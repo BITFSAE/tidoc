@@ -147,6 +147,12 @@ def _looks_like_invoice_meta(line: str) -> bool:
     norm = _normalize_label(line)
     if not norm:
         return True
+    # Some invoice generators place all field labels first and the actual values
+    # later in the text stream.  While waiting for the two party names, do not
+    # mistake an unrelated labelled value such as ``下载次数：1`` or
+    # ``校验码：...`` for a company/person name.
+    if re.match(r"^[\u4e00-\u9fffA-Za-z/（）()]{1,16}:", norm):
+        return True
     if re.fullmatch(r"\d{20}", norm):
         return True
     if re.fullmatch(r"\d{4}年\d{2}月\d{2}日", norm):

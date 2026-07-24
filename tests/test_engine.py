@@ -98,6 +98,46 @@ def test_pdf_keeps_explicit_buyer_and_seller_roles_for_personal_invoice():
     assert inv.seller == "杭州洋橙电子商务有限公司"
 
 
+def test_pdf_skips_download_label_before_detached_party_values():
+    text = """电子发票（普通发票） 发票号码：
+开票日期：
+购
+买
+方
+信
+息 统一社会信用代码/纳税人识别号：
+销
+售
+方
+信
+息 统一社会信用代码/纳税人识别号：
+名称： 名称：
+项目名称 规格型号 单 位 数 量 单 价 金 额 税率/征收率 税 额
+合 计
+价税合计（大写） （小写）
+备
+注
+开票人：
+下载次数：1
+26332000000000000001
+2026年07月21日
+北京理工大学教育基金会
+53100000500021676K
+温州测试电子有限公司
+9133030430755012X0
+*金属制品*刮刀 把 1 13.72 13.72 13% 1.78
+¥13.72 ¥1.78
+壹拾伍圆伍角整 ¥15.50
+测试开票人
+"""
+
+    inv = _parse_invoice_text(text)
+
+    assert inv.buyer_name == "北京理工大学教育基金会"
+    assert inv.buyer_tax_id == "53100000500021676K"
+    assert inv.seller == "温州测试电子有限公司"
+
+
 def test_layout_item_name_continuation_joins_name_column_and_merges_discount():
     layout_lines = [
         "*微电子组件*特殊功能放           AMC1311BDWVR    个  2  7.16  14.32  13%  1.86",

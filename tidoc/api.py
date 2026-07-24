@@ -740,6 +740,7 @@ class Api:
             make_prefill_script,
             make_print_compatibility_script,
             new_session_snapshot,
+            snapshot_pdfs,
         )
 
         entry = self.entries.get(entry_id)
@@ -756,6 +757,15 @@ class Api:
 
         session_id = uuid.uuid4().hex
         snapshot = new_session_snapshot()
+        custom_watch = str((fields or {}).get("watch_directory") or "").strip()
+        if custom_watch:
+            custom_watch_path = Path(custom_watch).expanduser()
+            if not custom_watch_path.is_dir():
+                raise ValueError("选择的自动归档目录不存在，请重新选择。")
+            custom_watch_path = custom_watch_path.resolve()
+            if custom_watch_path not in snapshot["watch_directories"]:
+                snapshot["watch_directories"].append(custom_watch_path)
+                snapshot["before"].update(snapshot_pdfs([custom_watch_path]))
         session = {
             "id": session_id,
             "entry_id": entry_id,
@@ -776,9 +786,9 @@ class Api:
             window = webview.create_window(
                 "tidoc · 发票查验",
                 url=TAX_VERIFICATION_URL,
-                width=1180,
-                height=820,
-                min_size=(900, 640),
+                width=1360,
+                height=860,
+                min_size=(1000, 680),
                 text_select=True,
                 zoomable=True,
             )
@@ -793,7 +803,9 @@ class Api:
 
             window.events.closed += on_window_closed
             script = make_prefill_script(info)
-            print_compatibility_script = make_print_compatibility_script()
+            print_compatibility_script = make_print_compatibility_script(
+                info["invoice_no"]
+            )
 
             def install_print_compatibility() -> None:
                 if session["window_closed"]:
@@ -883,7 +895,7 @@ class Api:
                 )
                 attachment = self.attachments.add(
                     session["entry_id"], path, TYPE_INSPECTION,
-                    note="由全国增值税发票查验平台下载",
+                    note="由全国增值税发票查验平台原生打印保存",
                 )
                 self.entries.recompute_status(session["entry_id"])
                 session["attached"] = attachment
@@ -904,196 +916,6 @@ class Api:
             "message": session["last_message"],
             "window_closed": session["window_closed"],
         }
-
-    @_guard
-    def save_invoice_verification_pdf(self, session_id):
-        """把当前已显示的查验结果直接生成为 PDF 并归入对应条目。"""
-        from .db import TYPE_INSPECTION
-        from .services.invoice_verification import (
-            make_finish_pdf_export_script,
-            make_print_compatibility_script,
-            make_trigger_print_script,
-        )
-
-        session = self._verification_sessions.get(str(session_id))
-        if not session:
-            raise ValueError("查验会话已结束，请保持查验窗口打开。")
-        window = session.get("window")
-        if window is None or session.get("window_closed"):
-            raise ValueError("查验窗口已关闭，无法保存当前结果。")
-
-        window.evaluate_js(make_print_compatibility_script())
-        prepared = window.evaluate_js(
-            make_trigger_print_script(suppress_print=True)
-        )
-        if not prepared or not prepared.get("ready"):
-            raise ValueError("当前还没有显示查验结果，请查验成功后再保存。")
-
-        width = max(1, min(int(prepared.get("width") or 1120), 4000))
-        height = max(1, min(int(prepared.get("height") or 800), 12000))
-        staging = (
-            self.data_root.dropped_dir
-            / f"查验单-{session['invoice_no']}-{session['id'][:8]}.pdf"
-        )
-        try:
-            self._export_verification_webview_pdf(window, staging, width, height)
-            attachment = self.attachments.add(
-                session["entry_id"],
-                staging,
-                TYPE_INSPECTION,
-                note="由全国增值税发票查验平台直接生成",
-            )
-            self.entries.recompute_status(session["entry_id"])
-            session["attached"] = attachment
-            self._close_verification_window(session)
-            return {
-                "attachment": attachment,
-                "message": "查验结果 PDF 已直接保存到当前条目。",
-            }
-        finally:
-            try:
-                if not session.get("window_closed"):
-                    window.evaluate_js(make_finish_pdf_export_script())
-            except Exception:
-                pass
-            if staging.exists():
-                staging.unlink()
-
-    @staticmethod
-    def _export_verification_webview_pdf(window, destination: Path,
-                                         width: int, height: int) -> None:
-        """用当前系统 WebView 的原生接口生成查验结果 PDF。"""
-        if sys.platform == "darwin":
-            Api._export_verification_webview_pdf_macos(
-                window, destination, width, height
-            )
-        elif sys.platform == "win32":
-            Api._export_verification_webview_pdf_windows(window, destination)
-        else:
-            raise RuntimeError("当前系统暂不支持直接生成查验结果 PDF。")
-
-    @staticmethod
-    def _export_verification_webview_pdf_macos(
-        window, destination: Path, width: int, height: int
-    ) -> None:
-        """在 Cocoa 主线程调用 WKWebView.createPDF，并等待回调写入暂存文件。"""
-        try:
-            import AppKit
-            import WebKit
-            from PyObjCTools import AppHelper
-        except ImportError as exc:
-            raise RuntimeError("当前运行环境不支持直接生成 PDF。") from exc
-
-        done = threading.Event()
-        result: dict[str, object] = {}
-
-        def start_export() -> None:
-            try:
-                native_window = window.native
-                native_webview = native_window.contentView()
-                if not hasattr(
-                    native_webview,
-                    "createPDFWithConfiguration_completionHandler_",
-                ):
-                    raise RuntimeError("当前 macOS WebView 不支持直接生成 PDF。")
-                config = WebKit.WKPDFConfiguration.alloc().init()
-                config.setRect_(AppKit.NSMakeRect(0, 0, width, height))
-
-                def completed(data, error) -> None:
-                    result["data"] = data
-                    result["error"] = error
-                    done.set()
-
-                native_webview.createPDFWithConfiguration_completionHandler_(
-                    config, completed
-                )
-            except Exception as exc:  # noqa: BLE001 - 传回桥线程统一处理
-                result["exception"] = exc
-                done.set()
-
-        AppHelper.callAfter(start_export)
-        if not done.wait(30):
-            raise TimeoutError("生成查验结果 PDF 超时，请重试。")
-        if result.get("exception"):
-            raise RuntimeError(str(result["exception"]))
-        if result.get("error"):
-            raise RuntimeError(f"生成查验结果 PDF 失败：{result['error']}")
-        data = result.get("data")
-        if data is None:
-            raise RuntimeError("未能取得查验结果 PDF。")
-        raw = bytes(data)
-        if not raw.startswith(b"%PDF"):
-            raise RuntimeError("生成的查验结果文件不是有效 PDF。")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(raw)
-
-    @staticmethod
-    def _export_verification_webview_pdf_windows(
-        window, destination: Path
-    ) -> None:
-        """在 WinForms UI 线程调用 WebView2.PrintToPdfAsync。"""
-        try:
-            import clr
-
-            clr.AddReference("System")
-            from Microsoft.Web.WebView2.Core import CoreWebView2PrintOrientation
-            from System import Action, Boolean, Func, Object
-            from System.Threading.Tasks import Task
-        except Exception as exc:  # noqa: BLE001 - Windows 运行时加载失败需转为用户提示
-            raise RuntimeError("当前运行环境不支持直接生成 PDF。") from exc
-
-        done = threading.Event()
-        result: dict[str, object] = {}
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        def completed(task) -> None:
-            try:
-                if task.IsCanceled:
-                    result["exception"] = RuntimeError("生成查验结果 PDF 已取消。")
-                elif task.IsFaulted:
-                    result["exception"] = task.Exception
-                else:
-                    result["success"] = bool(task.Result)
-            except Exception as exc:  # noqa: BLE001 - 传回桥线程统一处理
-                result["exception"] = exc
-            finally:
-                done.set()
-
-        def start_export():
-            try:
-                native_window = window.native
-                native_webview = native_window.webview
-                core = native_webview.CoreWebView2
-                if core is None or not hasattr(core, "PrintToPdfAsync"):
-                    raise RuntimeError("当前 Windows WebView2 不支持直接生成 PDF。")
-                settings = core.Environment.CreatePrintSettings()
-                settings.Orientation = CoreWebView2PrintOrientation.Landscape
-                settings.ShouldPrintBackgrounds = True
-                settings.ShouldPrintHeaderAndFooter = False
-                task = core.PrintToPdfAsync(str(destination), settings)
-                return task.ContinueWith(Action[Task[Boolean]](completed))
-            except Exception as exc:  # noqa: BLE001 - 传回桥线程统一处理
-                result["exception"] = exc
-                done.set()
-                return None
-
-        try:
-            window.native.Invoke(Func[Object](start_export))
-        except Exception as exc:
-            raise RuntimeError(f"无法启动查验结果 PDF 生成：{exc}") from exc
-        if not done.wait(30):
-            raise TimeoutError("生成查验结果 PDF 超时，请重试。")
-        if result.get("exception"):
-            raise RuntimeError(str(result["exception"]))
-        if not result.get("success"):
-            raise RuntimeError("未能生成查验结果 PDF。")
-        try:
-            with destination.open("rb") as file:
-                header = file.read(4)
-        except OSError as exc:
-            raise RuntimeError("未能读取生成的查验结果 PDF。") from exc
-        if header != b"%PDF":
-            raise RuntimeError("生成的查验结果文件不是有效 PDF。")
 
     @_guard
     def close_invoice_verification(self, session_id):

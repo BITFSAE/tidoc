@@ -42,25 +42,57 @@ def make_prefill_script(info: dict) -> str:
     return f"""
 (() => {{
   const values = {payload};
-  const setValue = (id, value) => {{
+  const dispatch = (input, names) => names.forEach((name) => {{
+    const EventType = name === 'keyup' ? KeyboardEvent : Event;
+    input.dispatchEvent(new EventType(name, {{ bubbles: true }}));
+  }});
+  const commitValue = (id, value) => {{
     const input = document.getElementById(id);
     if (!input || !value) return;
     input.focus();
     input.value = value;
-    ['input', 'change', 'keyup', 'blur'].forEach((name) =>
-      input.dispatchEvent(new Event(name, {{ bubbles: true }})));
+    dispatch(input, ['input', 'keyup', 'change']);
+    input.blur();
+    input.dispatchEvent(new FocusEvent('focusout', {{ bubbles: true }}));
   }};
-  setValue('fphm', values.fphm);
-  setValue('kprq', values.kprq);
+  const commitDate = (value) => {{
+    const input = document.getElementById('kprq');
+    if (!input || !value) return;
+    const jq = window.jQuery;
+    const match = /^([0-9]{{4}})([0-9]{{2}})([0-9]{{2}})$/.exec(value);
+    if (jq?.fn?.datepicker && jq(input).data('datepicker') && match) {{
+      input.focus();
+      jq(input).datepicker('setDate', new Date(
+        Number(match[1]), Number(match[2]) - 1, Number(match[3])
+      ));
+      jq(input).datepicker('hide');
+      dispatch(input, ['input', 'keyup', 'change']);
+      input.blur();
+      input.dispatchEvent(new FocusEvent('focusout', {{ bubbles: true }}));
+      return;
+    }}
+    commitValue('kprq', value);
+  }};
+  commitValue('fphm', values.fphm);
   setTimeout(() => {{
-    setValue('kjje', values.kjje);
+    commitDate(values.kprq);
+  }}, 180);
+  setTimeout(() => {{
+    commitValue('kjje', values.kjje);
+  }}, 420);
+  setTimeout(() => {{
+    const dateInput = document.getElementById('kprq');
+    if (window.jQuery?.fn?.datepicker && dateInput) {{
+      window.jQuery(dateInput).datepicker('hide');
+    }}
+    document.activeElement?.blur?.();
     const captcha = document.getElementById('yzm');
     if (captcha) {{ captcha.value = ''; captcha.focus(); }}
-  }}, 250);
+  }}, 700);
   if (!document.getElementById('tidoc-verification-helper')) {{
     const helper = document.createElement('div');
     helper.id = 'tidoc-verification-helper';
-    helper.textContent = '验证码通常不区分大小写。看到查验明细后，请回到 tidoc 保存到条目。';
+    helper.textContent = '验证码通常不区分大小写。查验成功后点击官网“打印”，另存为 PDF 后会自动归入条目。';
     helper.style.cssText = [
       'position:fixed', 'left:18px', 'bottom:18px', 'z-index:2147483647',
       'max-width:360px', 'padding:10px 14px', 'border-radius:9px',
@@ -75,13 +107,17 @@ def make_prefill_script(info: dict) -> str:
 """
 
 
-def make_print_compatibility_script() -> str:
-    """把官网 PrintArea 选定内容提升到顶层 WebView，供保存或打印使用。
+def make_print_compatibility_script(invoice_no: str = "") -> str:
+    """把官网 PrintArea 选定内容提升到顶层 WebView，供原生打印使用。
 
     查验结果自身也在 iframe 中，脚本会持续发现同源 frame、替换其中 PrintArea
     的出口，并把官网选定内容复制到顶层文档；普通调用仍进入系统打印。
     """
-    return """
+    print_title = json.dumps(
+        f"查验单-{re.sub(r'[^0-9A-Za-z_-]', '', str(invoice_no or ''))}",
+        ensure_ascii=False,
+    )
+    script = """
 (() => {
   if (window.__tidocPrintCompatibilityStarted) {
     window.__tidocScanPrintFrames?.();
@@ -93,6 +129,7 @@ def make_print_compatibility_script() -> str:
   const topDocument = document;
   const bodyClass = 'tidoc-native-printing';
   const hostId = 'tidoc-native-print-host';
+  const printTitle = __TIDOC_PRINT_TITLE__;
 
   const prepareTopLevelPrint = (selection, sourceWindow) => {
     let host = topDocument.getElementById(hostId);
@@ -122,14 +159,8 @@ def make_print_compatibility_script() -> str:
       style.id = 'tidoc-native-print-style';
       style.textContent = `
         #${hostId} { display: none; }
-        body.tidoc-native-exporting > :not(#${hostId}) { display: none !important; }
-        body.tidoc-native-exporting #${hostId} {
-          display: block !important;
-          width: 1120px !important;
-          margin: 0 !important;
-        }
         @media print {
-          @page { size: landscape; margin: 8mm; }
+          @page { size: A4 landscape; margin: 8mm; }
           body.${bodyClass} > :not(#${hostId}) { display: none !important; }
           body.${bodyClass} #${hostId} {
             display: block !important;
@@ -142,8 +173,8 @@ def make_print_compatibility_script() -> str:
     }
 
     topDocument.body.classList.add(bodyClass);
-    topWindow.__tidocPreparedPrintHost = true;
-    if (!topWindow.__tidocSuppressPrint) topWindow.print();
+    if (printTitle !== '查验单-') topDocument.title = printTitle;
+    topWindow.print();
   };
 
   const installInWindow = (targetWindow) => {
@@ -180,61 +211,7 @@ def make_print_compatibility_script() -> str:
   topWindow.setInterval(scan, 800);
 })();
 """
-
-
-def make_trigger_print_script(*, suppress_print: bool = False) -> str:
-    """调用当前结果的官网打印逻辑；可只准备内容而不弹出打印面板。"""
-    script = """
-(() => {
-  window.__tidocScanPrintFrames?.();
-  window.__tidocPreparedPrintHost = false;
-  window.__tidocSuppressPrint = __TIDOC_SUPPRESS_PRINT__;
-  const visit = (targetWindow) => {
-    try {
-      const button = [...targetWindow.document.querySelectorAll(
-        'button, input[type="button"], input[type="submit"], a'
-      )].find((node) => (
-        (node.textContent || node.value || '').replace(/\\s/g, '') === '打印'
-      ));
-      if (button) {
-        button.click();
-        return true;
-      }
-      for (const frame of targetWindow.document.querySelectorAll('iframe')) {
-        try {
-          if (frame.contentWindow && visit(frame.contentWindow)) return true;
-        } catch (_) {}
-      }
-    } catch (_) {}
-    return false;
-  };
-  const triggered = visit(window);
-  window.__tidocSuppressPrint = false;
-  const host = document.getElementById('tidoc-native-print-host');
-  const ready = Boolean(triggered && window.__tidocPreparedPrintHost && host);
-  if (ready && __TIDOC_SUPPRESS_PRINT__) {
-    document.body.classList.add('tidoc-native-exporting');
-    const width = Math.ceil(Math.max(1120, host.scrollWidth));
-    const height = Math.ceil(Math.max(1, host.scrollHeight));
-    return { triggered, ready, width, height };
-  }
-  return { triggered, ready };
-})();
-"""
-    return script.replace(
-        "__TIDOC_SUPPRESS_PRINT__", "true" if suppress_print else "false"
-    )
-
-
-def make_finish_pdf_export_script() -> str:
-    """恢复直接导出 PDF 前临时切换的页面显示状态。"""
-    return """
-(() => {
-  document.body.classList.remove('tidoc-native-exporting');
-  const host = document.getElementById('tidoc-native-print-host');
-  if (host) host.style.removeProperty('width');
-})();
-"""
+    return script.replace("__TIDOC_PRINT_TITLE__", print_title)
 
 
 def default_watch_directories(home: Path | None = None) -> list[Path]:

@@ -82,14 +82,18 @@ def test_frontend_exposes_explicit_online_verification_flow():
     assert "async function onlineVerificationFlow" in source
     assert "<ul>" in verification_flow
     assert "验证码在官网填写，通常不区分大小写" in verification_flow
-    assert "出现查验明细后，回到这里点击“保存到条目”" in verification_flow
+    assert "查验成功后点击官网“打印”" in verification_flow
+    assert "保存到上面的任一目录后会自动归入当前条目" in verification_flow
+    assert "自动归档目录" in verification_flow
+    assert "VERIFICATION_WATCH_DIR_KEY" in source
+    assert "watch_directory: watchDirectory" in verification_flow
     assert "网页证书错误" not in verification_flow
     assert "无需打印机" not in verification_flow
     assert "价税合计" in verification_flow
     assert "invoice_code" not in verification_flow
     assert "Api.invoiceVerificationStatus" in source
-    assert "Api.saveInvoiceVerificationPdf" in source
-    assert "保存到条目" in verification_flow
+    assert "Api.saveInvoiceVerificationPdf" not in source
+    assert "saveInvoiceVerificationPdf" not in api_source
     assert "printInvoiceVerification" not in api_source
     assert "startInvoiceVerification:" in api_source
     assert 'webview.settings["ALLOW_DOWNLOADS"] = True' in app_source

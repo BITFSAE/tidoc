@@ -72,6 +72,7 @@ const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
 const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
 const PAYMENT_OCR_KEY = 'tidoc.paymentScreenshotOcr';
 const DEFAULT_PAID_TO_INVOICE_KEY = 'tidoc.defaultPaidToInvoiceTotal';
+const VERIFICATION_WATCH_DIR_KEY = 'tidoc.invoiceVerification.watchDirectory';
 const AUTO_UPDATE_KEY = 'tidoc.update.autoCheck';
 const OPERATOR_PREF_KEYS = {
   name: 'tidoc.operator.name',
@@ -1406,6 +1407,10 @@ async function onlineVerificationFlow(entryId) {
     return;
   }
 
+  let watchDirectory = localStorage.getItem(VERIFICATION_WATCH_DIR_KEY) || '';
+  const watchDirectoryText = () => (
+    watchDirectory ? `下载、桌面、文档 + ${watchDirectory}` : '下载、桌面、文档'
+  );
   const body = el('div', 'verification-flow');
   body.innerHTML = `
     <div class="verification-fields">
@@ -1420,10 +1425,15 @@ async function onlineVerificationFlow(entryId) {
           placeholder="按发票价税合计填写"/>
       </label>
     </div>
+    <div class="verification-watch-directory">
+      <div><b>自动归档目录</b><small data-verification-watch-label title="${esc(watchDirectoryText())}">${esc(watchDirectoryText())}</small></div>
+      <button type="button" class="btn small ghost" data-verification-watch-pick>选择其他目录</button>
+    </div>
     <div class="verification-guide">
       <ul>
         <li>验证码在官网填写，通常不区分大小写</li>
-        <li>出现查验明细后，回到这里点击“保存到条目”</li>
+        <li>查验成功后点击官网“打印”，在系统窗口另存为 PDF</li>
+        <li>保存到上面的任一目录后会自动归入当前条目</li>
       </ul>
     </div>
     <div class="verification-status hidden" data-verification-status>
@@ -1436,6 +1446,19 @@ async function onlineVerificationFlow(entryId) {
   let attached = false;
   let closed = false;
   const status = body.querySelector('[data-verification-status]');
+  const watchLabel = body.querySelector('[data-verification-watch-label]');
+  body.querySelector('[data-verification-watch-pick]').addEventListener('click', async () => {
+    try {
+      const result = await Api.pickFolder();
+      if (!result.path) return;
+      watchDirectory = result.path;
+      localStorage.setItem(VERIFICATION_WATCH_DIR_KEY, watchDirectory);
+      watchLabel.textContent = watchDirectoryText();
+      watchLabel.title = watchDirectoryText();
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  });
   const fields = () => Object.fromEntries(
     [...body.querySelectorAll('[data-verification-field]')].map((input) => [
       input.dataset.verificationField, input.value.trim(),
@@ -1491,21 +1514,6 @@ async function onlineVerificationFlow(entryId) {
     pollTimer = setTimeout(poll, 1200);
   };
 
-  const saveBtn = mkBtn('保存到条目', 'primary', async () => {
-    if (!sessionId) return;
-    saveBtn.disabled = true;
-    setStatus('working', '正在保存查验单', '生成 PDF 并归入当前条目…');
-    try {
-      await Api.saveInvoiceVerificationPdf(sessionId);
-      await finishAttachment();
-    } catch (err) {
-      setStatus('error', '暂时不能保存', err.message);
-    } finally {
-      if (!attached) saveBtn.disabled = false;
-    }
-  });
-  saveBtn.style.display = 'none';
-
   const openBtn = mkBtn('打开查验官网', 'primary', async () => {
     const values = fields();
     if (!values.invoice_no || !values.invoice_date || !values.verification_value) {
@@ -1516,11 +1524,13 @@ async function onlineVerificationFlow(entryId) {
     body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = true; });
     setStatus('working', '正在打开官网', '加载完成后请填写验证码并点击“查验”…');
     try {
-      const result = await Api.startInvoiceVerification(entryId, values);
+      const result = await Api.startInvoiceVerification(entryId, {
+        ...values,
+        watch_directory: watchDirectory,
+      });
       sessionId = result.session_id;
       openBtn.style.display = 'none';
-      saveBtn.style.display = '';
-      setStatus('waiting', '请在官网完成查验', '看到查验明细后，回到这里保存。');
+      setStatus('waiting', '请在官网完成查验并打印', '另存为 PDF 后会自动归入当前条目。');
       pollTimer = setTimeout(poll, 800);
     } catch (err) {
       openBtn.disabled = false;
@@ -1536,7 +1546,6 @@ async function onlineVerificationFlow(entryId) {
     await syncEntryAfterChange(entryId, { affectsStatus: true });
     setStatus('done', '查验单已保存', '已归入当前条目的查验材料。');
     openBtn.style.display = 'none';
-    saveBtn.style.display = 'none';
     chooseBtn.style.display = 'none';
     closeBtn.textContent = '完成';
     closeBtn.classList.remove('ghost');
@@ -1546,7 +1555,7 @@ async function onlineVerificationFlow(entryId) {
   const m = modal({
     title: '在线查验',
     body,
-    footer: [chooseBtn, closeBtn, saveBtn, openBtn],
+    footer: [chooseBtn, closeBtn, openBtn],
     onClose: () => {
       closed = true;
       stopPolling();

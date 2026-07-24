@@ -100,7 +100,6 @@ const Api = (() => {
     invoiceVerificationInfo: (id) => call('invoice_verification_info', id),
     startInvoiceVerification: (id, fields) => call('start_invoice_verification', id, fields || {}),
     invoiceVerificationStatus: (sessionId) => call('invoice_verification_status', sessionId),
-    saveInvoiceVerificationPdf: (sessionId) => call('save_invoice_verification_pdf', sessionId),
     closeInvoiceVerification: (sessionId) => call('close_invoice_verification', sessionId),
 
     printComponentStatus: () => call('print_component_status'),

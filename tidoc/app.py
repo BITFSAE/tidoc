@@ -78,8 +78,8 @@ def main() -> None:
     from .db.paths import resolve_data_root
     api = Api(resolve_data_root())
     index = web_dir() / "index.html"
-    # 在线查验的官网下载仍可作为直接保存之外的兜底；PyWebView 会展示
-    # 系统保存对话框，主窗口不会自动访问网络或静默写入下载目录。
+    # 在线查验允许官网发起下载；PyWebView 会展示系统保存对话框，
+    # 主窗口不会自动访问网络或静默写入下载目录。
     webview.settings["ALLOW_DOWNLOADS"] = True
     window = webview.create_window(
         "tidoc",

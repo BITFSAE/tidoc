@@ -661,6 +661,15 @@ input[type="date"] { color: var(--ink-soft); }
 .verification-fields label > span { font-size: 11.5px; color: var(--ink-soft); font-weight: 600; }
 .verification-fields label small { margin-left: 4px; color: var(--ink-faint); font-weight: 400; }
 .verification-fields input[readonly] { color: var(--ink-soft); background: var(--paper-2); }
+.verification-watch-directory {
+  display: flex; align-items: center; gap: 12px; padding: 9px 11px;
+  border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel-raised);
+}
+.verification-watch-directory > div { display: flex; min-width: 0; flex: 1; align-items: baseline; gap: 9px; }
+.verification-watch-directory b { flex: 0 0 auto; font-size: 11.5px; color: var(--ink-soft); }
+.verification-watch-directory small {
+  min-width: 0; overflow: hidden; color: var(--ink-faint); text-overflow: ellipsis; white-space: nowrap;
+}
 .verification-guide {
   padding: 11px 14px; border: 1px solid var(--line-soft); border-radius: 10px;
   color: var(--ink-soft); background: var(--paper-2);

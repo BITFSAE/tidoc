@@ -7,10 +7,8 @@ from tidoc.engine.models import ParsedInvoice
 from tidoc.services.invoice_verification import (
     build_verification_info,
     changed_pdf_candidates,
-    make_finish_pdf_export_script,
     make_prefill_script,
     make_print_compatibility_script,
-    make_trigger_print_script,
     snapshot_pdfs,
 )
 
@@ -46,38 +44,27 @@ def test_prefill_script_only_fills_and_focuses_captcha():
     assert "26957000000168907686" in script
     assert "76.32" in script
     assert "不区分大小写" in script
-    assert "回到 tidoc 保存到条目" in script
+    assert "点击官网“打印”" in script
+    assert "自动归入条目" in script
+    assert "datepicker('setDate'" in script
+    assert "datepicker('hide'" in script
+    assert "input.blur()" in script
+    assert "FocusEvent('focusout'" in script
 
 
 def test_print_compatibility_uses_top_level_native_print():
-    script = make_print_compatibility_script()
+    script = make_print_compatibility_script("26957000000168907686")
 
     assert "jq.fn.printArea = nativePrintArea" in script
     assert "topWindow.print()" in script
     assert "@media print" in script
+    assert "size: A4 landscape" in script
     assert "tidoc-native-print-host" in script
     assert "querySelectorAll('iframe')" in script
     assert "MutationObserver" in script
     assert "checkfp" not in script
-
-
-def test_trigger_print_script_reuses_visible_result():
-    script = make_trigger_print_script()
-
-    assert "button.click()" in script
-    assert "querySelectorAll('iframe')" in script
-    assert "打印" in script
-    assert "checkfp" not in script
-
-
-def test_direct_pdf_export_prepares_without_print_dialog():
-    script = make_trigger_print_script(suppress_print=True)
-    finish = make_finish_pdf_export_script()
-
-    assert "window.__tidocSuppressPrint = true" in script
-    assert "tidoc-native-exporting" in script
-    assert "width" in script and "height" in script
-    assert "classList.remove('tidoc-native-exporting')" in finish
+    assert "查验单-26957000000168907686" in script
+    assert "topDocument.title = printTitle" in script
 
 
 def test_changed_pdf_candidates_only_returns_session_changes(tmp_path):
@@ -94,7 +81,73 @@ def test_changed_pdf_candidates_only_returns_session_changes(tmp_path):
     assert changed_pdf_candidates([downloads], before, started_ns) == [fresh.resolve()]
 
 
-def test_api_opens_official_site_only_after_explicit_start(api, monkeypatch):
+def test_verification_status_auto_attaches_native_printed_pdf(
+    api, tmp_path, monkeypatch
+):
+    from tidoc.services import folder_import, invoice_verification
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(
+        profile["id"],
+        parsed=ParsedInvoice(
+            invoice_no="26957000000168907686",
+            invoice_date="2026-07-13",
+            total=Decimal("76.32"),
+        ),
+    )
+    printed = tmp_path / "查验结果.pdf"
+    printed.write_bytes(b"%PDF-native-print")
+
+    class FakeWindow:
+        def __init__(self):
+            self.destroyed = False
+
+        def destroy(self):
+            self.destroyed = True
+
+    window = FakeWindow()
+    api._verification_sessions["session"] = {
+        "entry_id": entry_id,
+        "invoice_no": "26957000000168907686",
+        "window": window,
+        "window_closed": False,
+        "ssl_bypass_acquired": False,
+        "attached": None,
+        "watch_directories": [tmp_path],
+        "before": {},
+        "started_ns": time.time_ns(),
+        "candidate_sizes": {},
+        "seen_candidates": set(),
+        "last_message": "",
+    }
+    monkeypatch.setattr(
+        invoice_verification, "changed_pdf_candidates", lambda *_args: [printed]
+    )
+    monkeypatch.setattr(
+        folder_import,
+        "classify_pdf_attachment_type",
+        lambda _path: "inspection_pdf",
+    )
+    monkeypatch.setattr(
+        folder_import,
+        "extract_pdf_invoice_no",
+        lambda _path: "26957000000168907686",
+    )
+
+    first = api.invoice_verification_status("session")
+    second = api.invoice_verification_status("session")
+
+    assert first["data"]["state"] == "processing"
+    assert second["data"]["state"] == "attached"
+    attachment = second["data"]["attachment"]
+    assert attachment["type"] == "inspection_pdf"
+    assert attachment["note"] == "由全国增值税发票查验平台原生打印保存"
+    assert window.destroyed is True
+
+
+def test_api_opens_official_site_only_after_explicit_start(
+    api, tmp_path, monkeypatch
+):
     class FakeEvent:
         def __init__(self):
             self.handlers = []
@@ -145,12 +198,18 @@ def test_api_opens_official_site_only_after_explicit_start(api, monkeypatch):
         "invoice_no": "26957000000168907686",
         "invoice_date": "20260713",
         "verification_value": "76.32",
+        "watch_directory": str(tmp_path),
     })
 
     assert result["ok"] is True
     assert created["url"] == "https://inv-veri.chinatax.gov.cn/index.html"
+    assert "maximized" not in created
+    assert created["width"] == 1360
+    assert created["height"] == 860
     assert created["ignored_ssl_errors_while_opening"] is True
     assert webview.settings["IGNORE_SSL_ERRORS"] is True
+    assert str(tmp_path.resolve()) in result["data"]["watch_directories"]
+    assert "查验单-26957000000168907686" in fake_window.script
     assert api.close_invoice_verification(result["data"]["session_id"])["ok"] is True
     assert fake_window.destroyed is True
     assert webview.settings["IGNORE_SSL_ERRORS"] is original_ignore_ssl_errors
@@ -187,69 +246,3 @@ def test_verification_print_info_uses_landscape(api):
 
     assert int(info.orientation()) == AppKit.NSPaperOrientationLandscape
     assert info.paperSize().width > info.paperSize().height
-
-
-def test_native_verification_pdf_export_writes_callback_data(api, tmp_path, monkeypatch):
-    if sys.platform != "darwin":
-        return
-    import Foundation
-    from PyObjCTools import AppHelper
-
-    payload = b"%PDF-1.7\n%%EOF\n"
-    pdf_data = Foundation.NSData.dataWithBytes_length_(payload, len(payload))
-
-    class FakeNativeWebView:
-        def createPDFWithConfiguration_completionHandler_(self, config, callback):
-            assert config.rect().size.width == 1120
-            assert config.rect().size.height == 700
-            callback(pdf_data, None)
-
-    class FakeNativeWindow:
-        def contentView(self):
-            return FakeNativeWebView()
-
-    monkeypatch.setattr(
-        AppHelper, "callAfter", lambda function, *args: function(*args)
-    )
-    destination = tmp_path / "inspection.pdf"
-
-    api._export_verification_webview_pdf(
-        SimpleNamespace(native=FakeNativeWindow()),
-        destination,
-        1120,
-        700,
-    )
-
-    assert destination.read_bytes() == payload
-
-
-def test_verification_pdf_export_dispatches_to_windows(api, tmp_path, monkeypatch):
-    called = {}
-
-    def fake_windows_export(window, destination):
-        called["window"] = window
-        called["destination"] = destination
-
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(
-        type(api),
-        "_export_verification_webview_pdf_windows",
-        staticmethod(fake_windows_export),
-    )
-    window = SimpleNamespace()
-    destination = tmp_path / "inspection.pdf"
-
-    api._export_verification_webview_pdf(window, destination, 1120, 700)
-
-    assert called == {"window": window, "destination": destination}
-
-
-def test_windows_pdf_export_uses_webview2_landscape(api):
-    import inspect
-
-    source = inspect.getsource(api._export_verification_webview_pdf_windows)
-
-    assert "PrintToPdfAsync" in source
-    assert "CoreWebView2PrintOrientation.Landscape" in source
-    assert "ShouldPrintBackgrounds = True" in source
-    assert 'header != b"%PDF"' in source

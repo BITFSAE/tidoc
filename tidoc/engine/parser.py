@@ -453,8 +453,10 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
     ``layout=True`` 时保留 pypdf 版面文本的前导空格：首列续行补到商品名，
     缩进到规格列的续行不会误拼进商品名。
     """
-    _SKIP = ("合", "价税合计", "购买时间", "收款人", "复核人", "开票人", "备注",
-             "名称:", "统一社会信用", "电子发票", "小         计", "小计", "项目名称")
+    _SKIP_PREFIXES = (
+        "合计", "价税合计", "购买时间", "收款人", "复核人", "开票人", "备注",
+        "名称:", "统一社会信用", "电子发票", "小计", "项目名称",
+    )
 
     items: list[ParsedItem] = []
     last: ParsedItem | None = None
@@ -496,12 +498,16 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
         )
         return item
 
+    def is_item_boundary(line: str) -> bool:
+        compact = _normalize_label(line)
+        return any(compact.startswith(prefix) for prefix in _SKIP_PREFIXES)
+
     for raw_line in lines:
         line = raw_line.strip()
         if not line:
             allow_layout_suffix = False
             continue
-        if any(k in line for k in _SKIP):
+        if is_item_boundary(line):
             allow_layout_suffix = False
             continue
         if pending_name_parts:

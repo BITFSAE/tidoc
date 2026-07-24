@@ -164,6 +164,23 @@ def test_layout_item_spec_continuation_does_not_extend_product_name():
     assert items[0].actual_name == "测试线"
 
 
+def test_layout_item_spec_containing_he_is_not_mistaken_for_total_row():
+    layout_lines = [
+        "*金属制品*螺丝刀       【S2钢更优】-25合1     套  1  43.36  43.36  13%  5.64",
+        "                精密型（弹仓速取/",
+        "                铝盒）",
+        "       合       计                             ¥43.36       ¥5.64",
+    ]
+
+    items = _parse_pdf_items(layout_lines, layout=True)
+
+    assert len(items) == 1
+    assert items[0].actual_name == "螺丝刀"
+    assert items[0].unit == "套"
+    assert items[0].quantity == Decimal("1")
+    assert items[0].total == Decimal("49.00")
+
+
 def test_layout_item_name_can_continue_across_multiple_lines():
     layout_lines = [
         "*计算机配套产品*绿联      35265   个  1  61.858  61.86  13%  8.04",

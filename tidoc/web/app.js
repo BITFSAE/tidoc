@@ -1440,7 +1440,8 @@ function askUseInvoiceTotal(total, alreadyDefault) {
 async function settlePaymentAmountAfterAdd(entryId, paymentInfos) {
   if (!paymentInfos.length) return "";
   const entry = await Api.getEntry(entryId);
-  const paid = entry.fields?.paid_amount?.current || '';
+  const paidField = entry.fields?.paid_amount || {};
+  const paid = paidField.current || '';
   const total = entry.total || '';
   if (!State.paymentOcrEnabled) {
     if (State.defaultPaidToInvoice && total && !paid) {
@@ -1452,7 +1453,9 @@ async function settlePaymentAmountAfterAdd(entryId, paymentInfos) {
     }
     return paid ? `付款截图已添加，保留当前实付 ${fmtMoney(paid)}` : '付款截图已添加';
   }
-  const currentIsDefault = !paid || (total && sameMoney(paid, total));
+  const currentIsUserSet = !!paid
+    && (!total || !sameMoney(paid, total))
+    && paidField.value_source !== 'payment_ocr';
   const amounts = paymentInfos
     .map((info) => moneyText(info.paid_amount || info.payment_ocr?.paid_amount || ''))
     .filter(Boolean);
@@ -1461,17 +1464,18 @@ async function settlePaymentAmountAfterAdd(entryId, paymentInfos) {
     await maybeSetPaidFromInvoice(entryId);
     return "";
   }
-  if (!currentIsDefault) {
+  if (currentIsUserSet) {
     return `已识别付款 ${paymentAmountSummary(amounts)}，保留当前实付 ${fmtMoney(paid)}`;
   }
 
-  if (paymentInfos.length === 1 && amounts.length === 1) {
+  const sum = sumMoneyText(amounts);
+  const differsFromInvoice = !!total && !sameMoney(sum, total);
+  if (paymentInfos.length === 1 && amounts.length === 1 && !differsFromInvoice) {
     await Api.setRecognizedPaidAmount(entryId, amounts[0]);
     return `已按付款截图填写实付 ${fmtMoney(amounts[0])}`;
   }
 
-  const sum = sumMoneyText(amounts);
-  const choice = await askUseRecognizedPaymentAmount(amounts, sum);
+  const choice = await askUseRecognizedPaymentAmount(amounts, sum, paid, total);
   if (choice === 'use') {
     await Api.setRecognizedPaidAmount(entryId, sum);
     return `已填写实付 ${fmtMoney(sum)}`;
@@ -1497,7 +1501,7 @@ function paymentAmountSummary(amounts) {
   return `${amounts.map((a) => fmtMoney(a)).join(' + ')} = ${fmtMoney(sumMoneyText(amounts))}`;
 }
 
-function askUseRecognizedPaymentAmount(amounts, sum) {
+function askUseRecognizedPaymentAmount(amounts, sum, currentPaid = '', invoiceTotal = '') {
   return new Promise((resolve) => {
     let settled = false;
     const done = (value) => {
@@ -1508,14 +1512,17 @@ function askUseRecognizedPaymentAmount(amounts, sum) {
     };
     const body = el('div');
     body.innerHTML = `
-      <div class="hint">识别到付款金额：${esc(paymentAmountSummary(amounts))}</div>`;
+      <div class="hint">识别到付款金额：${esc(paymentAmountSummary(amounts))}</div>
+      ${invoiceTotal ? `<div class="hint">发票金额：${fmtMoney(invoiceTotal)}${
+        sameMoney(sum, invoiceTotal) ? '' : '，与截图金额不一致，请确认。'
+      }</div>` : ''}`;
     const m = modal({
       title: '实付金额',
       body,
       footer: [
-        mkBtn('保持当前', 'ghost', () => done('keep')),
+        mkBtn(currentPaid ? `保持当前 ${fmtMoney(currentPaid)}` : '暂不修改', 'ghost', () => done('keep')),
         mkBtn('手动填写', 'ghost', () => done('manual')),
-        mkBtn(`按 ${fmtMoney(sum)}`, 'primary', () => done('use')),
+        mkBtn(`按截图 ${fmtMoney(sum)}`, 'primary', () => done('use')),
       ],
       onClose: () => {
         if (!settled) {

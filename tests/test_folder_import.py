@@ -213,6 +213,15 @@ def test_extract_payment_amount_from_ocr_text():
     assert _payment_amount_from_text("深圳市立创电子商务有限公司\n- ￥45.74") == "45.74"
     assert _payment_amount_from_text("全 部 账 单 先 用 后 付 一 128 · 62 支 付 成 功") == "128.62"
     assert _payment_amount_from_text("账 单 管 理 一 83 ． 1 0 交 易 成 功") == "83.10"
+    assert _payment_amount_from_text(
+        "Ik**8\n-34.20\n支付成功\n光伏熔断器 ZTPV-25 熔芯R015"
+    ) == "34.20"
+    assert _payment_amount_from_text(
+        "Ik**8-34.20支付成功光伏熔断器ZTPV-25"
+    ) == "34.20"
+    assert _payment_amount_from_text(
+        "商品型号 ZTPV -25\n-34.20\n支付成功"
+    ) == "34.20"
 
 
 def test_material_binding_suggestion_requires_unique_match():

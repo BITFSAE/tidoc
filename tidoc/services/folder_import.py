@@ -28,6 +28,14 @@ _SPACED_INVOICE_NO_RE = re.compile(r"(?<!\d)(?:\d[\s\u3000]*){20}(?!\d)")
 _PAYMENT_AMOUNT_RE = re.compile(
     r"(?<![\d.])[-−－—一]\s*(?:[¥￥]\s*)?(\d{1,7}(?:[,，]\d{3})*(?:\.\d{1,2})?)(?![\d.])"
 )
+_STANDALONE_PAYMENT_AMOUNT_RE = re.compile(
+    r"(?<![\w.])[-−－—一]\s*(?:[¥￥]\s*)?(\d{1,7}(?:[,，]\d{3})*(?:\.\d{1,2})?)(?![\d.])"
+)
+_CONFIRMED_PAYMENT_AMOUNT_RE = re.compile(
+    r"[-−－—一]\s*(?:[¥￥]\s*)?(\d{1,7}(?:[,，]\d{3})*(?:\.\d{1,2})?)"
+    r"(?=支付成功|付款成功|交易成功|扣款成功)"
+)
+_PAYMENT_CONTEXT_WORDS = ("支付", "付款", "实付", "交易", "消费", "账单", "扣款")
 
 
 def _file_info(path: Path, att_type: str, invoice_no: str = "", warning: str = "") -> dict:
@@ -218,16 +226,52 @@ def _normalized_payment_amount(value) -> Decimal | None:
 
 
 def _payment_amount_from_text(text: str) -> str:
-    compact = re.sub(r"\s+", "", text or "")
-    compact = re.sub(r"(?<=\d)[·．。](?=\d)", ".", compact)
-    for match in _PAYMENT_AMOUNT_RE.finditer(compact):
+    def formatted_amount(match: re.Match) -> str:
         raw = match.group(1).replace(",", "").replace("，", "")
         try:
             amount = Decimal(raw).quantize(Decimal("0.01"))
         except (InvalidOperation, ValueError):
-            continue
+            return ""
         if amount > 0:
             return f"{amount:.2f}"
+        return ""
+
+    compact = re.sub(r"\s+", "", text or "")
+    compact = re.sub(r"(?<=\d)[·．。](?=\d)", ".", compact)
+    # A success label immediately after the amount is the strongest signal and
+    # should win even if a product-model line appears earlier in OCR order.
+    for match in _CONFIRMED_PAYMENT_AMOUNT_RE.finditer(compact):
+        amount = formatted_amount(match)
+        if amount:
+            return amount
+
+    # Prefer a standalone negative amount line.  This avoids treating product
+    # models such as ``ZTPV-25`` as a ¥25 payment.
+    for raw_line in (text or "").splitlines():
+        normalized = re.sub(r"(?<=\d)\s*[·．。]\s*(?=\d)", ".", raw_line)
+        for match in _STANDALONE_PAYMENT_AMOUNT_RE.finditer(normalized):
+            amount = formatted_amount(match)
+            if amount:
+                return amount
+
+        # Some native OCR streams split every character with spaces and read
+        # the minus sign as ``一``.  Compact only a line that contains payment
+        # context, rather than compacting unrelated product descriptions.
+        compact_line = re.sub(r"\s+", "", normalized)
+        if any(word in compact_line for word in _PAYMENT_CONTEXT_WORDS):
+            for match in _CONFIRMED_PAYMENT_AMOUNT_RE.finditer(compact_line):
+                amount = formatted_amount(match)
+                if amount:
+                    return amount
+            for match in _PAYMENT_AMOUNT_RE.finditer(compact_line):
+                amount = formatted_amount(match)
+                if amount:
+                    return amount
+
+    for match in _PAYMENT_AMOUNT_RE.finditer(compact):
+        amount = formatted_amount(match)
+        if amount:
+            return amount
     return ""
 
 

@@ -68,3 +68,20 @@ def test_card_drag_state_does_not_cover_amount_with_text():
     assert 'content: "拖到这里绑定材料"' not in styles
     assert "Api.setRecognizedPaidAmount" in source
     assert "setRecognizedPaidAmount:" in api_source
+
+
+def test_single_payment_amount_mismatch_requires_confirmation():
+    source = (app.web_dir() / "app.js").read_text("utf-8")
+    settle = source.split(
+        "async function settlePaymentAmountAfterAdd", 1
+    )[1].split("function moneyText", 1)[0]
+    prompt = source.split(
+        "function askUseRecognizedPaymentAmount", 1
+    )[1].split("function openEntryMenu", 1)[0]
+
+    assert "differsFromInvoice" in settle
+    assert "paymentInfos.length === 1 && amounts.length === 1 && !differsFromInvoice" in settle
+    assert "paidField.value_source !== 'payment_ocr'" in settle
+    assert "与截图金额不一致，请确认" in prompt
+    assert "保持当前 ${fmtMoney(currentPaid)}" in prompt
+    assert "按截图 ${fmtMoney(sum)}" in prompt

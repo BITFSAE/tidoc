@@ -45,6 +45,12 @@ def test_webview_settings_allow_tax_site_certificate_fallback():
         webview.settings["IGNORE_SSL_ERRORS"] = original_ssl
 
 
+def test_normal_startup_filters_known_native_and_pdf_noise():
+    patterns = "\n".join(app._STDERR_SUPPRESS_PATTERNS)
+    assert "IMKCFRunLoopWakeUpReliable" in patterns
+    assert "Ignoring wrong pointing object" in patterns
+
+
 def test_loose_material_matching_does_not_reuse_previous_import_scope():
     source = (app.web_dir() / "app.js").read_text("utf-8")
     loose_handler = source.split(

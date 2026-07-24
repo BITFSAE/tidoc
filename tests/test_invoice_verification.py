@@ -218,6 +218,110 @@ def test_verification_trash_failure_keeps_successful_attachment(
     assert printed.exists()
 
 
+def test_verification_without_readable_number_is_not_auto_attached(
+    api, tmp_path, monkeypatch
+):
+    from tidoc.services import folder_import, invoice_verification
+
+    invoice_no = "26957000000168907686"
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(
+        profile["id"],
+        parsed=ParsedInvoice(
+            invoice_no=invoice_no,
+            invoice_date="2026-07-13",
+            total=Decimal("76.32"),
+        ),
+    )
+    generic = tmp_path / "国家税务总局全国增值税发票查验平台.pdf"
+    generic.write_bytes(b"%PDF-native-print")
+    api._verification_sessions["session"] = {
+        "entry_id": entry_id,
+        "invoice_no": invoice_no,
+        "window": None,
+        "window_closed": True,
+        "attached": None,
+        "watch_directories": [tmp_path],
+        "before": {},
+        "started_ns": time.time_ns(),
+        "candidate_sizes": {str(generic): generic.stat().st_size},
+        "seen_candidates": set(),
+        "last_message": "",
+        "trash_source_after_archive": False,
+    }
+    monkeypatch.setattr(
+        invoice_verification, "changed_pdf_candidates", lambda *_args: [generic]
+    )
+    monkeypatch.setattr(
+        folder_import,
+        "classify_pdf_attachment_type",
+        lambda _path: "inspection_pdf",
+    )
+    monkeypatch.setattr(
+        folder_import,
+        "extract_pdf_invoice_no",
+        lambda _path: "",
+    )
+
+    result = api.invoice_verification_status("session")
+
+    assert result["data"]["state"] == "window_closed"
+    assert "未能确认发票号码" in result["data"]["message"]
+    assert api.attachments.list(entry_id) == []
+
+
+def test_verification_tidoc_filename_does_not_replace_content_confirmation(
+    api, tmp_path, monkeypatch
+):
+    from tidoc.services import folder_import, invoice_verification
+
+    invoice_no = "26957000000168907686"
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(
+        profile["id"],
+        parsed=ParsedInvoice(
+            invoice_no=invoice_no,
+            invoice_date="2026-07-13",
+            total=Decimal("76.32"),
+        ),
+    )
+    printed = tmp_path / f"查验单-{invoice_no}.pdf"
+    printed.write_bytes(b"%PDF-native-print")
+    api._verification_sessions["session"] = {
+        "entry_id": entry_id,
+        "invoice_no": invoice_no,
+        "window": None,
+        "window_closed": True,
+        "attached": None,
+        "watch_directories": [tmp_path],
+        "before": {},
+        "started_ns": time.time_ns(),
+        "candidate_sizes": {str(printed): printed.stat().st_size},
+        "seen_candidates": set(),
+        "last_message": "",
+        "trash_source_after_archive": False,
+    }
+    monkeypatch.setattr(
+        invoice_verification, "changed_pdf_candidates", lambda *_args: [printed]
+    )
+    monkeypatch.setattr(
+        folder_import,
+        "classify_pdf_attachment_type",
+        lambda _path: "inspection_pdf",
+    )
+    monkeypatch.setattr(
+        folder_import,
+        "extract_pdf_invoice_no",
+        lambda _path: "",
+    )
+
+    result = api.invoice_verification_status("session")
+
+    assert result["data"]["state"] == "window_closed"
+    assert "未能确认发票号码" in result["data"]["message"]
+    assert api.attachments.list(entry_id) == []
+
+
 def test_api_opens_official_site_only_after_explicit_start(
     api, tmp_path, monkeypatch
 ):

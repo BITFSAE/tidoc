@@ -19,6 +19,8 @@ from .api import Api
 WEB_DIR = Path(__file__).parent / "web"
 _STDERR_SUPPRESS_PATTERNS = (
     "NSSoftLinking - The function '_TSMMenuKeyTransWithModifiersBeginWithEvent'",
+    "error messaging the mach port for IMKCFRunLoopWakeUpReliable",
+    "Ignoring wrong pointing object",
 )
 
 

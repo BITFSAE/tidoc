@@ -975,6 +975,12 @@ class Api:
                         f"发现一份其他发票的查验单（{detected_invoice_no}），未绑定。"
                     )
                     continue
+                if session["invoice_no"] and not detected_invoice_no:
+                    session["last_message"] = (
+                        "发现一份查验单，但未能确认发票号码，未自动绑定。"
+                        "原 PDF 已保留，请手动选择这份文件。"
+                    )
+                    continue
                 self._validate_attachment_for_entry(
                     session["entry_id"], path, TYPE_INSPECTION
                 )

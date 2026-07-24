@@ -70,6 +70,31 @@ def test_card_drag_state_does_not_cover_amount_with_text():
     assert "setRecognizedPaidAmount:" in api_source
 
 
+def test_frontend_exposes_explicit_online_verification_flow():
+    web = app.web_dir()
+    source = (web / "app.js").read_text("utf-8")
+    api_source = (web / "api.js").read_text("utf-8")
+    app_source = (Path(app.__file__)).read_text("utf-8")
+    verification_flow = source.split(
+        "async function onlineVerificationFlow", 1
+    )[1].split("async function maybeSetPaidFromInvoice", 1)[0]
+
+    assert "async function onlineVerificationFlow" in source
+    assert "<ul>" in verification_flow
+    assert "验证码在官网填写，通常不区分大小写" in verification_flow
+    assert "出现查验明细后，回到这里点击“保存到条目”" in verification_flow
+    assert "网页证书错误" not in verification_flow
+    assert "无需打印机" not in verification_flow
+    assert "价税合计" in verification_flow
+    assert "invoice_code" not in verification_flow
+    assert "Api.invoiceVerificationStatus" in source
+    assert "Api.saveInvoiceVerificationPdf" in source
+    assert "保存到条目" in verification_flow
+    assert "printInvoiceVerification" not in api_source
+    assert "startInvoiceVerification:" in api_source
+    assert 'webview.settings["ALLOW_DOWNLOADS"] = True' in app_source
+
+
 def test_single_payment_amount_mismatch_requires_confirmation():
     source = (app.web_dir() / "app.js").read_text("utf-8")
     settle = source.split(

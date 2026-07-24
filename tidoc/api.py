@@ -85,6 +85,9 @@ class Api:
         self.attachments = AttachmentRepo(self.db, self.data_root)
         self.batches = BatchRepo(self.db)
         self._window = None
+        self._verification_sessions: dict[str, dict] = {}
+        self._verification_ssl_bypass_count = 0
+        self._verification_ssl_bypass_original: bool | None = None
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
 
     def __dir__(self):
@@ -714,6 +717,489 @@ class Api:
             raise FileNotFoundError(f"附件不存在：{att_id}")
         _reveal_local_path(att["abs_path"])
         return {"revealed": att["abs_path"]}
+
+    # ------------------------------------------------------------ 在线查验
+    @_guard
+    def invoice_verification_info(self, entry_id):
+        """从已有发票材料准备官网查验表单，但不主动联网。"""
+        from .services.invoice_verification import build_verification_info
+
+        entry = self.entries.get(entry_id)
+        if not entry:
+            raise FileNotFoundError(f"条目不存在：{entry_id}")
+        return build_verification_info(entry)
+
+    @_guard
+    def start_invoice_verification(self, entry_id, fields=None):
+        """用户主动打开税务官网，预填发票信息并创建结果保存会话。"""
+        import webview
+
+        from .services.invoice_verification import (
+            TAX_VERIFICATION_URL,
+            build_verification_info,
+            make_prefill_script,
+            make_print_compatibility_script,
+            new_session_snapshot,
+        )
+
+        entry = self.entries.get(entry_id)
+        if not entry:
+            raise FileNotFoundError(f"条目不存在：{entry_id}")
+        info = build_verification_info(entry)
+        for key in ("invoice_no", "invoice_date", "verification_value"):
+            if fields and fields.get(key) is not None:
+                info[key] = str(fields[key]).strip()
+        if not info["invoice_no"]:
+            raise ValueError("缺少发票号码，请先在条目详情补正发票号码。")
+        if not info["invoice_date"]:
+            raise ValueError("缺少开票日期，请先在条目详情补正开票日期。")
+
+        session_id = uuid.uuid4().hex
+        snapshot = new_session_snapshot()
+        session = {
+            "id": session_id,
+            "entry_id": entry_id,
+            "invoice_no": info["invoice_no"],
+            "window": None,
+            "window_closed": False,
+            "ssl_bypass_acquired": False,
+            "attached": None,
+            "candidate_sizes": {},
+            "seen_candidates": set(),
+            "last_message": "",
+            **snapshot,
+        }
+        self._verification_sessions[session_id] = session
+        try:
+            self._acquire_verification_ssl_bypass(session)
+            self._install_verification_landscape_print()
+            window = webview.create_window(
+                "tidoc · 发票查验",
+                url=TAX_VERIFICATION_URL,
+                width=1180,
+                height=820,
+                min_size=(900, 640),
+                text_select=True,
+                zoomable=True,
+            )
+            if window is None:
+                raise RuntimeError("无法打开查验平台窗口。")
+            session["window"] = window
+
+            def on_window_closed() -> None:
+                with self._api_lock:
+                    session["window_closed"] = True
+                    self._release_verification_ssl_bypass(session)
+
+            window.events.closed += on_window_closed
+            script = make_prefill_script(info)
+            print_compatibility_script = make_print_compatibility_script()
+
+            def install_print_compatibility() -> None:
+                if session["window_closed"]:
+                    return
+                try:
+                    window.evaluate_js(print_compatibility_script)
+                except Exception:  # noqa: BLE001 - 不阻断官网正常浏览
+                    session["last_message"] = (
+                        "官网已打开，但打印兼容处理失败；可关闭后重新打开查验窗口。"
+                    )
+
+            # 官网查验成功后会导航到结果页；每次页面加载都重新安装打印兼容处理。
+            window.events.loaded += install_print_compatibility
+
+            def prefill_when_loaded() -> None:
+                if window.events.loaded.wait(30):
+                    try:
+                        window.evaluate_js(script)
+                        install_print_compatibility()
+                    except Exception:  # noqa: BLE001 - 官网仍可供用户手动填写
+                        session["last_message"] = "官网已打开，但自动填写失败，请在官网手动填写。"
+
+            threading.Thread(target=prefill_when_loaded, daemon=True).start()
+        except Exception:
+            self._verification_sessions.pop(session_id, None)
+            self._release_verification_ssl_bypass(session)
+            raise
+
+        return {
+            "session_id": session_id,
+            "watch_directories": [str(path) for path in session["watch_directories"]],
+            "info": info,
+        }
+
+    @_guard
+    def invoice_verification_status(self, session_id):
+        """检测用户刚保存的官网查验单，确认归属后直接绑定到当前条目。"""
+        from .db import TYPE_INSPECTION
+        from .services.folder_import import (
+            classify_pdf_attachment_type,
+            extract_pdf_invoice_no,
+        )
+        from .services.invoice_verification import changed_pdf_candidates
+
+        session = self._verification_sessions.get(str(session_id))
+        if not session:
+            raise ValueError("查验会话已结束，请重新打开查验平台。")
+        if session["attached"]:
+            return {
+                "state": "attached",
+                "attachment": session["attached"],
+                "message": "查验单已保存到当前条目。",
+            }
+
+        candidates = changed_pdf_candidates(
+            session["watch_directories"],
+            session["before"],
+            session["started_ns"],
+        )
+        waiting_for_write = False
+        for path in candidates:
+            key = str(path)
+            if key in session["seen_candidates"]:
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            previous_size = session["candidate_sizes"].get(key)
+            session["candidate_sizes"][key] = size
+            if previous_size != size or size == 0:
+                waiting_for_write = True
+                continue
+            session["seen_candidates"].add(key)
+            try:
+                if classify_pdf_attachment_type(path) != TYPE_INSPECTION:
+                    continue
+                detected_invoice_no = extract_pdf_invoice_no(path)
+                if (detected_invoice_no and session["invoice_no"]
+                        and detected_invoice_no != session["invoice_no"]):
+                    session["last_message"] = (
+                        f"发现一份其他发票的查验单（{detected_invoice_no}），未绑定。"
+                    )
+                    continue
+                self._validate_attachment_for_entry(
+                    session["entry_id"], path, TYPE_INSPECTION
+                )
+                attachment = self.attachments.add(
+                    session["entry_id"], path, TYPE_INSPECTION,
+                    note="由全国增值税发票查验平台下载",
+                )
+                self.entries.recompute_status(session["entry_id"])
+                session["attached"] = attachment
+                self._close_verification_window(session)
+                return {
+                    "state": "attached",
+                    "attachment": attachment,
+                    "message": "查验单已保存到当前条目。",
+                }
+            except Exception as exc:  # noqa: BLE001 - 继续等待用户保存正确文件
+                session["last_message"] = f"发现 PDF，但未能绑定：{exc}"
+
+        state = "processing" if waiting_for_write else (
+            "window_closed" if session["window_closed"] else "waiting"
+        )
+        return {
+            "state": state,
+            "message": session["last_message"],
+            "window_closed": session["window_closed"],
+        }
+
+    @_guard
+    def save_invoice_verification_pdf(self, session_id):
+        """把当前已显示的查验结果直接生成为 PDF 并归入对应条目。"""
+        from .db import TYPE_INSPECTION
+        from .services.invoice_verification import (
+            make_finish_pdf_export_script,
+            make_print_compatibility_script,
+            make_trigger_print_script,
+        )
+
+        session = self._verification_sessions.get(str(session_id))
+        if not session:
+            raise ValueError("查验会话已结束，请保持查验窗口打开。")
+        window = session.get("window")
+        if window is None or session.get("window_closed"):
+            raise ValueError("查验窗口已关闭，无法保存当前结果。")
+
+        window.evaluate_js(make_print_compatibility_script())
+        prepared = window.evaluate_js(
+            make_trigger_print_script(suppress_print=True)
+        )
+        if not prepared or not prepared.get("ready"):
+            raise ValueError("当前还没有显示查验结果，请查验成功后再保存。")
+
+        width = max(1, min(int(prepared.get("width") or 1120), 4000))
+        height = max(1, min(int(prepared.get("height") or 800), 12000))
+        staging = (
+            self.data_root.dropped_dir
+            / f"查验单-{session['invoice_no']}-{session['id'][:8]}.pdf"
+        )
+        try:
+            self._export_verification_webview_pdf(window, staging, width, height)
+            attachment = self.attachments.add(
+                session["entry_id"],
+                staging,
+                TYPE_INSPECTION,
+                note="由全国增值税发票查验平台直接生成",
+            )
+            self.entries.recompute_status(session["entry_id"])
+            session["attached"] = attachment
+            self._close_verification_window(session)
+            return {
+                "attachment": attachment,
+                "message": "查验结果 PDF 已直接保存到当前条目。",
+            }
+        finally:
+            try:
+                if not session.get("window_closed"):
+                    window.evaluate_js(make_finish_pdf_export_script())
+            except Exception:
+                pass
+            if staging.exists():
+                staging.unlink()
+
+    @staticmethod
+    def _export_verification_webview_pdf(window, destination: Path,
+                                         width: int, height: int) -> None:
+        """用当前系统 WebView 的原生接口生成查验结果 PDF。"""
+        if sys.platform == "darwin":
+            Api._export_verification_webview_pdf_macos(
+                window, destination, width, height
+            )
+        elif sys.platform == "win32":
+            Api._export_verification_webview_pdf_windows(window, destination)
+        else:
+            raise RuntimeError("当前系统暂不支持直接生成查验结果 PDF。")
+
+    @staticmethod
+    def _export_verification_webview_pdf_macos(
+        window, destination: Path, width: int, height: int
+    ) -> None:
+        """在 Cocoa 主线程调用 WKWebView.createPDF，并等待回调写入暂存文件。"""
+        try:
+            import AppKit
+            import WebKit
+            from PyObjCTools import AppHelper
+        except ImportError as exc:
+            raise RuntimeError("当前运行环境不支持直接生成 PDF。") from exc
+
+        done = threading.Event()
+        result: dict[str, object] = {}
+
+        def start_export() -> None:
+            try:
+                native_window = window.native
+                native_webview = native_window.contentView()
+                if not hasattr(
+                    native_webview,
+                    "createPDFWithConfiguration_completionHandler_",
+                ):
+                    raise RuntimeError("当前 macOS WebView 不支持直接生成 PDF。")
+                config = WebKit.WKPDFConfiguration.alloc().init()
+                config.setRect_(AppKit.NSMakeRect(0, 0, width, height))
+
+                def completed(data, error) -> None:
+                    result["data"] = data
+                    result["error"] = error
+                    done.set()
+
+                native_webview.createPDFWithConfiguration_completionHandler_(
+                    config, completed
+                )
+            except Exception as exc:  # noqa: BLE001 - 传回桥线程统一处理
+                result["exception"] = exc
+                done.set()
+
+        AppHelper.callAfter(start_export)
+        if not done.wait(30):
+            raise TimeoutError("生成查验结果 PDF 超时，请重试。")
+        if result.get("exception"):
+            raise RuntimeError(str(result["exception"]))
+        if result.get("error"):
+            raise RuntimeError(f"生成查验结果 PDF 失败：{result['error']}")
+        data = result.get("data")
+        if data is None:
+            raise RuntimeError("未能取得查验结果 PDF。")
+        raw = bytes(data)
+        if not raw.startswith(b"%PDF"):
+            raise RuntimeError("生成的查验结果文件不是有效 PDF。")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(raw)
+
+    @staticmethod
+    def _export_verification_webview_pdf_windows(
+        window, destination: Path
+    ) -> None:
+        """在 WinForms UI 线程调用 WebView2.PrintToPdfAsync。"""
+        try:
+            import clr
+
+            clr.AddReference("System")
+            from Microsoft.Web.WebView2.Core import CoreWebView2PrintOrientation
+            from System import Action, Boolean, Func, Object
+            from System.Threading.Tasks import Task
+        except Exception as exc:  # noqa: BLE001 - Windows 运行时加载失败需转为用户提示
+            raise RuntimeError("当前运行环境不支持直接生成 PDF。") from exc
+
+        done = threading.Event()
+        result: dict[str, object] = {}
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        def completed(task) -> None:
+            try:
+                if task.IsCanceled:
+                    result["exception"] = RuntimeError("生成查验结果 PDF 已取消。")
+                elif task.IsFaulted:
+                    result["exception"] = task.Exception
+                else:
+                    result["success"] = bool(task.Result)
+            except Exception as exc:  # noqa: BLE001 - 传回桥线程统一处理
+                result["exception"] = exc
+            finally:
+                done.set()
+
+        def start_export():
+            try:
+                native_window = window.native
+                native_webview = native_window.webview
+                core = native_webview.CoreWebView2
+                if core is None or not hasattr(core, "PrintToPdfAsync"):
+                    raise RuntimeError("当前 Windows WebView2 不支持直接生成 PDF。")
+                settings = core.Environment.CreatePrintSettings()
+                settings.Orientation = CoreWebView2PrintOrientation.Landscape
+                settings.ShouldPrintBackgrounds = True
+                settings.ShouldPrintHeaderAndFooter = False
+                task = core.PrintToPdfAsync(str(destination), settings)
+                return task.ContinueWith(Action[Task[Boolean]](completed))
+            except Exception as exc:  # noqa: BLE001 - 传回桥线程统一处理
+                result["exception"] = exc
+                done.set()
+                return None
+
+        try:
+            window.native.Invoke(Func[Object](start_export))
+        except Exception as exc:
+            raise RuntimeError(f"无法启动查验结果 PDF 生成：{exc}") from exc
+        if not done.wait(30):
+            raise TimeoutError("生成查验结果 PDF 超时，请重试。")
+        if result.get("exception"):
+            raise RuntimeError(str(result["exception"]))
+        if not result.get("success"):
+            raise RuntimeError("未能生成查验结果 PDF。")
+        try:
+            with destination.open("rb") as file:
+                header = file.read(4)
+        except OSError as exc:
+            raise RuntimeError("未能读取生成的查验结果 PDF。") from exc
+        if header != b"%PDF":
+            raise RuntimeError("生成的查验结果文件不是有效 PDF。")
+
+    @_guard
+    def close_invoice_verification(self, session_id):
+        session = self._verification_sessions.pop(str(session_id), None)
+        if session:
+            self._close_verification_window(session)
+        return {"closed": bool(session)}
+
+    def _close_verification_window(self, session: dict) -> None:
+        self._release_verification_ssl_bypass(session)
+        window = session.get("window")
+        if window is None or session.get("window_closed"):
+            return
+        try:
+            window.destroy()
+        except Exception:  # noqa: BLE001 - 用户可能已先关闭窗口
+            pass
+        session["window_closed"] = True
+
+    def _acquire_verification_ssl_bypass(self, session: dict) -> None:
+        """查验窗口存续期间临时允许税务平台历史证书链。"""
+        import warnings
+
+        import webview
+
+        if session.get("ssl_bypass_acquired"):
+            return
+        try:
+            import objc
+
+            warnings.filterwarnings(
+                "ignore",
+                category=objc.ObjCPointerWarning,
+                module=r"webview\.platforms\.cocoa",
+            )
+        except (ImportError, AttributeError):
+            pass
+        if self._verification_ssl_bypass_count == 0:
+            self._verification_ssl_bypass_original = bool(
+                webview.settings["IGNORE_SSL_ERRORS"]
+            )
+            webview.settings["IGNORE_SSL_ERRORS"] = True
+        self._verification_ssl_bypass_count += 1
+        session["ssl_bypass_acquired"] = True
+
+    def _release_verification_ssl_bypass(self, session: dict) -> None:
+        import webview
+
+        if not session.get("ssl_bypass_acquired"):
+            return
+        session["ssl_bypass_acquired"] = False
+        self._verification_ssl_bypass_count = max(
+            0, self._verification_ssl_bypass_count - 1
+        )
+        if self._verification_ssl_bypass_count == 0:
+            if self._verification_ssl_bypass_original is not None:
+                webview.settings["IGNORE_SSL_ERRORS"] = (
+                    self._verification_ssl_bypass_original
+                )
+            self._verification_ssl_bypass_original = None
+
+    @staticmethod
+    def _configure_verification_print_info(info) -> None:
+        """把当前原生打印任务固定为横向。"""
+        if sys.platform != "darwin":
+            return
+        try:
+            import AppKit
+        except ImportError:
+            return
+        info.setOrientation_(AppKit.NSPaperOrientationLandscape)
+
+    def _install_verification_landscape_print(self) -> None:
+        """只为查验窗口包装 pywebview 的原生打印入口。
+
+        会话启动时修改共享 NSPrintInfo 容易被 macOS 在打开打印面板前重置，
+        因此必须在 ``print_webview`` 创建任务的同一刻设置横向。
+        """
+        if sys.platform != "darwin":
+            return
+        try:
+            import AppKit
+            from webview.platforms.cocoa import BrowserView
+        except ImportError:
+            return
+
+        current = BrowserView.print_webview
+        if getattr(current, "_tidoc_landscape_print", False):
+            return
+        original = current
+
+        def print_webview_landscape(native_webview):
+            window = getattr(native_webview, "pywebview_window", None)
+            if getattr(window, "title", "") != "tidoc · 发票查验":
+                return original(native_webview)
+
+            shared = AppKit.NSPrintInfo.sharedPrintInfo()
+            original_orientation = int(shared.orientation())
+            try:
+                self._configure_verification_print_info(shared)
+                return original(native_webview)
+            finally:
+                shared.setOrientation_(original_orientation)
+
+        print_webview_landscape._tidoc_landscape_print = True
+        BrowserView.print_webview = staticmethod(print_webview_landscape)
 
     # ------------------------------------------------------------ 汇总 / 绑定包
     @_guard

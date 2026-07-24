@@ -97,6 +97,11 @@ const Api = (() => {
     updateAttachment: (id, fields) => call('update_attachment', id, fields || {}),
     openAttachment: (id) => call('open_attachment', id),
     revealAttachment: (id) => call('reveal_attachment', id),
+    invoiceVerificationInfo: (id) => call('invoice_verification_info', id),
+    startInvoiceVerification: (id, fields) => call('start_invoice_verification', id, fields || {}),
+    invoiceVerificationStatus: (sessionId) => call('invoice_verification_status', sessionId),
+    saveInvoiceVerificationPdf: (sessionId) => call('save_invoice_verification_pdf', sessionId),
+    closeInvoiceVerification: (sessionId) => call('close_invoice_verification', sessionId),
 
     printComponentStatus: () => call('print_component_status'),
     buildPrints: (ids, options, name) => call('build_prints', ids, options || null, name || null),

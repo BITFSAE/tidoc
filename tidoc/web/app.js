@@ -687,7 +687,7 @@ function entryCard(e) {
       ${actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '已添加发票材料；点击补充发票 PDF' : '添加发票 PDF')}
       ${actionBtn('paid', '实付', !!paidCur, paidCur ? '已填写实付金额；点击修改' : '填写实付金额')}
       ${actionBtn('pay', '付款', e.has_payment, e.has_payment ? '已添加付款截图；点击继续添加' : '添加付款截图')}
-      ${actionBtn('inspect', '查验', e.has_inspection, e.has_inspection ? '已添加查验单；点击继续添加' : '添加查验单')}
+      ${actionBtn('inspect', '查验', e.has_inspection, e.has_inspection ? '已添加查验单；点击重新查验或补充' : '打开官网查验并自动归档 PDF')}
     </div>`;
   right.querySelectorAll('[data-card-action]').forEach((b) => {
     b.onclick = async (ev) => {
@@ -698,7 +698,7 @@ function entryCard(e) {
       else if (action === 'invoice') await quickAddAttachment(e.id, 'invoice_pdf');
       else if (action === 'paid') await quickPaidFlow(e);
       else if (action === 'pay') await quickAddAttachment(e.id, 'payment_screenshot');
-      else if (action === 'inspect') await quickAddAttachment(e.id, 'inspection_pdf');
+      else if (action === 'inspect') await onlineVerificationFlow(e.id);
     };
     b.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
   });
@@ -1397,6 +1397,165 @@ async function quickAddAttachment(entryId, type) {
   finally { progress?.close(); }
 }
 
+async function onlineVerificationFlow(entryId) {
+  let info;
+  try {
+    info = await Api.invoiceVerificationInfo(entryId);
+  } catch (err) {
+    toast(err.message, 'err');
+    return;
+  }
+
+  const body = el('div', 'verification-flow');
+  body.innerHTML = `
+    <div class="verification-fields">
+      <label><span>发票号码</span>
+        <input data-verification-field="invoice_no" value="${esc(info.invoice_no || '')}"/>
+      </label>
+      <label><span>开票日期 <small>YYYYMMDD</small></span>
+        <input data-verification-field="invoice_date" value="${esc(info.invoice_date || '')}" inputmode="numeric"/>
+      </label>
+      <label><span>${esc(info.verification_value_label || '价税合计')}</span>
+        <input data-verification-field="verification_value" value="${esc(info.verification_value || '')}" inputmode="decimal"
+          placeholder="按发票价税合计填写"/>
+      </label>
+    </div>
+    <div class="verification-guide">
+      <ul>
+        <li>验证码在官网填写，通常不区分大小写</li>
+        <li>出现查验明细后，回到这里点击“保存到条目”</li>
+      </ul>
+    </div>
+    <div class="verification-status hidden" data-verification-status>
+      <span class="verification-status-dot"></span>
+      <div><b></b><small></small></div>
+    </div>`;
+
+  let sessionId = '';
+  let pollTimer = null;
+  let attached = false;
+  let closed = false;
+  const status = body.querySelector('[data-verification-status]');
+  const fields = () => Object.fromEntries(
+    [...body.querySelectorAll('[data-verification-field]')].map((input) => [
+      input.dataset.verificationField, input.value.trim(),
+    ]),
+  );
+  const setStatus = (state, title, detail) => {
+    status.classList.remove('hidden');
+    status.className = `verification-status ${state || ''}`;
+    status.querySelector('b').textContent = title;
+    const detailEl = status.querySelector('small');
+    detailEl.textContent = detail || '';
+    detailEl.hidden = !detail;
+  };
+  const stopPolling = () => {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = null;
+  };
+
+  const chooseBtn = mkBtn('上传已有 PDF', 'ghost verification-upload', async () => {
+    try {
+      const res = await Api.pickFiles(false, ['PDF 文件 (*.pdf)']);
+      const path = (res.paths || [])[0];
+      if (!path) return;
+      setStatus('working', '正在核对查验单', '确认是否属于当前发票…');
+      await Api.addAttachment(entryId, path, 'inspection_pdf', '手动选择的查验单');
+      if (sessionId) await Api.closeInvoiceVerification(sessionId);
+      await finishAttachment();
+    } catch (err) {
+      setStatus('error', '未能添加', err.message);
+      toast(err.message, 'err');
+    }
+  });
+
+  const poll = async () => {
+    if (!sessionId || attached || closed) return;
+    try {
+      const result = await Api.invoiceVerificationStatus(sessionId);
+      if (result.state === 'attached') {
+        await finishAttachment();
+        return;
+      }
+      if (result.state === 'processing') {
+        setStatus('working', '正在接收 PDF', '写入完成后会自动归入条目…');
+      } else if (result.message) {
+        setStatus('error', '还未归档', result.message);
+      } else if (result.window_closed) {
+        setStatus('waiting', '查验窗口已关闭', '请重新查验，或上传已有 PDF。');
+      }
+    } catch (err) {
+      setStatus('error', '检测中断', err.message);
+      return;
+    }
+    pollTimer = setTimeout(poll, 1200);
+  };
+
+  const saveBtn = mkBtn('保存到条目', 'primary', async () => {
+    if (!sessionId) return;
+    saveBtn.disabled = true;
+    setStatus('working', '正在保存查验单', '生成 PDF 并归入当前条目…');
+    try {
+      await Api.saveInvoiceVerificationPdf(sessionId);
+      await finishAttachment();
+    } catch (err) {
+      setStatus('error', '暂时不能保存', err.message);
+    } finally {
+      if (!attached) saveBtn.disabled = false;
+    }
+  });
+  saveBtn.style.display = 'none';
+
+  const openBtn = mkBtn('打开查验官网', 'primary', async () => {
+    const values = fields();
+    if (!values.invoice_no || !values.invoice_date || !values.verification_value) {
+      setStatus('error', '信息还不完整', '请填写发票号码、开票日期和价税合计。');
+      return;
+    }
+    openBtn.disabled = true;
+    body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = true; });
+    setStatus('working', '正在打开官网', '加载完成后请填写验证码并点击“查验”…');
+    try {
+      const result = await Api.startInvoiceVerification(entryId, values);
+      sessionId = result.session_id;
+      openBtn.style.display = 'none';
+      saveBtn.style.display = '';
+      setStatus('waiting', '请在官网完成查验', '看到查验明细后，回到这里保存。');
+      pollTimer = setTimeout(poll, 800);
+    } catch (err) {
+      openBtn.disabled = false;
+      body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = false; });
+      setStatus('error', '官网未打开', err.message);
+    }
+  });
+
+  const closeBtn = mkBtn('取消', 'ghost', () => m.close());
+  const finishAttachment = async () => {
+    attached = true;
+    stopPolling();
+    await syncEntryAfterChange(entryId, { affectsStatus: true });
+    setStatus('done', '查验单已保存', '已归入当前条目的查验材料。');
+    openBtn.style.display = 'none';
+    saveBtn.style.display = 'none';
+    chooseBtn.style.display = 'none';
+    closeBtn.textContent = '完成';
+    closeBtn.classList.remove('ghost');
+    closeBtn.classList.add('primary');
+    toast('查验单已保存到当前条目', 'ok');
+  };
+  const m = modal({
+    title: '在线查验',
+    body,
+    footer: [chooseBtn, closeBtn, saveBtn, openBtn],
+    onClose: () => {
+      closed = true;
+      stopPolling();
+      if (sessionId && !attached) Api.closeInvoiceVerification(sessionId).catch(() => {});
+    },
+  });
+  m.foot.classList.add('verification-foot');
+}
+
 async function maybeSetPaidFromInvoice(entryId) {
   const entry = await Api.getEntry(entryId);
   const paid = entry.fields?.paid_amount?.current || '';
@@ -1545,7 +1704,8 @@ function openEntryMenu(x, y, e) {
   item('打开详情', () => openEntryDetail(e.id));
   item('填写实付金额', () => quickPaidFlow(e));
   item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'));
-  item('添加查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
+  item('在线查验', () => onlineVerificationFlow(e.id));
+  item('上传已有查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
   item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'));
   item('编辑条目备注', () => quickNoteFlow(e));
   item('打标签', () => tagSelectionFlow([e.id]));
@@ -2346,7 +2506,7 @@ async function maybeShowFirstUseGuide() {
 
 function usageGuideStepsMarkup() {
   return `<div><b>1 · 导入发票</b><span>把发票 PDF 或 XML 拖入、粘贴到主界面；文件较多时用“导入发票”选择多个文件或整个文件夹。</span></div>
-    <div><b>2 · 补齐材料</b><span>付款截图、查验单可直接拖到条目卡片或详情材料区；混合导入时，能按发票号唯一匹配的查验单会自动归入条目。</span></div>
+    <div><b>2 · 补齐材料</b><span>条目卡片的“查验”会打开税务官网并预填发票信息；手动填写验证码后，保存的查验单 PDF 会自动归入条目。已有材料也可直接拖入。</span></div>
     <div><b>3 · 核对修正</b><span>用“待补材料”“识别提醒”“严重问题”筛出待处理条目，在详情中核对实付金额、明细和备注。</span></div>
     <div><b>4 · 组织批次</b><span>勾选条目后装入报账批次、打标签或批量处理；按住 Shift 可连续选择，右键单条可快速移动或补材料。</span></div>
     <div><b>5 · 导出打印</b><span>打印默认按每个条目的发票、付款截图、查验单依次拼接；也可选择按材料类型分别导出，并按需关闭页码编号。</span></div>
@@ -2761,6 +2921,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const attGroup = (label, types, hint) => {
     const list = atts.filter((a) => types.includes(a.type));
     const has = list.length > 0;
+    const isInspection = types[0] === 'inspection_pdf';
     const rows = list.map((a) => `
       <div class="attach-item">
         <span class="attach-name" title="${esc(a.abs_path || a.stored_path)}">${esc(a.original_name)}</span>
@@ -2781,7 +2942,8 @@ async function openEntryDetail(entryId, currentDetail = null) {
           <span class="att-group-dot"></span>
           <span class="att-group-title">${label}</span>
           <span class="att-group-status">${has ? `已上传 ${list.length}` : '未上传'}</span>
-          <button class="btn small att-group-add" data-add-att-type="${types[0]}" data-add-att-label="${label}">＋ 添加</button>
+          ${isInspection ? '<button class="btn small att-group-add verify-online" data-online-verification>在线查验</button>' : ''}
+          <button class="btn small att-group-add" data-add-att-type="${types[0]}" data-add-att-label="${label}">＋ ${isInspection ? '上传' : '添加'}</button>
         </div>
         ${has ? `<div class="attach-list">${rows}</div>` : `<div class="att-group-hint">${hint}</div>`}
       </div>`;
@@ -3062,6 +3224,12 @@ async function openEntryDetail(entryId, currentDetail = null) {
   // ---- 报账材料：按类别添加（预选类型）
   body.querySelectorAll('[data-add-att-type]').forEach((btn) => {
     btn.onclick = () => addAttachmentFlow(entryId, mm, btn.dataset.addAttType);
+  });
+  body.querySelectorAll('[data-online-verification]').forEach((btn) => {
+    btn.onclick = () => {
+      mm.close();
+      onlineVerificationFlow(entryId);
+    };
   });
   body.querySelectorAll('[data-open-att]').forEach((b) => {
     b.onclick = async () => {

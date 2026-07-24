@@ -23,6 +23,8 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from send2trash import send2trash
+
 from tidoc import __version__
 
 from .db import (
@@ -37,6 +39,12 @@ from .db import (
 AUTO_UPDATE_PREF_KEY = "tidoc.update.autoCheck"
 PAYMENT_OCR_PREF_KEY = "tidoc.paymentScreenshotOcr"
 DEFAULT_PAID_TO_INVOICE_PREF_KEY = "tidoc.defaultPaidToInvoiceTotal"
+INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY = (
+    "tidoc.invoiceVerification.watchDirectory"
+)
+INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY = (
+    "tidoc.invoiceVerification.trashSourceAfterArchive"
+)
 UPDATE_LAST_CHECK_KEY = "tidoc.update.lastCheck"
 UPDATE_LAST_RESULT_KEY = "tidoc.update.lastResult"
 APP_LAST_SEEN_VERSION_KEY = "tidoc.update.lastSeenVersion"
@@ -86,8 +94,6 @@ class Api:
         self.batches = BatchRepo(self.db)
         self._window = None
         self._verification_sessions: dict[str, dict] = {}
-        self._verification_ssl_bypass_count = 0
-        self._verification_ssl_bypass_original: bool | None = None
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
 
     def __dir__(self):
@@ -108,6 +114,30 @@ class Api:
 
     def bind_window(self, window) -> None:
         self._window = window
+
+    def _preference_value(self, key: str, default: str = "") -> str:
+        row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,)
+        ).fetchone()
+        return str(row["value"]) if row else default
+
+    def _set_preference_value(self, key: str, value: str) -> None:
+        self.db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self.db.conn.commit()
+
+    def _invoice_verification_preferences(self) -> dict:
+        return {
+            "watch_directory": self._preference_value(
+                INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY
+            ),
+            "trash_source_after_archive": self._preference_value(
+                INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY, "0"
+            ) == "1",
+        }
 
     # ------------------------------------------------------------ 身份
     @_guard
@@ -135,18 +165,59 @@ class Api:
     # ------------------------------------------------------------ 应用偏好
     @_guard
     def app_preference(self, key, default=""):
-        row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (str(key),)).fetchone()
-        return row["value"] if row else default
+        return self._preference_value(str(key), str(default))
 
     @_guard
     def set_app_preference(self, key, value):
-        self.db.conn.execute(
+        self._set_preference_value(str(key), str(value))
+        return {"key": str(key), "value": str(value)}
+
+    @_guard
+    def invoice_verification_preferences(self):
+        return self._invoice_verification_preferences()
+
+    @_guard
+    def set_invoice_verification_preferences(self, options=None):
+        values = dict(options or {})
+        current = self._invoice_verification_preferences()
+        watch_directory = current["watch_directory"]
+        trash_source = current["trash_source_after_archive"]
+
+        if "watch_directory" in values:
+            watch_directory = str(values.get("watch_directory") or "").strip()
+            if watch_directory:
+                path = Path(watch_directory).expanduser()
+                if not path.is_dir():
+                    raise ValueError("选择的查验单归档目录不存在。")
+                path = path.resolve()
+                if _is_inside(self.data_root.root, path):
+                    raise ValueError("查验单归档目录不能位于 tidoc 数据目录内。")
+                watch_directory = str(path)
+        if "trash_source_after_archive" in values:
+            raw_trash_source = values["trash_source_after_archive"]
+            trash_source = (
+                raw_trash_source
+                if isinstance(raw_trash_source, bool)
+                else str(raw_trash_source).strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+
+        self.db.conn.executemany(
             "INSERT INTO meta(key, value) VALUES(?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (str(key), str(value)),
+            (
+                (INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY, watch_directory),
+                (
+                    INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY,
+                    "1" if trash_source else "0",
+                ),
+            ),
         )
         self.db.conn.commit()
-        return {"key": str(key), "value": str(value)}
+        return {
+            "watch_directory": watch_directory,
+            "trash_source_after_archive": trash_source,
+        }
 
     @_guard
     def app_info(self):
@@ -741,6 +812,7 @@ class Api:
             make_print_compatibility_script,
             new_session_snapshot,
             snapshot_pdfs,
+            verification_print_title,
         )
 
         entry = self.entries.get(entry_id)
@@ -757,12 +829,15 @@ class Api:
 
         session_id = uuid.uuid4().hex
         snapshot = new_session_snapshot()
-        custom_watch = str((fields or {}).get("watch_directory") or "").strip()
+        verification_preferences = self._invoice_verification_preferences()
+        custom_watch = verification_preferences["watch_directory"]
         if custom_watch:
             custom_watch_path = Path(custom_watch).expanduser()
             if not custom_watch_path.is_dir():
-                raise ValueError("选择的自动归档目录不存在，请重新选择。")
+                raise ValueError("设置中的查验单归档目录不存在，请重新选择。")
             custom_watch_path = custom_watch_path.resolve()
+            if _is_inside(self.data_root.root, custom_watch_path):
+                raise ValueError("查验单归档目录不能位于 tidoc 数据目录内。")
             if custom_watch_path not in snapshot["watch_directories"]:
                 snapshot["watch_directories"].append(custom_watch_path)
                 snapshot["before"].update(snapshot_pdfs([custom_watch_path]))
@@ -772,16 +847,20 @@ class Api:
             "invoice_no": info["invoice_no"],
             "window": None,
             "window_closed": False,
-            "ssl_bypass_acquired": False,
             "attached": None,
             "candidate_sizes": {},
             "seen_candidates": set(),
             "last_message": "",
+            "result_message": "",
+            "cleanup_warning": "",
+            "source_trashed": False,
+            "trash_source_after_archive": verification_preferences[
+                "trash_source_after_archive"
+            ],
             **snapshot,
         }
         self._verification_sessions[session_id] = session
         try:
-            self._acquire_verification_ssl_bypass(session)
             self._install_verification_landscape_print()
             window = webview.create_window(
                 "tidoc · 发票查验",
@@ -794,12 +873,14 @@ class Api:
             )
             if window is None:
                 raise RuntimeError("无法打开查验平台窗口。")
+            window._tidoc_print_title = verification_print_title(  # type: ignore[attr-defined]
+                info["invoice_no"]
+            )
             session["window"] = window
 
             def on_window_closed() -> None:
                 with self._api_lock:
                     session["window_closed"] = True
-                    self._release_verification_ssl_bypass(session)
 
             window.events.closed += on_window_closed
             script = make_prefill_script(info)
@@ -831,7 +912,6 @@ class Api:
             threading.Thread(target=prefill_when_loaded, daemon=True).start()
         except Exception:
             self._verification_sessions.pop(session_id, None)
-            self._release_verification_ssl_bypass(session)
             raise
 
         return {
@@ -857,7 +937,12 @@ class Api:
             return {
                 "state": "attached",
                 "attachment": session["attached"],
-                "message": "查验单已保存到当前条目。",
+                "message": (
+                    session.get("result_message")
+                    or "查验单已保存到当前条目。"
+                ),
+                "cleanup_warning": session.get("cleanup_warning", ""),
+                "source_trashed": bool(session.get("source_trashed")),
             }
 
         candidates = changed_pdf_candidates(
@@ -899,11 +984,34 @@ class Api:
                 )
                 self.entries.recompute_status(session["entry_id"])
                 session["attached"] = attachment
+                result_message = "查验单已保存到当前条目。"
+                cleanup_warning = ""
+                source_trashed = False
+                if session.get("trash_source_after_archive"):
+                    try:
+                        send2trash(str(path))
+                        source_trashed = True
+                        result_message = (
+                            "查验单已保存，原 PDF 已移到废纸篓或回收站。"
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 归档成功不应回滚
+                        cleanup_warning = (
+                            "原 PDF 未能移到废纸篓或回收站，仍保留在原位置："
+                            f"{exc}"
+                        )
+                        result_message = (
+                            "查验单已保存，但原 PDF 仍保留在原位置。"
+                        )
+                session["result_message"] = result_message
+                session["cleanup_warning"] = cleanup_warning
+                session["source_trashed"] = source_trashed
                 self._close_verification_window(session)
                 return {
                     "state": "attached",
                     "attachment": attachment,
-                    "message": "查验单已保存到当前条目。",
+                    "message": result_message,
+                    "cleanup_warning": cleanup_warning,
+                    "source_trashed": source_trashed,
                 }
             except Exception as exc:  # noqa: BLE001 - 继续等待用户保存正确文件
                 session["last_message"] = f"发现 PDF，但未能绑定：{exc}"
@@ -925,7 +1033,6 @@ class Api:
         return {"closed": bool(session)}
 
     def _close_verification_window(self, session: dict) -> None:
-        self._release_verification_ssl_bypass(session)
         window = session.get("window")
         if window is None or session.get("window_closed"):
             return
@@ -934,48 +1041,6 @@ class Api:
         except Exception:  # noqa: BLE001 - 用户可能已先关闭窗口
             pass
         session["window_closed"] = True
-
-    def _acquire_verification_ssl_bypass(self, session: dict) -> None:
-        """查验窗口存续期间临时允许税务平台历史证书链。"""
-        import warnings
-
-        import webview
-
-        if session.get("ssl_bypass_acquired"):
-            return
-        try:
-            import objc
-
-            warnings.filterwarnings(
-                "ignore",
-                category=objc.ObjCPointerWarning,
-                module=r"webview\.platforms\.cocoa",
-            )
-        except (ImportError, AttributeError):
-            pass
-        if self._verification_ssl_bypass_count == 0:
-            self._verification_ssl_bypass_original = bool(
-                webview.settings["IGNORE_SSL_ERRORS"]
-            )
-            webview.settings["IGNORE_SSL_ERRORS"] = True
-        self._verification_ssl_bypass_count += 1
-        session["ssl_bypass_acquired"] = True
-
-    def _release_verification_ssl_bypass(self, session: dict) -> None:
-        import webview
-
-        if not session.get("ssl_bypass_acquired"):
-            return
-        session["ssl_bypass_acquired"] = False
-        self._verification_ssl_bypass_count = max(
-            0, self._verification_ssl_bypass_count - 1
-        )
-        if self._verification_ssl_bypass_count == 0:
-            if self._verification_ssl_bypass_original is not None:
-                webview.settings["IGNORE_SSL_ERRORS"] = (
-                    self._verification_ssl_bypass_original
-                )
-            self._verification_ssl_bypass_original = None
 
     @staticmethod
     def _configure_verification_print_info(info) -> None:
@@ -989,15 +1054,10 @@ class Api:
         info.setOrientation_(AppKit.NSPaperOrientationLandscape)
 
     def _install_verification_landscape_print(self) -> None:
-        """只为查验窗口包装 pywebview 的原生打印入口。
-
-        会话启动时修改共享 NSPrintInfo 容易被 macOS 在打开打印面板前重置，
-        因此必须在 ``print_webview`` 创建任务的同一刻设置横向。
-        """
+        """只为查验窗口包装 pywebview 的原生打印入口。"""
         if sys.platform != "darwin":
             return
         try:
-            import AppKit
             from webview.platforms.cocoa import BrowserView
         except ImportError:
             return
@@ -1011,17 +1071,51 @@ class Api:
             window = getattr(native_webview, "pywebview_window", None)
             if getattr(window, "title", "") != "tidoc · 发票查验":
                 return original(native_webview)
-
-            shared = AppKit.NSPrintInfo.sharedPrintInfo()
-            original_orientation = int(shared.orientation())
-            try:
-                self._configure_verification_print_info(shared)
-                return original(native_webview)
-            finally:
-                shared.setOrientation_(original_orientation)
+            job_title = getattr(window, "_tidoc_print_title", "查验单")
+            return self._run_macos_verification_print(native_webview, job_title)
 
         print_webview_landscape._tidoc_landscape_print = True
         BrowserView.print_webview = staticmethod(print_webview_landscape)
+
+    @staticmethod
+    def _run_macos_verification_print(native_webview, job_title: str) -> None:
+        """创建带横向设置和明确任务名的 macOS 原生打印任务。"""
+        import AppKit
+        import Foundation
+
+        info = AppKit.NSPrintInfo.sharedPrintInfo().copy()
+        Api._configure_verification_print_info(info)
+        info.setHorizontalPagination_(AppKit.NSFitPagination)
+        info.setHorizontallyCentered_(Foundation.NO)
+        info.setVerticallyCentered_(Foundation.NO)
+
+        imageable_bounds = info.imageablePageBounds()
+        paper_size = info.paperSize()
+        if Foundation.NSWidth(imageable_bounds) > paper_size.width:
+            imageable_bounds.origin.x = 0
+            imageable_bounds.size.width = paper_size.width
+        if Foundation.NSHeight(imageable_bounds) > paper_size.height:
+            imageable_bounds.origin.y = 0
+            imageable_bounds.size.height = paper_size.height
+
+        info.setBottomMargin_(Foundation.NSMinY(imageable_bounds))
+        info.setTopMargin_(
+            paper_size.height
+            - Foundation.NSMinY(imageable_bounds)
+            - Foundation.NSHeight(imageable_bounds)
+        )
+        info.setLeftMargin_(Foundation.NSMinX(imageable_bounds))
+        info.setRightMargin_(
+            paper_size.width
+            - Foundation.NSMinX(imageable_bounds)
+            - Foundation.NSWidth(imageable_bounds)
+        )
+
+        print_operation = native_webview._printOperationWithPrintInfo_(info)
+        print_operation.setJobTitle_(job_title)
+        print_operation.runOperationModalForWindow_delegate_didRunSelector_contextInfo_(
+            native_webview.window(), None, None, None
+        )
 
     # ------------------------------------------------------------ 汇总 / 绑定包
     @_guard

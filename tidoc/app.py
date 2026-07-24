@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import warnings
 from pathlib import Path
 
 import webview
@@ -73,14 +74,30 @@ def web_app_url(index: Path | None = None) -> str:
     return page.as_uri()
 
 
+def _configure_webview_settings() -> None:
+    """在任何原生 WebView 创建前配置查验所需的全局行为。"""
+    # WebView2 只会在控件初始化时根据此设置注册证书错误处理器。tidoc 的主
+    # 界面是本地文件，唯一的内嵌远程页面是用户主动打开的税务查验平台。
+    webview.settings["IGNORE_SSL_ERRORS"] = True
+    webview.settings["ALLOW_DOWNLOADS"] = True
+    try:
+        import objc
+
+        warnings.filterwarnings(
+            "ignore",
+            category=objc.ObjCPointerWarning,
+            module=r"webview\.platforms\.cocoa",
+        )
+    except (ImportError, AttributeError):
+        pass
+
+
 def main() -> None:
     _install_native_stderr_filter()
     from .db.paths import resolve_data_root
     api = Api(resolve_data_root())
     index = web_dir() / "index.html"
-    # 在线查验允许官网发起下载；PyWebView 会展示系统保存对话框，
-    # 主窗口不会自动访问网络或静默写入下载目录。
-    webview.settings["ALLOW_DOWNLOADS"] = True
+    _configure_webview_settings()
     window = webview.create_window(
         "tidoc",
         url=web_app_url(index),

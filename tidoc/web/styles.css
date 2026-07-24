@@ -661,15 +661,6 @@ input[type="date"] { color: var(--ink-soft); }
 .verification-fields label > span { font-size: 11.5px; color: var(--ink-soft); font-weight: 600; }
 .verification-fields label small { margin-left: 4px; color: var(--ink-faint); font-weight: 400; }
 .verification-fields input[readonly] { color: var(--ink-soft); background: var(--paper-2); }
-.verification-watch-directory {
-  display: flex; align-items: center; gap: 12px; padding: 9px 11px;
-  border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel-raised);
-}
-.verification-watch-directory > div { display: flex; min-width: 0; flex: 1; align-items: baseline; gap: 9px; }
-.verification-watch-directory b { flex: 0 0 auto; font-size: 11.5px; color: var(--ink-soft); }
-.verification-watch-directory small {
-  min-width: 0; overflow: hidden; color: var(--ink-faint); text-overflow: ellipsis; white-space: nowrap;
-}
 .verification-guide {
   padding: 11px 14px; border: 1px solid var(--line-soft); border-radius: 10px;
   color: var(--ink-soft); background: var(--paper-2);
@@ -693,6 +684,10 @@ input[type="date"] { color: var(--ink-soft); }
 .verification-status.done { background: var(--pass-soft); border-color: transparent; }
 .verification-status.done .verification-status-dot { background: var(--pass); }
 .verification-status.done b, .verification-status.done small { color: var(--pass); }
+.verification-status.done.warning { background: var(--warn-soft); border-color: #f0dcb0; }
+.verification-status.done.warning .verification-status-dot { background: var(--warn); }
+.verification-status.done.warning b { color: var(--pass); }
+.verification-status.done.warning small { color: var(--warn); }
 .verification-status.error { background: var(--warn-soft); border-color: #f0dcb0; }
 .verification-status.error .verification-status-dot { background: var(--warn); }
 .verification-status.error b, .verification-status.error small { color: var(--warn); }
@@ -903,6 +898,11 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .settings-row-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .settings-row-copy b { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; line-height: 1.35; }
 .settings-row-copy span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
+.settings-inline-path {
+  display: block; max-width: min(520px, 58vw); margin-top: 3px; overflow: hidden;
+  color: var(--ink-soft); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap;
+}
+.settings-row-controls { display: flex; flex: 0 0 auto; gap: 7px; }
 .settings-select { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-raised); font-size: 13px; }
 .settings-form-grid { padding: 8px 0 4px; }
 .switch-line { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink); white-space: nowrap; }

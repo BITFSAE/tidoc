@@ -1,6 +1,7 @@
 # tidoc core dependencies (required and lightweight; see DESIGN section 3)
 pywebview==6.2.1   # Native window using the system WebView
 pypdf==6.14.2      # PDF text extraction
+Send2Trash==2.1.0  # Recoverable cleanup after verification PDF archival
 
 # Standard-library modules need no installation: xml, sqlite3, hashlib, hmac, zipfile
 

@@ -22,6 +22,8 @@ const State = {
   multiClaimantMode: false,
   paymentOcrEnabled: true,
   defaultPaidToInvoice: true,
+  verificationWatchDirectory: '',
+  verificationTrashSource: false,
   activeDetailEntryId: null,
   updateStatus: null,
 };
@@ -325,16 +327,27 @@ function setUpdateNotice(status) {
 
 async function loadWorkflowPreferences() {
   const local = localStorage.getItem(MULTI_CLAIMANT_KEY);
+  const legacyVerificationWatch = localStorage.getItem(VERIFICATION_WATCH_DIR_KEY) || '';
   State.multiClaimantMode = local === '1';
   try {
-    const [multiMode, paymentOcr, defaultPaidToInvoice] = await Promise.all([
+    const [multiMode, paymentOcr, defaultPaidToInvoice, verification] = await Promise.all([
       Api.appPreference(MULTI_CLAIMANT_KEY, local || ''),
       Api.appPreference(PAYMENT_OCR_KEY, '1'),
       Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, '1'),
+      Api.invoiceVerificationPreferences(),
     ]);
     State.multiClaimantMode = multiMode === '1';
     State.paymentOcrEnabled = paymentOcr !== '0';
     State.defaultPaidToInvoice = defaultPaidToInvoice !== '0';
+    State.verificationWatchDirectory = verification.watch_directory || '';
+    State.verificationTrashSource = !!verification.trash_source_after_archive;
+    if (!State.verificationWatchDirectory && legacyVerificationWatch) {
+      const migrated = await Api.setInvoiceVerificationPreferences({
+        watch_directory: legacyVerificationWatch,
+      });
+      State.verificationWatchDirectory = migrated.watch_directory || '';
+    }
+    if (legacyVerificationWatch) localStorage.removeItem(VERIFICATION_WATCH_DIR_KEY);
     if (multiMode) localStorage.setItem(MULTI_CLAIMANT_KEY, multiMode);
   } catch (e) {}
 }
@@ -1407,10 +1420,10 @@ async function onlineVerificationFlow(entryId) {
     return;
   }
 
-  let watchDirectory = localStorage.getItem(VERIFICATION_WATCH_DIR_KEY) || '';
-  const watchDirectoryText = () => (
-    watchDirectory ? `下载、桌面、文档 + ${watchDirectory}` : '下载、桌面、文档'
-  );
+  const watchDirectory = State.verificationWatchDirectory;
+  const archiveLocationHint = watchDirectory
+    ? '设置中的归档目录，或下载、桌面、文档'
+    : '下载、桌面或文档';
   const body = el('div', 'verification-flow');
   body.innerHTML = `
     <div class="verification-fields">
@@ -1425,15 +1438,14 @@ async function onlineVerificationFlow(entryId) {
           placeholder="按发票价税合计填写"/>
       </label>
     </div>
-    <div class="verification-watch-directory">
-      <div><b>自动归档目录</b><small data-verification-watch-label title="${esc(watchDirectoryText())}">${esc(watchDirectoryText())}</small></div>
-      <button type="button" class="btn small ghost" data-verification-watch-pick>选择其他目录</button>
-    </div>
     <div class="verification-guide">
       <ul>
         <li>验证码在官网填写，通常不区分大小写</li>
         <li>查验成功后点击官网“打印”，在系统窗口另存为 PDF</li>
-        <li>保存到上面的任一目录后会自动归入当前条目</li>
+        <li>保存到${esc(archiveLocationHint)}后会自动归入当前条目</li>
+        ${State.verificationTrashSource
+          ? '<li>归档完成后，原 PDF 会移到系统废纸篓或回收站</li>'
+          : ''}
       </ul>
     </div>
     <div class="verification-status hidden" data-verification-status>
@@ -1446,19 +1458,6 @@ async function onlineVerificationFlow(entryId) {
   let attached = false;
   let closed = false;
   const status = body.querySelector('[data-verification-status]');
-  const watchLabel = body.querySelector('[data-verification-watch-label]');
-  body.querySelector('[data-verification-watch-pick]').addEventListener('click', async () => {
-    try {
-      const result = await Api.pickFolder();
-      if (!result.path) return;
-      watchDirectory = result.path;
-      localStorage.setItem(VERIFICATION_WATCH_DIR_KEY, watchDirectory);
-      watchLabel.textContent = watchDirectoryText();
-      watchLabel.title = watchDirectoryText();
-    } catch (err) {
-      toast(err.message, 'err');
-    }
-  });
   const fields = () => Object.fromEntries(
     [...body.querySelectorAll('[data-verification-field]')].map((input) => [
       input.dataset.verificationField, input.value.trim(),
@@ -1497,7 +1496,7 @@ async function onlineVerificationFlow(entryId) {
     try {
       const result = await Api.invoiceVerificationStatus(sessionId);
       if (result.state === 'attached') {
-        await finishAttachment();
+        await finishAttachment(result);
         return;
       }
       if (result.state === 'processing') {
@@ -1524,10 +1523,7 @@ async function onlineVerificationFlow(entryId) {
     body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = true; });
     setStatus('working', '正在打开官网', '加载完成后请填写验证码并点击“查验”…');
     try {
-      const result = await Api.startInvoiceVerification(entryId, {
-        ...values,
-        watch_directory: watchDirectory,
-      });
+      const result = await Api.startInvoiceVerification(entryId, values);
       sessionId = result.session_id;
       openBtn.style.display = 'none';
       setStatus('waiting', '请在官网完成查验并打印', '另存为 PDF 后会自动归入当前条目。');
@@ -1540,17 +1536,21 @@ async function onlineVerificationFlow(entryId) {
   });
 
   const closeBtn = mkBtn('取消', 'ghost', () => m.close());
-  const finishAttachment = async () => {
+  const finishAttachment = async (result = {}) => {
     attached = true;
     stopPolling();
     await syncEntryAfterChange(entryId, { affectsStatus: true });
-    setStatus('done', '查验单已保存', '已归入当前条目的查验材料。');
+    const warning = result.cleanup_warning || '';
+    const detail = warning || (result.source_trashed
+      ? '已归入当前条目，原 PDF 已移到废纸篓或回收站。'
+      : '已归入当前条目的查验材料。');
+    setStatus(warning ? 'done warning' : 'done', '查验单已保存', detail);
     openBtn.style.display = 'none';
     chooseBtn.style.display = 'none';
     closeBtn.textContent = '完成';
     closeBtn.classList.remove('ghost');
     closeBtn.classList.add('primary');
-    toast('查验单已保存到当前条目', 'ok');
+    toast(result.message || '查验单已保存到当前条目', warning ? 'err' : 'ok');
   };
   const m = modal({
     title: '在线查验',
@@ -2041,7 +2041,8 @@ function editProfileFlow(p, onDone) {
 }
 
 async function openSettings() {
-  let paths, printStatus, appInfo, operatorPrefs, multiMode, paymentOcrMode, defaultPaidMode, autoUpdateMode, maintenance;
+  let paths, printStatus, appInfo, operatorPrefs, multiMode, paymentOcrMode;
+  let defaultPaidMode, autoUpdateMode, maintenance, verificationPrefs;
   try {
     paths = await Api.dataRoot();
     printStatus = await Api.printComponentStatus();
@@ -2057,6 +2058,7 @@ async function openSettings() {
       Api.appPreference(PAYMENT_OCR_KEY, State.paymentOcrEnabled ? '1' : '0'),
       Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, State.defaultPaidToInvoice ? '1' : '0'),
       Api.appPreference(AUTO_UPDATE_KEY, '0'),
+      Api.invoiceVerificationPreferences(),
     ]);
     operatorPrefs = {
       name: prefValues[0],
@@ -2069,6 +2071,7 @@ async function openSettings() {
     paymentOcrMode = prefValues[6] !== '0';
     defaultPaidMode = prefValues[7] !== '0';
     autoUpdateMode = prefValues[8] === '1';
+    verificationPrefs = prefValues[9];
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
 
@@ -2136,6 +2139,32 @@ async function openSettings() {
             <span>开启后，新建或批量导入条目时自动填写；关闭后留空待确认</span>
           </div>
           <label class="switch-line"><input type="checkbox" id="setDefaultPaidInvoice" ${defaultPaidMode ? 'checked' : ''}/><span>${defaultPaidMode ? '已开启' : '已关闭'}</span></label>
+        </div>
+      </div>
+
+      <!-- 查验单归档 -->
+      <div class="settings-block">
+        <div class="settings-block-title">查验单</div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>额外归档目录</b>
+            <span>除下载、桌面和文档外，再监测一个常用保存位置</span>
+            <code class="settings-inline-path" id="setVerificationWatchPath"
+              data-tooltip-overflow="${esc(verificationPrefs.watch_directory || '')}">${esc(verificationPrefs.watch_directory || '未设置')}</code>
+          </div>
+          <div class="settings-row-controls">
+            <button class="btn small ghost" id="setVerificationWatchPick">选择</button>
+            <button class="btn small ghost" id="setVerificationWatchClear"
+              ${verificationPrefs.watch_directory ? '' : 'disabled'}>清除</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>归档后清理原 PDF</b>
+            <span>成功复制到条目后，将原文件移到系统废纸篓或回收站；需要时可以恢复</span>
+          </div>
+          <label class="switch-line"><input type="checkbox" id="setVerificationTrash"
+            ${verificationPrefs.trash_source_after_archive ? 'checked' : ''}/><span>${verificationPrefs.trash_source_after_archive ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
 
@@ -2263,6 +2292,67 @@ async function openSettings() {
       State.defaultPaidToInvoice = enabled;
       label.textContent = enabled ? '已开启' : '已关闭';
       toast(enabled ? '新条目将默认填写发票金额' : '新条目实付金额将默认留空', 'ok');
+    } catch (e) {
+      ev.target.checked = !enabled;
+      toast(e.message, 'err');
+    } finally {
+      ev.target.disabled = false;
+    }
+  };
+  const renderVerificationWatchDirectory = (path) => {
+    const pathNode = body.querySelector('#setVerificationWatchPath');
+    const clearBtn = body.querySelector('#setVerificationWatchClear');
+    pathNode.textContent = path || '未设置';
+    pathNode.dataset.tooltipOverflow = path || '';
+    clearBtn.disabled = !path;
+  };
+  body.querySelector('#setVerificationWatchPick').onclick = async (ev) => {
+    ev.target.disabled = true;
+    try {
+      const picked = await Api.pickFolder();
+      if (!picked.path) return;
+      const result = await Api.setInvoiceVerificationPreferences({
+        watch_directory: picked.path,
+      });
+      State.verificationWatchDirectory = result.watch_directory || '';
+      renderVerificationWatchDirectory(State.verificationWatchDirectory);
+      toast('查验单归档目录已保存', 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+    } finally {
+      ev.target.disabled = false;
+    }
+  };
+  body.querySelector('#setVerificationWatchClear').onclick = async (ev) => {
+    ev.target.disabled = true;
+    try {
+      const result = await Api.setInvoiceVerificationPreferences({
+        watch_directory: '',
+      });
+      State.verificationWatchDirectory = result.watch_directory || '';
+      renderVerificationWatchDirectory(State.verificationWatchDirectory);
+      toast('已恢复默认监测目录', 'ok');
+    } catch (e) {
+      ev.target.disabled = false;
+      toast(e.message, 'err');
+    }
+  };
+  body.querySelector('#setVerificationTrash').onchange = async (ev) => {
+    const enabled = ev.target.checked;
+    const label = ev.target.nextElementSibling;
+    ev.target.disabled = true;
+    try {
+      const result = await Api.setInvoiceVerificationPreferences({
+        trash_source_after_archive: enabled,
+      });
+      State.verificationTrashSource = !!result.trash_source_after_archive;
+      label.textContent = State.verificationTrashSource ? '已开启' : '已关闭';
+      toast(
+        State.verificationTrashSource
+          ? '归档后会把原 PDF 移到废纸篓或回收站'
+          : '归档后将保留原 PDF',
+        'ok',
+      );
     } catch (e) {
       ev.target.checked = !enabled;
       toast(e.message, 'err');

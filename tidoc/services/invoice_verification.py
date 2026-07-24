@@ -107,16 +107,19 @@ def make_prefill_script(info: dict) -> str:
 """
 
 
+def verification_print_title(invoice_no: str = "") -> str:
+    """生成系统打印任务使用的稳定文件名，不包含扩展名。"""
+    cleaned = re.sub(r"[^0-9A-Za-z_-]", "", str(invoice_no or ""))
+    return f"查验单-{cleaned}"
+
+
 def make_print_compatibility_script(invoice_no: str = "") -> str:
     """把官网 PrintArea 选定内容提升到顶层 WebView，供原生打印使用。
 
     查验结果自身也在 iframe 中，脚本会持续发现同源 frame、替换其中 PrintArea
     的出口，并把官网选定内容复制到顶层文档；普通调用仍进入系统打印。
     """
-    print_title = json.dumps(
-        f"查验单-{re.sub(r'[^0-9A-Za-z_-]', '', str(invoice_no or ''))}",
-        ensure_ascii=False,
-    )
+    print_title = json.dumps(verification_print_title(invoice_no), ensure_ascii=False)
     script = """
 (() => {
   if (window.__tidocPrintCompatibilityStarted) {

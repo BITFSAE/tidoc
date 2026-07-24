@@ -31,6 +31,20 @@ def test_web_app_url_and_assets_are_versioned(tmp_path):
     assert f"app.js?v={__version__}" in source
 
 
+def test_webview_settings_allow_tax_site_certificate_fallback():
+    import webview
+
+    original_downloads = webview.settings["ALLOW_DOWNLOADS"]
+    original_ssl = webview.settings["IGNORE_SSL_ERRORS"]
+    try:
+        app._configure_webview_settings()
+        assert webview.settings["ALLOW_DOWNLOADS"] is True
+        assert webview.settings["IGNORE_SSL_ERRORS"] is True
+    finally:
+        webview.settings["ALLOW_DOWNLOADS"] = original_downloads
+        webview.settings["IGNORE_SSL_ERRORS"] = original_ssl
+
+
 def test_loose_material_matching_does_not_reuse_previous_import_scope():
     source = (app.web_dir() / "app.js").read_text("utf-8")
     loose_handler = source.split(
@@ -83,10 +97,16 @@ def test_frontend_exposes_explicit_online_verification_flow():
     assert "<ul>" in verification_flow
     assert "验证码在官网填写，通常不区分大小写" in verification_flow
     assert "查验成功后点击官网“打印”" in verification_flow
-    assert "保存到上面的任一目录后会自动归入当前条目" in verification_flow
-    assert "自动归档目录" in verification_flow
+    assert "设置中的归档目录" in verification_flow
+    assert "archiveLocationHint" in verification_flow
     assert "VERIFICATION_WATCH_DIR_KEY" in source
-    assert "watch_directory: watchDirectory" in verification_flow
+    assert "data-verification-watch-pick" not in verification_flow
+    assert "watch_directory: watchDirectory" not in verification_flow
+    assert "归档后清理原 PDF" in source
+    assert "Api.invoiceVerificationPreferences" in source
+    assert "Api.setInvoiceVerificationPreferences" in source
+    assert "invoiceVerificationPreferences:" in api_source
+    assert "setInvoiceVerificationPreferences:" in api_source
     assert "网页证书错误" not in verification_flow
     assert "无需打印机" not in verification_flow
     assert "价税合计" in verification_flow
@@ -97,6 +117,7 @@ def test_frontend_exposes_explicit_online_verification_flow():
     assert "printInvoiceVerification" not in api_source
     assert "startInvoiceVerification:" in api_source
     assert 'webview.settings["ALLOW_DOWNLOADS"] = True' in app_source
+    assert 'webview.settings["IGNORE_SSL_ERRORS"] = True' in app_source
 
 
 def test_single_payment_amount_mismatch_requires_confirmation():

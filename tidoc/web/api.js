@@ -49,6 +49,8 @@ const Api = (() => {
     deleteProfile: (id) => call('delete_profile', id),
     appPreference: (key, defaultValue) => call('app_preference', key, defaultValue || ''),
     setAppPreference: (key, value) => call('set_app_preference', key, value || ''),
+    invoiceVerificationPreferences: () => call('invoice_verification_preferences'),
+    setInvoiceVerificationPreferences: (options) => call('set_invoice_verification_preferences', options || {}),
     appInfo: () => call('app_info'),
     startupUpdateState: () => call('startup_update_state'),
 

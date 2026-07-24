@@ -1466,14 +1466,14 @@ async function settlePaymentAmountAfterAdd(entryId, paymentInfos) {
   }
 
   if (paymentInfos.length === 1 && amounts.length === 1) {
-    await Api.updateField(entryId, 'paid_amount', amounts[0], State.currentProfileId);
+    await Api.setRecognizedPaidAmount(entryId, amounts[0]);
     return `已按付款截图填写实付 ${fmtMoney(amounts[0])}`;
   }
 
   const sum = sumMoneyText(amounts);
   const choice = await askUseRecognizedPaymentAmount(amounts, sum);
   if (choice === 'use') {
-    await Api.updateField(entryId, 'paid_amount', sum, State.currentProfileId);
+    await Api.setRecognizedPaidAmount(entryId, sum);
     return `已填写实付 ${fmtMoney(sum)}`;
   } else if (choice === 'manual') {
     await quickPaidFlow(entry);
@@ -3086,8 +3086,12 @@ async function openEntryDetail(entryId, currentDetail = null) {
   body.querySelectorAll('[data-att-type]').forEach((sel) => {
     sel.onchange = async () => {
       try {
-        await Api.updateAttachment(sel.dataset.attType, { type: sel.value });
-        toast('附件类型已更新', 'ok');
+        const result = await Api.updateAttachment(sel.dataset.attType, { type: sel.value });
+        const reset = result.paid_amount_reset;
+        toast(
+          reset?.reset ? `附件类型已更新，实付已恢复为 ${fmtMoney(reset.value)}` : '附件类型已更新',
+          'ok',
+        );
         await reopenEntryDetail(mm, entryId, { affectsStatus: true });
       } catch (err) { toast(err.message, 'err'); }
     };
@@ -3118,7 +3122,14 @@ async function openEntryDetail(entryId, currentDetail = null) {
         const detail = await Api.getEntry(entryId);
         await syncEntryAfterChange(entryId, { affectsStatus: true }, detail);
         updateDetailMaterialState(detail);
-        toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
+        const reset = result.paid_amount_reset;
+        const message = reset?.reset
+          ? `已删除最后一张付款截图，实付已恢复为 ${fmtMoney(reset.value)}`
+          : '已删除';
+        toast(
+          result.cleanup_warning ? `${message}；${result.cleanup_warning}` : message,
+          result.cleanup_warning ? 'err' : 'ok',
+        );
       }
       catch (err) { toast(err.message, 'err'); }
     };

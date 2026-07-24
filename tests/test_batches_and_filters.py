@@ -7,6 +7,7 @@ import pytest
 
 from tidoc.db import Database
 from tidoc.db.batches import BatchRepo
+from tidoc.db.schema import SCHEMA_VERSION
 from tidoc.engine import parse_xml
 
 
@@ -229,11 +230,45 @@ def test_v1_db_upgrades_to_latest_schema(tmp_path):
 
     db = Database(db_path)  # init_db 应升级
     ver = db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-    assert ver == "3"
+    assert ver == str(SCHEMA_VERSION)
     # 批次表可用
     repo = BatchRepo(db)
     b = repo.create("迁移后批次")
     assert b["count"] == 0
+
+
+def test_v3_db_adds_editable_value_source_column(tmp_path):
+    db_path = tmp_path / "v3.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE entry_fields (
+            entry_id TEXT NOT NULL,
+            field TEXT NOT NULL,
+            origin TEXT DEFAULT '',
+            current TEXT DEFAULT '',
+            modified INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (entry_id, field)
+        );
+        INSERT INTO meta(key, value) VALUES('schema_version', '3');
+        INSERT INTO entry_fields(entry_id, field, origin, current, modified)
+        VALUES('e1', 'paid_amount', '10.00', '9.00', 1);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    row = db.conn.execute(
+        "SELECT current, value_source FROM entry_fields WHERE entry_id = 'e1'"
+    ).fetchone()
+
+    assert row["current"] == "9.00"
+    assert row["value_source"] == ""
+    assert db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()["value"] == str(SCHEMA_VERSION)
 
 
 def test_v2_migration_downgrades_only_item_recognition_mismatch(tmp_path):

@@ -248,7 +248,8 @@ def test_api_applies_payment_ocr_amount(api, sample_xmls, tmp_path, monkeypatch)
     assert res["payment_ocr"] == {"paid_amount": "27.00", "applied": True}
     updated = api.get_entry(e["id"])["data"]
     assert updated["fields"]["paid_amount"]["current"] == "27.00"
-    assert updated["fields"]["paid_amount"]["modified"] is True
+    assert updated["fields"]["paid_amount"]["modified"] is False
+    assert updated["fields"]["paid_amount"]["value_source"] == "payment_ocr"
 
 
 def test_api_can_recognize_payment_ocr_without_applying(api, sample_xmls, tmp_path, monkeypatch):

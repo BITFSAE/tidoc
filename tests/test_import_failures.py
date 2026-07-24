@@ -394,3 +394,137 @@ def test_reset_data_root_failure_restores_database_connection(api, tmp_path, mon
 
     assert result == {"ok": False, "error": "目标目录不可写"}
     assert api.list_profiles()["data"][0]["id"] == profile["id"]
+
+
+def test_deleting_last_ocr_payment_restores_invoice_total(api, tmp_path, monkeypatch):
+    from tidoc.services import folder_import
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(profile["id"], parsed=ParsedInvoice(total=Decimal("100.00")))
+    payment = tmp_path / "错误付款截图.png"
+    payment.write_bytes(b"payment")
+    monkeypatch.setattr(
+        folder_import, "extract_payment_image_amount", lambda _path: "27.00"
+    )
+
+    attachment = api.add_attachment(
+        entry_id, str(payment), "payment_screenshot"
+    )["data"]
+    recognized = api.get_entry(entry_id)["data"]["fields"]["paid_amount"]
+    assert recognized["current"] == "27.00"
+    assert recognized["value_source"] == "payment_ocr"
+
+    deleted = api.delete_attachment(attachment["id"])["data"]
+    restored = api.get_entry(entry_id)["data"]["fields"]["paid_amount"]
+
+    assert deleted["paid_amount_reset"] == {"reset": True, "value": "100.00"}
+    assert restored["current"] == "100.00"
+    assert restored["value_source"] == ""
+
+
+def test_deleting_ocr_payment_preserves_later_manual_amount(api, tmp_path, monkeypatch):
+    from tidoc.services import folder_import
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(profile["id"], parsed=ParsedInvoice(total=Decimal("100.00")))
+    payment = tmp_path / "付款截图.png"
+    payment.write_bytes(b"payment")
+    monkeypatch.setattr(
+        folder_import, "extract_payment_image_amount", lambda _path: "27.00"
+    )
+    attachment = api.add_attachment(
+        entry_id, str(payment), "payment_screenshot"
+    )["data"]
+
+    api.update_field(entry_id, "paid_amount", "35.00", profile["id"])
+    manual = api.get_entry(entry_id)["data"]["fields"]["paid_amount"]
+    assert manual["value_source"] == "manual"
+
+    deleted = api.delete_attachment(attachment["id"])["data"]
+    after = api.get_entry(entry_id)["data"]["fields"]["paid_amount"]
+
+    assert deleted["paid_amount_reset"]["reset"] is False
+    assert after["current"] == "35.00"
+    assert after["value_source"] == "manual"
+
+
+def test_paid_amount_waits_until_last_payment_is_deleted(api, tmp_path, monkeypatch):
+    from tidoc.services import folder_import
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(profile["id"], parsed=ParsedInvoice(total=Decimal("100.00")))
+    first = tmp_path / "付款截图一.png"
+    second = tmp_path / "付款截图二.png"
+    first.write_bytes(b"payment-one")
+    second.write_bytes(b"payment-two")
+    monkeypatch.setattr(
+        folder_import, "extract_payment_image_amount", lambda _path: "27.00"
+    )
+    first_att = api.add_attachment(
+        entry_id, str(first), "payment_screenshot"
+    )["data"]
+    second_att = api.add_attachment(
+        entry_id,
+        str(second),
+        "payment_screenshot",
+        options={"skip_payment_ocr": True},
+    )["data"]
+
+    first_deleted = api.delete_attachment(first_att["id"])["data"]
+    assert first_deleted["paid_amount_reset"]["reset"] is False
+    assert api.get_entry(entry_id)["data"]["fields"]["paid_amount"]["current"] == "27.00"
+
+    last_deleted = api.delete_attachment(second_att["id"])["data"]
+    assert last_deleted["paid_amount_reset"] == {"reset": True, "value": "100.00"}
+    assert api.get_entry(entry_id)["data"]["fields"]["paid_amount"]["current"] == "100.00"
+
+
+def test_reclassifying_last_payment_restores_invoice_total(api, tmp_path, monkeypatch):
+    from tidoc.services import folder_import
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(profile["id"], parsed=ParsedInvoice(total=Decimal("100.00")))
+    payment = tmp_path / "误分类截图.png"
+    payment.write_bytes(b"payment")
+    monkeypatch.setattr(
+        folder_import, "extract_payment_image_amount", lambda _path: "27.00"
+    )
+    attachment = api.add_attachment(
+        entry_id, str(payment), "payment_screenshot"
+    )["data"]
+
+    updated = api.update_attachment(
+        attachment["id"], {"type": "other"}
+    )["data"]
+
+    assert updated["paid_amount_reset"] == {"reset": True, "value": "100.00"}
+    assert api.get_entry(entry_id)["data"]["fields"]["paid_amount"]["current"] == "100.00"
+
+
+def test_legacy_ocr_value_is_conservatively_restored(api, tmp_path):
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(profile["id"], parsed=ParsedInvoice(total=Decimal("100.00")))
+    payment = tmp_path / "旧版付款截图.png"
+    payment.write_bytes(b"payment")
+    attachment = api.add_attachment(
+        entry_id,
+        str(payment),
+        "payment_screenshot",
+        options={"skip_payment_ocr": True},
+    )["data"]
+    api.entries.update_field(
+        entry_id,
+        "paid_amount",
+        "27.00",
+        profile["id"],
+        value_source="",
+    )
+    api.db.conn.execute(
+        "UPDATE field_history SET changed_at = ? WHERE entry_id = ? AND field = 'paid_amount'",
+        (attachment["added_at"], entry_id),
+    )
+    api.db.conn.commit()
+
+    deleted = api.delete_attachment(attachment["id"])["data"]
+
+    assert deleted["paid_amount_reset"] == {"reset": True, "value": "100.00"}

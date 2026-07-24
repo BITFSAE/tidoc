@@ -20,6 +20,8 @@ from .database import Database
 
 # 可自由修改的字段（设计文档 8.5）
 EDITABLE_FIELDS = ("paid_amount", "actual_item_name", "notes")
+VALUE_SOURCE_PAYMENT_OCR = "payment_ocr"
+VALUE_SOURCE_MANUAL = "manual"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
 LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "invoice_date")
 
@@ -128,11 +130,17 @@ class EntryRepo:
 
     def _fields(self, entry_id: str) -> dict:
         rows = self.db.conn.execute(
-            "SELECT field, origin, current, modified FROM entry_fields WHERE entry_id = ?",
+            "SELECT field, origin, current, modified, value_source "
+            "FROM entry_fields WHERE entry_id = ?",
             (entry_id,),
         ).fetchall()
         return {
-            r["field"]: {"origin": r["origin"], "current": r["current"], "modified": bool(r["modified"])}
+            r["field"]: {
+                "origin": r["origin"],
+                "current": r["current"],
+                "modified": bool(r["modified"]),
+                "value_source": r["value_source"] or "",
+            }
             for r in rows
         }
 
@@ -275,7 +283,7 @@ class EntryRepo:
                 attachments_by_entry[row["entry_id"]][row["type"]] = row["c"]
 
             field_rows = self.db.conn.execute(
-                f"SELECT entry_id, field, origin, current, modified FROM entry_fields "
+                f"SELECT entry_id, field, origin, current, modified, value_source FROM entry_fields "
                 f"WHERE entry_id IN ({placeholders})",
                 batch_ids,
             ).fetchall()
@@ -284,6 +292,7 @@ class EntryRepo:
                     "origin": row["origin"],
                     "current": row["current"],
                     "modified": bool(row["modified"]),
+                    "value_source": row["value_source"] or "",
                 }
 
         for r in rows:
@@ -333,12 +342,20 @@ class EntryRepo:
         return {"ready": ready, "status": status, "missing": missing}
 
     # ------------------------------------------------------------------ 可改字段更新
-    def update_field(self, entry_id: str, field: str, value: str, profile_id: str = "") -> dict:
+    def update_field(
+        self,
+        entry_id: str,
+        field: str,
+        value: str,
+        profile_id: str = "",
+        value_source: str | None = None,
+    ) -> dict:
         """更新一个可改字段。current != origin 即永久打人工修改标记并写历史。"""
         if field not in EDITABLE_FIELDS:
             raise ValueError(f"字段「{field}」不是可自由修改的字段。")
         row = self.db.conn.execute(
-            "SELECT origin, current FROM entry_fields WHERE entry_id = ? AND field = ?",
+            "SELECT origin, current, modified, value_source FROM entry_fields "
+            "WHERE entry_id = ? AND field = ?",
             (entry_id, field),
         ).fetchone()
         if row is None:
@@ -346,24 +363,96 @@ class EntryRepo:
         old_value = row["current"]
         new_value = str(value) if value is not None else ""
         if new_value == old_value:
+            if value_source and field == "paid_amount" and row["value_source"] != value_source:
+                self.db.conn.execute(
+                    "UPDATE entry_fields SET value_source = ? WHERE entry_id = ? AND field = ?",
+                    (value_source, entry_id, field),
+                )
+                self.db.conn.commit()
             return self._fields(entry_id)
+        source = ""
+        if field == "paid_amount":
+            source = VALUE_SOURCE_MANUAL if value_source is None else value_source
         # 一旦 current != origin 就永久标记（即使之后改回，标记不擦除）
-        modified = 1 if new_value != row["origin"] else self._current_modified(entry_id, field)
+        if source == VALUE_SOURCE_PAYMENT_OCR:
+            modified = row["modified"]
+        else:
+            modified = 1 if new_value != row["origin"] else row["modified"]
         self.db.conn.execute(
-            "UPDATE entry_fields SET current = ?, modified = ? WHERE entry_id = ? AND field = ?",
-            (new_value, modified, entry_id, field),
+            "UPDATE entry_fields SET current = ?, modified = ?, value_source = ? "
+            "WHERE entry_id = ? AND field = ?",
+            (new_value, modified, source, entry_id, field),
         )
         self._log_history(entry_id, field, old_value, new_value, profile_id)
         self._touch(entry_id)
         self.db.conn.commit()
         return self._fields(entry_id)
 
-    def _current_modified(self, entry_id: str, field: str) -> int:
-        r = self.db.conn.execute(
-            "SELECT modified FROM entry_fields WHERE entry_id = ? AND field = ?",
-            (entry_id, field),
+    def restore_paid_amount_after_last_payment(
+        self, entry_id: str, removed_attachment_added_at: str = ""
+    ) -> dict:
+        """最后一张付款截图移除后，仅撤销仍由付款 OCR 控制的实付金额。"""
+        has_payment = self.db.conn.execute(
+            "SELECT 1 FROM attachments WHERE entry_id = ? "
+            "AND type = 'payment_screenshot' LIMIT 1",
+            (entry_id,),
         ).fetchone()
-        return r["modified"] if r else 0
+        if has_payment:
+            return {"reset": False, "value": ""}
+        row = self.db.conn.execute(
+            """SELECT e.total, ef.current, ef.value_source
+                 FROM entries e
+                 JOIN entry_fields ef ON ef.entry_id = e.id AND ef.field = 'paid_amount'
+                WHERE e.id = ?""",
+            (entry_id,),
+        ).fetchone()
+        if row is None:
+            return {"reset": False, "value": ""}
+
+        source = row["value_source"] or ""
+        should_reset = source == VALUE_SOURCE_PAYMENT_OCR
+        if not should_reset and not source and removed_attachment_added_at:
+            # v4 之前没有来源列。旧版 OCR 只会在附件写入后数秒内从
+            # 空值/发票默认值自动改写；用时间与旧值条件保守识别已有自动值。
+            latest = self.db.conn.execute(
+                """SELECT old_value, new_value, changed_at
+                     FROM field_history
+                    WHERE entry_id = ? AND field = 'paid_amount'
+                    ORDER BY id DESC LIMIT 1""",
+                (entry_id,),
+            ).fetchone()
+            timing_matches = False
+            if latest:
+                try:
+                    timing_matches = abs(
+                        (
+                            datetime.fromisoformat(latest["changed_at"])
+                            - datetime.fromisoformat(removed_attachment_added_at)
+                        ).total_seconds()
+                    ) <= 5
+                except (TypeError, ValueError):
+                    timing_matches = latest["changed_at"] == removed_attachment_added_at
+            should_reset = bool(
+                latest
+                and latest["new_value"] == row["current"]
+                and timing_matches
+                and (not latest["old_value"] or latest["old_value"] == (row["total"] or ""))
+            )
+        if not should_reset:
+            return {"reset": False, "value": row["current"] or ""}
+
+        old_value = row["current"] or ""
+        restored = row["total"] or ""
+        self.db.conn.execute(
+            "UPDATE entry_fields SET current = ?, value_source = '' "
+            "WHERE entry_id = ? AND field = 'paid_amount'",
+            (restored, entry_id),
+        )
+        if restored != old_value:
+            self._log_history(entry_id, "paid_amount", old_value, restored, "")
+            self._touch(entry_id)
+        self.db.conn.commit()
+        return {"reset": restored != old_value, "value": restored}
 
     def correct_locked_field(self, entry_id: str, field: str, value: str, profile_id: str = "") -> dict:
         """对关键信息的『标记为人工修正』特殊流程：更新列值 + 强制留痕（第 6 节、8.5）。"""

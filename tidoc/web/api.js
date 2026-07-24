@@ -60,6 +60,7 @@ const Api = (() => {
     listEntries: (filters) => call('list_entries', filters || {}),
     getEntry: (id) => call('get_entry', id),
     updateField: (id, field, value, pid) => call('update_field', id, field, value, pid || ''),
+    setRecognizedPaidAmount: (id, value) => call('set_recognized_paid_amount', id, value),
     correctLocked: (id, field, value, pid) => call('correct_locked_field', id, field, value, pid || ''),
     updateEntryProfile: (id, profileId, operatorProfileId) => call('update_entry_profile', id, profileId, operatorProfileId || ''),
     updateEntryProfiles: (ids, profileId, operatorProfileId) => call('update_entry_profiles', ids || [], profileId, operatorProfileId || ''),

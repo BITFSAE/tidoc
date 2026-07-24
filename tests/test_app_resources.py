@@ -58,3 +58,13 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert 'id="changeProfileBtn"' in html
     assert ".main { display: flex; flex-direction: column; min-width: 0; min-height: 0;" in css
     assert "flex: 1; min-height: 0; overflow-y: auto" in css
+
+
+def test_card_drag_state_does_not_cover_amount_with_text():
+    source = (app.web_dir() / "app.js").read_text("utf-8")
+    api_source = (app.web_dir() / "api.js").read_text("utf-8")
+    styles = (app.web_dir() / "styles.css").read_text("utf-8")
+
+    assert 'content: "拖到这里绑定材料"' not in styles
+    assert "Api.setRecognizedPaidAmount" in source
+    assert "setRecognizedPaidAmount:" in api_source

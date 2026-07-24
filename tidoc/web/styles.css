@@ -1071,12 +1071,6 @@ body.dragging-files .content::before {
 body.dragging-files .entry-card {
   box-shadow: inset 0 0 0 2px rgba(15, 125, 94, .18);
 }
-body.dragging-files .entry-card::after {
-  content: "拖到这里绑定材料";
-  position: absolute; right: 14px; top: 10px; z-index: 2;
-  padding: 4px 9px; border-radius: 999px; background: var(--found);
-  color: #fff; font-size: 11px; font-weight: 700; opacity: .88;
-}
 body.dragging-files .entry-card:hover,
 body.dragging-files .entry-card.card-dragging {
   border-color: var(--found);

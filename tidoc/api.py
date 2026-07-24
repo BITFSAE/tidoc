@@ -421,6 +421,20 @@ class Api:
         return result
 
     @_guard
+    def set_recognized_paid_amount(self, entry_id, value):
+        from .db.entries import VALUE_SOURCE_PAYMENT_OCR
+
+        result = self.entries.update_field(
+            entry_id,
+            "paid_amount",
+            value,
+            "",
+            value_source=VALUE_SOURCE_PAYMENT_OCR,
+        )
+        self.entries.recompute_status(entry_id)
+        return result
+
+    @_guard
     def correct_locked_field(self, entry_id, field, value, profile_id=""):
         return self.entries.correct_locked_field(entry_id, field, value, profile_id)
 
@@ -564,11 +578,18 @@ class Api:
 
     @_guard
     def delete_attachment(self, att_id):
+        from .db import TYPE_PAYMENT
+
         att = self.attachments.get(att_id)
         result = self.attachments.delete(att_id)
+        paid_reset = {"reset": False, "value": ""}
         if att and att.get("entry_id"):
+            if att.get("type") == TYPE_PAYMENT:
+                paid_reset = self.entries.restore_paid_amount_after_last_payment(
+                    att["entry_id"], att.get("added_at") or ""
+                )
             self.entries.recompute_status(att["entry_id"])
-        return {"deleted": att_id, **result}
+        return {"deleted": att_id, "paid_amount_reset": paid_reset, **result}
 
     @_guard
     def set_attachment_note(self, att_id, note):
@@ -576,6 +597,8 @@ class Api:
 
     @_guard
     def update_attachment(self, att_id, fields=None):
+        from .db import TYPE_PAYMENT
+
         fields = fields or {}
         current = self.attachments.get(att_id)
         if not current:
@@ -590,8 +613,14 @@ class Api:
             src_path=fields.get("src_path"),
             note=fields.get("note"),
         )
+        paid_reset = {"reset": False, "value": ""}
         if att and att.get("entry_id"):
+            if current.get("type") == TYPE_PAYMENT and att.get("type") != TYPE_PAYMENT:
+                paid_reset = self.entries.restore_paid_amount_after_last_payment(
+                    att["entry_id"], current.get("added_at") or ""
+                )
             self.entries.recompute_status(att["entry_id"])
+            att["paid_amount_reset"] = paid_reset
         return att
 
     def _validate_attachment_for_entry(self, entry_id, src_path, att_type) -> None:
@@ -643,6 +672,7 @@ class Api:
                 _validate_same_invoice(entry, invoice_no, path.name)
 
     def _maybe_apply_payment_ocr_amount(self, entry_id, src_path, apply: bool = True) -> tuple[str, bool]:
+        from .db.entries import VALUE_SOURCE_PAYMENT_OCR
         from .services.folder_import import extract_payment_image_amount
 
         if not self._payment_ocr_enabled():
@@ -660,7 +690,13 @@ class Api:
         total = str(entry.get("total") or "").strip()
         if current and total and not _same_money(current, total):
             return amount, False
-        self.entries.update_field(entry_id, "paid_amount", amount, entry["profile_id"])
+        self.entries.update_field(
+            entry_id,
+            "paid_amount",
+            amount,
+            "",
+            value_source=VALUE_SOURCE_PAYMENT_OCR,
+        )
         return amount, True
 
     @_guard

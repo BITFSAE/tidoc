@@ -18,8 +18,9 @@ from __future__ import annotations
 import sqlite3
 
 # v1：初版；v2：新增 batches / batch_entries（运营组批次）；
-# v3：明细识别合计不一致从 blocked 降为 warning。
-SCHEMA_VERSION = 3
+# v3：明细识别合计不一致从 blocked 降为 warning；
+# v4：可改字段增加 value_source，用于区分付款 OCR 自动值与人工值。
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS entry_fields (
     origin      TEXT DEFAULT '',    -- 识别原值
     current     TEXT DEFAULT '',    -- 当前值
     modified    INTEGER NOT NULL DEFAULT 0,  -- 是否被人工改过（永久，不可擦除）
+    value_source TEXT DEFAULT '',   -- payment_ocr / manual / 空（初始或历史数据）
     PRIMARY KEY (entry_id, field),
     FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
 );
@@ -189,6 +191,15 @@ def init_db(conn: sqlite3.Connection) -> None:
                AND check_message LIKE '发票总额与明细合计相差%'
                AND check_message NOT LIKE '%与当前分区%'
             """
+        )
+
+    # CREATE TABLE IF NOT EXISTS 不会给历史表补列，因此按真实列结构兜底迁移。
+    entry_field_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(entry_fields)").fetchall()
+    }
+    if "value_source" not in entry_field_columns:
+        conn.execute(
+            "ALTER TABLE entry_fields ADD COLUMN value_source TEXT DEFAULT ''"
         )
 
     # 历史库升级：把 schema_version 抬到当前版本（新表已由上面的 executescript 补齐）。

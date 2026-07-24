@@ -240,8 +240,17 @@ def import_bindle(
                 )
                 for field, fv in e.get("fields", {}).items():
                     conn.execute(
-                        "INSERT INTO entry_fields(entry_id, field, origin, current, modified) VALUES(?,?,?,?,?)",
-                        (new_id, field, fv.get("origin", ""), fv.get("current", ""), int(bool(fv.get("modified")))),
+                        """INSERT INTO entry_fields(
+                               entry_id, field, origin, current, modified, value_source
+                           ) VALUES(?,?,?,?,?,?)""",
+                        (
+                            new_id,
+                            field,
+                            fv.get("origin", ""),
+                            fv.get("current", ""),
+                            int(bool(fv.get("modified"))),
+                            fv.get("value_source", ""),
+                        ),
                     )
                 for it in e.get("items", []):
                     conn.execute(

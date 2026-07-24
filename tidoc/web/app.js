@@ -1608,7 +1608,11 @@ async function quickNoteFlow(e) {
 }
 async function quickDelete(e) {
   if (!confirm(`确认删除「${e.seller || '该条目'}」？此操作不可撤销。`)) return;
-  try { await Api.deleteEntry(e.id); await refreshEntries(); toast('已删除', 'ok'); }
+  try {
+    const result = await Api.deleteEntry(e.id);
+    await refreshEntries();
+    toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
+  }
   catch (err) { toast(err.message, 'err'); }
 }
 
@@ -2538,6 +2542,8 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
     key: g.key,
     label: g.label,
     selected: g.selected !== false,
+    created: false,
+    error: '',
     warnings: g.warnings || [],
     files: g.files.map((f) => ({ ...f })),
   }));
@@ -2548,9 +2554,9 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
   const body = el('div');
   const render = () => {
     const groupRows = groups.map((g, gi) => `
-      <div class="bi-group${g.selected ? '' : ' off'}">
+      <div class="bi-group${g.selected ? '' : ' off'}${g.error ? ' failed' : ''}${g.created ? ' created' : ''}">
         <div class="bi-group-head">
-          <label class="bi-ignore"><input type="checkbox" data-bi-group="${gi}" ${g.selected ? 'checked' : ''}/> 导入</label>
+          <label class="bi-ignore"><input type="checkbox" data-bi-group="${gi}" ${g.selected ? 'checked' : ''} ${g.created ? 'disabled' : ''}/> ${g.created ? '已创建' : '导入'}</label>
           <b>组 ${esc(g.label)}</b>
           <span class="bi-count">${batchGroupSummary(g)}</span>
         </div>
@@ -2561,6 +2567,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
             ${f.warning ? `<span class="bi-warning">${esc(f.warning)}</span>` : ''}
           </div>`).join('')}
         ${(g.warnings || []).length ? `<div class="bi-warning">${g.warnings.map(esc).join('；')}</div>` : ''}
+        ${g.error ? `<div class="bi-error"><b>未创建：</b>${esc(g.error)}</div>` : ''}
       </div>`).join('') || '<div class="hint">没有找到可导入的发票 PDF。批量导入要求每条至少有一个发票 PDF，XML 可以没有。</div>';
 
     const ungroupedRows = ungrouped.length ? `
@@ -2614,7 +2621,12 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
       ${ignoredRows}`;
 
     body.querySelectorAll('[data-bi-group]').forEach((cb) => {
-      cb.onchange = () => { groups[+cb.dataset.biGroup].selected = cb.checked; render(); };
+      cb.onchange = () => {
+        const group = groups[+cb.dataset.biGroup];
+        group.selected = cb.checked;
+        group.error = '';
+        render();
+      };
     });
   };
   render();
@@ -2629,7 +2641,26 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
     ...pendingMaterialInfos.map((f) => f.path),
   ];
   let cleanupOnClose = allPreviewPaths;
-  const m = modal({
+  const createdEntries = [];
+  let m;
+  const finishCreatedEntries = async (progress) => {
+    if (pendingMaterialInfos.length) progress.update('正在识别并匹配随附材料…');
+    const bind = pendingMaterialInfos.length && createdEntries.length
+      ? await autoBindMaterialInfos(pendingMaterialInfos, createdEntries)
+      : { auto: [], manual: [] };
+    const manualPaths = new Set((bind.manual || []).map((f) => f.path));
+    const cleanupNow = allPreviewPaths().filter((p) => !manualPaths.has(p));
+    cleanupOnClose = () => [];
+    await cleanupDroppedPaths(cleanupNow);
+    await refreshEntries();
+    m.close();
+    if (bind.auto && bind.auto.length) {
+      toast(`已创建 ${createdEntries.length} 条，并绑定 ${bind.auto.length} 份材料`, 'ok');
+    } else {
+      toast(`已创建 ${createdEntries.length} 条`, 'ok');
+    }
+  };
+  m = modal({
     title: '确认导入',
     wide: true, body,
     onClose: () => cleanupDroppedPaths(cleanupOnClose()),
@@ -2640,29 +2671,47 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
       }),
       mkBtn('创建选中条目', 'primary', async () => {
         const payload = groups
-          .filter((g) => g.selected)
+          .filter((g) => g.selected && !g.created)
           .map((g) => ({ key: g.key, label: g.label, files: g.files.map((f) => ({ path: f.path, type: f.type })) }));
-        if (!payload.length) { toast('没有可创建的分组', 'err'); return; }
+        if (!payload.length) {
+          if (!createdEntries.length) { toast('没有可创建的分组', 'err'); return; }
+          const progress = taskProgress('正在完成已创建条目的材料处理…');
+          try { await finishCreatedEntries(progress); }
+          catch (e) { toast(e.message, 'err'); }
+          finally { progress.close(); }
+          return;
+        }
         const progress = taskProgress(`正在创建 ${payload.length} 个报账条目…`);
         try {
           const r = await Api.batchCreateEntries(selectedClaimantId(body), payload);
-          if (pendingMaterialInfos.length) progress.update('正在识别并匹配随附材料…');
-          const bind = pendingMaterialInfos.length
-            ? await autoBindMaterialInfos(pendingMaterialInfos, r.created_entries || [])
-            : { manual: [] };
-          const manualPaths = new Set((bind.manual || []).map((f) => f.path));
-          const cleanupNow = allPreviewPaths().filter((p) => !manualPaths.has(p));
-          cleanupOnClose = () => [];
-          await cleanupDroppedPaths(cleanupNow);
-          m.close();
+          createdEntries.push(...(r.created_entries || []));
+          const failedByKey = new Map((r.failed || []).map((item) => [item.key || item.group, item]));
+          const createdKeys = new Set((r.created_entries || []).map((item) => item.group));
+          groups.forEach((group) => {
+            const failure = failedByKey.get(group.key) || failedByKey.get(group.label);
+            if (failure) {
+              group.error = failure.error || '导入失败';
+              group.selected = false;
+            } else if (createdKeys.has(group.key) || payload.some((item) => item.key === group.key)) {
+              group.created = true;
+              group.selected = false;
+              group.error = '';
+            }
+          });
           await refreshEntries();
           if (r.failed && r.failed.length) {
-            toast(`创建 ${r.created} 条，${r.failed.length} 组失败`, 'err');
-          } else if (bind.auto && bind.auto.length) {
-            toast(`已创建 ${r.created} 条，并绑定 ${bind.auto.length} 份材料`, 'ok');
-          } else {
-            toast(`已创建 ${r.created} 条`, 'ok');
+            render();
+            if (createdEntries.length) {
+              const primary = m.foot.querySelector('.btn.primary');
+              if (primary) primary.textContent = '完成已创建条目';
+            }
+            const detail = r.failed.length === 1
+              ? `${r.created ? `已创建 ${r.created} 条；` : ''}未创建：${r.failed[0].error}`
+              : `有 ${r.failed.length} 组未创建，请查看标红原因`;
+            toast(detail, 'err');
+            return;
           }
+          await finishCreatedEntries(progress);
         } catch (e) { toast(e.message, 'err'); }
         finally { progress.close(); }
       }),
@@ -3028,8 +3077,8 @@ async function openEntryDetail(entryId, currentDetail = null) {
         const res = await Api.pickFiles(false);
         const path = (res.paths || [])[0];
         if (!path) return;
-        await Api.updateAttachment(att.id, { src_path: path, type });
-        toast('附件已替换', 'ok');
+        const result = await Api.updateAttachment(att.id, { src_path: path, type });
+        toast(result.cleanup_warning || '附件已替换', result.cleanup_warning ? 'err' : 'ok');
         await reopenEntryDetail(mm, entryId, { affectsStatus: true });
       } catch (err) { toast(err.message, 'err'); }
     };
@@ -3052,7 +3101,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   body.querySelectorAll('[data-del-att]').forEach((b) => {
     b.onclick = async () => {
       try {
-        await Api.deleteAttachment(b.dataset.delAtt);
+        const result = await Api.deleteAttachment(b.dataset.delAtt);
         const group = b.closest('.att-group');
         b.closest('.attach-item')?.remove();
         if (group) {
@@ -3069,7 +3118,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
         const detail = await Api.getEntry(entryId);
         await syncEntryAfterChange(entryId, { affectsStatus: true }, detail);
         updateDetailMaterialState(detail);
-        toast('已删除', 'ok');
+        toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
       }
       catch (err) { toast(err.message, 'err'); }
     };
@@ -3085,7 +3134,12 @@ async function openEntryDetail(entryId, currentDetail = null) {
     footer: [
       mkBtn('删除条目', 'danger', async () => {
         if (!confirm('确认删除该条目及其附件？此操作不可撤销。')) return;
-        try { await Api.deleteEntry(entryId); mm.close(); await refreshEntries(); toast('已删除', 'ok'); }
+        try {
+          const result = await Api.deleteEntry(entryId);
+          mm.close();
+          await refreshEntries();
+          toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
+        }
         catch (err) { toast(err.message, 'err'); }
       }),
       mkBtn('关闭', 'ghost', () => mm.close()),
@@ -3830,10 +3884,10 @@ async function batchDelete() {
   if (!ids.length) return;
   if (!confirm(`确认删除所选 ${ids.length} 条？此操作不可撤销。`)) return;
   try {
-    await Api.deleteEntries(ids);
+    const result = await Api.deleteEntries(ids);
     State.selected.clear();
     await refreshEntries();
-    toast('已删除', 'ok');
+    toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
   } catch (e) { toast(e.message, 'err'); }
 }
 

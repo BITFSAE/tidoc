@@ -63,14 +63,21 @@ class AttachmentRepo:
         dest_dir = self.data_root.entry_dir(entry_id)
         stored_name = self._unique_name(dest_dir, entry_id, att_type, src.suffix)
         dest = dest_dir / stored_name
-        shutil.copy2(src, dest)
-        rel = f"{entry_id}/{stored_name}"
-        self.db.conn.execute(
-            """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
-               sha256, note, added_at) VALUES(?,?,?,?,?,?,?,?)""",
-            (att_id, entry_id, att_type, src.name, rel, sha, note, _now()),
-        )
-        self.db.conn.commit()
+        try:
+            shutil.copy2(src, dest)
+            rel = f"{entry_id}/{stored_name}"
+            self.db.conn.execute(
+                """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
+                   sha256, note, added_at) VALUES(?,?,?,?,?,?,?,?)""",
+                (att_id, entry_id, att_type, src.name, rel, sha, note, _now()),
+            )
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            if dest.exists():
+                dest.unlink()
+            _remove_empty_dir(dest_dir)
+            raise
         return self.get(att_id)
 
     def _unique_name(self, dest_dir: Path, entry_id: str, att_type: str, suffix: str) -> str:
@@ -105,15 +112,32 @@ class AttachmentRepo:
             out.append(d)
         return out
 
-    def delete(self, att_id: str) -> None:
+    def delete(self, att_id: str) -> dict:
         att = self.get(att_id)
         if not att:
-            return
+            return {"cleanup_warning": ""}
         abs_path = Path(att["abs_path"])
+        quarantine = abs_path.with_name(f".deleting-{att_id}-{abs_path.name}")
+        moved = False
         if abs_path.exists():
-            abs_path.unlink()
-        self.db.conn.execute("DELETE FROM attachments WHERE id = ?", (att_id,))
-        self.db.conn.commit()
+            abs_path.rename(quarantine)
+            moved = True
+        try:
+            self.db.conn.execute("DELETE FROM attachments WHERE id = ?", (att_id,))
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            if moved and quarantine.exists():
+                quarantine.rename(abs_path)
+            raise
+        warning = ""
+        if moved and quarantine.exists():
+            try:
+                quarantine.unlink()
+            except OSError as exc:
+                warning = f"附件记录已删除，但文件清理失败：{exc}"
+        _remove_empty_dir(abs_path.parent)
+        return {"cleanup_warning": warning}
 
     def set_note(self, att_id: str, note: str) -> dict:
         self.db.conn.execute("UPDATE attachments SET note = ? WHERE id = ?", (note, att_id))
@@ -130,6 +154,9 @@ class AttachmentRepo:
         original_name = att["original_name"]
         stored_path = att["stored_path"]
         sha = att["sha256"]
+        old_abs = Path(att["abs_path"])
+        new_abs: Path | None = None
+        rollback_rename = False
 
         if src_path:
             src = Path(src_path)
@@ -142,31 +169,59 @@ class AttachmentRepo:
             ).fetchone()
             if dup:
                 raise ValueError(f"这份文件已添加过：{dup['original_name']}")
-            old_abs = Path(att["abs_path"])
             dest_dir = self.data_root.entry_dir(att["entry_id"])
             stored_name = self._unique_name(dest_dir, att["entry_id"], new_type, src.suffix)
             dest = dest_dir / stored_name
-            shutil.copy2(src, dest)
-            if old_abs.exists() and old_abs != dest:
-                old_abs.unlink()
+            try:
+                shutil.copy2(src, dest)
+            except Exception:
+                if dest.exists():
+                    dest.unlink()
+                _remove_empty_dir(dest_dir)
+                raise
+            new_abs = dest
             original_name = src.name
             stored_path = f"{att['entry_id']}/{stored_name}"
             sha = new_sha
         elif att_type and att_type != att["type"]:
-            old_abs = Path(att["abs_path"])
             if old_abs.exists():
                 dest_dir = self.data_root.entry_dir(att["entry_id"])
                 stored_name = self._unique_name(dest_dir, att["entry_id"], new_type, old_abs.suffix)
                 dest = dest_dir / stored_name
                 old_abs.rename(dest)
+                new_abs = dest
+                rollback_rename = True
                 stored_path = f"{att['entry_id']}/{stored_name}"
 
-        self.db.conn.execute(
-            """UPDATE attachments
-               SET type = ?, original_name = ?, stored_path = ?, sha256 = ?,
-                   note = COALESCE(?, note)
-               WHERE id = ?""",
-            (new_type, original_name, stored_path, sha, note, att_id),
-        )
-        self.db.conn.commit()
-        return self.get(att_id)
+        try:
+            self.db.conn.execute(
+                """UPDATE attachments
+                   SET type = ?, original_name = ?, stored_path = ?, sha256 = ?,
+                       note = COALESCE(?, note)
+                   WHERE id = ?""",
+                (new_type, original_name, stored_path, sha, note, att_id),
+            )
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            if rollback_rename and new_abs and new_abs.exists():
+                new_abs.rename(old_abs)
+            elif new_abs and new_abs.exists():
+                new_abs.unlink()
+                _remove_empty_dir(new_abs.parent)
+            raise
+
+        updated = self.get(att_id)
+        if src_path and old_abs.exists() and new_abs != old_abs:
+            try:
+                old_abs.unlink()
+            except OSError as exc:
+                updated["cleanup_warning"] = f"附件已替换，但旧文件清理失败：{exc}"
+        return updated
+
+
+def _remove_empty_dir(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:
+        pass

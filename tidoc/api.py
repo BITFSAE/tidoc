@@ -9,9 +9,11 @@ from __future__ import annotations
 import functools
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -41,6 +43,22 @@ APP_LAST_SEEN_VERSION_KEY = "tidoc.update.lastSeenVersion"
 AUTO_UPDATE_INTERVAL_SECONDS = 24 * 60 * 60
 MAX_DROPPED_FILE_BYTES = 100 * 1024 * 1024
 MAX_DROPPED_TOTAL_BYTES = 500 * 1024 * 1024
+
+
+class DuplicateInvoiceError(ValueError):
+    """导入命中了已有发票，携带可供前端定位原条目的结构化信息。"""
+
+    def __init__(self, existing: dict):
+        self.existing = existing
+        invoice_no = existing.get("invoice_no") or ""
+        seller = existing.get("seller") or "未识别销售方"
+        claimant = existing.get("profile_name") or "未识别报账人"
+        identity = f"发票号 {invoice_no} 已存在" if invoice_no else "相同发票文件已存在"
+        super().__init__(
+            f"{identity}（{seller}，报账人：{claimant}）。"
+            "如需调整归属，请修改原条目的报账人，不要重复创建。"
+        )
+
 
 def _guard(func):
     """把返回值包成 {ok:True,...}，异常包成 {ok:False,error:...}。"""
@@ -157,31 +175,43 @@ class Api:
         parsed = None
         if xml_path or pdf_path:
             parsed = parse_invoice_files(xml_path, pdf_path)
-        entry_id = self.entries.create(
-            profile_id,
-            title=title,
-            parsed=parsed,
-            status=status,
-            default_paid_to_total=self._default_paid_to_invoice(),
-        )
+            self._ensure_invoice_not_duplicate(parsed, [xml_path, pdf_path])
 
-        if parsed:
-            check = check_invoice(parsed, expected_title=title)
-            self.entries.set_check(entry_id, check.status, check.message)
+        entry_id = None
+        try:
+            entry_id = self.entries.create(
+                profile_id,
+                title=title,
+                parsed=parsed,
+                status=status,
+                default_paid_to_total=self._default_paid_to_invoice(),
+            )
 
-        from .db import TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
-        if xml_path:
-            self.attachments.add(entry_id, xml_path, TYPE_INVOICE_XML)
-        if pdf_path:
-            self.attachments.add(entry_id, pdf_path, TYPE_INVOICE_PDF)
-        for pp in (payment_paths or []):
-            self.attachments.add(entry_id, pp, TYPE_PAYMENT)
-            self._maybe_apply_payment_ocr_amount(entry_id, pp)
-        if inspection_path:
-            self.attachments.add(entry_id, inspection_path, TYPE_INSPECTION)
+            if parsed:
+                check = check_invoice(parsed, expected_title=title)
+                self.entries.set_check(entry_id, check.status, check.message)
 
-        self.entries.recompute_status(entry_id)
-        return self.entries.get(entry_id)
+            from .db import TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
+            if xml_path:
+                self.attachments.add(entry_id, xml_path, TYPE_INVOICE_XML)
+            if pdf_path:
+                self.attachments.add(entry_id, pdf_path, TYPE_INVOICE_PDF)
+            for pp in (payment_paths or []):
+                self.attachments.add(entry_id, pp, TYPE_PAYMENT)
+                self._maybe_apply_payment_ocr_amount(entry_id, pp)
+            if inspection_path:
+                self.attachments.add(entry_id, inspection_path, TYPE_INSPECTION)
+
+            self.entries.recompute_status(entry_id)
+            return self.entries.get(entry_id)
+        except Exception as exc:
+            if entry_id:
+                cleanup_error = self._discard_incomplete_entry(entry_id)
+                if cleanup_error:
+                    raise RuntimeError(
+                        f"{exc}；失败后的临时数据清理未完成：{cleanup_error}"
+                    ) from exc
+            raise
 
     # ------------------------------------------------------------ 文件夹批量导入
     @_guard
@@ -324,17 +354,12 @@ class Api:
             xml_files = [f for f in files if f.get("type") == TYPE_INVOICE_XML]
             pdf_path = next((f["path"] for f in files if f.get("type") == TYPE_INVOICE_PDF), None)
             xml_path = next((f["path"] for f in xml_files), None)
+            entry_id = None
             try:
                 if not pdf_path:
                     raise ValueError("缺少发票 PDF")
                 parsed = parse_invoice_files(xml_path, pdf_path)
-                if parsed.invoice_no:
-                    old = self.db.conn.execute(
-                        "SELECT id FROM entries WHERE profile_id = ? AND invoice_no = ? LIMIT 1",
-                        (profile_id, parsed.invoice_no),
-                    ).fetchone()
-                    if old:
-                        raise ValueError("这张发票已导入过")
+                self._ensure_invoice_not_duplicate(parsed, [xml_path, pdf_path])
                 entry_id = self.entries.create(
                     profile_id,
                     title=title,
@@ -356,8 +381,28 @@ class Api:
                     "entry_id": entry_id,
                     "invoice_no": parsed.invoice_no or "",
                 })
+            except DuplicateInvoiceError as exc:
+                failed.append({
+                    "key": g.get("key") or "",
+                    "group": g.get("label") or g.get("key") or "?",
+                    "code": "duplicate_invoice",
+                    "error": str(exc),
+                    "existing_entry_id": exc.existing.get("id") or "",
+                    "invoice_no": exc.existing.get("invoice_no") or "",
+                })
             except Exception as exc:  # noqa: BLE001 — 单组失败不阻断其余
-                failed.append({"group": g.get("label") or g.get("key") or "?", "error": str(exc)})
+                cleanup_error = ""
+                if entry_id:
+                    cleanup_error = self._discard_incomplete_entry(entry_id)
+                error = str(exc) or "导入过程中发生未知错误"
+                if cleanup_error:
+                    error += f"；失败后的临时数据清理未完成：{cleanup_error}"
+                failed.append({
+                    "key": g.get("key") or "",
+                    "group": g.get("label") or g.get("key") or "?",
+                    "code": "import_failed",
+                    "error": error,
+                })
         return {"created": len(created), "entry_ids": created, "created_entries": created_entries, "failed": failed}
 
     # ------------------------------------------------------------ 条目管理
@@ -406,13 +451,16 @@ class Api:
 
     @_guard
     def delete_entry(self, entry_id):
-        self.entries.delete(entry_id)
-        return {"deleted": entry_id}
+        deleted, cleanup_warning = self._delete_entries_with_files([entry_id])
+        return {
+            "deleted": entry_id if deleted else "",
+            "cleanup_warning": cleanup_warning,
+        }
 
     @_guard
     def delete_entries(self, entry_ids):
-        n = self.entries.delete_many(entry_ids)
-        return {"deleted": n}
+        deleted, cleanup_warning = self._delete_entries_with_files(entry_ids or [])
+        return {"deleted": deleted, "cleanup_warning": cleanup_warning}
 
     # ------------------------------------------------------------ 标签（批量）
     @_guard
@@ -517,10 +565,10 @@ class Api:
     @_guard
     def delete_attachment(self, att_id):
         att = self.attachments.get(att_id)
-        self.attachments.delete(att_id)
+        result = self.attachments.delete(att_id)
         if att and att.get("entry_id"):
             self.entries.recompute_status(att["entry_id"])
-        return {"deleted": att_id}
+        return {"deleted": att_id, **result}
 
     @_guard
     def set_attachment_note(self, att_id, note):
@@ -876,8 +924,13 @@ class Api:
         default = default_data_root()
         if str(self.data_root.root) == str(default):
             return {"changed": False}
+        old_root = self.data_root
         self.db.close()
-        new_root_path = self.data_root.migrate_to(default)
+        try:
+            new_root_path = old_root.migrate_to(default)
+        except Exception:
+            self._rebuild_repos(old_root.root)
+            raise
         self._rebuild_repos(new_root_path)
         return {"changed": True, **self._paths_dict()}
 
@@ -923,6 +976,122 @@ class Api:
 
     def _default_paid_to_invoice(self) -> bool:
         return self._preference_value(DEFAULT_PAID_TO_INVOICE_PREF_KEY, "1") != "0"
+
+    def _ensure_invoice_not_duplicate(self, parsed, source_paths) -> None:
+        """按发票号优先、文件摘要兜底，在全库阻止同一发票重复建条目。"""
+        invoice_no = str(getattr(parsed, "invoice_no", "") or "").strip()
+        row = None
+        if invoice_no:
+            row = self.db.conn.execute(
+                """SELECT e.id, e.invoice_no, e.seller, p.name AS profile_name
+                     FROM entries e
+                     LEFT JOIN profiles p ON p.id = e.profile_id
+                    WHERE e.invoice_no = ?
+                    ORDER BY e.created_at
+                    LIMIT 1""",
+                (invoice_no,),
+            ).fetchone()
+
+        if row is None:
+            for raw_path in source_paths or []:
+                if not raw_path:
+                    continue
+                path = Path(raw_path)
+                if not path.is_file():
+                    continue
+                sha256 = _file_sha256(path)
+                row = self.db.conn.execute(
+                    """SELECT e.id, e.invoice_no, e.seller, p.name AS profile_name
+                         FROM attachments a
+                         JOIN entries e ON e.id = a.entry_id
+                         LEFT JOIN profiles p ON p.id = e.profile_id
+                        WHERE a.sha256 = ?
+                          AND a.type IN ('invoice_pdf', 'invoice_xml')
+                        ORDER BY e.created_at
+                        LIMIT 1""",
+                    (sha256,),
+                ).fetchone()
+                if row is not None:
+                    break
+
+        if row is not None:
+            raise DuplicateInvoiceError({key: row[key] for key in row.keys()})
+
+    def _discard_incomplete_entry(self, entry_id: str) -> str:
+        """导入失败时清掉已落库的半成品记录和已复制附件。"""
+        errors = []
+        try:
+            self.db.conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+            self.db.conn.commit()
+        except Exception as exc:  # noqa: BLE001 - 返回给原始导入错误统一报告
+            errors.append(f"记录未删除：{exc}")
+        entry_dir = self.data_root.attachments_dir / entry_id
+        try:
+            if entry_dir.is_dir():
+                shutil.rmtree(entry_dir)
+        except Exception as exc:  # noqa: BLE001 - 返回给原始导入错误统一报告
+            errors.append(f"附件未删除：{exc}")
+        return "；".join(errors)
+
+    def _delete_entries_with_files(self, entry_ids) -> tuple[int, str]:
+        """先暂存附件目录，再删记录；数据库删除失败时可把附件原位恢复。"""
+        ids = list(dict.fromkeys(str(value) for value in (entry_ids or []) if value))
+        if not ids:
+            return 0, ""
+        placeholders = ",".join("?" * len(ids))
+        rows = self.db.conn.execute(
+            f"SELECT id FROM entries WHERE id IN ({placeholders})", ids
+        ).fetchall()
+        existing_ids = [row["id"] for row in rows]
+        if not existing_ids:
+            return 0, ""
+
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for entry_id in existing_ids:
+                source = self.data_root.attachments_dir / entry_id
+                if not source.is_dir():
+                    continue
+                quarantine = self.data_root.attachments_dir / (
+                    f".deleting-{entry_id}-{uuid.uuid4().hex[:8]}"
+                )
+                source.rename(quarantine)
+                moved.append((source, quarantine))
+        except Exception:
+            for source, quarantine in reversed(moved):
+                if quarantine.exists() and not source.exists():
+                    quarantine.rename(source)
+            raise
+
+        try:
+            deleted = self.entries.delete_many(existing_ids)
+        except Exception:
+            self.db.conn.rollback()
+            restore_errors = []
+            for source, quarantine in reversed(moved):
+                try:
+                    if quarantine.exists() and not source.exists():
+                        quarantine.rename(source)
+                except OSError as exc:
+                    restore_errors.append(str(exc))
+            if restore_errors:
+                raise RuntimeError(
+                    "条目删除失败，且附件目录恢复未完成：" + "；".join(restore_errors)
+                )
+            raise
+
+        cleanup_errors = []
+        for _source, quarantine in moved:
+            try:
+                shutil.rmtree(quarantine)
+            except OSError as exc:
+                cleanup_errors.append(str(exc))
+        warning = (
+            f"条目已删除，但有 {len(cleanup_errors)} 个附件目录清理失败："
+            + "；".join(cleanup_errors)
+            if cleanup_errors else ""
+        )
+        return deleted, warning
 
     def _set_preference_value(self, key: str, value: str) -> None:
         self.db.conn.execute(
@@ -995,6 +1164,14 @@ def _file_dialog_kind(webview_module, modern_name: str, legacy_name: str):
 def _safe_filename(name: str) -> str:
     cleaned = re.sub(r"[/\\:\0]+", "_", name).strip()
     return cleaned or "dropped-file"
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _is_inside(root: Path, path: Path) -> bool:

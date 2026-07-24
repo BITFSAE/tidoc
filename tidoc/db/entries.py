@@ -65,32 +65,36 @@ class EntryRepo:
         entry_id = uuid.uuid4().hex
         now = _now()
         p = parsed or ParsedInvoice()
-        self.db.conn.execute(
-            """INSERT INTO entries(id, profile_id, title, invoice_no, invoice_date,
-               seller, total, buyer_name, buyer_tax_id, status, check_status,
-               source, created_at, updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (entry_id, profile_id, title or p.buyer_name, p.invoice_no, p.invoice_date,
-             p.seller, str(money(p.total)) if p.total else "", p.buyer_name,
-             p.buyer_tax_id, status, "warning", p.source, now, now),
-        )
-        # 可改字段初始化：origin = current；实付是否默认按发票总额由应用偏好决定。
-        for field in EDITABLE_FIELDS:
-            origin = self._initial_editable(field, p, default_paid_to_total)
+        try:
             self.db.conn.execute(
-                "INSERT INTO entry_fields(entry_id, field, origin, current, modified) VALUES(?,?,?,?,0)",
-                (entry_id, field, origin, origin),
+                """INSERT INTO entries(id, profile_id, title, invoice_no, invoice_date,
+                   seller, total, buyer_name, buyer_tax_id, status, check_status,
+                   source, created_at, updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (entry_id, profile_id, title or p.buyer_name, p.invoice_no, p.invoice_date,
+                 p.seller, str(money(p.total)) if p.total else "", p.buyer_name,
+                 p.buyer_tax_id, status, "warning", p.source, now, now),
             )
-        # 明细
-        for i, item in enumerate(p.items):
-            self.db.conn.execute(
-                """INSERT INTO items(entry_id, name, actual_name, unit, quantity,
-                   unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
-                (entry_id, item.name, item.actual_name, item.unit,
-                 str(item.quantity) if item.quantity is not None else "",
-                 str(money(item.unit_price)), str(money(item.total)), item.spec, i),
-            )
-        self.db.conn.commit()
+            # 可改字段初始化：origin = current；实付是否默认按发票总额由应用偏好决定。
+            for field in EDITABLE_FIELDS:
+                origin = self._initial_editable(field, p, default_paid_to_total)
+                self.db.conn.execute(
+                    "INSERT INTO entry_fields(entry_id, field, origin, current, modified) VALUES(?,?,?,?,0)",
+                    (entry_id, field, origin, origin),
+                )
+            # 明细
+            for i, item in enumerate(p.items):
+                self.db.conn.execute(
+                    """INSERT INTO items(entry_id, name, actual_name, unit, quantity,
+                       unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (entry_id, item.name, item.actual_name, item.unit,
+                     str(item.quantity) if item.quantity is not None else "",
+                     str(money(item.unit_price)), str(money(item.total)), item.spec, i),
+                )
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            raise
         return entry_id
 
     @staticmethod

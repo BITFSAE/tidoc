@@ -781,6 +781,8 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .bi-groups { display: flex; flex-direction: column; gap: 10px; }
 .bi-group { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; background: var(--panel-raised); }
 .bi-group.off { opacity: .55; background: var(--paper-2); }
+.bi-group.failed { opacity: 1; border-color: var(--blocked); background: var(--blocked-soft); }
+.bi-group.created { opacity: .62; }
 .bi-group-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
 .bi-group-head b { font-size: 13px; }
 .bi-count { font-size: 11px; color: var(--ink-soft); }
@@ -789,6 +791,7 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .bi-type { font-size: 12px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); background: #fff; }
 .bi-ignore { font-size: 12px; color: var(--ink-soft); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .bi-warning { font-size: 11px; color: var(--warn); margin-top: 4px; line-height: 1.5; }
+.bi-error { font-size: 12px; color: var(--blocked); margin-top: 7px; line-height: 1.55; }
 .bi-muted-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .batch-import-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .batch-import-summary > div {

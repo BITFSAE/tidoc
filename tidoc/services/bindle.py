@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -168,6 +169,7 @@ def import_bindle(
     if inspected["tampered"] and not allow_tampered:
         return {
             "imported": 0,
+            "skipped": [],
             "tampered": inspected["tampered"],
             "entry_ids": [],
             "message": "绑定包已被外部修改，已拒绝导入。",
@@ -175,66 +177,135 @@ def import_bindle(
 
     path = Path(path)
     imported_ids: list[str] = []
+    skipped: list[dict] = []
+    created_dirs: list[Path] = []
     conn = entries_repo.db.conn
     now = datetime.now().isoformat(timespec="seconds")
+    existing_invoice_nos = {
+        str(row["invoice_no"] or "").strip()
+        for row in conn.execute(
+            "SELECT invoice_no FROM entries WHERE TRIM(COALESCE(invoice_no, '')) <> ''"
+        ).fetchall()
+    }
+    existing_invoice_hashes = {
+        str(row["sha256"] or "").strip()
+        for row in conn.execute(
+            """SELECT sha256 FROM attachments
+                WHERE type IN ('invoice_pdf', 'invoice_xml')
+                  AND TRIM(COALESCE(sha256, '')) <> ''"""
+        ).fetchall()
+    }
 
-    with zipfile.ZipFile(path, "r") as zf:
-        for e in inspected["entries"]:
-            new_id = uuid.uuid4().hex
-            conn.execute(
-                """INSERT INTO entries(id, profile_id, title, invoice_no, invoice_date,
-                   seller, total, buyer_name, buyer_tax_id, category, tags, status,
-                   check_status, check_message, source, created_at, updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (new_id, profile_id, e.get("title", ""), e.get("invoice_no", ""),
-                 e.get("invoice_date", ""), e.get("seller", ""), e.get("total", ""),
-                 e.get("buyer_name", ""), e.get("buyer_tax_id", ""), e.get("category", ""),
-                 json.dumps(e.get("tags", []), ensure_ascii=False), e.get("status", "draft"),
-                 e.get("check_status", "warning"), e.get("check_message", ""),
-                 e.get("source", "imported"), now, now),
-            )
-            for field, fv in e.get("fields", {}).items():
-                conn.execute(
-                    "INSERT INTO entry_fields(entry_id, field, origin, current, modified) VALUES(?,?,?,?,?)",
-                    (new_id, field, fv.get("origin", ""), fv.get("current", ""), int(bool(fv.get("modified")))),
-                )
-            for it in e.get("items", []):
-                conn.execute(
-                    """INSERT INTO items(entry_id, name, actual_name, unit, quantity,
-                       unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
-                    (new_id, it.get("name", ""), it.get("actual_name", ""), it.get("unit", ""),
-                     it.get("quantity", ""), it.get("unit_price", ""), it.get("total", ""),
-                     it.get("spec", ""), it.get("ordinal", 0)),
-                )
-            for h in e.get("history", []):
-                conn.execute(
-                    """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)
-                       VALUES(?,?,?,?,?,?)""",
-                    (new_id, h.get("field", ""), h.get("old_value", ""), h.get("new_value", ""),
-                     h.get("profile_id", ""), h.get("changed_at", now)),
-                )
-            # 附件：从包里解出到新条目目录，重建记录
-            dest_dir = attachments_repo.data_root.entry_dir(new_id)
-            for att in e.get("attachments", []):
-                arcname = f"attachments/{att['stored_path']}"
-                if arcname not in zf.namelist():
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            for e in inspected["entries"]:
+                invoice_no = str(e.get("invoice_no") or "").strip()
+                invoice_hashes = {
+                    str(att.get("sha256") or "").strip()
+                    for att in e.get("attachments", [])
+                    if att.get("type") in {"invoice_pdf", "invoice_xml"}
+                    and str(att.get("sha256") or "").strip()
+                }
+                if (
+                    (invoice_no and invoice_no in existing_invoice_nos)
+                    or bool(invoice_hashes & existing_invoice_hashes)
+                ):
+                    skipped.append({
+                        "invoice_no": invoice_no,
+                        "seller": e.get("seller", ""),
+                        "reason": "发票号已存在" if invoice_no in existing_invoice_nos else "相同发票文件已存在",
+                    })
                     continue
-                stored_name = Path(att["stored_path"]).name
-                dest = dest_dir / stored_name
-                dest.write_bytes(zf.read(arcname))
+
+                check_status = e.get("check_status", "warning")
+                check_message = e.get("check_message", "")
+                status = e.get("status", "draft")
+                if inspected["tampered"]:
+                    check_status = "blocked"
+                    status = "partial"
+                    tampered_message = "绑定包完整性校验未通过，导入前已由用户确认"
+                    check_message = "；".join(filter(None, [tampered_message, check_message]))
+
+                new_id = uuid.uuid4().hex
                 conn.execute(
-                    """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
-                       sha256, note, added_at) VALUES(?,?,?,?,?,?,?,?)""",
-                    (uuid.uuid4().hex, new_id, att.get("type", "other"),
-                     att.get("original_name", ""), f"{new_id}/{stored_name}",
-                     att.get("sha256", ""), att.get("note", ""), att.get("added_at", now)),
+                    """INSERT INTO entries(id, profile_id, title, invoice_no, invoice_date,
+                       seller, total, buyer_name, buyer_tax_id, category, tags, status,
+                       check_status, check_message, source, created_at, updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (new_id, profile_id, e.get("title", ""), invoice_no,
+                     e.get("invoice_date", ""), e.get("seller", ""), e.get("total", ""),
+                     e.get("buyer_name", ""), e.get("buyer_tax_id", ""), e.get("category", ""),
+                     json.dumps(e.get("tags", []), ensure_ascii=False), status,
+                     check_status, check_message, e.get("source", "imported"), now, now),
                 )
-            imported_ids.append(new_id)
-        conn.commit()
+                for field, fv in e.get("fields", {}).items():
+                    conn.execute(
+                        "INSERT INTO entry_fields(entry_id, field, origin, current, modified) VALUES(?,?,?,?,?)",
+                        (new_id, field, fv.get("origin", ""), fv.get("current", ""), int(bool(fv.get("modified")))),
+                    )
+                for it in e.get("items", []):
+                    conn.execute(
+                        """INSERT INTO items(entry_id, name, actual_name, unit, quantity,
+                           unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
+                        (new_id, it.get("name", ""), it.get("actual_name", ""), it.get("unit", ""),
+                         it.get("quantity", ""), it.get("unit_price", ""), it.get("total", ""),
+                         it.get("spec", ""), it.get("ordinal", 0)),
+                    )
+                for h in e.get("history", []):
+                    conn.execute(
+                        """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)
+                           VALUES(?,?,?,?,?,?)""",
+                        (new_id, h.get("field", ""), h.get("old_value", ""), h.get("new_value", ""),
+                         h.get("profile_id", ""), h.get("changed_at", now)),
+                    )
+                # 附件：从包里解出到新条目目录，重建记录
+                dest_dir = attachments_repo.data_root.entry_dir(new_id)
+                created_dirs.append(dest_dir)
+                for att in e.get("attachments", []):
+                    arcname = f"attachments/{att['stored_path']}"
+                    if arcname not in zf.namelist():
+                        continue
+                    stored_name = Path(att["stored_path"]).name
+                    dest = dest_dir / stored_name
+                    dest.write_bytes(zf.read(arcname))
+                    conn.execute(
+                        """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
+                           sha256, note, added_at) VALUES(?,?,?,?,?,?,?,?)""",
+                        (uuid.uuid4().hex, new_id, att.get("type", "other"),
+                         att.get("original_name", ""), f"{new_id}/{stored_name}",
+                         att.get("sha256", ""), att.get("note", ""), att.get("added_at", now)),
+                    )
+                imported_ids.append(new_id)
+                if invoice_no:
+                    existing_invoice_nos.add(invoice_no)
+                existing_invoice_hashes.update(invoice_hashes)
+            conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        cleanup_errors = []
+        for folder in created_dirs:
+            if folder.is_dir():
+                try:
+                    shutil.rmtree(folder)
+                except OSError as cleanup_exc:
+                    cleanup_errors.append(str(cleanup_exc))
+        if cleanup_errors:
+            raise RuntimeError(
+                f"{exc}；失败后的附件目录清理未完成：" + "；".join(cleanup_errors)
+            ) from exc
+        raise
+
+    message_parts = ["导入完成" if imported_ids else "没有导入新条目"]
+    if skipped:
+        message_parts.append(f"已跳过 {len(skipped)} 条重复发票")
+    if inspected["tampered"] and imported_ids:
+        message_parts.append("完整性异常条目已标记为严重问题")
+    message = "；".join(message_parts) + "。"
 
     return {
         "imported": len(imported_ids),
+        "skipped": skipped,
         "tampered": inspected["tampered"],
         "entry_ids": imported_ids,
-        "message": "导入完成（该包曾被修改，已按你的确认导入）。" if inspected["tampered"] else "导入完成。",
+        "message": message,
     }

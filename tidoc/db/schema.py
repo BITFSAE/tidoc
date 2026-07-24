@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE INDEX IF NOT EXISTS idx_entries_profile ON entries(profile_id);
 CREATE INDEX IF NOT EXISTS idx_entries_title   ON entries(title);
 CREATE INDEX IF NOT EXISTS idx_entries_status  ON entries(status);
+CREATE INDEX IF NOT EXISTS idx_entries_invoice_no ON entries(invoice_no);
 
 -- 可改字段的 origin/current 双值。current != origin 即永久打上人工修改标记。
 CREATE TABLE IF NOT EXISTS entry_fields (

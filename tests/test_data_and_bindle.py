@@ -5,7 +5,15 @@ import zipfile
 import base64
 from decimal import Decimal
 
-from tidoc.db import STATUS_COMPLETE, TYPE_INVOICE_XML
+from tidoc.db import (
+    STATUS_COMPLETE,
+    TYPE_INVOICE_XML,
+    AttachmentRepo,
+    Database,
+    DataRoot,
+    EntryRepo,
+    ProfileRepo,
+)
 from tidoc.engine import parse_xml
 from tidoc.engine.models import ParsedInvoice
 from tidoc.services import export_bindle, import_bindle, inspect_bindle
@@ -415,6 +423,44 @@ def test_bindle_round_trip_and_tamper(repos, sample_xmls, tmp_path):
     res = import_bindle(repos["entries"], repos["attachments"], tampered, p["id"])
     assert res["imported"] == 0
 
-    # 允许强制导入
-    res2 = import_bindle(repos["entries"], repos["attachments"], out, p["id"])
+    # 导入到另一份数据库，模拟成员之间交换
+    target_root = DataRoot(tmp_path / "target")
+    target_db = Database(target_root.db_path)
+    target_profiles = ProfileRepo(target_db)
+    target_profile = target_profiles.create("王五", "赵老师")
+    target_entries = EntryRepo(target_db)
+    target_attachments = AttachmentRepo(target_db, target_root)
+    res2 = import_bindle(
+        target_entries, target_attachments, out, target_profile["id"]
+    )
     assert res2["imported"] == 2
+
+    # 同一绑定包再次导入时跳过重复发票
+    duplicate = import_bindle(
+        target_entries, target_attachments, out, target_profile["id"]
+    )
+    assert duplicate["imported"] == 0
+    assert len(duplicate["skipped"]) == 2
+    assert "跳过 2 条重复发票" in duplicate["message"]
+
+    # 用户确认导入完整性异常的包后，条目必须实际标记为严重问题
+    suspicious_root = DataRoot(tmp_path / "suspicious")
+    suspicious_db = Database(suspicious_root.db_path)
+    suspicious_profiles = ProfileRepo(suspicious_db)
+    suspicious_profile = suspicious_profiles.create("赵六", "审核人")
+    suspicious_entries = EntryRepo(suspicious_db)
+    suspicious_attachments = AttachmentRepo(suspicious_db, suspicious_root)
+    suspicious = import_bindle(
+        suspicious_entries,
+        suspicious_attachments,
+        tampered,
+        suspicious_profile["id"],
+        allow_tampered=True,
+    )
+    assert suspicious["imported"] == 2
+    assert all(
+        entry["check_status"] == "blocked"
+        and "完整性校验未通过" in entry["check_message"]
+        and entry["status"] == "partial"
+        for entry in suspicious_entries.list()
+    )

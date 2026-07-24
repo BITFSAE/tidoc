@@ -39,7 +39,10 @@ def test_loose_material_matching_does_not_reuse_previous_import_scope():
 
     assert "autoBindMaterialInfos(infos, []," in loose_handler
     assert "recentImportedEntryIds" not in source
-    assert "autoBindMaterialInfos(pendingMaterialInfos, r.created_entries || [])" in source
+    assert "pendingMaterialInfos.length && createdEntries.length" in source
+    assert "autoBindMaterialInfos(pendingMaterialInfos, createdEntries)" in source
+    assert '<b>未创建：</b>${esc(g.error)}' in source
+    assert "未创建：${r.failed[0].error}" in source
 
 
 def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints():

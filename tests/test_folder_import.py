@@ -222,6 +222,10 @@ def test_extract_payment_amount_from_ocr_text():
     assert _payment_amount_from_text(
         "商品型号 ZTPV -25\n-34.20\n支付成功"
     ) == "34.20"
+    assert _payment_amount_from_text(
+        "交易详情\nK-5204K导热硅胶\n卡夫**店\n-12.70\n交易成功\n"
+        "招商银行储蓄卡（0097）"
+    ) == "12.70"
 
 
 def test_material_binding_suggestion_requires_unique_match():

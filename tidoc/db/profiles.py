@@ -9,6 +9,7 @@ from .database import Database
 
 # 供打印导出组件使用的可选字段
 OPTIONAL_FIELDS = ("student_id", "contact", "bank_name", "bank_card", "season")
+MULTI_CLAIMANT_PREF_KEY = "tidoc.multiClaimantMode"
 
 
 def _now() -> str:
@@ -27,9 +28,10 @@ class ProfileRepo:
         if not name.strip() or not reviewer.strip():
             raise ValueError("本人姓名与审核人均为必填。")
         profile_id = uuid.uuid4().hex
+        previous_count = self._count()
         if is_default:
             self.db.conn.execute("UPDATE profiles SET is_default = 0")
-        elif self._count() == 0:
+        elif previous_count == 0:
             is_default = True  # 第一个身份自动设为默认
         cols = {k: optional.get(k, "") for k in OPTIONAL_FIELDS}
         self.db.conn.execute(
@@ -40,6 +42,12 @@ class ProfileRepo:
              cols["student_id"], cols["contact"], cols["bank_name"],
              cols["bank_card"], cols["season"], _now()),
         )
+        if previous_count == 1:
+            self.db.conn.execute(
+                """INSERT INTO meta(key, value) VALUES(?, '1')
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (MULTI_CLAIMANT_PREF_KEY,),
+            )
         self.db.conn.commit()
         return self.get(profile_id)
 

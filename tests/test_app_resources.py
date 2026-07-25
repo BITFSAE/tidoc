@@ -74,7 +74,32 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "tidoc.paymentScreenshotOcr" in source
     assert "tidoc.defaultPaidToInvoiceTotal" in source
     assert "setDefaultPaidInvoice" in source
+    assert "tidoc.bindle.includeNotes" in source
+    assert "tidoc.bindle.includeTags" in source
+    assert "setBindleNotes" in source
+    assert "setBindleTags" in source
+    assert "已自动开启代填模式" in source
+    assert 'id="setComponentsUpdate"' in source
+    assert 'id="setPrintComponent"' not in source
+    assert 'id="setUpdate"' not in source
+    assert "软件与组件" in source
+    assert "BV1oegQ6TEXc" in source
+    assert 'id="setBilibili"' in source
+    assert "Api.listTitles" in source
+    assert "refreshTitleOptions" in source
+    assert "has-custom-title" in source
+    assert "title-notice-dot" in html
+    assert ".title-filter-chip.has-custom-title .title-notice-dot" in css
+    assert "bindleNotesMode ? '包含' : '不包含'" not in source
+    assert "autoUpdateMode ? '已开启' : '未开启'" not in source
     assert "updateEntryProfiles" in source
+    card_source = source.split("function entryCard(e)", 1)[1].split(
+        "function itemCardLabel", 1
+    )[0]
+    assert "batchBadges" in card_source
+    assert "e.batches" in card_source
+    assert "compBadge" not in card_source
+    assert "${compBadge}" not in card_source
     assert 'id="changeProfileBtn"' in html
     assert ".main { display: flex; flex-direction: column; min-width: 0; min-height: 0;" in css
     assert "flex: 1; min-height: 0; overflow-y: auto" in css

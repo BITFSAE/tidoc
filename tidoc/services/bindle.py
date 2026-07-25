@@ -2,6 +2,7 @@
 
 一个 zip 包，内含：
 - entries.json     结构化条目数据（含字段级修改标记与历史，不可擦除）
+                   以及报账人清单和每条发票的归属
 - summary.json     汇总信息文本（第 8.4 节）
 - attachments/     规范命名的 PDF / 截图 / 查验单
 - signatures.json  HMAC 签名清单（第 6.1 节）
@@ -23,16 +24,41 @@ from ..db.entries import EntryRepo
 from .signing import MANIFEST_NAME, sign_bytes, verify
 from .summary import build_summary
 
-BINDLE_VERSION = 1
+BINDLE_VERSION = 2
 ENTRIES_NAME = "entries.json"
 SUMMARY_NAME = "summary.json"
 
 
-def _serialize_entry(entry: dict) -> dict:
+def _serialize_entry(
+    entry: dict,
+    *,
+    include_notes: bool = True,
+    include_tags: bool = True,
+) -> dict:
     """挑出需要随包走的字段：识别字段、可改字段的 origin/current/modified、
     明细、附件元数据、字段历史。"""
+    fields = {
+        field: value
+        for field, value in entry.get("fields", {}).items()
+        if include_notes or field != "notes"
+    }
+    history = [
+        {k: h.get(k) for k in ("field", "old_value", "new_value", "profile_id", "changed_at")}
+        for h in entry.get("history", [])
+        if include_notes or h.get("field") != "notes"
+    ]
+    attachments = []
+    for attachment in entry.get("attachments", []):
+        serialized_attachment = {
+            k: attachment.get(k)
+            for k in ("id", "type", "original_name", "stored_path", "sha256", "added_at")
+        }
+        serialized_attachment["note"] = attachment.get("note", "") if include_notes else ""
+        attachments.append(serialized_attachment)
+
     return {
         "id": entry["id"],
+        "profile_id": entry.get("profile_id", ""),
         "title": entry.get("title", ""),
         "invoice_no": entry.get("invoice_no", ""),
         "invoice_date": entry.get("invoice_date", ""),
@@ -41,26 +67,30 @@ def _serialize_entry(entry: dict) -> dict:
         "buyer_name": entry.get("buyer_name", ""),
         "buyer_tax_id": entry.get("buyer_tax_id", ""),
         "category": entry.get("category", ""),
-        "tags": entry.get("tags", []),
+        "tags": entry.get("tags", []) if include_tags else [],
         "status": entry.get("status", ""),
         "check_status": entry.get("check_status", ""),
         "check_message": entry.get("check_message", ""),
         "source": entry.get("source", ""),
         "profile_name": entry.get("_profile_name", ""),
         "reviewer": entry.get("_reviewer", ""),
-        "fields": entry.get("fields", {}),
+        "fields": fields,
         "items": [
             {k: it.get(k) for k in ("name", "actual_name", "unit", "quantity", "unit_price", "total", "spec", "ordinal")}
             for it in entry.get("items", [])
         ],
-        "attachments": [
-            {k: a.get(k) for k in ("id", "type", "original_name", "stored_path", "sha256", "note", "added_at")}
-            for a in entry.get("attachments", [])
-        ],
-        "history": [
-            {k: h.get(k) for k in ("field", "old_value", "new_value", "profile_id", "changed_at")}
-            for h in entry.get("history", [])
-        ],
+        "attachments": attachments,
+        "history": history,
+    }
+
+
+def _serialize_profile(profile: dict) -> dict:
+    """绑定包只携带发票归属所需的报账人字段，不携带本机收款信息。"""
+    return {
+        "id": profile.get("id", ""),
+        "name": profile.get("name", ""),
+        "reviewer": profile.get("reviewer", ""),
+        "is_default": bool(profile.get("is_default")),
     }
 
 
@@ -70,6 +100,9 @@ def export_bindle(
     entry_ids: list[str],
     out_path: str | Path,
     profile_lookup: dict[str, dict] | None = None,
+    *,
+    include_notes: bool = True,
+    include_tags: bool = True,
 ) -> Path:
     """把选定条目连同附件打成一个 .tidoc 包，内嵌 HMAC 签名清单。"""
     out_path = Path(out_path)
@@ -78,6 +111,7 @@ def export_bindle(
     profile_lookup = profile_lookup or {}
 
     serialized, signatures = [], {}
+    referenced_profile_ids: set[str] = set()
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for eid in entry_ids:
             entry = entries_repo.get(eid)
@@ -86,7 +120,19 @@ def export_bindle(
             prof = profile_lookup.get(entry.get("profile_id"), {})
             entry["_profile_name"] = prof.get("name", "")
             entry["_reviewer"] = prof.get("reviewer", "")
-            serialized.append(_serialize_entry(entry))
+            if entry.get("profile_id"):
+                referenced_profile_ids.add(entry["profile_id"])
+            referenced_profile_ids.update(
+                h.get("profile_id", "") for h in entry.get("history", [])
+                if h.get("profile_id")
+            )
+            serialized.append(
+                _serialize_entry(
+                    entry,
+                    include_notes=include_notes,
+                    include_tags=include_tags,
+                )
+            )
             # 写附件文件，并对每个文件签名
             for att in entry.get("attachments", []):
                 abs_path = attachments_repo.data_root.attachments_dir / att["stored_path"]
@@ -96,9 +142,27 @@ def export_bindle(
                 zf.write(abs_path, arcname)
                 signatures[arcname] = sign_bytes(abs_path.read_bytes())
 
-        entries_payload = {"bindle_version": BINDLE_VERSION, "entries": serialized}
+        profiles = [
+            _serialize_profile(profile_lookup[profile_id])
+            for profile_id in referenced_profile_ids
+            if profile_id in profile_lookup
+        ]
+        profiles.sort(key=lambda p: (not p["is_default"], p["name"], p["reviewer"], p["id"]))
+        entries_payload = {
+            "bindle_version": BINDLE_VERSION,
+            "profiles": profiles,
+            "options": {
+                "include_notes": include_notes,
+                "include_tags": include_tags,
+            },
+            "entries": serialized,
+        }
         entries_bytes = json.dumps(entries_payload, ensure_ascii=False, indent=2).encode("utf-8")
-        summary_bytes = json.dumps(build_summary(entries_repo, entry_ids), ensure_ascii=False, indent=2).encode("utf-8")
+        summary_payload = build_summary(entries_repo, entry_ids)
+        if not include_notes:
+            for record in summary_payload.get("entries", []):
+                record.pop("notes", None)
+        summary_bytes = json.dumps(summary_payload, ensure_ascii=False, indent=2).encode("utf-8")
 
         zf.writestr(ENTRIES_NAME, entries_bytes)
         zf.writestr(SUMMARY_NAME, summary_bytes)
@@ -144,6 +208,8 @@ def inspect_bindle(path: str | Path) -> dict:
 
     return {
         "entries": entries_payload.get("entries", []),
+        "profiles": entries_payload.get("profiles", []),
+        "options": entries_payload.get("options", {}),
         "summary": summary,
         "tampered": tampered,
         "verified": not tampered,
@@ -159,7 +225,8 @@ def import_bindle(
 ) -> dict:
     """把一个 .tidoc 包导入到当前库，附件落地到指定条目目录。
 
-    默认拒绝导入被篡改的包（allow_tampered=False）。导入的条目挂到 profile_id 名下，
+    默认拒绝导入被篡改的包（allow_tampered=False）。新版绑定包会按姓名和审核人
+    复用或创建报账人并恢复每条发票的归属；旧绑定包缺少身份时才挂到 profile_id。
     保留原始识别字段、可改字段的修改标记与历史（不可擦除）。
     返回 {"imported": n, "tampered": [...], "entry_ids": [...]}。
     """
@@ -172,6 +239,8 @@ def import_bindle(
             "skipped": [],
             "tampered": inspected["tampered"],
             "entry_ids": [],
+            "profiles_imported": 0,
+            "profile_ids": [],
             "message": "绑定包已被外部修改，已拒绝导入。",
         }
 
@@ -195,6 +264,52 @@ def import_bindle(
                   AND TRIM(COALESCE(sha256, '')) <> ''"""
         ).fetchall()
     }
+    package_profiles = {
+        str(profile.get("id") or ""): profile
+        for profile in inspected.get("profiles", [])
+        if str(profile.get("id") or "")
+    }
+    existing_profiles = [dict(row) for row in conn.execute("SELECT * FROM profiles").fetchall()]
+    profile_count_before = len(existing_profiles)
+    profile_by_identity = {
+        (str(profile.get("name") or "").strip(), str(profile.get("reviewer") or "").strip()): profile["id"]
+        for profile in existing_profiles
+    }
+    source_profile_map: dict[str, str] = {}
+    created_profile_ids: list[str] = []
+
+    def resolve_profile(profile: dict | None, source_id: str = "") -> str:
+        if source_id and source_id in source_profile_map:
+            return source_profile_map[source_id]
+        profile = profile or {}
+        name = str(profile.get("name") or "").strip()
+        reviewer = str(profile.get("reviewer") or "").strip()
+        if not name or not reviewer:
+            if not profile_id:
+                raise ValueError("绑定包缺少可用的报账人信息，且未指定导入归属。")
+            if source_id:
+                source_profile_map[source_id] = profile_id
+            return profile_id
+
+        identity = (name, reviewer)
+        destination_id = profile_by_identity.get(identity)
+        if not destination_id:
+            destination_id = uuid.uuid4().hex
+            is_default = int(
+                not existing_profiles
+                and not created_profile_ids
+                and bool(profile.get("is_default"))
+            )
+            conn.execute(
+                """INSERT INTO profiles(id, name, reviewer, is_default, created_at)
+                   VALUES(?,?,?,?,?)""",
+                (destination_id, name, reviewer, is_default, now),
+            )
+            profile_by_identity[identity] = destination_id
+            created_profile_ids.append(destination_id)
+        if source_id:
+            source_profile_map[source_id] = destination_id
+        return destination_id
 
     try:
         with zipfile.ZipFile(path, "r") as zf:
@@ -217,6 +332,16 @@ def import_bindle(
                     })
                     continue
 
+                source_profile_id = str(e.get("profile_id") or "")
+                source_profile = package_profiles.get(source_profile_id)
+                if source_profile is None and (e.get("profile_name") or e.get("reviewer")):
+                    # v1 绑定包虽没有 profiles 清单，但每条仍带姓名和审核人。
+                    source_profile = {
+                        "name": e.get("profile_name", ""),
+                        "reviewer": e.get("reviewer", ""),
+                    }
+                destination_profile_id = resolve_profile(source_profile, source_profile_id)
+
                 check_status = e.get("check_status", "warning")
                 check_message = e.get("check_message", "")
                 status = e.get("status", "draft")
@@ -232,7 +357,7 @@ def import_bindle(
                        seller, total, buyer_name, buyer_tax_id, category, tags, status,
                        check_status, check_message, source, created_at, updated_at)
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (new_id, profile_id, e.get("title", ""), invoice_no,
+                    (new_id, destination_profile_id, e.get("title", ""), invoice_no,
                      e.get("invoice_date", ""), e.get("seller", ""), e.get("total", ""),
                      e.get("buyer_name", ""), e.get("buyer_tax_id", ""), e.get("category", ""),
                      json.dumps(e.get("tags", []), ensure_ascii=False), status,
@@ -261,11 +386,23 @@ def import_bindle(
                          it.get("spec", ""), it.get("ordinal", 0)),
                     )
                 for h in e.get("history", []):
+                    history_source_profile_id = str(h.get("profile_id") or "")
+                    if history_source_profile_id in package_profiles:
+                        history_profile_id = resolve_profile(
+                            package_profiles[history_source_profile_id],
+                            history_source_profile_id,
+                        )
+                    elif history_source_profile_id:
+                        history_profile_id = source_profile_map.get(
+                            history_source_profile_id, destination_profile_id
+                        )
+                    else:
+                        history_profile_id = ""
                     conn.execute(
                         """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)
                            VALUES(?,?,?,?,?,?)""",
                         (new_id, h.get("field", ""), h.get("old_value", ""), h.get("new_value", ""),
-                         h.get("profile_id", ""), h.get("changed_at", now)),
+                         history_profile_id, h.get("changed_at", now)),
                     )
                 # 附件：从包里解出到新条目目录，重建记录
                 dest_dir = attachments_repo.data_root.entry_dir(new_id)
@@ -288,6 +425,24 @@ def import_bindle(
                 if invoice_no:
                     existing_invoice_nos.add(invoice_no)
                 existing_invoice_hashes.update(invoice_hashes)
+
+            if imported_ids and created_profile_ids:
+                has_default = conn.execute(
+                    "SELECT 1 FROM profiles WHERE is_default = 1 LIMIT 1"
+                ).fetchone()
+                if not has_default:
+                    conn.execute(
+                        "UPDATE profiles SET is_default = 1 WHERE id = ?",
+                        (created_profile_ids[0],),
+                    )
+                profile_count_after = conn.execute(
+                    "SELECT COUNT(*) c FROM profiles"
+                ).fetchone()["c"]
+                if profile_count_before < 2 <= profile_count_after:
+                    conn.execute(
+                        """INSERT INTO meta(key, value) VALUES('tidoc.multiClaimantMode', '1')
+                           ON CONFLICT(key) DO UPDATE SET value = excluded.value"""
+                    )
             conn.commit()
     except Exception as exc:
         conn.rollback()
@@ -309,6 +464,8 @@ def import_bindle(
         message_parts.append(f"已跳过 {len(skipped)} 条重复发票")
     if inspected["tampered"] and imported_ids:
         message_parts.append("完整性异常条目已标记为严重问题")
+    if created_profile_ids:
+        message_parts.append(f"已恢复 {len(created_profile_ids)} 个报账人")
     message = "；".join(message_parts) + "。"
 
     return {
@@ -316,5 +473,7 @@ def import_bindle(
         "skipped": skipped,
         "tampered": inspected["tampered"],
         "entry_ids": imported_ids,
+        "profiles_imported": len(created_profile_ids),
+        "profile_ids": created_profile_ids,
         "message": message,
     }

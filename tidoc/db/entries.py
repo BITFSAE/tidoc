@@ -119,6 +119,7 @@ class EntryRepo:
         entry["fields"] = self._fields(entry_id)
         entry["items"] = self._items(entry_id)
         entry["attachments"] = self._attachments(entry_id)
+        entry["batches"] = self._batches(entry_id)
         entry["history"] = self.history(entry_id)
         # 按类型汇总附件在场情况，供完整度派生（与 list 保持一致）
         types = {a["type"] for a in entry["attachments"]}
@@ -155,6 +156,20 @@ class EntryRepo:
             "SELECT * FROM attachments WHERE entry_id = ? ORDER BY added_at", (entry_id,)
         ).fetchall()
         return [_row_to_dict(r) for r in rows]
+
+    def _batches(self, entry_id: str) -> list[dict]:
+        rows = self.db.conn.execute(
+            """SELECT b.id, b.name, b.archived
+                 FROM batch_entries be
+                 JOIN batches b ON b.id = be.batch_id
+                WHERE be.entry_id = ?
+                ORDER BY b.archived ASC, b.updated_at DESC""",
+            (entry_id,),
+        ).fetchall()
+        return [
+            {"id": row["id"], "name": row["name"], "archived": bool(row["archived"])}
+            for row in rows
+        ]
 
     def history(self, entry_id: str) -> list[dict]:
         rows = self.db.conn.execute(
@@ -261,6 +276,7 @@ class EntryRepo:
         modified_by_entry = {entry_id: [] for entry_id in entry_ids}
         attachments_by_entry = {entry_id: {} for entry_id in entry_ids}
         fields_by_entry = {entry_id: {} for entry_id in entry_ids}
+        batches_by_entry = {entry_id: [] for entry_id in entry_ids}
         for offset in range(0, len(entry_ids), QUERY_BATCH_SIZE):
             batch_ids = entry_ids[offset:offset + QUERY_BATCH_SIZE]
             placeholders = ",".join("?" for _ in batch_ids)
@@ -295,6 +311,21 @@ class EntryRepo:
                     "value_source": row["value_source"] or "",
                 }
 
+            batch_rows = self.db.conn.execute(
+                f"""SELECT be.entry_id, b.id, b.name, b.archived
+                      FROM batch_entries be
+                      JOIN batches b ON b.id = be.batch_id
+                     WHERE be.entry_id IN ({placeholders})
+                     ORDER BY b.archived ASC, b.updated_at DESC""",
+                batch_ids,
+            ).fetchall()
+            for row in batch_rows:
+                batches_by_entry[row["entry_id"]].append({
+                    "id": row["id"],
+                    "name": row["name"],
+                    "archived": bool(row["archived"]),
+                })
+
         for r in rows:
             entry = _row_to_dict(r)
             entry["tags"] = json.loads(entry.get("tags") or "[]")
@@ -307,6 +338,7 @@ class EntryRepo:
             entry["has_invoice"] = bool(by_type.get("invoice_pdf") or by_type.get("invoice_xml"))
             entry["has_payment"] = bool(by_type.get("payment_screenshot"))
             entry["has_inspection"] = bool(by_type.get("inspection_pdf"))
+            entry["batches"] = batches_by_entry[entry["id"]]
             # 列表附上可改字段当前值（备注 / 实付金额 / 实际物资名），供卡片预览
             ef = fields_by_entry[entry["id"]]
             entry["fields"] = ef
@@ -683,6 +715,16 @@ class EntryRepo:
                 if t:
                     seen.add(t)
         return sorted(seen)
+
+    def all_titles(self) -> list[str]:
+        """当前库实际使用的全部抬头，供主工具条生成可用筛选项。"""
+        rows = self.db.conn.execute(
+            """SELECT DISTINCT TRIM(title) AS title
+                 FROM entries
+                WHERE TRIM(COALESCE(title, '')) <> ''
+                ORDER BY title"""
+        ).fetchall()
+        return [row["title"] for row in rows]
 
     def _touch(self, entry_id: str) -> None:
         self.db.conn.execute("UPDATE entries SET updated_at = ? WHERE id = ?", (_now(), entry_id))

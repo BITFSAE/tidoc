@@ -2,6 +2,7 @@
 
 const State = {
   profiles: [],
+  profilesLoaded: false,
   profileById: {},
   currentProfileId: null,
   activeTitle: '',
@@ -68,12 +69,16 @@ function taskProgress(message) {
 
 const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基金会': 'found' };
 const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
+const BUILTIN_TITLES = ['北京理工大学', '北京理工大学教育基金会'];
+const BILIBILI_GUIDE_URL = 'https://www.bilibili.com/video/BV1oegQ6TEXc/';
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
 const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
 const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
 const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
 const PAYMENT_OCR_KEY = 'tidoc.paymentScreenshotOcr';
 const DEFAULT_PAID_TO_INVOICE_KEY = 'tidoc.defaultPaidToInvoiceTotal';
+const BINDLE_INCLUDE_NOTES_KEY = 'tidoc.bindle.includeNotes';
+const BINDLE_INCLUDE_TAGS_KEY = 'tidoc.bindle.includeTags';
 const VERIFICATION_WATCH_DIR_KEY = 'tidoc.invoiceVerification.watchDirectory';
 const AUTO_UPDATE_KEY = 'tidoc.update.autoCheck';
 const OPERATOR_PREF_KEYS = {
@@ -133,6 +138,7 @@ const I = {
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>',
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   github: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-1.05-.01-1.9-2.78.62-3.37-1.21-3.37-1.21-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .08 1.53 1.06 1.53 1.06.9 1.57 2.35 1.12 2.92.85.09-.66.35-1.12.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.3 9.3 0 0 1 12 6.95a9.3 9.3 0 0 1 2.5.35c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.59.69.49A10.24 10.24 0 0 0 22 12.23C22 6.58 17.52 2 12 2Z"/></svg>',
+  bilibili: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 3 3 3M16 3l-3 3"/><rect x="3" y="6" width="18" height="14" rx="3"/><path d="M8 12v2M16 12v2M9 17h6"/></svg>',
 };
 function iconPencil(s) { return wrapSvg(I.pencil, s); }
 function iconNote(s) { return wrapSvg(I.note, s); }
@@ -376,9 +382,39 @@ async function refreshTagOptions() {
     State.allTags.map((t) => `<option value="${esc(t)}"${t === cur ? ' selected' : ''}>${esc(t)}</option>`).join('');
 }
 
+async function refreshTitleOptions() {
+  const sel = $('#filterTitle');
+  if (!sel) return;
+  const current = State.activeTitle || sel.value || '';
+  try {
+    const usedTitles = await Api.listTitles();
+    const customTitles = usedTitles.filter((title) => !BUILTIN_TITLES.includes(title));
+    const titles = [...BUILTIN_TITLES, ...customTitles];
+    sel.innerHTML = '<option value="">全部</option>' + titles.map((title) =>
+      `<option value="${esc(title)}">${esc(TITLE_SHORT[title] || title)}</option>`
+    ).join('');
+    const available = !current || titles.includes(current);
+    sel.value = available ? current : '';
+    if (!available) State.activeTitle = '';
+    const chip = sel.closest('.title-filter-chip');
+    chip?.classList.toggle('has-custom-title', customTitles.length > 0);
+  } catch (e) {
+    // 抬头选项刷新失败不阻断条目列表，保留当前静态选项。
+  }
+}
+
 async function loadProfiles() {
+  const previousCount = State.profiles.length;
+  const hadLoaded = State.profilesLoaded;
   State.profiles = await Api.listProfiles();
+  State.profilesLoaded = true;
   State.profileById = Object.fromEntries(State.profiles.map((p) => [p.id, p]));
+  if (hadLoaded && previousCount < 2 && State.profiles.length >= 2 && !State.multiClaimantMode) {
+    State.multiClaimantMode = true;
+    localStorage.setItem(MULTI_CLAIMANT_KEY, '1');
+    try { await Api.setAppPreference(MULTI_CLAIMANT_KEY, '1'); } catch (e) {}
+    toast('已自动开启代填模式', 'ok');
+  }
   renderProfileSelects();
   if (!State.profiles.length) {
     openProfileManager(true);
@@ -469,6 +505,7 @@ function currentFilters() {
 
 async function refreshEntries() {
   try {
+    await refreshTitleOptions();
     State.currentBatch = State.batchFilter ? await Api.getBatch(State.batchFilter) : null;
     State.entries = await Api.listEntries(currentFilters());
     if (State.quickView === 'incomplete') {
@@ -649,13 +686,10 @@ function entryCard(e) {
   const owner = State.profileById[e.profile_id];
   const ownerBadge = (State.multiClaimantMode || State.profiles.length > 1) && owner
     ? `<span class="badge person"${owner.reviewer ? ` title="审核人：${esc(owner.reviewer)}"` : ''}>${esc(owner.name)}</span>` : '';
-
-  // 完整度：基于后端派生的 completeness（状态自动推导），缺项做 tooltip
-  const comp = e.completeness || { ready: false, status: e.status, missing: [] };
-  const dstatus = comp.status || e.status;
-  const compBadge = comp.ready
-    ? `<span class="badge complete-ready" title="材料齐全、实付已填、校验通过">齐备</span>`
-    : `<span class="badge status-${dstatus}" title="${comp.missing.length ? '待补：' + comp.missing.join('、') : ''}">${STATUS_LABEL[dstatus] || dstatus}</span>`;
+  const batchBadges = (e.batches || []).map((batch) =>
+    `<span class="badge batch${batch.archived ? ' archived' : ''}" ` +
+    `title="${batch.archived ? '已归档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</span>`
+  ).join('');
 
   const itemTitle = actualCur || (e.items && e.items[0] && (e.items[0].actual_name || e.items[0].name)) || '未填物资名称';
   const notesPreview = notesCur
@@ -670,7 +704,7 @@ function entryCard(e) {
     <div class="entry-line1">
       <span class="entry-item-title" data-tooltip-overflow="${esc(itemTitle)}">${esc(itemTitle)}</span>
       ${ownerBadge}
-      ${compBadge}
+      ${batchBadges}
       ${checkBadge}
       ${modified}
     </div>
@@ -1088,7 +1122,7 @@ function openArchivedBatchesFlow() {
   body.querySelectorAll('[data-restore-batch]').forEach((btn) => {
     btn.onclick = async () => {
       await Api.archiveBatch(btn.dataset.restoreBatch, false);
-      m.close(); await loadBatches(); toast('批次已恢复', 'ok');
+      m.close(); await loadBatches(); await refreshEntries(); toast('批次已恢复', 'ok');
     };
   });
 }
@@ -1106,13 +1140,17 @@ function openBatchMenu(x, y, b) {
   item(b.archived ? '取消归档' : '归档', async () => {
     await Api.archiveBatch(b.id, !b.archived); await loadBatches();
     if (!b.archived && State.batchFilter === b.id) focusBatch('');
+    else await refreshEntries();
     toast(b.archived ? '已取消归档' : '已归档', 'ok');
   });
   item('删除批次', async () => {
     if (!confirm(`删除批次「${b.name}」？条目本身不会被删除。`)) return;
+    const wasFocused = State.batchFilter === b.id;
     await Api.deleteBatch(b.id);
-    if (State.batchFilter === b.id) focusBatch('');
-    await loadBatches(); toast('批次已删除', 'ok');
+    await loadBatches();
+    if (wasFocused) focusBatch('');
+    else await refreshEntries();
+    toast('批次已删除', 'ok');
   }, true);
   menu.style.left = Math.min(x, window.innerWidth - 190) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - 200) + 'px';
@@ -1133,8 +1171,7 @@ async function renameBatchFlow(b) {
       try {
         await Api.updateBatch(b.id, { name, note: body.querySelector('#bNote').value });
         m.close(); await loadBatches();
-        if (State.batchFilter === b.id) await refreshEntries();
-        else renderBatchContext();
+        await refreshEntries();
         toast('已保存', 'ok');
       } catch (e) { toast(e.message, 'err'); }
     })],
@@ -2042,7 +2079,8 @@ function editProfileFlow(p, onDone) {
 
 async function openSettings() {
   let paths, printStatus, appInfo, operatorPrefs, multiMode, paymentOcrMode;
-  let defaultPaidMode, autoUpdateMode, maintenance, verificationPrefs;
+  let defaultPaidMode, bindleNotesMode, bindleTagsMode;
+  let autoUpdateMode, maintenance, verificationPrefs;
   try {
     paths = await Api.dataRoot();
     printStatus = await Api.printComponentStatus();
@@ -2057,6 +2095,8 @@ async function openSettings() {
       Api.appPreference(MULTI_CLAIMANT_KEY, State.multiClaimantMode ? '1' : '0'),
       Api.appPreference(PAYMENT_OCR_KEY, State.paymentOcrEnabled ? '1' : '0'),
       Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, State.defaultPaidToInvoice ? '1' : '0'),
+      Api.appPreference(BINDLE_INCLUDE_NOTES_KEY, '1'),
+      Api.appPreference(BINDLE_INCLUDE_TAGS_KEY, '1'),
       Api.appPreference(AUTO_UPDATE_KEY, '0'),
       Api.invoiceVerificationPreferences(),
     ]);
@@ -2070,8 +2110,10 @@ async function openSettings() {
     multiMode = prefValues[5] === '1';
     paymentOcrMode = prefValues[6] !== '0';
     defaultPaidMode = prefValues[7] !== '0';
-    autoUpdateMode = prefValues[8] === '1';
-    verificationPrefs = prefValues[9];
+    bindleNotesMode = prefValues[8] !== '0';
+    bindleTagsMode = prefValues[9] !== '0';
+    autoUpdateMode = prefValues[10] === '1';
+    verificationPrefs = prefValues[11];
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
 
@@ -2080,7 +2122,9 @@ async function openSettings() {
   const printBadge = printStatus.available
     ? '<span class="settings-ok">已安装</span>'
     : '<span class="settings-warn">未安装</span>';
-  const printDetail = printStatus.available ? '打印材料' : '安装后可用';
+  const hasAvailableUpdate = (State.updateStatus?.updates || []).some(
+    (item) => item.available
+  );
 
   body.innerHTML = `
     <div class="settings-shell">
@@ -2098,7 +2142,7 @@ async function openSettings() {
             <b>代填模式</b>
             <span>新建/导入时选择报账人</span>
           </div>
-          <label class="switch-line"><input type="checkbox" id="setMultiClaimant" ${multiMode ? 'checked' : ''}/><span>开启</span></label>
+          <label class="switch-line"><input type="checkbox" id="setMultiClaimant" ${multiMode ? 'checked' : ''}/><span>${multiMode ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
 
@@ -2139,6 +2183,20 @@ async function openSettings() {
             <span>开启后，新建或批量导入条目时自动填写；关闭后留空待确认</span>
           </div>
           <label class="switch-line"><input type="checkbox" id="setDefaultPaidInvoice" ${defaultPaidMode ? 'checked' : ''}/><span>${defaultPaidMode ? '已开启' : '已关闭'}</span></label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>绑定包包含备注</b>
+            <span>导出条目备注、附件备注及备注修改记录</span>
+          </div>
+          <label class="switch-line"><input type="checkbox" id="setBindleNotes" ${bindleNotesMode ? 'checked' : ''}/><span>${bindleNotesMode ? '已开启' : '已关闭'}</span></label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>绑定包包含标签</b>
+            <span>关闭后，导出的绑定包不会带出条目标签</span>
+          </div>
+          <label class="switch-line"><input type="checkbox" id="setBindleTags" ${bindleTagsMode ? 'checked' : ''}/><span>${bindleTagsMode ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
 
@@ -2205,24 +2263,18 @@ async function openSettings() {
       <!-- 可选组件与更新 -->
       <div class="settings-block">
         <div class="settings-block-title">组件与更新</div>
-        <div class="settings-row is-actionable" id="setPrintComponent">
+        <div class="settings-row is-actionable" id="setComponentsUpdate">
           <div class="settings-row-copy">
-            <b>打印导出组件 ${printBadge}</b>
-            <span>${printDetail}</span>
+            <b>软件与组件 ${hasAvailableUpdate ? '<span class="settings-warn">有可用更新</span>' : ''}</b>
+            <span>tidoc v${esc(appInfo.version)} · 打印导出组件 ${printBadge}</span>
           </div>
           <button class="btn small ghost">管理</button>
-        </div>
-        <div class="settings-row is-actionable" id="setUpdate">
-          <div class="settings-row-copy">
-            <b>软件更新 ${(State.updateStatus?.updates || []).some((item) => item.available) ? '<span class="settings-warn">有可用更新</span>' : ''}</b>
-          </div>
-          <button class="btn small">检查更新</button>
         </div>
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>启动后检查更新</b>
           </div>
-          <label class="switch-line"><input type="checkbox" id="setAutoUpdate" ${autoUpdateMode ? 'checked' : ''}/><span>${autoUpdateMode ? '已开启' : '未开启'}</span></label>
+          <label class="switch-line"><input type="checkbox" id="setAutoUpdate" ${autoUpdateMode ? 'checked' : ''}/><span>${autoUpdateMode ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
 
@@ -2234,6 +2286,7 @@ async function openSettings() {
           <div class="settings-credit"><button class="link-btn" id="setBitfsae">BITFSAE</button><span>出品</span></div>
           <div class="settings-about-actions">
             <button class="link-btn with-icon" id="setRepo">${wrapSvg(I.github, 14)}<span>GitHub</span></button>
+            <button class="link-btn with-icon" id="setBilibili">${wrapSvg(I.bilibili, 14)}<span>视频说明</span></button>
             <button class="link-btn" id="setGuide">使用提示</button>
           </div>
         </div>
@@ -2259,13 +2312,22 @@ async function openSettings() {
     toast('已保存', 'ok');
   };
   body.querySelector('#setMultiClaimant').onchange = async (ev) => {
-    const value = ev.target.checked ? '1' : '0';
-    State.multiClaimantMode = value === '1';
-    localStorage.setItem(MULTI_CLAIMANT_KEY, value);
+    const enabled = ev.target.checked;
+    const value = enabled ? '1' : '0';
+    const label = ev.target.nextElementSibling;
+    ev.target.disabled = true;
     try {
       await Api.setAppPreference(MULTI_CLAIMANT_KEY, value);
+      State.multiClaimantMode = enabled;
+      localStorage.setItem(MULTI_CLAIMANT_KEY, value);
+      label.textContent = enabled ? '已开启' : '已关闭';
       toast('已保存', 'ok');
-    } catch (e) { toast(e.message, 'err'); }
+    } catch (e) {
+      ev.target.checked = !enabled;
+      toast(e.message, 'err');
+    } finally {
+      ev.target.disabled = false;
+    }
   };
   body.querySelector('#setPaymentOcr').onchange = async (ev) => {
     const enabled = ev.target.checked;
@@ -2299,6 +2361,31 @@ async function openSettings() {
       ev.target.disabled = false;
     }
   };
+  const bindlePreferenceHandler = (key, enabledText, disabledText) => async (ev) => {
+    const enabled = ev.target.checked;
+    const label = ev.target.nextElementSibling;
+    ev.target.disabled = true;
+    try {
+      await Api.setAppPreference(key, enabled ? '1' : '0');
+      label.textContent = enabled ? '已开启' : '已关闭';
+      toast(enabled ? enabledText : disabledText, 'ok');
+    } catch (e) {
+      ev.target.checked = !enabled;
+      toast(e.message, 'err');
+    } finally {
+      ev.target.disabled = false;
+    }
+  };
+  body.querySelector('#setBindleNotes').onchange = bindlePreferenceHandler(
+    BINDLE_INCLUDE_NOTES_KEY,
+    '绑定包将包含备注',
+    '绑定包将不包含备注',
+  );
+  body.querySelector('#setBindleTags').onchange = bindlePreferenceHandler(
+    BINDLE_INCLUDE_TAGS_KEY,
+    '绑定包将包含标签',
+    '绑定包将不包含标签',
+  );
   const renderVerificationWatchDirectory = (path) => {
     const pathNode = body.querySelector('#setVerificationWatchPath');
     const clearBtn = body.querySelector('#setVerificationWatchClear');
@@ -2366,7 +2453,7 @@ async function openSettings() {
     ev.target.disabled = true;
     try {
       await Api.setAppPreference(AUTO_UPDATE_KEY, enabled ? '1' : '0');
-      label.textContent = enabled ? '已开启' : '未开启';
+      label.textContent = enabled ? '已开启' : '已关闭';
       if (enabled) {
         toast('已开启自动检查', 'ok');
         maybeAutoCheckUpdates(true);
@@ -2402,11 +2489,11 @@ async function openSettings() {
   };
 
   body.querySelector('#setProfilesManage').onclick = () => { m.close(); openProfileManager(false); };
-  body.querySelector('#setPrintComponent').onclick = () => { m.close(); openUpdateDialog(); };
-  body.querySelector('#setUpdate').onclick = () => { m.close(); openUpdateDialog(); };
+  body.querySelector('#setComponentsUpdate').onclick = () => { m.close(); openUpdateDialog(); };
   body.querySelector('#setGuide').onclick = () => { m.close(); openUsageGuide(false); };
   body.querySelector('#setBitfsae').onclick = () => Api.openExternalUrl('https://www.bitfsae.com').catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
+  body.querySelector('#setBilibili').onclick = () => Api.openExternalUrl(BILIBILI_GUIDE_URL).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepoLogo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenData').onclick = () => Api.openPath(paths.root).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenExports').onclick = () => Api.openPath(paths.exports).catch((e) => toast(e.message, 'err'));
@@ -2609,7 +2696,7 @@ function usageGuideStepsMarkup() {
     <div><b>3 · 核对修正</b><span>用“待补材料”“识别提醒”“严重问题”筛出待处理条目，在详情中核对实付金额、明细和备注。</span></div>
     <div><b>4 · 组织批次</b><span>勾选条目后装入报账批次、打标签或批量处理；按住 Shift 可连续选择，右键单条可快速移动或补材料。</span></div>
     <div><b>5 · 导出打印</b><span>打印默认按每个条目的发票、付款截图、查验单依次拼接；也可选择按材料类型分别导出，并按需关闭页码编号。</span></div>
-    <div><b>6 · 后续查找</b><span>可按报账人、抬头、批次、状态、日期、金额或关键词筛选；打印导出组件与软件更新在“设置 → 软件更新”管理。</span></div>`;
+    <div><b>6 · 后续查找</b><span>可按报账人、抬头、批次、状态、日期、金额或关键词筛选；打印导出组件与软件更新在“设置 → 组件与更新”统一管理。</span></div>`;
 }
 
 function openUsageGuide(firstRun) {
@@ -3953,7 +4040,7 @@ async function doExport(ids) {
     <div class="export-options">
       <label class="export-option">
         <input type="checkbox" data-export="bindle" checked/>
-        <span><b>绑定包</b><small>给别人导入 tidoc 继续整理，包含条目、附件与签名清单。</small></span>
+        <span><b>绑定包</b><small>包含条目、附件、报账人和签名清单；备注与标签按设置导出。</small></span>
       </label>
       <label class="export-option">
         <input type="checkbox" data-export="excel" checked/>
@@ -4046,7 +4133,9 @@ async function doImport() {
       progress.update('正在导入条目和附件…');
       const r = await Api.importBindle(path, State.currentProfileId, allow);
       progress.update('正在刷新条目列表…');
+      if (r.profiles_imported) await loadProfiles();
       await refreshEntries();
+      await refreshTagOptions();
       toast(r.message + `（${r.imported} 条）`, r.tampered && r.tampered.length ? 'err' : 'ok');
     } finally {
       progress.close();

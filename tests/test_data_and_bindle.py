@@ -3,6 +3,7 @@
 import os
 import zipfile
 import base64
+import json
 from decimal import Decimal
 
 from tidoc.db import (
@@ -24,12 +25,25 @@ def test_profile_first_is_default(repos):
     assert p["is_default"] == 1
     p2 = repos["profiles"].create("王五", "赵老师")
     assert p2["is_default"] == 0
+    mode = repos["db"].conn.execute(
+        "SELECT value FROM meta WHERE key = 'tidoc.multiClaimantMode'"
+    ).fetchone()
+    assert mode["value"] == "1"
 
 
 def test_profile_required_fields(repos):
     import pytest
     with pytest.raises(ValueError):
         repos["profiles"].create("", "李老师")
+
+
+def test_entry_titles_are_listed_for_dynamic_filter(repos):
+    profile = repos["profiles"].create("张三", "李老师")
+    repos["entries"].create(profile["id"], title="北京理工大学")
+    repos["entries"].create(profile["id"], title="第三方公司")
+    repos["entries"].create(profile["id"], title="第三方公司")
+
+    assert repos["entries"].all_titles() == ["北京理工大学", "第三方公司"]
 
 
 def test_field_modification_marks_permanently(repos, sample_xmls):
@@ -465,3 +479,69 @@ def test_bindle_round_trip_and_tamper(repos, sample_xmls, tmp_path):
         and entry["status"] == "partial"
         for entry in suspicious_entries.list()
     )
+
+
+def test_bindle_restores_claimants_and_respects_optional_notes_and_tags(repos, tmp_path):
+    first = repos["profiles"].create("张三", "李老师")
+    second = repos["profiles"].create("王五", "赵老师")
+    first_entry = repos["entries"].create(first["id"])
+    second_entry = repos["entries"].create(second["id"])
+    repos["entries"].update_field(first_entry, "notes", "只在本机保留", first["id"])
+    repos["entries"].set_meta(first_entry, tags=["待补票"])
+    material = tmp_path / "说明.txt"
+    material.write_text("material", encoding="utf-8")
+    repos["attachments"].add(first_entry, material, "other", "附件私密备注")
+
+    package = export_bindle(
+        repos["entries"],
+        repos["attachments"],
+        [first_entry, second_entry],
+        tmp_path / "多人包.tidoc",
+        {first["id"]: first, second["id"]: second},
+        include_notes=False,
+        include_tags=False,
+    )
+    inspected = inspect_bindle(package)
+
+    assert inspected["options"] == {"include_notes": False, "include_tags": False}
+    assert {(p["name"], p["reviewer"]) for p in inspected["profiles"]} == {
+        ("张三", "李老师"),
+        ("王五", "赵老师"),
+    }
+    assert {entry["profile_id"] for entry in inspected["entries"]} == {
+        first["id"], second["id"],
+    }
+    exported_first = next(e for e in inspected["entries"] if e["profile_id"] == first["id"])
+    assert exported_first["tags"] == []
+    assert "notes" not in exported_first["fields"]
+    assert all(h["field"] != "notes" for h in exported_first["history"])
+    assert exported_first["attachments"][0]["note"] == ""
+    assert all("notes" not in entry for entry in inspected["summary"]["entries"])
+
+    target_root = DataRoot(tmp_path / "multi-target")
+    target_db = Database(target_root.db_path)
+    target_profiles = ProfileRepo(target_db)
+    fallback = target_profiles.create("运营同学", "总审核人")
+    target_entries = EntryRepo(target_db)
+    target_attachments = AttachmentRepo(target_db, target_root)
+
+    result = import_bindle(
+        target_entries, target_attachments, package, fallback["id"]
+    )
+
+    assert result["imported"] == 2
+    assert result["profiles_imported"] == 2
+    target_profile_names = {
+        profile["id"]: profile["name"] for profile in target_profiles.list()
+    }
+    imported_owner_names = {
+        target_profile_names[entry["profile_id"]] for entry in target_entries.list()
+    }
+    assert imported_owner_names == {"张三", "王五"}
+    assert target_db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'tidoc.multiClaimantMode'"
+    ).fetchone()["value"] == "1"
+
+    with zipfile.ZipFile(package) as archive:
+        payload = json.loads(archive.read("entries.json"))
+    assert payload["bindle_version"] == 2

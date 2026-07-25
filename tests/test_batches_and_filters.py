@@ -100,6 +100,12 @@ def test_batches_of_entry(repos, sample_xmls):
     b2 = repos["batches"].create("批二", entry_ids=ids)
     names = {x["name"] for x in repos["batches"].batches_of_entry(ids[0])}
     assert names == {"批一", "批二"}
+    assert {x["name"] for x in repos["entries"].get(ids[0])["batches"]} == {
+        "批一", "批二",
+    }
+    assert {x["name"] for x in repos["entries"].list()[0]["batches"]} == {
+        "批一", "批二",
+    }
 
 
 # ------------------------------------------------------------------ 标签
@@ -161,7 +167,8 @@ def test_entry_list_uses_bounded_query_count(repos, sample_xmls):
 
     selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
     assert len(entries) == 3
-    assert len(selects) == 4
+    # 主查询 + 修改字段 / 附件 / 可编辑字段 / 批次归属，仍为固定查询数。
+    assert len(selects) == 5
 
 
 def test_amount_filter_and_sort_are_numeric(repos):

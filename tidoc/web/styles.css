@@ -351,6 +351,13 @@ body {
 }
 .chip-select select:focus { box-shadow: none; }
 .chip-select::after { content: "▾"; margin-left: -10px; color: var(--ink-faint); font-size: 10px; pointer-events: none; }
+.title-filter-chip { position: relative; }
+.title-notice-dot {
+  display: none; position: absolute; top: 4px; right: 4px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--modified); border: 1.5px solid var(--panel-raised);
+  pointer-events: none;
+}
+.title-filter-chip.has-custom-title .title-notice-dot { display: block; }
 .chip-toggle { user-select: none; }
 .chip-toggle select {
   border: none; background: transparent; font-size: 12px; padding: 0; outline: none; cursor: pointer; color: var(--ink);
@@ -577,6 +584,11 @@ body {
 .badge.pass { background: var(--pass-soft); color: var(--pass); }
 .badge.warning { background: var(--warn-soft); color: var(--warn); }
 .badge.blocked { background: var(--blocked-soft); color: var(--blocked); }
+.badge.batch {
+  display: inline-block; max-width: 22ch; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; background: var(--primary-soft); color: var(--primary);
+}
+.badge.batch.archived { background: var(--paper-2); color: var(--ink-faint); }
 .badge.status-draft { background: #eceae3; color: #6b7280; }
 .badge.status-partial { background: var(--warn-soft); color: var(--warn); }
 .badge.status-complete { background: var(--pass-soft); color: var(--pass); }
@@ -907,6 +919,7 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .settings-form-grid { padding: 8px 0 4px; }
 .switch-line { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink); white-space: nowrap; }
 .switch-line input { accent-color: var(--primary); }
+.switch-line > span { min-width: 39px; color: var(--ink-soft); text-align: left; }
 .settings-datapath { display: flex; align-items: center; gap: 10px; padding: 12px 0 6px; flex-wrap: wrap; }
 .settings-datapath code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; background: var(--paper-2); padding: 6px 10px; border-radius: 7px; }
 .settings-datapath-tag { font-size: 11px; color: var(--ink-faint); white-space: nowrap; }

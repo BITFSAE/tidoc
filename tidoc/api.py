@@ -39,6 +39,8 @@ from .db import (
 AUTO_UPDATE_PREF_KEY = "tidoc.update.autoCheck"
 PAYMENT_OCR_PREF_KEY = "tidoc.paymentScreenshotOcr"
 DEFAULT_PAID_TO_INVOICE_PREF_KEY = "tidoc.defaultPaidToInvoiceTotal"
+BINDLE_INCLUDE_NOTES_PREF_KEY = "tidoc.bindle.includeNotes"
+BINDLE_INCLUDE_TAGS_PREF_KEY = "tidoc.bindle.includeTags"
 INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY = (
     "tidoc.invoiceVerification.watchDirectory"
 )
@@ -483,6 +485,10 @@ class Api:
     @_guard
     def list_entries(self, filters=None):
         return self.entries.list(**(filters or {}))
+
+    @_guard
+    def list_titles(self):
+        return self.entries.all_titles()
 
     @_guard
     def get_entry(self, entry_id):
@@ -1137,7 +1143,15 @@ class Api:
         name = out_name or "绑定包"
         out_path = self.data_root.exports_dir / f"{name}.tidoc"
         lookup = {p["id"]: p for p in self.profiles.list()}
-        result = export_bindle(self.entries, self.attachments, entry_ids, out_path, lookup)
+        result = export_bindle(
+            self.entries,
+            self.attachments,
+            entry_ids,
+            out_path,
+            lookup,
+            include_notes=self._preference_value(BINDLE_INCLUDE_NOTES_PREF_KEY, "1") != "0",
+            include_tags=self._preference_value(BINDLE_INCLUDE_TAGS_PREF_KEY, "1") != "0",
+        )
         return {"path": str(result), "count": len(entry_ids)}
 
     @_guard

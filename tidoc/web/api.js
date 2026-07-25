@@ -60,6 +60,7 @@ const Api = (() => {
       args.paymentPaths || [], args.inspectionPath || null, args.status || 'draft'),
 
     listEntries: (filters) => call('list_entries', filters || {}),
+    listTitles: () => call('list_titles'),
     getEntry: (id) => call('get_entry', id),
     updateField: (id, field, value, pid) => call('update_field', id, field, value, pid || ''),
     setRecognizedPaidAmount: (id, value) => call('set_recognized_paid_amount', id, value),

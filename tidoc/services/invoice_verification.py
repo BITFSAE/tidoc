@@ -92,7 +92,7 @@ def make_prefill_script(info: dict) -> str:
   if (!document.getElementById('tidoc-verification-helper')) {{
     const helper = document.createElement('div');
     helper.id = 'tidoc-verification-helper';
-    helper.textContent = '验证码通常不区分大小写。查验成功后点击官网“打印”，另存为 PDF 后会自动归入条目。';
+    helper.textContent = '验证码通常不区分大小写。查验成功后点击官网“打印”，另存为 PDF 后请等待约 1–2 秒，软件识别处理完成后会自动归入条目。';
     helper.style.cssText = [
       'position:fixed', 'left:18px', 'bottom:18px', 'z-index:2147483647',
       'max-width:360px', 'padding:10px 14px', 'border-radius:9px',

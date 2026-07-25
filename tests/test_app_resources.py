@@ -128,6 +128,7 @@ def test_frontend_exposes_explicit_online_verification_flow():
     assert "<ul>" in verification_flow
     assert "验证码在官网填写，通常不区分大小写" in verification_flow
     assert "查验成功后点击官网“打印”" in verification_flow
+    assert "等待约 1–2 秒" in verification_flow
     assert "设置中的归档目录" in verification_flow
     assert "archiveLocationHint" in verification_flow
     assert "VERIFICATION_WATCH_DIR_KEY" in source

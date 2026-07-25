@@ -25,6 +25,24 @@ def test_build_manifest_script(tmp_path):
     assert (release / "upload_plan.tsv").read_text("utf-8").count("\n") == 3
 
 
+def test_build_manifest_keeps_print_version_independent_from_core(tmp_path):
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "tidoc-core-windows-v0.4.0.exe").write_bytes(b"core-win")
+    (release / "tidoc-print-windows-v0.2.1.exe").write_bytes(b"print-win")
+    (release / "tidoc-print-macos-v0.2.1.zip").write_bytes(b"print-mac")
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "build_manifest.py"
+    subprocess.run(
+        [sys.executable, str(script), "--release-dir", str(release), "--version", "0.4.0"],
+        check=True,
+    )
+
+    manifest = json.loads((release / "manifest.json").read_text("utf-8"))
+    assert manifest["components"]["core"]["latest"] == "0.4.0"
+    assert manifest["components"]["print"]["latest"] == "0.2.1"
+
+
 def test_build_manifest_uses_structured_release_notes(tmp_path):
     release = tmp_path / "release"
     release.mkdir()
@@ -67,6 +85,7 @@ def test_set_version_updates_frontend_asset_cache_keys(tmp_path):
     subprocess.run([sys.executable, str(script), "9.8.7"], cwd=tmp_path, check=True)
 
     assert '__version__ = "9.8.7"' in (tmp_path / "tidoc" / "__init__.py").read_text("utf-8")
+    assert '__version__ = "0.1.0"' in (tmp_path / "tidoc_print" / "__init__.py").read_text("utf-8")
     updated = index.read_text("utf-8")
     assert "styles.css?v=9.8.7" in updated
     assert "api.js?v=9.8.7" in updated

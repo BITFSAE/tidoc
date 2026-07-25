@@ -1479,7 +1479,7 @@ async function onlineVerificationFlow(entryId) {
       <ul>
         <li>验证码在官网填写，通常不区分大小写</li>
         <li>查验成功后点击官网“打印”，在系统窗口另存为 PDF</li>
-        <li>保存到${esc(archiveLocationHint)}后会自动归入当前条目</li>
+        <li>保存到${esc(archiveLocationHint)}后，请等待约 1–2 秒，软件识别处理完成后会自动归入当前条目</li>
         ${State.verificationTrashSource
           ? '<li>归档完成后，原 PDF 会移到系统废纸篓或回收站</li>'
           : ''}
@@ -1537,7 +1537,7 @@ async function onlineVerificationFlow(entryId) {
         return;
       }
       if (result.state === 'processing') {
-        setStatus('working', '正在接收 PDF', '写入完成后会自动归入条目…');
+        setStatus('working', '正在识别 PDF', '通常需要 1–2 秒，处理完成后会自动归入条目…');
       } else if (result.message) {
         setStatus('error', '还未归档', result.message);
       } else if (result.window_closed) {
@@ -1563,7 +1563,7 @@ async function onlineVerificationFlow(entryId) {
       const result = await Api.startInvoiceVerification(entryId, values);
       sessionId = result.session_id;
       openBtn.style.display = 'none';
-      setStatus('waiting', '请在官网完成查验并打印', '另存为 PDF 后会自动归入当前条目。');
+      setStatus('waiting', '请在官网完成查验并打印', '另存为 PDF 后请等待约 1–2 秒，软件会识别并自动归入当前条目。');
       pollTimer = setTimeout(poll, 800);
     } catch (err) {
       openBtn.disabled = false;
@@ -2602,11 +2602,15 @@ async function openUpdateDialog() {
         action = '<button class="btn small" data-download-core>下载并打开</button>';
       }
       const notes = Array.isArray(u.asset?.notes) ? u.asset.notes : (u.asset?.notes ? [u.asset.notes] : []);
+      const responsibility = u.component === 'print'
+        ? '<span class="update-component-description">负责材料 PDF 拼接、付款截图排版与编号，以及报账说明、验收单 Word；独立版本，只有组件本身变化时才需更新。</span>'
+        : '';
       return `<div class="update-component">
         <div class="update-component-main">
           <div class="update-component-copy">
             <div class="update-component-title"><b>${esc(u.name || u.component)}</b>${state}</div>
             <span>${meta}</span>
+            ${responsibility}
           </div>
           <div class="update-component-action">${action}</div>
         </div>

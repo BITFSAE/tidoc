@@ -46,6 +46,7 @@ def test_prefill_script_only_fills_and_focuses_captcha():
     assert "76.32" in script
     assert "不区分大小写" in script
     assert "点击官网“打印”" in script
+    assert "等待约 1–2 秒" in script
     assert "自动归入条目" in script
     assert "datepicker('setDate'" in script
     assert "datepicker('hide'" in script

@@ -34,10 +34,10 @@ GitHub Actions 会并行打包 macOS / Windows，汇总后运行
 
 ```text
 tidoc/manifest.json
-tidoc/core/windows/tidoc-core-windows-v0.1.1.exe
-tidoc/core/macos/tidoc-core-macos-v0.1.1.dmg
-tidoc/print/windows/tidoc-print-windows-v0.1.1.exe
-tidoc/print/macos/tidoc-print-macos-v0.1.1.zip
+tidoc/core/windows/tidoc-core-windows-v0.1.20.exe
+tidoc/core/macos/tidoc-core-macos-v0.1.20.dmg
+tidoc/print/windows/tidoc-print-windows-v0.1.19.exe
+tidoc/print/macos/tidoc-print-macos-v0.1.19.zip
 ```
 
 ## 客户端行为
@@ -46,6 +46,7 @@ tidoc/print/macos/tidoc-print-macos-v0.1.1.zip
 - 自动发现核心更新时会显示一次本次更新；升级后的首次启动会再次展示更新完成与版本变化。弹窗内提供醒目的可折叠使用指南，完整覆盖导入、补材料、核对、批次、打印与查找流程。
 - 核心更新会下载并校验安装包，校验通过后打开更新包；未重启前仍显示有更新，但状态会标为“已下载待安装”。
 - 打印组件可直接下载安装到本机数据目录的 `components/print/<platform>/` 下。
+- 核心与打印组件使用独立版本。`scripts/set_version.py` 只写入核心版本；只有 `tidoc_print` 代码、`requirements-print.txt` 或核心与组件的 JSON 调用协议变化时，才在 `tidoc_print/__init__.py` 增加组件版本。普通核心发布即使重新构建组件包，也不会让客户端误报组件更新。
 - 客户端会同时检查打印组件版本标记、可执行文件和安装校验值；文件缺失或损坏时显示“需要修复”，最新版本也允许重新安装。
 - 下载 / 安装过程会在设置弹窗里显示进行中状态，组件安装完成后立即刷新状态。
 - 软件内始终提供 GitHub Releases 手动下载入口；更新服务不可用时仍可访问。

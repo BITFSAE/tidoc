@@ -2,10 +2,10 @@
 """Generate tidoc COS update manifest and upload plan.
 
 Expected release file names:
-- tidoc-core-windows-v0.1.1.exe
-- tidoc-core-macos-v0.1.1.dmg
-- tidoc-print-windows-v0.1.1.exe
-- tidoc-print-macos-v0.1.1.zip
+- tidoc-core-windows-v0.1.20.exe
+- tidoc-core-macos-v0.1.20.dmg
+- tidoc-print-windows-v0.1.19.exe
+- tidoc-print-macos-v0.1.19.zip
 """
 
 from __future__ import annotations
@@ -70,13 +70,24 @@ def main() -> int:
         if not match:
             continue
         info = match.groupdict()
-        if info["version"] != args.version:
+        # The core follows the release tag. Optional components use their own
+        # package versions, so an unchanged print component does not become a
+        # fake update whenever the core ships.
+        if info["component"] == "core" and info["version"] != args.version:
             continue
         component = info["component"]
         platform = info["platform"]
         key = f"tidoc/{component}/{platform}/{path.name}"
         url = f"{args.base_url.rstrip('/')}/{component}/{platform}/{path.name}"
-        comp = components.setdefault(component, _component_block(component, args))
+        comp = components.setdefault(
+            component,
+            _component_block(component, info["version"], args),
+        )
+        if comp["latest"] != info["version"]:
+            raise SystemExit(
+                f"Component {component} has inconsistent artifact versions: "
+                f"{comp['latest']} and {info['version']}."
+            )
         comp["platforms"][platform] = {
             "filename": path.name,
             "url": url,
@@ -109,16 +120,16 @@ def main() -> int:
     return 0
 
 
-def _component_block(component: str, args) -> dict:
+def _component_block(component: str, version: str, args) -> dict:
     meta = COMPONENT_META[component]
     return {
         "name": meta["name"],
-        "latest": args.version,
+        "latest": version,
         "min_supported_version": args.min_supported_version,
         "force_update": bool(args.force_update),
         "entrypoint": meta["entrypoint"],
         "release_date": datetime.now(timezone.utc).date().isoformat(),
-        "notes": args.release_notes,
+        "notes": args.release_notes if component == "core" or version == args.version else [],
         "platforms": {},
     }
 

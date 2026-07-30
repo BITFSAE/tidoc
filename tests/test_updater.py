@@ -190,9 +190,11 @@ def test_frozen_core_does_not_treat_bundled_package_fragment_as_component(monkey
 
 
 def test_source_run_prefers_workspace_print_code_over_installed_component(monkeypatch, tmp_path):
+    import tidoc_print
     from tidoc.services import printing
 
     monkeypatch.delattr(printing.sys, "frozen", raising=False)
+    monkeypatch.setattr(tidoc_print, "is_available", lambda: True)
     monkeypatch.setattr(
         printing,
         "installed_component_info",

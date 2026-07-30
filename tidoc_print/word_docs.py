@@ -47,12 +47,12 @@ def _compact_item(entry: PrintEntry, storage_location: str) -> PrintItem:
     quantity = sum((it.quantity for it in entry.items if it.quantity is not None), Decimal("0"))
     if quantity == Decimal("0"):
         quantity = Decimal("1")
-    actual_base = (first.actual_name if first else "") or "发票物资"
+    actual_base = (first.actual_name if first else "") or "未填写品名"
     product_base = (first.product_name if first and first.product_name else actual_base) or actual_base
     return PrintItem(
         actual_name=actual_base + suffix,
         product_name=product_base + suffix,
-        unit=first.unit if first else "",
+        unit=(first.unit if first else "") or "个",
         quantity=quantity,
         total=_money(entry.total),
         seller=entry.seller or (first.seller if first else ""),
@@ -96,12 +96,18 @@ def generate_reimburse_doc(
     template_row = deepcopy(table.rows[1])
     clear_data_rows(table, 1)
     for entry in entries:
-        first = entry.items[0] if entry.items else PrintItem(actual_name="发票物资")
+        first = entry.items[0] if entry.items else PrintItem(
+            actual_name="未填写品名",
+            product_name="未填写品名",
+            unit="个",
+            quantity=Decimal("1"),
+            total=entry.total,
+        )
         suffix = "等" if len(entry.items) > 1 else ""
         row = clone_row(table, template_row)
         values = [
-            (first.actual_name or "发票物资") + suffix,
-            (first.actual_name or "发票物资") + suffix,
+            (first.actual_name or "未填写品名") + suffix,
+            (first.product_name or first.actual_name or "未填写品名") + suffix,
             _fmt_money(entry.total, currency=True),
         ]
         for cell, value in zip(row.cells, values):
@@ -139,10 +145,10 @@ def generate_acceptance_doc(
         row = clone_row(table, template_row)
         values = [
             item.product_name or item.actual_name,
-            item.unit,
+            item.unit or "个",
             _fmt_decimal(item.quantity),
-            _fmt_decimal(item.unit_price),
-            _fmt_money(item.total),
+            _fmt_money(item.unit_price, currency=True),
+            _fmt_money(item.total, currency=True),
             item.seller,
             item.invoice_no,
             item.storage_location or storage_location,

@@ -16,7 +16,7 @@ from tidoc.db import (
     ProfileRepo,
 )
 from tidoc.engine import parse_xml
-from tidoc.engine.models import ParsedInvoice
+from tidoc.engine.models import ParsedInvoice, ParsedItem
 from tidoc.services import export_bindle, import_bindle, inspect_bindle
 
 
@@ -95,6 +95,53 @@ def test_locked_field_correction_logged(repos, sample_xmls):
     e = repos["entries"].get(eid)
     assert e["invoice_no"] == "999"
     assert any("人工修正" in h["field"] for h in e["history"])
+
+
+def test_batch_reparse_replaces_items_and_preserves_user_fields(api, tmp_path, monkeypatch):
+    from tidoc.db import TYPE_INVOICE_PDF
+    from tidoc.engine.validator import TITLE_FOUNDATION
+
+    profile = api.profiles.create("张三", "李老师")
+    entry_id = api.entries.create(
+        profile["id"],
+        title=TITLE_FOUNDATION,
+        parsed=ParsedInvoice(
+            invoice_no="123",
+            buyer_name=TITLE_FOUNDATION,
+            total=Decimal("84.00"),
+            source="pdf",
+        ),
+    )
+    invoice_path = tmp_path / "invoice.pdf"
+    invoice_path.write_bytes(b"placeholder")
+    api.attachments.add(entry_id, invoice_path, TYPE_INVOICE_PDF)
+    api.entries.update_field(entry_id, "actual_item_name", "用户核对名称", profile["id"])
+
+    reparsed = ParsedInvoice(
+        invoice_no="123",
+        buyer_name=TITLE_FOUNDATION,
+        total=Decimal("84.00"),
+        source="pdf",
+        items=[ParsedItem(
+            name="*橡胶制品*发票原品名",
+            actual_name="发票原品名",
+            unit="卷",
+            quantity=Decimal("2"),
+            total=Decimal("84.00"),
+        )],
+    )
+    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args: reparsed)
+
+    response = api.reparse_entries([entry_id])
+
+    assert response["ok"] is True
+    assert response["data"]["resolved"] == 1
+    entry = api.entries.get(entry_id)
+    assert entry["check_status"] == "pass"
+    assert entry["items"][0]["actual_name"] == "发票原品名"
+    assert entry["items"][0]["unit"] == "卷"
+    assert entry["fields"]["actual_item_name"]["current"] == "用户核对名称"
+    assert entry["fields"]["actual_item_name"]["modified"] is True
 
 
 def test_entry_profile_can_be_changed_and_logged(repos, sample_xmls):

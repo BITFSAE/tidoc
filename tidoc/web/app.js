@@ -70,7 +70,7 @@ function taskProgress(message) {
 const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基金会': 'found' };
 const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
 const BUILTIN_TITLES = ['北京理工大学', '北京理工大学教育基金会'];
-const BILIBILI_GUIDE_URL = 'https://www.bilibili.com/video/BV1oegQ6TEXc/';
+const BILIBILI_GUIDE_URL = 'https://www.bilibili.com/video/BV1XN3q69EPi/';
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
 const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
 const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
@@ -554,10 +554,12 @@ function renderEntries() {
 
 function updateSelectionBar() {
   const hasSelection = State.selected.size > 0;
+  const reparseBtn = $('#batchReparseBtn');
+  reparseBtn?.classList.toggle('hidden', State.quickView !== 'warning');
   $('#selectionBar').classList.toggle('empty', !hasSelection);
   $('#selCount').textContent = hasSelection ? `已选 ${State.selected.size}` : '选择条目';
   $('#clearSelBtn').classList.toggle('hidden', !hasSelection);
-  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
+  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReparseBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
     const btn = $('#' + id);
     if (btn) btn.disabled = !hasSelection;
   });
@@ -1887,6 +1889,7 @@ function bindEvents() {
   $('#addToBatchBtn').onclick = addSelectionToBatch;
   $('#tagBtn').onclick = () => tagSelectionFlow();
   $('#changeProfileBtn').onclick = () => changeSelectionProfile();
+  $('#batchReparseBtn').onclick = batchReparse;
   $('#batchSummaryBtn').onclick = () => exportSummary([...State.selected]);
   $('#batchExportBtn').onclick = () => doExport([...State.selected]);
   $('#batchPrintBtn').onclick = () => openPrintDialog([...State.selected]);
@@ -4267,6 +4270,38 @@ async function batchDelete() {
     await refreshEntries();
     toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
   } catch (e) { toast(e.message, 'err'); }
+}
+
+async function batchReparse() {
+  const ids = [...State.selected];
+  if (!ids.length || State.quickView !== 'warning') return;
+  if (!confirm(
+    `重新识别所选 ${ids.length} 条？\n\n` +
+    '将使用已有的原发票 PDF / XML 重新生成发票明细并刷新识别提醒。' +
+    '实际物资名称、实付金额和备注不会改变；明细表内的手动修改会被新识别结果替换。'
+  )) return;
+
+  const btn = $('#batchReparseBtn');
+  const oldHtml = btn.innerHTML;
+  const progress = taskProgress(`正在重新识别 ${ids.length} 条发票…`);
+  btn.disabled = true;
+  btn.querySelector('span').textContent = '识别中…';
+  try {
+    const result = await Api.reparseEntries(ids);
+    State.selected.clear();
+    await refreshEntries();
+    const parts = [];
+    if (result.resolved) parts.push(`${result.resolved} 条提醒已消除`);
+    if (result.remaining) parts.push(`${result.remaining} 条仍需核对`);
+    if (result.failed?.length) parts.push(`${result.failed.length} 条失败`);
+    toast(parts.join('，') || '重新识别完成', result.failed?.length ? 'err' : 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    progress.close();
+    btn.innerHTML = oldHtml;
+    updateSelectionBar();
+  }
 }
 
 window.addEventListener('error', (e) => {

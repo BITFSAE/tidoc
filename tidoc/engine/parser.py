@@ -532,6 +532,19 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             if allow_layout_suffix:
                 allow_layout_suffix = append_layout_name_suffix(raw_line)
             continue
+        # 部分发票把折扣行按“同品名 税率 折扣金额 折扣税额”输出，
+        # 例如 ``*衡器*电子秤 13%-0.88 -0.12``。
+        discount = re.fullmatch(
+            r"(?P<name>\*.+?)\s+(?P<rate>\d+(?:\.\d+)?)%"
+            r"\s*(?P<amount>-\d+\.\d{2})\s+(?P<tax>-\d+\.\d{2})",
+            line,
+        )
+        if discount and last and clean_item_name(discount.group("name")) == last_base_name:
+            last.total = money(
+                last.total + d(discount.group("amount")) + d(discount.group("tax"))
+            )
+            allow_layout_suffix = False
+            continue
         parsed = _parse_amount_tax_line(line)
         if not parsed:
             loose = _parse_loose_amount_tax_line(line)
@@ -568,6 +581,84 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
         allow_layout_suffix = True
 
     return items
+
+
+def _parse_columnar_pdf_items(lines: list[str]) -> list[ParsedItem]:
+    """兜底解析按列输出、每个单元格独占一行的发票明细。
+
+    部分平台发票的可复制文本不是按视觉行排列，而是依次输出“品名列、
+    规格列、单位列、数量列……”；pypdf 的 layout 模式又会忽略这些文本。
+    这里只在常规逐行解析完全没有结果时启用，并且只接受能明确闭合的一条
+    商品记录。若检测到多个不同品名，宁可保留识别提醒，也不猜测列对应关系。
+    """
+    number = re.compile(r"-?\d+(?:\.\d+)?")
+    rate = re.compile(r"-?\d+(?:\.\d+)?%")
+    unit = re.compile(r"[\u4e00-\u9fffA-Za-z]{1,4}")
+
+    for start, line in enumerate(lines):
+        if not line.startswith("*"):
+            continue
+
+        # 锚定连续的“单位、数量、单价、金额、税额、税率”六列。
+        unit_index = -1
+        for idx in range(start + 1, len(lines) - 5):
+            tail = lines[idx:idx + 6]
+            if (
+                unit.fullmatch(tail[0])
+                and all(number.fullmatch(value) for value in tail[1:5])
+                and rate.fullmatch(tail[5])
+            ):
+                unit_index = idx
+                break
+        if unit_index < 0:
+            continue
+
+        prefix = lines[start:unit_index]
+        star_indexes = [i for i, value in enumerate(prefix) if value.startswith("*")]
+        blocks: list[list[str]] = []
+        for offset, block_start in enumerate(star_indexes):
+            block_end = star_indexes[offset + 1] if offset + 1 < len(star_indexes) else len(prefix)
+            blocks.append(prefix[block_start:block_end])
+
+        # 规格型号通常是单位前最后一个短 token，不属于商品名。
+        if blocks:
+            final = blocks[-1]
+            if len(final) > 1 and re.fullmatch(r"[\w./+×*()-]{1,32}", final[-1]):
+                final.pop()
+        normalized_blocks = [_normalize_name(block) for block in blocks if block]
+        if not normalized_blocks:
+            continue
+        first_name = normalized_blocks[0]
+        # 京东等开票方会为折扣行重复一次品名；不同品名意味着多条商品，
+        # 此时简单的单行兜底无法可靠配对各列。
+        if any(name != first_name for name in normalized_blocks[1:]):
+            continue
+
+        quantity = d(lines[unit_index + 1])
+        amount = d(lines[unit_index + 3])
+        tax = d(lines[unit_index + 4])
+        total = amount + tax
+
+        # 紧随主记录的“折扣金额、折扣税额、税率”三列并入该商品。
+        pos = unit_index + 6
+        while (
+            pos + 2 < len(lines)
+            and number.fullmatch(lines[pos])
+            and number.fullmatch(lines[pos + 1])
+            and rate.fullmatch(lines[pos + 2])
+        ):
+            total += d(lines[pos]) + d(lines[pos + 1])
+            pos += 3
+
+        return [ParsedItem(
+            name=first_name,
+            actual_name=clean_item_name(first_name),
+            unit=lines[unit_index],
+            quantity=quantity,
+            total=money(total),
+        )]
+
+    return []
 
 
 def parse_pdf(path: str | Path) -> ParsedInvoice:
@@ -624,7 +715,10 @@ def _parse_invoice_text(text: str, source: str = "pdf") -> ParsedInvoice:
         total=total,
         source=source,
     )
-    invoice.items.extend(_parse_pdf_items(lines))
+    items = _parse_pdf_items(lines)
+    if not items:
+        items = _parse_columnar_pdf_items(lines)
+    invoice.items.extend(items)
     return invoice
 
 

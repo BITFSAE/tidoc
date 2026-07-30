@@ -36,8 +36,8 @@ GitHub Actions 会并行打包 macOS / Windows，汇总后运行
 tidoc/manifest.json
 tidoc/core/windows/tidoc-core-windows-v0.1.20.exe
 tidoc/core/macos/tidoc-core-macos-v0.1.20.dmg
-tidoc/print/windows/tidoc-print-windows-v0.1.19.exe
-tidoc/print/macos/tidoc-print-macos-v0.1.19.zip
+tidoc/print/windows/tidoc-print-windows-v0.1.20.exe
+tidoc/print/macos/tidoc-print-macos-v0.1.20.zip
 ```
 
 ## 客户端行为

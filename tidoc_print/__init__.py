@@ -12,7 +12,7 @@ from __future__ import annotations
 # This version is intentionally independent from the core application.  It
 # starts at the last coupled release so existing v0.1.19 installations are not
 # treated as newer than future component releases.
-__version__ = "0.1.19"
+__version__ = "0.1.20"
 
 # 组件所需的重依赖模块名
 _REQUIRED = ("docx", "pypdf", "PIL", "reportlab")

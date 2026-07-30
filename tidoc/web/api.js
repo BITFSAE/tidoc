@@ -55,6 +55,7 @@ const Api = (() => {
     startupUpdateState: () => call('startup_update_state'),
 
     parseFiles: (xml, pdf) => call('parse_files', xml, pdf),
+    reparseEntries: (ids) => call('reparse_entries', ids || []),
     createEntry: (args) => call('create_entry',
       args.profileId, args.title || '', args.xmlPath || null, args.pdfPath || null,
       args.paymentPaths || [], args.inspectionPath || null, args.status || 'draft'),

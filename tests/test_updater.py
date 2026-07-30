@@ -189,6 +189,27 @@ def test_frozen_core_does_not_treat_bundled_package_fragment_as_component(monkey
     assert status["mode"] == "missing"
 
 
+def test_source_run_prefers_workspace_print_code_over_installed_component(monkeypatch, tmp_path):
+    from tidoc.services import printing
+
+    monkeypatch.delattr(printing.sys, "frozen", raising=False)
+    monkeypatch.setattr(
+        printing,
+        "installed_component_info",
+        lambda *_args, **_kwargs: {
+            "valid": True,
+            "version": "0.1.19",
+            "executable": str(tmp_path / "old-tidoc-print"),
+        },
+    )
+
+    status = printing.component_status(tmp_path / "components")
+
+    assert status["available"] is True
+    assert status["mode"] == "python"
+    assert status["version"] == "0.1.20"
+
+
 def test_frozen_core_reports_removed_component_as_needing_repair(monkeypatch, tmp_path):
     from tidoc.services import printing
 

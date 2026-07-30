@@ -243,6 +243,81 @@ class Api:
         return {"parsed": parsed.to_dict(), "check": check.to_dict()}
 
     @_guard
+    def reparse_entries(self, entry_ids):
+        """用条目已有的原始发票附件批量重新识别明细并刷新识别提醒。"""
+        from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
+        from .engine import check_invoice, parse_invoice_files
+        from .engine.money import d
+
+        results = []
+        seen = set()
+        for entry_id in entry_ids or []:
+            if not entry_id or entry_id in seen:
+                continue
+            seen.add(entry_id)
+            entry = self.entries.get(entry_id)
+            if not entry:
+                results.append({"entry_id": entry_id, "ok": False, "error": "条目不存在"})
+                continue
+            try:
+                xml_attachment = next(
+                    (a for a in entry["attachments"] if a["type"] == TYPE_INVOICE_XML),
+                    None,
+                )
+                pdf_attachment = next(
+                    (a for a in entry["attachments"] if a["type"] == TYPE_INVOICE_PDF),
+                    None,
+                )
+                if not xml_attachment and not pdf_attachment:
+                    raise ValueError("缺少原始发票 PDF 或 XML")
+
+                xml_path = (
+                    self.data_root.attachments_dir / xml_attachment["stored_path"]
+                    if xml_attachment else None
+                )
+                pdf_path = (
+                    self.data_root.attachments_dir / pdf_attachment["stored_path"]
+                    if pdf_attachment else None
+                )
+                parsed = parse_invoice_files(xml_path, pdf_path)
+                if (
+                    entry.get("invoice_no")
+                    and parsed.invoice_no
+                    and parsed.invoice_no != entry["invoice_no"]
+                ):
+                    raise ValueError("附件中的发票号码与当前条目不一致")
+
+                # 条目中已锁定或人工修正的发票总额仍是校验权威值；重新识别
+                # 只替换识别明细，不静默覆盖实付、备注或关键字段。
+                parsed.total = d(entry.get("total"))
+                check = check_invoice(parsed, expected_title=entry.get("title", ""))
+                self.entries.replace_recognized_items(
+                    entry_id,
+                    parsed.items,
+                    parsed.source,
+                    check.status,
+                    check.message,
+                )
+                results.append({
+                    "entry_id": entry_id,
+                    "ok": True,
+                    "check_status": check.status,
+                    "check_message": check.message,
+                    "item_count": len(parsed.items),
+                })
+            except Exception as exc:  # noqa: BLE001 — 单条失败不阻断其余批量任务
+                results.append({"entry_id": entry_id, "ok": False, "error": str(exc)})
+
+        succeeded = [result for result in results if result.get("ok")]
+        return {
+            "processed": len(results),
+            "resolved": sum(result["check_status"] == "pass" for result in succeeded),
+            "remaining": sum(result["check_status"] != "pass" for result in succeeded),
+            "failed": [result for result in results if not result.get("ok")],
+            "results": results,
+        }
+
+    @_guard
     def create_entry(self, profile_id, title="", xml_path=None, pdf_path=None,
                      payment_paths=None, inspection_path=None, status="draft"):
         """从上传文件创建条目：解析 → 校验 → 落库 → 复制附件。"""

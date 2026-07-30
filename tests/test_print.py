@@ -95,9 +95,109 @@ def test_generate_word_docs(tmp_path):
     r = generate_reimburse_doc(entries, tmp_path / "报账说明.docx", "2026年7月5日", PersonProfile(person_name="张三"))
     a = generate_acceptance_doc(entries, tmp_path / "验收单.docx", "2026年7月5日")
     assert r.exists() and a.exists()
-    # 报账说明表格里应有数据行
-    assert len(Document(str(r)).tables[0].rows) >= 2
-    assert len(Document(str(a)).tables[0].rows) >= 2
+    reimburse_row = [cell.text for cell in Document(str(r)).tables[0].rows[1].cells]
+    acceptance_row = [cell.text for cell in Document(str(a)).tables[0].rows[1].cells]
+    assert reimburse_row[:3] == ["电阻", "电阻", "¥100.00"]
+    assert acceptance_row[:5] == ["电阻", "个", "10", "¥10.00", "¥100.00"]
+
+
+def test_print_payload_uses_entry_name_and_fills_missing_item_defaults(tmp_path):
+    from tidoc.services.printing import _entry_to_print_payload
+
+    entry = {
+        "id": "e1",
+        "invoice_no": "123",
+        "seller": "某某公司",
+        "total": "84.00",
+        "fields": {
+            "actual_item_name": {"current": "3M防水胶带"},
+            "paid_amount": {"current": "84.00"},
+        },
+        "items": [],
+        "attachments": [],
+    }
+    payload = _entry_to_print_payload(entry, tmp_path, {})
+    assert payload["items"] == [{
+        "actual_name": "3M防水胶带",
+        "product_name": "3M防水胶带",
+        "unit": "个",
+        "quantity": "1",
+        "total": "84.00",
+        "seller": "某某公司",
+        "invoice_no": "123",
+    }]
+
+
+def test_print_payload_recovers_historical_missing_items_from_invoice_pdf(tmp_path, monkeypatch):
+    from tidoc.engine.models import ParsedInvoice, ParsedItem
+    from tidoc.services.printing import _entry_to_print_payload
+
+    invoice_path = tmp_path / "invoice.pdf"
+    invoice_path.touch()
+    monkeypatch.setattr(
+        "tidoc.engine.parse_pdf",
+        lambda _path: ParsedInvoice(
+            invoice_no="123",
+            items=[ParsedItem(
+                name="*橡胶制品*发票原品名",
+                actual_name="发票原品名",
+                unit="卷",
+                quantity=Decimal("2"),
+                total=Decimal("84.00"),
+            )],
+        ),
+    )
+    entry = {
+        "id": "e1",
+        "invoice_no": "123",
+        "seller": "某某公司",
+        "total": "84.00",
+        "fields": {
+            "actual_item_name": {"current": "用户核对名称"},
+            "paid_amount": {"current": "84.00"},
+        },
+        "items": [],
+        "attachments": [{"type": "invoice_pdf", "stored_path": "invoice.pdf"}],
+    }
+
+    payload = _entry_to_print_payload(entry, tmp_path, {})
+
+    assert payload["items"][0] == {
+        "actual_name": "用户核对名称",
+        "product_name": "发票原品名",
+        "unit": "卷",
+        "quantity": "2",
+        "total": "84.00",
+        "seller": "某某公司",
+        "invoice_no": "123",
+    }
+
+
+def test_print_payload_keeps_invoice_name_separate_from_edited_actual_name(tmp_path):
+    from tidoc.services.printing import _entry_to_print_payload
+
+    entry = {
+        "id": "e1",
+        "invoice_no": "123",
+        "seller": "某某公司",
+        "total": "20.00",
+        "fields": {
+            "actual_item_name": {"current": "实际用品"},
+            "paid_amount": {"current": "20.00"},
+        },
+        "items": [{
+            "name": "*办公用品*原发票品名",
+            "actual_name": "原发票品名",
+            "unit": "",
+            "quantity": "2",
+            "total": "20.00",
+        }],
+        "attachments": [],
+    }
+    payload = _entry_to_print_payload(entry, tmp_path, {})
+    assert payload["items"][0]["actual_name"] == "实际用品"
+    assert payload["items"][0]["product_name"] == "原发票品名"
+    assert payload["items"][0]["unit"] == "个"
 
 
 def test_title_isolation(tmp_path):

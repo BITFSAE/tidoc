@@ -620,6 +620,57 @@ class EntryRepo:
         self._touch(entry_id)
         self.db.conn.commit()
 
+    def replace_recognized_items(
+        self,
+        entry_id: str,
+        items: list,
+        source: str,
+        check_status: str,
+        check_message: str = "",
+    ) -> None:
+        """用重新识别结果原子替换明细，同时保留用户修改过的条目级字段。"""
+        exists = self.db.conn.execute(
+            "SELECT 1 FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not exists:
+            raise ValueError("条目不存在。")
+
+        with self.db.conn:
+            self.db.conn.execute("DELETE FROM items WHERE entry_id = ?", (entry_id,))
+            for ordinal, item in enumerate(items):
+                self.db.conn.execute(
+                    """INSERT INTO items(entry_id, name, actual_name, unit, quantity,
+                       unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (
+                        entry_id,
+                        item.name,
+                        item.actual_name,
+                        item.unit,
+                        str(item.quantity) if item.quantity is not None else "",
+                        str(money(item.unit_price)),
+                        str(money(item.total)),
+                        item.spec,
+                        ordinal,
+                    ),
+                )
+
+            # “实际物资名称”一旦被用户修改就不覆盖；仍为识别默认值时，
+            # 跟随新的第一条明细更新 origin/current。
+            first_name = items[0].actual_name if items else ""
+            self.db.conn.execute(
+                """UPDATE entry_fields
+                      SET origin = ?, current = ?
+                    WHERE entry_id = ? AND field = 'actual_item_name' AND modified = 0""",
+                (first_name, first_name, entry_id),
+            )
+            self.db.conn.execute(
+                """UPDATE entries
+                      SET source = ?, check_status = ?, check_message = ?, updated_at = ?
+                    WHERE id = ?""",
+                (source, check_status, check_message, _now(), entry_id),
+            )
+        self.recompute_status(entry_id)
+
     def set_meta(self, entry_id: str, category: str | None = None, tags: list | None = None) -> None:
         if category is not None:
             self.db.conn.execute("UPDATE entries SET category = ? WHERE id = ?", (category, entry_id))

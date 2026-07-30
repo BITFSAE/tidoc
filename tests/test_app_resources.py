@@ -83,7 +83,8 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert 'id="setPrintComponent"' not in source
     assert 'id="setUpdate"' not in source
     assert "软件与组件" in source
-    assert "BV1oegQ6TEXc" in source
+    assert "BV1XN3q69EPi" in source
+    assert "vd_source=" not in source
     assert 'id="setBilibili"' in source
     assert "Api.listTitles" in source
     assert "refreshTitleOptions" in source
@@ -101,6 +102,10 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "compBadge" not in card_source
     assert "${compBadge}" not in card_source
     assert 'id="changeProfileBtn"' in html
+    assert 'id="batchReparseBtn"' in html
+    assert "State.quickView !== 'warning'" in source
+    assert "Api.reparseEntries(ids)" in source
+    assert "reparseEntries:" in (web / "api.js").read_text("utf-8")
     assert ".main { display: flex; flex-direction: column; min-width: 0; min-height: 0;" in css
     assert "flex: 1; min-height: 0; overflow-y: auto" in css
 

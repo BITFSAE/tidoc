@@ -28,6 +28,23 @@ from .updater import COMPONENT_PRINT, installed_component_info
 
 def component_status(components_dir: str | Path | None = None) -> dict:
     """打印组件是否可用 + 缺哪些依赖。核心据此决定入口是否置灰。"""
+    frozen = bool(getattr(sys, "frozen", False))
+
+    # 从源码启动时优先使用当前工作区的 tidoc_print。否则开发机只要装过
+    # 发布版组件，就会悄悄继续调用旧可执行文件，让本地代码修改看似不生效。
+    if not frozen:
+        try:
+            import tidoc_print
+        except Exception:  # noqa: BLE001
+            tidoc_print = None
+        if tidoc_print is not None and tidoc_print.is_available():
+            return {
+                "available": True,
+                "mode": "python",
+                "version": getattr(tidoc_print, "__version__", ""),
+                "missing": [],
+            }
+
     installed = (
         installed_component_info(components_dir, COMPONENT_PRINT)
         if components_dir
@@ -46,7 +63,7 @@ def component_status(components_dir: str | Path | None = None) -> dict:
     # A packaged core must never fall back to the tidoc_print package fragment
     # that PyInstaller may have discovered while analysing this adapter.  The
     # heavy dependencies belong exclusively to the external component.
-    if getattr(sys, "frozen", False):
+    if frozen:
         return {
             "available": False,
             "mode": "repair" if installed.get("needs_repair") else "missing",
@@ -55,13 +72,8 @@ def component_status(components_dir: str | Path | None = None) -> dict:
             "error": installed.get("issue") or "打印导出组件未安装",
         }
 
-    try:
-        import tidoc_print
-    except Exception as exc:  # noqa: BLE001
-        return {"available": False, "mode": "missing", "missing": ["tidoc_print"], "error": str(exc)}
-    available = tidoc_print.is_available()
-    if available:
-        return {"available": True, "mode": "python", "missing": []}
+    if tidoc_print is None:
+        return {"available": False, "mode": "missing", "missing": ["tidoc_print"]}
     return {"available": False, "mode": "python", "missing": tidoc_print.missing_dependencies()}
 
 
@@ -97,19 +109,50 @@ def _entry_to_print_payload(entry: dict, attachments_dir: Path, profile: dict) -
         return [str(attachments_dir / a["stored_path"])
                 for a in entry.get("attachments", []) if a["type"] == att_type]
 
-    items = [
-        {
-            "actual_name": it.get("actual_name") or it.get("name", ""),
-            "product_name": it.get("actual_name") or it.get("name", ""),
-            "unit": it.get("unit", ""),
+    fields = entry.get("fields", {})
+    actual_name = (fields.get("actual_item_name", {}).get("current") or "").strip()
+    source_items = list(entry.get("items") or [])
+    if not source_items:
+        invoice_paths = abs_paths(TYPE_INVOICE_PDF)
+        if invoice_paths:
+            try:
+                from ..engine import parse_pdf
+
+                reparsed = parse_pdf(invoice_paths[0])
+                if (
+                    reparsed.items
+                    and (not reparsed.invoice_no or reparsed.invoice_no == entry.get("invoice_no", ""))
+                ):
+                    source_items = [item.to_dict() for item in reparsed.items]
+            except Exception:
+                # 历史附件可能损坏或来自不支持的版式；继续使用用户核对过的
+                # 条目级名称，不能让打印被一次补识别失败阻断。
+                pass
+    items = []
+    for index, it in enumerate(source_items):
+        product_name = it.get("actual_name") or it.get("name", "")
+        items.append({
+            "actual_name": actual_name if index == 0 and actual_name else product_name,
+            "product_name": product_name,
+            "unit": it.get("unit") or "个",
             "quantity": it.get("quantity") or "",
             "total": it.get("total") or "0",
             "seller": entry.get("seller", ""),
             "invoice_no": entry.get("invoice_no", ""),
-        }
-        for it in entry.get("items", [])
-    ]
-    fields = entry.get("fields", {})
+        })
+    if not items:
+        # PDF 识别不到明细时，条目级“实际物资名称”仍是用户已经核对过的
+        # 权威值。打印时带上它，不能退回成没有信息量的“发票物资”。
+        fallback_name = actual_name or "未填写品名"
+        items.append({
+            "actual_name": fallback_name,
+            "product_name": fallback_name,
+            "unit": "个",
+            "quantity": "1",
+            "total": entry.get("total") or "0",
+            "seller": entry.get("seller", ""),
+            "invoice_no": entry.get("invoice_no", ""),
+        })
     return {
         "entry_id": entry["id"],
         "title": entry.get("title", ""),

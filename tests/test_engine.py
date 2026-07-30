@@ -79,6 +79,67 @@ CM639 件 1 106.74 106.74 13% 13.88
     assert inv.items[0].total == Decimal("120.62")
 
 
+def test_pdf_parses_columnar_single_item_text():
+    text = """项目名称 规格型号 单位 数量 单价 金额 税率/征收率 税额
+*橡胶制品*3M 防水密封胶带强力补漏空气蒸
+汽隔离膜3015 40毫米宽*3米长一卷
+3015-40
+卷
+2
+37.17
+74.34
+9.66
+13%
+价税合计（小写）
+¥84.00
+"""
+
+    inv = _parse_invoice_text(text)
+
+    assert len(inv.items) == 1
+    assert inv.items[0].actual_name == "3M防水密封胶带强力补漏空气蒸汽隔离膜301540毫米宽*3米长一卷"
+    assert inv.items[0].unit == "卷"
+    assert inv.items[0].quantity == Decimal("2")
+    assert inv.items[0].total == Decimal("84.00")
+
+
+def test_pdf_columnar_repeated_name_merges_discount_row():
+    text = """*橡胶制品*防水密封胶带
+*橡胶制品*防水密封胶带
+3015-40
+卷
+4
+37.1675
+148.67
+19.33
+13%
+-0.02
+0.00
+13%
+价税合计（小写）
+¥167.98
+"""
+
+    inv = _parse_invoice_text(text)
+
+    assert len(inv.items) == 1
+    assert inv.items[0].actual_name == "防水密封胶带"
+    assert inv.items[0].total == Decimal("167.98")
+
+
+def test_pdf_merges_rate_first_discount_row():
+    text = """*衡器*电子秤 13%个 14.53 1.8914.53097345132741
+*衡器*电子秤 13%-0.88 -0.12
+价税合计（小写） ¥15.42
+"""
+
+    inv = _parse_invoice_text(text)
+
+    assert len(inv.items) == 1
+    assert inv.items[0].actual_name == "电子秤"
+    assert inv.items[0].total == Decimal("15.42")
+
+
 def test_pdf_keeps_explicit_buyer_and_seller_roles_for_personal_invoice():
     text = """购买方信息
 名称： 武理博

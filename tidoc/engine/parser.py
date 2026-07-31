@@ -97,6 +97,98 @@ def _pdf_layout_text(path: Path) -> str:
 _TAX_ID_RE = re.compile(r"[0-9A-Z]{15,20}")
 # 统一社会信用代码固定 18 位；发票号码(EIid) 为 20 位数字，靠长度区分。
 _USCC_RE = re.compile(r"[0-9A-Z]{18,}")
+_DIGIT_RUN_RE = re.compile(r"(?<!\d)(?:\d[^\S\r\n]*){20,}")
+
+
+def _compact_digits(value: str) -> str:
+    return re.sub(r"\D", "", value or "")
+
+
+def _extract_invoice_no(text: str) -> str:
+    """Extract invoice numbers even when PDF text separates every digit.
+
+    Several tax-platform PDFs keep the invoice number visually intact but expose
+    it to pypdf as ``2 6 4 4 ...``.  Restrict the fallback to exactly twenty
+    digits so ordinary dates, tax ids, and bank account numbers are not chosen.
+    """
+    labeled = re.search(
+        r"发票号码[:：]?[^\d\r\n]*((?:\d[^\S\r\n]*){20,})",
+        text or "",
+    )
+    if labeled:
+        value = _compact_digits(labeled.group(1))
+        if len(value) == 20:
+            return value
+    match = re.search(r"(?<!\d)\d{20}(?!\d)", text or "")
+    if match:
+        return match.group(0)
+    for spaced in _DIGIT_RUN_RE.finditer(text or ""):
+        value = _compact_digits(spaced.group(0))
+        if len(value) == 20:
+            return value
+    return ""
+
+
+def _extract_invoice_date(text: str) -> str:
+    """Read dates from both contiguous and character-spaced PDF text."""
+    match = re.search(
+        r"((?:\d[^\S\r\n]*){4})[^\S\r\n]*年[^\S\r\n]*"
+        r"((?:\d[^\S\r\n]*){1,2})[^\S\r\n]*月[^\S\r\n]*"
+        r"((?:\d[^\S\r\n]*){1,2})[^\S\r\n]*日",
+        text or "",
+    )
+    if not match:
+        return ""
+    year = _compact_digits(match.group(1))
+    month = _compact_digits(match.group(2))
+    day = _compact_digits(match.group(3))
+    return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+
+def _normalize_party_name(value: str) -> str:
+    return re.sub(r"\s+", "", value or "").strip()
+
+
+def _extract_layout_parties(text: str) -> tuple[str, str, str, str] | None:
+    """Read the side-by-side buyer/seller block from layout-preserving text.
+
+    The three supplied invoices expose the left buyer and right seller in one
+    text row.  The ordinary text stream loses those roles and reverses or even
+    picks up the vertical tax-stamp text, while the layout stream still carries
+    the ``购 ... 名称`` / ``销 ... 名称`` anchors.
+    """
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    buyer = seller = ""
+    for line in lines:
+        if "名称" not in line or "购" not in line or "销" not in line:
+            continue
+        direct = re.search(
+            r"购\s+名称[:：]\s*(.*?)\s+销\s+名称[:：]\s*(.*?)\s*$",
+            line,
+        )
+        if direct:
+            buyer = _normalize_party_name(direct.group(1))
+            seller = _normalize_party_name(direct.group(2))
+            if buyer and seller:
+                break
+        # Some PDFs emit the seller name before the right-column ``销 名称``
+        # label.  A large layout gap separates it from the buyer name.
+        split = re.search(
+            r"购\s+名称[:：]\s*(.*?)\s{3,}(.*?)销\s+名称",
+            line,
+        )
+        if split:
+            buyer = _normalize_party_name(split.group(1))
+            seller = _normalize_party_name(split.group(2))
+            if buyer and seller:
+                break
+
+    if not buyer or not seller:
+        return None
+    tax_ids = _collect_tax_ids(lines)
+    buyer_tax_id = tax_ids[0] if len(tax_ids) >= 1 else ""
+    seller_tax_id = tax_ids[1] if len(tax_ids) >= 2 else ""
+    return seller, seller_tax_id, buyer, buyer_tax_id
 
 
 def _collect_tax_ids(lines: list[str]) -> list[str]:
@@ -395,6 +487,34 @@ def _parse_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Dec
     return None
 
 
+def _joined_quantity(joined: str, amount: Decimal) -> Decimal | None:
+    """Split an integer quantity from a unit price concatenated by PDF text."""
+    dot_index = joined.find(".")
+    for split_at in range(1, dot_index):
+        quantity = d(joined[:split_at])
+        unit_price = d(joined[split_at:])
+        if quantity > 0 and money(quantity * unit_price) == money(amount):
+            return quantity
+    return None
+
+
+def _packed_quantity_amount(value: str) -> tuple[Decimal, Decimal] | None:
+    """Split ``quantity + unit price + amount`` using the amount closure."""
+    last_dot = value.rfind(".")
+    if last_dot < 0 or len(value) - last_dot != 3:
+        return None
+    integer_tail = re.search(r"\d+$", value[:last_dot])
+    if not integer_tail:
+        return None
+    for integer_digits in range(1, len(integer_tail.group(0)) + 1):
+        amount_start = last_dot - integer_digits
+        amount = d(value[amount_start:])
+        quantity = _joined_quantity(value[:amount_start], amount)
+        if quantity is not None:
+            return quantity, amount
+    return None
+
+
 def _parse_loose_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Decimal] | None:
     """解析被 PDF 文本流拆乱的金额行。
 
@@ -406,6 +526,47 @@ def _parse_loose_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decima
     # (``23. 01`` / ``2. 99``), although the rendered invoice is normal.
     compact = re.sub(r"(?<=\d)\s*\.\s*(?=\d)", ".", line)
     compact = re.sub(r"\s+", " ", compact).strip()
+
+    # Layout extraction can concatenate quantity, unit price, and amount into
+    # one numeric token, e.g. ``168.316831683168368.32 1% 0.68``.
+    packed = re.search(
+        r"(?P<unit>[\u4e00-\u9fffA-Za-z]{1,4})\s+"
+        r"(?P<packed>-?\d+(?:\.\d+){2,})\s+"
+        r"(?P<rate>\d+(?:\.\d+)?)%\s+"
+        r"(?P<tax>-?\d+(?:\.\d+)?)\s*$",
+        compact,
+    )
+    if packed:
+        quantity_amount = _packed_quantity_amount(packed.group("packed"))
+        if quantity_amount:
+            quantity, amount = quantity_amount
+            return (
+                packed.group("unit"),
+                quantity,
+                amount,
+                d(packed.group("tax")),
+            )
+
+    # Quantity and unit price can also be concatenated while the line amount
+    # remains separate: ``公斤 115.5663716814159 15.57 13% 2.02``.
+    joined_price = re.search(
+        r"(?P<unit>[\u4e00-\u9fffA-Za-z]{1,4})\s+"
+        r"(?P<joined>\d\d+\.\d+)\s+"
+        r"(?P<amount>-?\d+\.\d{2})\s+"
+        r"(?P<rate>\d+(?:\.\d+)?)%\s+"
+        r"(?P<tax>-?\d+(?:\.\d+)?)\s*$",
+        compact,
+    )
+    if joined_price:
+        amount = d(joined_price.group("amount"))
+        quantity = _joined_quantity(joined_price.group("joined"), amount)
+        if quantity is not None:
+            return (
+                joined_price.group("unit"),
+                quantity,
+                amount,
+                d(joined_price.group("tax")),
+            )
 
     # Wrapped item name/spec on previous lines, with all numeric columns on this line:
     # ``CM639 件 1 106.74 106.74 13% 13.88``.
@@ -484,8 +645,22 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
         ):
             return False
         if not last.actual_name.endswith(suffix):
-            last.name += suffix
-            last.actual_name += suffix
+            # A specification column can sit after a short first-line product
+            # fragment. Put the continuation before that final token so
+            # ``...核 不含线`` + ``心板`` becomes ``...核心板 不含线``.
+            raw_head, raw_tail = (
+                last.name.rsplit(" ", 1) if " " in last.name else (last.name, "")
+            )
+            if (
+                raw_tail
+                and "*" in raw_head
+                and last.name.rfind(" ") > last.name.rfind("*")
+            ):
+                last.name = f"{raw_head}{suffix} {raw_tail}"
+                last.actual_name = clean_item_name(last.name)
+            else:
+                last.name += suffix
+                last.actual_name += suffix
         return True
 
     def make_item(name: str, unit: str, quantity, amount, tax):
@@ -520,7 +695,7 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
                 last = item
                 last_base_name = item.actual_name
                 pending_name_parts = []
-                allow_layout_suffix = False
+                allow_layout_suffix = layout
                 continue
             if not re.search(r"\d+\.\d{2}|\d+%", line):
                 part = layout_name_part(raw_line)
@@ -546,6 +721,19 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             allow_layout_suffix = False
             continue
         parsed = _parse_amount_tax_line(line)
+        if parsed and layout and (not parsed[0] or parsed[1] is None):
+            # The generic folded-line regex can match the tail but lose the
+            # unit/quantity when layout extraction joins numeric columns.
+            loose = _parse_loose_amount_tax_line(line)
+            if loose:
+                unit, quantity, amount, tax = loose
+                raw_name = layout_name_part(raw_line)
+                item = make_item(raw_name, unit, quantity, amount, tax)
+                items.append(item)
+                last = item
+                last_base_name = item.actual_name
+                allow_layout_suffix = True
+                continue
         if not parsed:
             loose = _parse_loose_amount_tax_line(line)
             if loose:
@@ -556,7 +744,7 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
                 items.append(item)
                 last = item
                 last_base_name = item.actual_name
-                allow_layout_suffix = False
+                allow_layout_suffix = layout
                 continue
             pending_name_parts = [layout_name_part(raw_line)]
             allow_layout_suffix = False
@@ -666,7 +854,17 @@ def parse_pdf(path: str | Path) -> ParsedInvoice:
     text = _pdf_text(path)
     invoice = _parse_invoice_text(text, source="pdf")
     try:
-        layout_items = _parse_pdf_items(_pdf_layout_text(path).splitlines(), layout=True)
+        layout_text = _pdf_layout_text(path)
+        layout_invoice = _parse_invoice_text(layout_text, source="pdf-layout")
+        if not invoice.invoice_no:
+            invoice.invoice_no = layout_invoice.invoice_no
+        if not invoice.invoice_date:
+            invoice.invoice_date = layout_invoice.invoice_date
+        layout_parties = _extract_layout_parties(layout_text)
+        if layout_parties:
+            invoice.seller, _seller_tax_id, invoice.buyer_name, invoice.buyer_tax_id = layout_parties
+
+        layout_items = _parse_pdf_items(layout_text.splitlines(), layout=True)
         layout_total = sum((item.total for item in layout_items), Decimal("0"))
         if layout_items and money(layout_total - invoice.total) == Decimal("0.00"):
             invoice.items = layout_items
@@ -680,15 +878,8 @@ def _parse_invoice_text(text: str, source: str = "pdf") -> ParsedInvoice:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     lines = _normalize_party_lines(lines)
 
-    invoice_no_match = re.search(r"发票号码[:：]?\s*(\d{20})", text)
-    if invoice_no_match:
-        invoice_no = invoice_no_match.group(1)
-    else:
-        long_numbers = re.findall(r"\b\d{20}\b", text)
-        invoice_no = long_numbers[0] if long_numbers else ""
-
-    date_match = re.search(r"(\d{4})\s*年\s*(\d{2})\s*月\s*(\d{2})\s*日", text)
-    invoice_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}" if date_match else ""
+    invoice_no = _extract_invoice_no(text)
+    invoice_date = _extract_invoice_date(text)
 
     seller_name, seller_tax_id, buyer_name, buyer_tax_id = _extract_parties(lines)
     if not seller_name:
@@ -700,7 +891,10 @@ def _parse_invoice_text(text: str, source: str = "pdf") -> ParsedInvoice:
     # newline, so a trailing ``¥`` in the tax line could consume a bank/account number
     # on the next line and turn it into an enormous invoice total.
     raw_amounts = re.findall(
-        r"[¥￥][^\S\r\n]*(-?[0-9][0-9,，]*(?:[^\S\r\n]*\.[^\S\r\n]*[0-9]{1,2})?)",
+        r"[¥￥][^\S\r\n]*"
+        r"(-?(?:[0-9,，][^\S\r\n]*)+"
+        r"(?:\.[^\S\r\n]*(?:[0-9][^\S\r\n]*){1,2})?)"
+        r"(?=\r?\n|[^\S\r\n]*[¥￥]|[^0-9\s.]|$)",
         text,
     )
     amounts = [d(re.sub(r"[\s,，]", "", value)) for value in raw_amounts]

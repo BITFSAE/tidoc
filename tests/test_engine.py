@@ -13,8 +13,9 @@ from tidoc.engine import (
     money,
     parse_xml,
 )
+import tidoc.engine.parser as parser_module
 from tidoc.engine.money import d
-from tidoc.engine.parser import _parse_invoice_text, _parse_pdf_items
+from tidoc.engine.parser import _parse_invoice_text, _parse_pdf_items, parse_pdf
 
 
 def test_money_helpers():
@@ -45,6 +46,26 @@ def test_pdf_total_does_not_cross_newline_after_trailing_currency_sign():
     assert inv.items[0].total == Decimal("20.30")
 
 
+def test_pdf_number_fallback_stays_on_one_line_and_keeps_thousands_separator():
+    text = """电子发票（普通发票） 发票号码：
+开票日期：2026年07月13日
+价税合计（小写） ¥1,234.56
+订单 1234567890
+账号 9876543210
+"""
+
+    inv = _parse_invoice_text(text)
+
+    assert inv.invoice_no == ""
+    assert inv.total == Decimal("1234.56")
+
+
+def test_pdf_number_fallback_rejects_more_than_twenty_spaced_digits():
+    inv = _parse_invoice_text("编号：1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1")
+
+    assert inv.invoice_no == ""
+
+
 def test_pdf_parses_spaced_decimals_in_wrapped_item_line():
     text = """电子发票（普通发票） 发票号码：26952000001959929356
 开票日期：2026年05月 13日
@@ -59,6 +80,58 @@ def test_pdf_parses_spaced_decimals_in_wrapped_item_line():
     assert inv.total == Decimal("26.00")
     assert inv.items[0].actual_name.startswith("电阻器")
     assert inv.items[0].total == Decimal("26.00")
+
+
+def test_pdf_layout_fallback_handles_user_supplied_messy_invoices(monkeypatch, tmp_path):
+    cases = [
+        (
+            "发票号码：\n开票日期：\n价税合计（小写） ¥ 37.90\n"
+            "2 6 4 2 2 0 0 0 0 0 2 174 96 974 6\n"
+            "2 0 2 6 年 0 6 月 18日\n",
+            "购  名称：太原理工大学                 销  名称：武汉启是科技有限公司\n"
+            "统一社会信用代码/纳税人识别号：12140000405700021K"
+            "                 统一社会信用代码/纳税人识别号：91420111MA4K4DRNX2\n"
+            "*电子元件*MSPM0G3507核 不含线          个              1 37.5247524752475   37.52 1% 0.38\n"
+            "心板\n",
+            "26422000002174969746", "2026-06-18", "武汉启是科技有限公司", "太原理工大学",
+            Decimal("37.90"), "MSPM0G3507核心板 不含线", "个", Decimal("1"),
+        ),
+        (
+            "发票号码：26442000003444434596\n开票日期：2026年03月30日\n"
+            "价税合计（小写） ¥ 17.59\n",
+            "购  名称：太原理工大学                 销  名称：中山大简科技有限公司\n"
+            "统一社会信用代码/纳税人识别号：12140000405700021K"
+            "                 统一社会信用代码/纳税人识别号：914420003247671440\n"
+            "*其他 化学制品*3D打印耗   PETG（无料盘）    公斤             115.5663716814159    15.57    13% 2.02\n"
+            "材\n",
+            "26442000003444434596", "2026-03-30", "中山大简科技有限公司", "太原理工大学",
+            Decimal("17.59"), "3D打印耗材", "公斤", Decimal("1"),
+        ),
+        (
+            "发票号码：26332000002742642046\n开票日期：2026年04月03日\n"
+            "价税合计（小写） ¥69.00\n",
+            "购  名称：太原理工大学                 台州市椒江西域电子厂销  名称：\n"
+            "统一社会信用代码/纳税人识别号：12140000405700021K"
+            "                 91331002L40170656B\n"
+            "*敏感元件及传感器*角度                 支 168.316831683168368.32 1% 0.68\n"
+            "位移传感器\n",
+            "26332000002742642046", "2026-04-03", "台州市椒江西域电子厂", "太原理工大学",
+            Decimal("69.00"), "角度位移传感器", "支", Decimal("1"),
+        ),
+    ]
+
+    for index, (normal_text, layout_text, invoice_no, date, seller, buyer,
+                total, item_name, unit, quantity) in enumerate(cases):
+        path = tmp_path / f"invoice-{index}.pdf"
+        monkeypatch.setattr(parser_module, "_pdf_text", lambda _path, value=normal_text: value)
+        monkeypatch.setattr(parser_module, "_pdf_layout_text", lambda _path, value=layout_text: value)
+        parsed = parse_pdf(path)
+        assert (parsed.invoice_no, parsed.invoice_date) == (invoice_no, date)
+        assert (parsed.seller, parsed.buyer_name) == (seller, buyer)
+        assert parsed.total == total
+        assert parsed.items[0].actual_name == item_name
+        assert parsed.items[0].unit == unit
+        assert parsed.items[0].quantity == quantity
 
 
 def test_pdf_parses_wrapped_item_with_standard_numeric_tail():
@@ -212,6 +285,17 @@ def test_layout_item_name_continuation_joins_name_column_and_merges_discount():
     assert len(items) == 1
     assert items[0].actual_name == "特殊功能放大器"
     assert items[0].total == Decimal("15.47")
+
+
+def test_layout_joined_numbers_support_multi_digit_quantity_and_amount():
+    items = _parse_pdf_items(
+        ["*电子元件*批量零件 个 1215.50186.00 13% 24.18"],
+        layout=True,
+    )
+
+    assert len(items) == 1
+    assert items[0].quantity == Decimal("12")
+    assert items[0].total == Decimal("210.18")
 
 
 def test_layout_item_spec_continuation_does_not_extend_product_name():

@@ -119,7 +119,7 @@ const Api = (() => {
     exportOverviewExcel: (ids, name) => call('export_overview_excel', ids, name),
     exportAttachmentArchive: (ids, name) => call('export_attachment_archive', ids, name),
     inspectBindle: (path) => call('inspect_bindle', path),
-    importBindle: (path, pid, allowTampered) => call('import_bindle', path, pid, !!allowTampered),
+    importBindle: (path, pid, allowTampered, options) => call('import_bindle', path, pid, !!allowTampered, options || null),
 
     pickFiles: (multiple, fileTypes) => call('pick_files', multiple !== false, fileTypes || null),
     pickFolder: () => call('pick_folder'),

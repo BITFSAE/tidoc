@@ -222,6 +222,7 @@ def import_bindle(
     path: str | Path,
     profile_id: str,
     allow_tampered: bool = False,
+    options: dict | None = None,
 ) -> dict:
     """把一个 .tidoc 包导入到当前库，附件落地到指定条目目录。
 
@@ -231,6 +232,16 @@ def import_bindle(
     返回 {"imported": n, "tampered": [...], "entry_ids": [...]}。
     """
     import uuid
+
+    options = dict(options or {})
+    profile_overrides = options.get("profile_overrides") or {}
+    import_tags = list(dict.fromkeys(
+        str(tag).strip() for tag in (options.get("tags") or []) if str(tag).strip()
+    ))
+    target_batch_id = str(options.get("batch_id") or "").strip()
+    new_batch_name = str(options.get("batch_name") or "").strip()
+    if target_batch_id and new_batch_name:
+        raise ValueError("已有批次和新建批次只能选择一个。")
 
     inspected = inspect_bindle(path)
     if inspected["tampered"] and not allow_tampered:
@@ -270,6 +281,10 @@ def import_bindle(
         if str(profile.get("id") or "")
     }
     existing_profiles = [dict(row) for row in conn.execute("SELECT * FROM profiles").fetchall()]
+    if target_batch_id and not conn.execute(
+        "SELECT 1 FROM batches WHERE id = ?", (target_batch_id,)
+    ).fetchone():
+        raise ValueError("所选批次不存在，导入前请重新选择。")
     profile_count_before = len(existing_profiles)
     profile_by_identity = {
         (str(profile.get("name") or "").strip(), str(profile.get("reviewer") or "").strip()): profile["id"]
@@ -277,6 +292,7 @@ def import_bindle(
     }
     source_profile_map: dict[str, str] = {}
     created_profile_ids: list[str] = []
+    batch_created = False
 
     def resolve_profile(profile: dict | None, source_id: str = "") -> str:
         if source_id and source_id in source_profile_map:
@@ -340,6 +356,12 @@ def import_bindle(
                         "name": e.get("profile_name", ""),
                         "reviewer": e.get("reviewer", ""),
                     }
+                override = profile_overrides.get(source_profile_id) or profile_overrides.get("__fallback__")
+                if override:
+                    source_profile = dict(source_profile or {})
+                    for key in ("name", "reviewer"):
+                        if key in override:
+                            source_profile[key] = str(override.get(key) or "").strip()
                 destination_profile_id = resolve_profile(source_profile, source_profile_id)
 
                 check_status = e.get("check_status", "warning")
@@ -360,7 +382,13 @@ def import_bindle(
                     (new_id, destination_profile_id, e.get("title", ""), invoice_no,
                      e.get("invoice_date", ""), e.get("seller", ""), e.get("total", ""),
                      e.get("buyer_name", ""), e.get("buyer_tax_id", ""), e.get("category", ""),
-                     json.dumps(e.get("tags", []), ensure_ascii=False), status,
+                     json.dumps(
+                         list(dict.fromkeys(
+                             [str(tag).strip() for tag in (e.get("tags") or []) if str(tag).strip()]
+                             + import_tags
+                         )),
+                         ensure_ascii=False,
+                     ), status,
                      check_status, check_message, e.get("source", "imported"), now, now),
                 )
                 for field, fv in e.get("fields", {}).items():
@@ -426,6 +454,26 @@ def import_bindle(
                     existing_invoice_nos.add(invoice_no)
                 existing_invoice_hashes.update(invoice_hashes)
 
+            if imported_ids and new_batch_name:
+                target_batch_id = uuid.uuid4().hex
+                conn.execute(
+                    """INSERT INTO batches(id, name, note, archived, created_at, updated_at)
+                       VALUES(?,?,?,0,?,?)""",
+                    (target_batch_id, new_batch_name, "", now, now),
+                )
+                batch_created = True
+            if imported_ids and target_batch_id:
+                for imported_id in imported_ids:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO batch_entries(batch_id, entry_id, note, added_at)
+                           VALUES(?,?,?,?)""",
+                        (target_batch_id, imported_id, "", now),
+                    )
+                conn.execute(
+                    "UPDATE batches SET updated_at = ? WHERE id = ?",
+                    (now, target_batch_id),
+                )
+
             if imported_ids and created_profile_ids:
                 has_default = conn.execute(
                     "SELECT 1 FROM profiles WHERE is_default = 1 LIMIT 1"
@@ -466,6 +514,10 @@ def import_bindle(
         message_parts.append("完整性异常条目已标记为严重问题")
     if created_profile_ids:
         message_parts.append(f"已恢复 {len(created_profile_ids)} 个报账人")
+    if import_tags and imported_ids:
+        message_parts.append(f"已给全部 {len(imported_ids)} 条添加标签")
+    if target_batch_id and imported_ids:
+        message_parts.append("已装入新建批次" if batch_created else "已装入所选批次")
     message = "；".join(message_parts) + "。"
 
     return {
@@ -475,5 +527,8 @@ def import_bindle(
         "entry_ids": imported_ids,
         "profiles_imported": len(created_profile_ids),
         "profile_ids": created_profile_ids,
+        "batch_id": target_batch_id if imported_ids else "",
+        "batch_created": batch_created,
+        "tags_applied": import_tags if imported_ids else [],
         "message": message,
     }

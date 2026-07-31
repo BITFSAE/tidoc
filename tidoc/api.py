@@ -1258,10 +1258,17 @@ class Api:
         return inspect_bindle(path)
 
     @_guard
-    def import_bindle(self, path, profile_id, allow_tampered=False):
+    def import_bindle(self, path, profile_id, allow_tampered=False, options=None):
         from .services.bindle import import_bindle
 
-        return import_bindle(self.entries, self.attachments, path, profile_id, allow_tampered)
+        return import_bindle(
+            self.entries,
+            self.attachments,
+            path,
+            profile_id,
+            allow_tampered,
+            options,
+        )
 
     # ------------------------------------------------------------ 打印导出组件（可选）
     @_guard
@@ -1374,6 +1381,7 @@ class Api:
         return {
             "files": len(files),
             "size": sum(path.stat().st_size for path in files if path.exists()),
+            "exports_size": _directory_size(self.data_root.exports_dir),
         }
 
     @_guard
@@ -1705,6 +1713,18 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _directory_size(folder: Path) -> int:
+    """Return the current size of regular files, tolerating concurrent changes."""
+    total = 0
+    for path in folder.rglob("*"):
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _is_inside(root: Path, path: Path) -> bool:

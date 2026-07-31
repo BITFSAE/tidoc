@@ -592,3 +592,82 @@ def test_bindle_restores_claimants_and_respects_optional_notes_and_tags(repos, t
     with zipfile.ZipFile(package) as archive:
         payload = json.loads(archive.read("entries.json"))
     assert payload["bindle_version"] == 2
+
+
+def test_bindle_import_applies_profile_tag_and_existing_batch_before_commit(repos, tmp_path):
+    source_profile = repos["profiles"].create("张三", "李老师")
+    source_entry = repos["entries"].create(
+        source_profile["id"],
+        parsed=ParsedInvoice(invoice_no="26952000001672381651", total=Decimal("12.00")),
+    )
+    package = export_bindle(
+        repos["entries"], repos["attachments"], [source_entry],
+        tmp_path / "可配置导入.tidoc", {source_profile["id"]: source_profile},
+    )
+
+    target_root = DataRoot(tmp_path / "configured-target")
+    target_db = Database(target_root.db_path)
+    target_profiles = ProfileRepo(target_db)
+    fallback = target_profiles.create("运营同学", "总审核人")
+    target_entries = EntryRepo(target_db)
+    target_attachments = AttachmentRepo(target_db, target_root)
+    from tidoc.db.batches import BatchRepo
+
+    target_batches = BatchRepo(target_db)
+    existing_batch = target_batches.create("已有报账批次")
+
+    result = import_bindle(
+        target_entries,
+        target_attachments,
+        package,
+        fallback["id"],
+        options={
+            "profile_overrides": {
+                source_profile["id"]: {"name": "王五", "reviewer": "赵老师"},
+            },
+            "tags": ["本次导入"],
+            "batch_id": existing_batch["id"],
+        },
+    )
+
+    assert result["imported"] == 1
+    assert result["batch_id"] == existing_batch["id"]
+    imported = target_entries.get(result["entry_ids"][0])
+    assert imported["tags"] == ["本次导入"]
+    profile = target_profiles.get(imported["profile_id"])
+    assert (profile["name"], profile["reviewer"]) == ("王五", "赵老师")
+    assert target_batches.get(existing_batch["id"])["entry_ids"] == [imported["id"]]
+
+
+def test_bindle_import_can_leave_entries_out_of_batches(repos, tmp_path):
+    source_profile = repos["profiles"].create("张三", "李老师")
+    source_entry = repos["entries"].create(
+        source_profile["id"],
+        parsed=ParsedInvoice(invoice_no="26952000001672381652", total=Decimal("12.00")),
+    )
+    package = export_bindle(
+        repos["entries"], repos["attachments"], [source_entry],
+        tmp_path / "不入批次.tidoc", {source_profile["id"]: source_profile},
+    )
+
+    target_root = DataRoot(tmp_path / "no-batch-target")
+    target_db = Database(target_root.db_path)
+    target_profiles = ProfileRepo(target_db)
+    fallback = target_profiles.create("运营同学", "总审核人")
+    target_entries = EntryRepo(target_db)
+    target_attachments = AttachmentRepo(target_db, target_root)
+
+    result = import_bindle(
+        target_entries,
+        target_attachments,
+        package,
+        fallback["id"],
+        options={"batch_id": "", "batch_name": ""},
+    )
+
+    assert result["imported"] == 1
+    assert result["batch_id"] == ""
+    assert result["batch_created"] is False
+    assert target_db.conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
+    assert target_db.conn.execute("SELECT COUNT(*) FROM batch_entries").fetchone()[0] == 0
+    assert target_entries.get(result["entry_ids"][0])["batches"] == []

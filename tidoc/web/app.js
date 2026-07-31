@@ -126,6 +126,11 @@ function dateShort(s) {
   return s.length > 10 ? s.slice(0, 10) : s;
 }
 
+function filenameTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${pad(date.getHours())}-${pad(date.getMinutes())}`;
+}
+
 // inline SVG icons (no emoji)
 const I = {
   pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m4 20 4-1 11-11-3-3L5 16l-1 4z"/><path d="m14 5 3 3"/></svg>',
@@ -2238,7 +2243,8 @@ async function openSettings() {
         </div>
         <div class="settings-row-actions">
           <button class="btn small ghost" id="setOpenData">打开文件夹</button>
-          <button class="btn small ghost" id="setOpenExports">打开导出目录</button>
+          <button class="btn small ghost" id="setOpenExports">打开导出目录 · ${fmtBytes(maintenance.exports_size || 0)}</button>
+          <button class="btn small ghost" id="setCleanup" ${maintenance.files ? '' : 'disabled'}>清理临时文件${maintenance.size ? ` · ${fmtBytes(maintenance.size)}` : ''}</button>
         </div>
         <details class="settings-advanced" id="paymentInfoFold">
           <summary>收款信息</summary>
@@ -2258,7 +2264,6 @@ async function openSettings() {
           <div class="settings-row-actions">
             <button class="btn small" id="setMigrate">迁移到新位置…</button>
             ${paths.is_default ? '' : '<button class="btn small ghost" id="setResetData">恢复默认位置</button>'}
-            <button class="btn small ghost" id="setCleanup" ${maintenance.files ? '' : 'disabled'}>清理临时文件${maintenance.size ? ` · ${fmtBytes(maintenance.size)}` : ''}</button>
           </div>
         </details>
       </div>
@@ -4038,7 +4043,7 @@ async function exportSummary(ids) {
 async function doExport(ids) {
   if (!ids || !ids.length) { toast('请先选择要导出的条目', 'err'); return; }
   const body = el('div');
-  const defaultName = '报账导出-' + new Date().toISOString().slice(0, 10);
+  const defaultName = '报账导出-' + filenameTimestamp();
   body.innerHTML = `
     <div class="form-row">
       <label>导出名称</label>
@@ -4050,11 +4055,11 @@ async function doExport(ids) {
         <span><b>绑定包</b><small>包含条目、附件、报账人和签名清单；备注与标签按设置导出。</small></span>
       </label>
       <label class="export-option">
-        <input type="checkbox" data-export="excel" checked/>
+        <input type="checkbox" data-export="excel"/>
         <span><b>总览 Excel</b><small>给负责人核对条数、金额、材料状态和备注。</small></span>
       </label>
       <label class="export-option">
-        <input type="checkbox" data-export="archive" checked/>
+        <input type="checkbox" data-export="archive"/>
         <span><b>规范命名附件包</b><small>按“序号_发票号_销售方_金额”分文件夹整理附件并压缩。</small></span>
       </label>
     </div>
@@ -4122,28 +4127,198 @@ function showExportResult(outputs) {
   });
 }
 
+async function openBindleImportPreview(path, insp) {
+  const [batches, tags] = await Promise.all([
+    Api.listBatches(true),
+    Api.listTags(),
+  ]);
+  const fallback = State.profileById[State.currentProfileId];
+  const entries = insp.entries || [];
+  const legacyProfiles = new Map();
+  entries.forEach((entry) => {
+    const sourceId = entry.profile_id || '__fallback__';
+    if (!legacyProfiles.has(sourceId)) {
+      legacyProfiles.set(sourceId, {
+        id: sourceId,
+        sourceId,
+        name: entry.profile_name || fallback?.name || '',
+        reviewer: entry.reviewer || fallback?.reviewer || '',
+        is_default: false,
+      });
+    }
+  });
+  const packageProfiles = (insp.profiles || []).length
+    ? insp.profiles.map((p) => ({ ...p, sourceId: p.id || '__fallback__' }))
+    : [...legacyProfiles.values()];
+  if (!packageProfiles.length) {
+    packageProfiles.push({
+      id: '__fallback__', sourceId: '__fallback__',
+      name: fallback?.name || '', reviewer: fallback?.reviewer || '',
+      is_default: false,
+    });
+  }
+  const counts = new Map(packageProfiles.map((p) => [p.sourceId, 0]));
+  (insp.entries || []).forEach((entry) => {
+    const key = entry.profile_id || '__fallback__';
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  const activeBatches = (batches || []).filter((batch) => !batch.archived);
+  const attachmentCount = entries.reduce((sum, entry) => sum + (entry.attachments || []).length, 0);
+  const body = el('div', 'bindle-import');
+  const profileRows = packageProfiles.map((profile) => `
+    <div class="bindle-profile-row" data-bind-profile="${esc(profile.sourceId)}">
+      <input data-bind-profile-name aria-label="报账人" value="${esc(profile.name || '')}" placeholder="填写报账人"/>
+      <input data-bind-profile-reviewer aria-label="审核人" value="${esc(profile.reviewer || '')}" placeholder="填写审核人"/>
+      <span>${counts.get(profile.sourceId) || 0} 条</span>
+    </div>`).join('');
+  const entryRows = entries.slice(0, 100).map((entry) => {
+    const profile = packageProfiles.find((item) => item.sourceId === (entry.profile_id || '__fallback__'));
+    return `<div class="bindle-entry-row" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}">
+      <span class="mono">${esc(entry.invoice_no || '无发票号')}</span>
+      <span class="bindle-entry-seller" data-tooltip-overflow="${esc(entry.seller || '')}">${esc(entry.seller || '未识别销售方')}</span>
+      <span>${fmtMoney(entry.total)}</span>
+      <span class="bindle-entry-owner">${esc(profile?.name || entry.profile_name || '未填写')} · ${esc(profile?.reviewer || entry.reviewer || '未填写')}</span>
+    </div>`;
+  }).join('');
+  const existingTagOptions = (tags || []).map((tag) => `<option value="${esc(tag)}"></option>`).join('');
+  const existingBatchOptions = activeBatches.map((batch) =>
+    `<option value="${esc(batch.id)}">${esc(batch.name)} · ${batch.stats?.count || 0} 条</option>`
+  ).join('');
+  body.innerHTML = `
+    <div class="bindle-import-bar">
+      <strong data-tooltip-overflow="${esc(baseName(path))}">${esc(baseName(path))}</strong>
+      <div class="bindle-import-meta">
+        <span><b>${entries.length}</b> 条目</span>
+        <span><b>${packageProfiles.length}</b> 报账人</span>
+        <span><b>${attachmentCount}</b> 附件</span>
+      </div>
+    </div>
+    ${insp.verified ? '' : `<div class="bindle-integrity-warning">
+      <b>完整性校验未通过</b><span>${esc((insp.tampered || []).join('、'))}</span>
+      <label><input type="checkbox" id="bindleAllowTampered"/> 我确认继续，导入后标记为严重问题</label>
+    </div>`}
+    <section class="bindle-import-section">
+      <h3>身份对应</h3>
+      <div class="bindle-profile-list">
+        <div class="bindle-profile-labels"><span>报账人</span><span>审核人</span><span>条目</span></div>
+        ${profileRows}
+      </div>
+    </section>
+    <section class="bindle-import-section">
+      <h3>导入设置</h3>
+      <div class="bindle-import-options">
+        <div class="form-row bindle-batch-option">
+          <label>报账批次</label>
+          <div class="bindle-segments" role="radiogroup" aria-label="报账批次">
+            <label><input type="radio" name="bindleBatchMode" value="none" checked/><span>不加入</span></label>
+            <label class="${activeBatches.length ? '' : 'disabled'}"><input type="radio" name="bindleBatchMode" value="existing" ${activeBatches.length ? '' : 'disabled'}/><span>已有批次</span></label>
+            <label><input type="radio" name="bindleBatchMode" value="new"/><span>新建批次</span></label>
+          </div>
+          <select id="bindleBatchSelect" class="hidden" aria-label="选择已有批次">${existingBatchOptions}</select>
+          <input id="bindleNewBatch" class="hidden" aria-label="新批次名称" placeholder="输入批次名称"/>
+        </div>
+        <div class="form-row">
+          <label for="bindleTagInput">统一标签 <span class="optional">可选</span></label>
+          <input id="bindleTagInput" list="bindleTagOptions" placeholder="选择或输入标签"/>
+          <datalist id="bindleTagOptions">${existingTagOptions}</datalist>
+        </div>
+      </div>
+    </section>
+    <section class="bindle-import-section">
+      <h3>条目</h3>
+      <div class="bindle-entry-list">
+        ${entryRows ? '<div class="bindle-entry-head"><span>发票号</span><span>销售方</span><span>金额</span><span>归属</span></div>' + entryRows : '<div class="bindle-empty">包内没有条目</div>'}
+      </div>
+      ${entries.length > 100 ? '<div class="bindle-list-note">显示前 100 条，不影响导入</div>' : ''}
+    </section>`;
+
+  const tagInput = body.querySelector('#bindleTagInput');
+  const batchSelect = body.querySelector('#bindleBatchSelect');
+  const newBatch = body.querySelector('#bindleNewBatch');
+  const batchModes = [...body.querySelectorAll('[name="bindleBatchMode"]')];
+  batchModes.forEach((input) => {
+    input.onchange = () => {
+      batchSelect.classList.toggle('hidden', input.value !== 'existing');
+      newBatch.classList.toggle('hidden', input.value !== 'new');
+      if (input.checked && input.value === 'new') newBatch.focus();
+    };
+  });
+  body.querySelectorAll('[data-bind-profile]').forEach((row) => {
+    const nameInput = row.querySelector('[data-bind-profile-name]');
+    const reviewerInput = row.querySelector('[data-bind-profile-reviewer]');
+    const syncOwner = () => {
+      body.querySelectorAll('[data-bind-entry-profile]').forEach((entryRow) => {
+        if (entryRow.dataset.bindEntryProfile !== row.dataset.bindProfile) return;
+        entryRow.querySelector('.bindle-entry-owner').textContent =
+          `${nameInput.value.trim() || '未填写'} · ${reviewerInput.value.trim() || '未填写'}`;
+      });
+    };
+    nameInput.oninput = syncOwner;
+    reviewerInput.oninput = syncOwner;
+  });
+
+  let m;
+  m = modal({
+    title: '导入绑定包',
+    wide: true,
+    body,
+    footer: [
+      mkBtn('取消', 'ghost', () => m.close()),
+      mkBtn(entries.length ? `导入 ${entries.length} 条` : '确认导入', 'primary', async () => {
+        const tampered = body.querySelector('#bindleAllowTampered');
+        if (tampered && !tampered.checked) {
+          toast('请确认完整性异常后再导入', 'err');
+          return;
+        }
+        const profileOverrides = {};
+        let invalidProfile = false;
+        body.querySelectorAll('[data-bind-profile]').forEach((row) => {
+          const name = row.querySelector('[data-bind-profile-name]').value.trim();
+          const reviewer = row.querySelector('[data-bind-profile-reviewer]').value.trim();
+          if (!name || !reviewer) invalidProfile = true;
+          profileOverrides[row.dataset.bindProfile] = { name, reviewer };
+        });
+        if (invalidProfile) { toast('报账人与审核人都必须填写', 'err'); return; }
+        const tag = tagInput.value.trim();
+        const batchMode = body.querySelector('[name="bindleBatchMode"]:checked').value;
+        const batchId = batchMode === 'existing' ? batchSelect.value : '';
+        const batchName = batchMode === 'new' ? newBatch.value.trim() : '';
+        if (batchMode === 'existing' && !batchId) { toast('请选择报账批次', 'err'); return; }
+        if (batchMode === 'new' && !batchName) { toast('请填写新批次名称', 'err'); return; }
+        const options = {
+          profile_overrides: profileOverrides,
+          tags: tag ? [tag] : [],
+          batch_id: batchId,
+          batch_name: batchName,
+        };
+        const progress = taskProgress('正在导入条目和附件…');
+        try {
+          const r = await Api.importBindle(path, State.currentProfileId, !!tampered, options);
+          progress.update('正在刷新条目列表…');
+          m.close();
+          await loadProfiles();
+          await loadBatches();
+          await refreshEntries();
+          await refreshTagOptions();
+          toast(r.message + `（${r.imported} 条）`, r.tampered && r.tampered.length ? 'err' : 'ok');
+        } catch (e) { toast(e.message, 'err'); }
+        finally { progress.close(); }
+      }),
+    ],
+  });
+}
+
 async function doImport() {
   if (!State.currentProfileId) { toast('请先创建报账人', 'err'); return; }
   try {
     const res = await Api.pickFiles(false, ['绑定包 (*.tidoc)']);
     const paths = res.paths || [];
     if (!paths.length) return;
-    const path = paths[0];
     const progress = taskProgress('正在检查绑定包完整性…');
     try {
-      const insp = await Api.inspectBindle(path);
-      let allow = false;
-      if (!insp.verified) {
-        if (!confirm(`这份文件被改过（${insp.tampered.join(', ')}）。\n仍要导入吗？导入后这些条目会标记为可疑。`)) return;
-        allow = true;
-      }
-      progress.update('正在导入条目和附件…');
-      const r = await Api.importBindle(path, State.currentProfileId, allow);
-      progress.update('正在刷新条目列表…');
-      if (r.profiles_imported) await loadProfiles();
-      await refreshEntries();
-      await refreshTagOptions();
-      toast(r.message + `（${r.imported} 条）`, r.tampered && r.tampered.length ? 'err' : 'ok');
+      const insp = await Api.inspectBindle(paths[0]);
+      progress.close();
+      await openBindleImportPreview(paths[0], insp);
     } finally {
       progress.close();
     }

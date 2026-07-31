@@ -72,12 +72,18 @@ def test_cleanup_removes_only_rebuildable_files(tmp_path):
         "sha256": sha256_file(pending),
     }), "utf-8")
 
+    exported = api.data_root.exports_dir / "nested" / "材料.tidoc"
+    exported.parent.mkdir(parents=True)
+    exported.write_bytes(b"exported")
+
     status = unwrap(api.storage_maintenance_status())
     assert status["files"] == 2
+    assert status["exports_size"] == len(b"exported")
     cleaned = unwrap(api.cleanup_app_cache())
     assert cleaned["files"] == 2
     assert pending.exists()
     assert marker.exists()
+    assert exported.exists()
     assert not dropped.exists()
     assert not stale.exists()
 

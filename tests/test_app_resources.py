@@ -120,6 +120,42 @@ def test_card_drag_state_does_not_cover_amount_with_text():
     assert "setRecognizedPaidAmount:" in api_source
 
 
+def test_bindle_preview_is_compact_and_keeps_legacy_profile_mapping():
+    source = (app.web_dir() / "app.js").read_text("utf-8")
+    preview = source.split(
+        "async function openBindleImportPreview", 1
+    )[1].split("async function doImport", 1)[0]
+
+    assert "legacyProfiles" in preview
+    assert "entry.profile_name || fallback?.name" in preview
+    assert 'name="bindleBatchMode"' in preview
+    assert 'class="bindle-entry-head"' in preview
+    assert "已读取 ${esc(baseName(path))}" not in preview
+    assert "给全部导入条目添加标签" not in preview
+
+
+def test_export_names_include_local_time_and_settings_show_export_storage():
+    source = (app.web_dir() / "app.js").read_text("utf-8")
+    styles = (app.web_dir() / "styles.css").read_text("utf-8")
+
+    assert "function filenameTimestamp" in source
+    assert "'报账导出-' + filenameTimestamp()" in source
+    assert "new Date().toISOString().slice(0, 10)" not in source
+    export_dialog = source.split("async function doExport", 1)[1].split("function showExportResult", 1)[0]
+    assert 'data-export="bindle" checked' in export_dialog
+    assert 'data-export="excel" checked' not in export_dialog
+    assert 'data-export="archive" checked' not in export_dialog
+    assert "打开导出目录 · ${fmtBytes(maintenance.exports_size || 0)}" in source
+    actions = source.split('<div class="settings-row-actions">', 1)[1].split("</div>", 1)[0]
+    assert 'id="setOpenExports"' in actions
+    assert 'id="setCleanup"' in actions
+    settings_title = styles.split(".settings-block-title {", 1)[1].split("}", 1)[0]
+    assert 'font-family: "Microsoft YaHei UI"' in settings_title
+    assert "font-size: 12px" in settings_title
+    assert "letter-spacing: 0" in settings_title
+    assert "text-transform: none" in settings_title
+
+
 def test_frontend_exposes_explicit_online_verification_flow():
     web = app.web_dir()
     source = (web / "app.js").read_text("utf-8")

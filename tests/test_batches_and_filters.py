@@ -55,6 +55,21 @@ def test_batch_move_entries(repos, sample_xmls):
     assert set(repos["batches"].get(target["id"])["entry_ids"]) == set(ids)
 
 
+def test_set_single_entry_batch_can_replace_or_clear(repos, sample_xmls):
+    _, ids = _make_entries(repos, sample_xmls, 1)
+    first = repos["batches"].create("原批次", entry_ids=ids)
+    second = repos["batches"].create("新批次")
+
+    replaced = repos["batches"].set_entry_batch(ids[0], second["id"])
+    assert replaced["removed"] == 1
+    assert repos["batches"].get(first["id"])["entry_ids"] == []
+    assert repos["batches"].get(second["id"])["entry_ids"] == ids
+
+    cleared = repos["batches"].set_entry_batch(ids[0])
+    assert cleared["removed"] == 1
+    assert repos["batches"].get(second["id"])["entry_ids"] == []
+
+
 def test_batch_entry_note(repos, sample_xmls):
     _, ids = _make_entries(repos, sample_xmls, 1)
     b = repos["batches"].create("批次")
@@ -152,8 +167,25 @@ def test_batch_filter_on_entries(repos, sample_xmls):
     b = repos["batches"].create("批", entry_ids=ids[:1])
     inside = repos["entries"].list(batch_id=b["id"])
     outside = repos["entries"].list(not_in_batch_id=b["id"])
+    unbatched = repos["entries"].list(unbatched=True)
     assert len(inside) == 1
     assert len(outside) == 2
+    assert {entry["id"] for entry in unbatched} == set(ids[1:])
+    assert repos["batches"].unbatched_count() == 2
+
+
+def test_api_batch_listing_includes_unbatched_count(api):
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry = api.create_entry(profile["id"])["data"]
+
+    listing = api.list_batches(True)["data"]
+    assert listing["batches"] == []
+    assert listing["unbatched_count"] == 1
+
+    api.create_batch("第一批", entry_ids=[entry["id"]])
+    listing = api.list_batches(True)["data"]
+    assert len(listing["batches"]) == 1
+    assert listing["unbatched_count"] == 0
 
 
 def test_entry_list_uses_bounded_query_count(repos, sample_xmls):

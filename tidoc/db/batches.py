@@ -125,6 +125,28 @@ class BatchRepo:
             self.db.conn.rollback()
             raise
 
+    def set_entry_batch(self, entry_id: str, target_batch_id: str | None = None) -> dict:
+        """把单条条目改为一个批次，或明确设为不进任何批次。"""
+        if not self.db.conn.execute(
+            "SELECT 1 FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone():
+            raise ValueError("条目不存在。")
+        if target_batch_id and not self._exists(target_batch_id):
+            raise ValueError("批次不存在。")
+        old_rows = self.db.conn.execute(
+            "SELECT batch_id FROM batch_entries WHERE entry_id = ?", (entry_id,)
+        ).fetchall()
+        old_ids = [row["batch_id"] for row in old_rows]
+        self.db.conn.execute("DELETE FROM batch_entries WHERE entry_id = ?", (entry_id,))
+        now = _now()
+        added = 0
+        if target_batch_id:
+            added = self._link(target_batch_id, entry_id, now)
+        for batch_id in set(old_ids) | ({target_batch_id} if target_batch_id else set()):
+            self._touch(batch_id)
+        self.db.conn.commit()
+        return {"added": added, "removed": len(old_ids), "batch_id": target_batch_id or ""}
+
     def set_entry_note(self, batch_id: str, entry_id: str, note: str) -> dict:
         """设置某条目在该批次内的催办备注。条目若不在批次内则先装入。"""
         row = self.db.conn.execute(
@@ -176,6 +198,17 @@ class BatchRepo:
             batch["count"] = batch["stats"]["count"]
             result.append(batch)
         return result
+
+    def unbatched_count(self) -> int:
+        """统计尚未归入任何批次的条目，供批次栏的快捷入口显示。"""
+        row = self.db.conn.execute(
+            """SELECT COUNT(*) AS count
+                 FROM entries e
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id
+                )"""
+        ).fetchone()
+        return int(row["count"] or 0)
 
     def entry_ids(self, batch_id: str) -> list[str]:
         rows = self.db.conn.execute(

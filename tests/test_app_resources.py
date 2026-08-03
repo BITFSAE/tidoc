@@ -103,6 +103,17 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "${compBadge}" not in card_source
     assert 'id="changeProfileBtn"' in html
     assert 'id="batchReparseBtn"' in html
+    assert 'id="filterUnbatched"' not in html
+    assert "unbatched_count" in source
+    assert 'class="batch-folder unbatched' in source
+    assert "actionBtn('pay', '付款'" in source
+    assert "actionBtn('physical', '实物'" in source
+    assert "showPhysicalAction" in source
+    assert "左键点击条目上的批次标签" not in source
+    assert "在卡片或详情添加付款截图、实物图和查验单" in source
+    assert '<details class="settings-block">' in source
+    assert ".att-group-actions" in css
+    assert ".att-group.has .attach-item" in css
     assert "State.quickView !== 'warning'" in source
     assert "Api.reparseEntries(ids)" in source
     assert "reparseEntries:" in (web / "api.js").read_text("utf-8")

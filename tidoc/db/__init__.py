@@ -5,6 +5,7 @@ from .attachments import (
     TYPE_INSPECTION,
     TYPE_INVOICE_PDF,
     TYPE_INVOICE_XML,
+    TYPE_PHYSICAL_IMAGE,
     TYPE_OTHER,
     TYPE_PAYMENT,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "TYPE_INVOICE_PDF",
     "TYPE_INVOICE_XML",
     "TYPE_PAYMENT",
+    "TYPE_PHYSICAL_IMAGE",
     "TYPE_INSPECTION",
     "TYPE_OTHER",
 ]

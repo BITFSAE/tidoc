@@ -115,7 +115,7 @@ CREATE INDEX IF NOT EXISTS idx_items_entry ON items(entry_id);
 CREATE TABLE IF NOT EXISTS attachments (
     id            TEXT PRIMARY KEY,
     entry_id      TEXT NOT NULL,
-    type          TEXT NOT NULL,     -- invoice_pdf/invoice_xml/payment_screenshot/inspection_pdf/other
+    type          TEXT NOT NULL,     -- invoice_pdf/invoice_xml/payment_screenshot/physical_image/inspection_pdf/other
     original_name TEXT DEFAULT '',
     stored_path   TEXT DEFAULT '',   -- 相对 attachments/ 的路径
     sha256        TEXT DEFAULT '',

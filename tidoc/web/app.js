@@ -6,6 +6,7 @@ const State = {
   profileById: {},
   currentProfileId: null,
   activeTitle: '',
+  titleOptions: [],
   quickView: 'all',
   entries: [],
   selected: new Set(),
@@ -16,13 +17,22 @@ const State = {
   groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
   tagFilter: '',         // 工具栏筛选：按标签
   notesFilter: '',       // 高级筛选：'' | 'yes' | 'no'（有 / 无记账备注）
-  batchFilter: '',       // 当前聚焦的批次 id（在批次内浏览 / 管理）
+  batchFilter: '',       // 当前聚焦的批次 id；'unbatched' 表示未进批次
   batches: [],           // 批次列表缓存
+  unbatchedCount: 0,     // 未进任何批次的条目数
   currentBatch: null,    // 当前批次详情（含批次级催办备注）
   allTags: [],           // 全库用过的标签
   multiClaimantMode: false,
   paymentOcrEnabled: true,
   defaultPaidToInvoice: true,
+  defaultEntryTitle: '',
+  materialRequirements: {
+    invoice: true,
+    payment_screenshot: true,
+    physical_image: false,
+    inspection_pdf: true,
+    paid_amount: true,
+  },
   verificationWatchDirectory: '',
   verificationTrashSource: false,
   activeDetailEntryId: null,
@@ -77,6 +87,14 @@ const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
 const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
 const PAYMENT_OCR_KEY = 'tidoc.paymentScreenshotOcr';
 const DEFAULT_PAID_TO_INVOICE_KEY = 'tidoc.defaultPaidToInvoiceTotal';
+const DEFAULT_ENTRY_TITLE_KEY = 'tidoc.defaultEntryTitle';
+const DEFAULT_MATERIAL_REQUIREMENTS = {
+  invoice: true,
+  payment_screenshot: true,
+  physical_image: false,
+  inspection_pdf: true,
+  paid_amount: true,
+};
 const BINDLE_INCLUDE_NOTES_KEY = 'tidoc.bindle.includeNotes';
 const BINDLE_INCLUDE_TAGS_KEY = 'tidoc.bindle.includeTags';
 const VERIFICATION_WATCH_DIR_KEY = 'tidoc.invoiceVerification.watchDirectory';
@@ -339,17 +357,26 @@ function setUpdateNotice(status) {
 async function loadWorkflowPreferences() {
   const local = localStorage.getItem(MULTI_CLAIMANT_KEY);
   const legacyVerificationWatch = localStorage.getItem(VERIFICATION_WATCH_DIR_KEY) || '';
+  const localDefaultEntryTitle = localStorage.getItem(DEFAULT_ENTRY_TITLE_KEY) || '';
   State.multiClaimantMode = local === '1';
   try {
-    const [multiMode, paymentOcr, defaultPaidToInvoice, verification] = await Promise.all([
+    const [multiMode, paymentOcr, defaultPaidToInvoice, defaultEntryTitle, materialRequirements, verification] = await Promise.all([
       Api.appPreference(MULTI_CLAIMANT_KEY, local || ''),
       Api.appPreference(PAYMENT_OCR_KEY, '1'),
       Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, '1'),
+      Api.appPreference(DEFAULT_ENTRY_TITLE_KEY, localDefaultEntryTitle),
+      Api.materialRequirements(),
       Api.invoiceVerificationPreferences(),
     ]);
     State.multiClaimantMode = multiMode === '1';
     State.paymentOcrEnabled = paymentOcr !== '0';
     State.defaultPaidToInvoice = defaultPaidToInvoice !== '0';
+    State.defaultEntryTitle = defaultEntryTitle || localDefaultEntryTitle || '';
+    State.materialRequirements = {
+      ...DEFAULT_MATERIAL_REQUIREMENTS,
+      ...(materialRequirements || {}),
+      invoice: true,
+    };
     State.verificationWatchDirectory = verification.watch_directory || '';
     State.verificationTrashSource = !!verification.trash_source_after_archive;
     if (!State.verificationWatchDirectory && legacyVerificationWatch) {
@@ -360,6 +387,7 @@ async function loadWorkflowPreferences() {
     }
     if (legacyVerificationWatch) localStorage.removeItem(VERIFICATION_WATCH_DIR_KEY);
     if (multiMode) localStorage.setItem(MULTI_CLAIMANT_KEY, multiMode);
+    if (State.defaultEntryTitle) localStorage.setItem(DEFAULT_ENTRY_TITLE_KEY, State.defaultEntryTitle);
   } catch (e) {}
 }
 
@@ -395,6 +423,7 @@ async function refreshTitleOptions() {
     const usedTitles = await Api.listTitles();
     const customTitles = usedTitles.filter((title) => !BUILTIN_TITLES.includes(title));
     const titles = [...BUILTIN_TITLES, ...customTitles];
+    State.titleOptions = titles;
     sel.innerHTML = '<option value="">全部</option>' + titles.map((title) =>
       `<option value="${esc(title)}">${esc(TITLE_SHORT[title] || title)}</option>`
     ).join('');
@@ -406,6 +435,22 @@ async function refreshTitleOptions() {
   } catch (e) {
     // 抬头选项刷新失败不阻断条目列表，保留当前静态选项。
   }
+}
+
+function knownTitleValues() {
+  return [...new Set([
+    ...BUILTIN_TITLES,
+    ...State.titleOptions,
+    ...State.entries.map((entry) => entry.title).filter(Boolean),
+    State.defaultEntryTitle,
+  ].filter(Boolean))];
+}
+
+function titleChoiceOptions(selected = '', autoLabel = '自动识别') {
+  const titles = [...new Set([...knownTitleValues(), selected].filter(Boolean))];
+  return `<option value="">${esc(autoLabel)}</option>` + titles.map((title) =>
+    `<option value="${esc(title)}"${title === selected ? ' selected' : ''}>${esc(TITLE_SHORT[title] || title)}</option>`
+  ).join('');
 }
 
 async function loadProfiles() {
@@ -475,6 +520,11 @@ function claimantConfirmHtml() {
 }
 
 // ------------------------------------------------------------------ 筛选
+const UNBATCHED_BATCH_ID = 'unbatched';
+const inUnbatchedView = () => State.batchFilter === UNBATCHED_BATCH_ID;
+const activeBatchId = () => State.batchFilter || '';
+const actualBatchId = () => (inUnbatchedView() ? '' : activeBatchId());
+
 function currentFilters() {
   const val = (id) => $('#' + id)?.value || '';
   State.activeTitle = val('filterTitle');
@@ -504,14 +554,15 @@ function currentFilters() {
   if (sort) f.sort = sort;
   if (State.tagFilter) f.tags = [State.tagFilter];
   if (State.notesFilter) f.has_notes = State.notesFilter;
-  if (State.batchFilter) f.batch_id = State.batchFilter;
+  if (inUnbatchedView()) f.unbatched = true;
+  else if (State.batchFilter) f.batch_id = State.batchFilter;
   return f;
 }
 
 async function refreshEntries() {
   try {
     await refreshTitleOptions();
-    State.currentBatch = State.batchFilter ? await Api.getBatch(State.batchFilter) : null;
+    State.currentBatch = actualBatchId() ? await Api.getBatch(actualBatchId()) : null;
     State.entries = await Api.listEntries(currentFilters());
     if (State.quickView === 'incomplete') {
       State.entries = State.entries.filter((e) => (e.completeness?.status || e.status) !== 'complete');
@@ -601,6 +652,7 @@ function listEntryFromDetail(entry) {
     attachment_types: attachmentTypes,
     has_invoice: !!(attachmentTypes.invoice_pdf || attachmentTypes.invoice_xml),
     has_payment: !!attachmentTypes.payment_screenshot,
+    has_physical: !!attachmentTypes.physical_image,
     has_inspection: !!attachmentTypes.inspection_pdf,
   };
 }
@@ -648,6 +700,32 @@ async function syncEntryAfterChange(entryId, { searchable = false, notes = false
   await refreshEntryCard(entryId, detail);
 }
 
+async function openCardAttachment(entry, action) {
+  const typeGroups = {
+    invoice: ['invoice_pdf', 'invoice_xml'],
+    pay: ['payment_screenshot'],
+    physical: ['physical_image'],
+    inspect: ['inspection_pdf'],
+  };
+  const types = typeGroups[action] || [];
+  try {
+    const detail = await Api.getEntry(entry.id);
+    const attachments = detail?.attachments || [];
+    const matches = attachments.filter((item) => types.includes(item.type));
+    const attachment = action === 'invoice'
+      ? (matches.find((item) => item.type === 'invoice_pdf') || matches[matches.length - 1])
+      : matches[matches.length - 1];
+    if (!attachment) {
+      const labels = { invoice: '发票材料', pay: '付款截图', physical: '实物图', inspect: '查验单' };
+      toast(`当前条目还没有${labels[action] || '该材料'}`, 'err');
+      return;
+    }
+    await Api.openAttachment(attachment.id);
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
 async function reopenEntryDetail(modalRef, entryId, options = {}) {
   modalRef.close();
   const detail = await Api.getEntry(entryId);
@@ -691,12 +769,14 @@ function entryCard(e) {
   const modified = paidDiff
     ? `<span class="badge modified">${iconPencil(11)}已修改</span>` : '';
   const owner = State.profileById[e.profile_id];
-  const ownerBadge = (State.multiClaimantMode || State.profiles.length > 1) && owner
-    ? `<span class="badge person"${owner.reviewer ? ` title="审核人：${esc(owner.reviewer)}"` : ''}>${esc(owner.name)}</span>` : '';
-  const batchBadges = (e.batches || []).map((batch) =>
-    `<span class="badge batch${batch.archived ? ' archived' : ''}" ` +
-    `title="${batch.archived ? '已归档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</span>`
-  ).join('');
+  const ownerBadge = owner
+    ? `<button class="badge person badge-action" data-card-owner="${esc(e.profile_id)}"${owner.reviewer ? ` title="审核人：${esc(owner.reviewer)} · 点击编辑"` : ' title="点击编辑报账人"'}>${esc(owner.name)}</button>` : '';
+  const batchBadges = (e.batches || []).length
+    ? e.batches.map((batch) =>
+      `<button class="badge batch badge-action${batch.archived ? ' archived' : ''}" data-card-batch="${esc(batch.id)}" ` +
+      `title="${batch.archived ? '已归档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</button>`
+    ).join('')
+    : '<button class="badge batch empty badge-action" data-card-batch="" title="点击设置报账批次">批次</button>';
 
   const itemTitle = actualCur || (e.items && e.items[0] && (e.items[0].actual_name || e.items[0].name)) || '未填物资名称';
   const notesPreview = notesCur
@@ -734,16 +814,20 @@ function entryCard(e) {
   }
 
   const right = el('div', 'entry-right');
+  const showPhysicalAction = State.materialRequirements.physical_image || e.has_physical;
+  const detailAction = `<button class="entry-detail-action" data-card-action="detail">${showPhysicalAction ? '详情' : '打开详情'}</button>`;
+  const commonActions = `
+      ${actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '左键补充发票 PDF；右键打开已有材料' : '添加发票 PDF')}
+      ${actionBtn('paid', '实付', !!paidCur, paidCur ? '已填写实付金额；点击修改' : '填写实付金额')}
+      ${actionBtn('pay', '付款', e.has_payment, e.has_payment ? '左键继续添加付款截图；右键打开已有截图' : '添加付款截图')}
+      ${actionBtn('inspect', '查验', e.has_inspection, e.has_inspection ? '左键重新查验或补充；右键打开已有查验单' : '打开官网查验并自动归档 PDF')}`;
+  const physicalAction = actionBtn('physical', '实物', e.has_physical, e.has_physical ? '左键继续添加实物图；右键打开已有实物图' : '添加实物图');
   right.innerHTML = `
     <div class="entry-total">${fmtMoney(e.total)}</div>
     ${paidDiff ? `<div class="entry-paid diff">实付 <b>${fmtMoney(paidCur)}</b><span>差异</span></div>` : ''}
-    <button class="entry-detail-action" data-card-action="detail">打开详情</button>
-    <div class="entry-inline-actions">
-      ${actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '已添加发票材料；点击补充发票 PDF' : '添加发票 PDF')}
-      ${actionBtn('paid', '实付', !!paidCur, paidCur ? '已填写实付金额；点击修改' : '填写实付金额')}
-      ${actionBtn('pay', '付款', e.has_payment, e.has_payment ? '已添加付款截图；点击继续添加' : '添加付款截图')}
-      ${actionBtn('inspect', '查验', e.has_inspection, e.has_inspection ? '已添加查验单；点击重新查验或补充' : '打开官网查验并自动归档 PDF')}
-    </div>`;
+    ${showPhysicalAction
+      ? `<div class="entry-inline-actions with-detail">${commonActions}${detailAction}${physicalAction}</div>`
+      : `${detailAction}<div class="entry-inline-actions">${commonActions}</div>`}`;
   right.querySelectorAll('[data-card-action]').forEach((b) => {
     b.onclick = async (ev) => {
       ev.stopPropagation();
@@ -753,9 +837,30 @@ function entryCard(e) {
       else if (action === 'invoice') await quickAddAttachment(e.id, 'invoice_pdf');
       else if (action === 'paid') await quickPaidFlow(e);
       else if (action === 'pay') await quickAddAttachment(e.id, 'payment_screenshot');
+      else if (action === 'physical') await quickAddAttachment(e.id, 'physical_image');
       else if (action === 'inspect') await onlineVerificationFlow(e.id);
     };
+    if (['invoice', 'pay', 'physical', 'inspect'].includes(b.dataset.cardAction)) {
+      b.oncontextmenu = async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        await openCardAttachment(e, b.dataset.cardAction);
+      };
+    }
     b.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
+  });
+
+  main.querySelector('[data-card-owner]')?.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    changeSelectionProfile([e.id], e.profile_id);
+  });
+  main.querySelectorAll('[data-card-batch]').forEach((badge) => {
+    badge.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openEntryBatchFlow(e);
+    });
   });
 
   card.append(check, stripe, main, right);
@@ -1049,8 +1154,13 @@ async function selectAllVisible() {
 // ------------------------------------------------------------------ 批次（运营组）
 async function loadBatches() {
   try {
-    State.batches = await Api.listBatches(true);
-  } catch (e) { State.batches = []; }
+    const result = await Api.listBatches(true);
+    State.batches = Array.isArray(result) ? result : (result?.batches || []);
+    State.unbatchedCount = Array.isArray(result) ? 0 : Number(result?.unbatched_count || 0);
+  } catch (e) {
+    State.batches = [];
+    State.unbatchedCount = 0;
+  }
   renderBatchFolders();
 }
 
@@ -1059,7 +1169,7 @@ function renderBatchFolders() {
   if (!wrap) return;
   const folders = State.batches.filter((b) => !b.archived);
   const archived = State.batches.filter((b) => b.archived);
-  if (!folders.length && !archived.length && !State.batchFilter) {
+  if (!folders.length && !archived.length && !State.batchFilter && !State.unbatchedCount) {
     wrap.innerHTML = '';
     wrap.classList.add('hidden');
     return;
@@ -1067,6 +1177,9 @@ function renderBatchFolders() {
     wrap.classList.remove('hidden');
     wrap.innerHTML = `
       <button class="batch-folder all${State.batchFilter ? '' : ' active'}" data-folder="">全部条目</button>
+      <button class="batch-folder unbatched${inUnbatchedView() ? ' active' : ''}" data-folder="${UNBATCHED_BATCH_ID}">
+        <span>未进批次</span><small>${State.unbatchedCount} 条</small>
+      </button>
       ${folders.map((b) => {
         const st = b.stats || {};
         return `<span class="batch-folder${State.batchFilter === b.id ? ' active' : ''}" data-folder="${esc(b.id)}">
@@ -1108,8 +1221,8 @@ function focusBatch(batchId) {
 function renderBatchContext() {
   const bar = $('#batchContext');
   if (!bar) return;
-  if (!State.batchFilter) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
-  const batch = State.currentBatch || State.batches.find((item) => item.id === State.batchFilter);
+  if (!actualBatchId()) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  const batch = State.currentBatch || State.batches.find((item) => item.id === actualBatchId());
   if (!batch) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
   const people = (batch.stats?.by_person || []).map((person) =>
     `<span><b>${esc(person.name)}</b> ${person.count} 条 · ${fmtMoney(person.total)}${person.incomplete ? ` · <i>缺 ${person.incomplete}</i>` : ''}</span>`).join('');
@@ -1221,7 +1334,7 @@ async function addSelectionToBatch(idsArg) {
     memberCounts.set(batch.id, (memberCounts.get(batch.id) || 0) + 1);
   }));
   const body = el('div');
-  const current = State.batchFilter && State.batches.find((b) => b.id === State.batchFilter);
+  const current = actualBatchId() && State.batches.find((b) => b.id === actualBatchId());
   const rows = State.batches.filter((batch) => !batch.archived).map((batch) => {
     const count = memberCounts.get(batch.id) || 0;
     const toggleLabel = count === ids.length ? '移出' : count ? '补齐' : '装入';
@@ -1263,6 +1376,56 @@ async function addSelectionToBatch(idsArg) {
       } catch (e) { toast(e.message, 'err'); }
     };
   });
+}
+
+async function openEntryBatchFlow(entry) {
+  try {
+    await loadBatches();
+    const memberships = await Api.batchesOfEntry(entry.id);
+    const currentIds = new Set(memberships.map((batch) => batch.id));
+    const body = el('div');
+    const activeBatches = State.batches.filter((batch) => !batch.archived);
+    const rows = activeBatches.map((batch) => {
+      const current = currentIds.has(batch.id);
+      return `<div class="batch-membership-row${current ? ' current' : ''}">
+        <div class="batch-membership-name"><b>${esc(batch.name)}</b><span>${current ? '当前批次' : `${batch.stats?.count || 0} 条`}</span></div>
+        <button class="btn small ghost" data-entry-batch="${esc(batch.id)}">${current && memberships.length === 1 ? '当前' : '改为此批次'}</button>
+      </div>`;
+    }).join('');
+    const currentLabel = memberships.length
+      ? memberships.map((batch) => `${esc(batch.name)}${batch.archived ? ' · 已归档' : ''}`).join('、')
+      : '不在任何批次';
+    body.innerHTML = `
+      <div class="entry-batch-current"><span>当前归属</span><b>${currentLabel}</b></div>
+      <div class="batch-membership-list">${rows || '<div class="hint">还没有可用批次。</div>'}</div>`;
+    const m = modal({
+      title: '编辑批次归属',
+      body,
+      footer: [
+        ...(memberships.length ? [mkBtn('不进任何批次', 'ghost', async () => {
+          try {
+            await Api.setEntryBatch(entry.id, '');
+            m.close(); await loadBatches(); await refreshEntries();
+            toast('已移出所有批次', 'ok');
+          } catch (err) { toast(err.message, 'err'); }
+        })] : []),
+        mkBtn('新建批次', 'primary', () => { m.close(); newBatchFlow([entry.id]); }),
+        mkBtn('关闭', 'ghost', () => m.close()),
+      ],
+    });
+    body.querySelectorAll('[data-entry-batch]').forEach((button) => {
+      button.onclick = async () => {
+        if (button.textContent.trim() === '当前') return;
+        try {
+          await Api.setEntryBatch(entry.id, button.dataset.entryBatch);
+          m.close(); await loadBatches(); await refreshEntries();
+          toast('批次归属已更新', 'ok');
+        } catch (err) { toast(err.message, 'err'); }
+      };
+    });
+  } catch (err) {
+    toast(err.message, 'err');
+  }
 }
 
 // 批量打标签
@@ -1326,17 +1489,17 @@ async function tagSelectionFlow(idsArg) {
   setTimeout(() => input.focus(), 20);
 }
 
-async function changeSelectionProfile(idsArg) {
-  const ids = Array.isArray(idsArg) ? idsArg : [...State.selected];
+async function changeSelectionProfile(idsArg, selectedProfileId = '') {
+  const fromSelection = !Array.isArray(idsArg);
+  const ids = fromSelection ? [...State.selected] : idsArg;
   if (!ids.length) { toast('请先选择条目', 'err'); return; }
   if (!State.profiles.length) { toast('还没有可选择的报账人', 'err'); return; }
   const body = el('div');
   body.innerHTML = `
     <div class="form-row">
       <label>改为报账人</label>
-      <select id="batchProfileSelect">${profileOptionsHtml()}</select>
-    </div>
-    <div class="hint">将修改所选 ${ids.length} 条的报账人，并为每条保留修改记录。</div>`;
+      <select id="batchProfileSelect">${profileOptionsHtml(selectedProfileId)}</select>
+    </div>`;
   const m = modal({
     title: `修改报账人 · ${ids.length} 条`,
     body,
@@ -1347,8 +1510,10 @@ async function changeSelectionProfile(idsArg) {
         try {
           const result = await Api.updateEntryProfiles(ids, profileId, State.currentProfileId);
           m.close();
-          State.selected.clear();
-          State.lastSelectedId = null;
+          if (fromSelection) {
+            State.selected.clear();
+            State.lastSelectedId = null;
+          }
           await refreshEntries();
           await loadBatches();
           toast(result.changed ? `已修改 ${result.changed} 条报账人` : '所选条目已经属于该报账人', 'ok');
@@ -1434,7 +1599,7 @@ async function quickPaidFlow(e) {
 async function quickAddAttachment(entryId, type) {
   let progress = null;
   try {
-    const res = await Api.pickFiles(type === 'payment_screenshot');
+    const res = await Api.pickFiles(type === 'payment_screenshot' || type === 'physical_image');
     const paths = res.paths || [];
     if (!paths.length) return;
     progress = taskProgress(type === 'payment_screenshot'
@@ -1762,11 +1927,11 @@ function openEntryMenu(x, y, e) {
   item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'));
   item('编辑条目备注', () => quickNoteFlow(e));
   item('打标签', () => tagSelectionFlow([e.id]));
-  if (State.batchFilter) item('批次催办备注', () => batchEntryNoteFlow(e));
-  item(State.batchFilter ? '移出当前批次' : '批次', async () => {
-    if (State.batchFilter) {
+  if (actualBatchId()) item('批次催办备注', () => batchEntryNoteFlow(e));
+  item(actualBatchId() ? '移出当前批次' : '批次', async () => {
+    if (actualBatchId()) {
       try {
-        const r = await Api.removeEntriesFromBatch(State.batchFilter, [e.id]);
+        const r = await Api.removeEntriesFromBatch(actualBatchId(), [e.id]);
         State.selected.delete(e.id);
         await loadBatches();
         await refreshEntries();
@@ -1784,7 +1949,7 @@ function openEntryMenu(x, y, e) {
 }
 
 async function batchEntryNoteFlow(e) {
-  const batch = State.currentBatch || await Api.getBatch(State.batchFilter);
+  const batch = State.currentBatch || await Api.getBatch(actualBatchId());
   const body = el('div');
   body.innerHTML = `<div class="form-row"><textarea id="batchEntryNote" rows="4" placeholder="这条在本批次中的催办事项">${esc(batch?.entry_notes?.[e.id] || '')}</textarea></div>`;
   const m = modal({
@@ -1793,7 +1958,7 @@ async function batchEntryNoteFlow(e) {
       mkBtn('取消', 'ghost', () => m.close()),
       mkBtn('保存', 'primary', async () => {
         try {
-          await Api.setBatchEntryNote(State.batchFilter, e.id, body.querySelector('#batchEntryNote').value.trim());
+          await Api.setBatchEntryNote(actualBatchId(), e.id, body.querySelector('#batchEntryNote').value.trim());
           m.close(); await refreshEntries(); toast('批次备注已保存', 'ok');
         } catch (err) { toast(err.message, 'err'); }
       }),
@@ -1830,6 +1995,7 @@ async function quickDelete(e) {
   if (!confirm(`确认删除「${e.seller || '该条目'}」？此操作不可撤销。`)) return;
   try {
     const result = await Api.deleteEntry(e.id);
+    await loadBatches();
     await refreshEntries();
     toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
   }
@@ -1913,7 +2079,6 @@ function bindEvents() {
   // 新增筛选维度
   $('#filterTag').onchange = () => { State.tagFilter = $('#filterTag').value; relistFromAdvanced(); };
   $('#filterNotes').onchange = () => { State.notesFilter = $('#filterNotes').value; relistFromAdvanced(); };
-
   setupGlobalDrop();
   setupClipboardUpload();
 
@@ -1949,6 +2114,7 @@ function clearAllFilters() {
   State.tagFilter = '';
   State.notesFilter = '';
   showSearchHintIfEmpty();
+  renderBatchFolders();
   refreshEntries();
 }
 
@@ -2087,7 +2253,7 @@ function editProfileFlow(p, onDone) {
 
 async function openSettings() {
   let paths, printStatus, appInfo, operatorPrefs, multiMode, paymentOcrMode;
-  let defaultPaidMode, bindleNotesMode, bindleTagsMode;
+  let defaultPaidMode, defaultEntryTitleMode, materialRequirementsMode, bindleNotesMode, bindleTagsMode;
   let autoUpdateMode, maintenance, verificationPrefs;
   try {
     paths = await Api.dataRoot();
@@ -2103,6 +2269,8 @@ async function openSettings() {
       Api.appPreference(MULTI_CLAIMANT_KEY, State.multiClaimantMode ? '1' : '0'),
       Api.appPreference(PAYMENT_OCR_KEY, State.paymentOcrEnabled ? '1' : '0'),
       Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, State.defaultPaidToInvoice ? '1' : '0'),
+      Api.appPreference(DEFAULT_ENTRY_TITLE_KEY, State.defaultEntryTitle || ''),
+      Api.materialRequirements(),
       Api.appPreference(BINDLE_INCLUDE_NOTES_KEY, '1'),
       Api.appPreference(BINDLE_INCLUDE_TAGS_KEY, '1'),
       Api.appPreference(AUTO_UPDATE_KEY, '0'),
@@ -2118,10 +2286,14 @@ async function openSettings() {
     multiMode = prefValues[5] === '1';
     paymentOcrMode = prefValues[6] !== '0';
     defaultPaidMode = prefValues[7] !== '0';
-    bindleNotesMode = prefValues[8] !== '0';
-    bindleTagsMode = prefValues[9] !== '0';
-    autoUpdateMode = prefValues[10] === '1';
-    verificationPrefs = prefValues[11];
+    defaultEntryTitleMode = prefValues[8] || '';
+    materialRequirementsMode = { ...DEFAULT_MATERIAL_REQUIREMENTS, ...(prefValues[9] || {}), invoice: true };
+    bindleNotesMode = prefValues[10] !== '0';
+    bindleTagsMode = prefValues[11] !== '0';
+    autoUpdateMode = prefValues[12] === '1';
+    verificationPrefs = prefValues[13];
+    State.defaultEntryTitle = defaultEntryTitleMode;
+    State.materialRequirements = materialRequirementsMode;
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
 
@@ -2207,6 +2379,42 @@ async function openSettings() {
           <label class="switch-line"><input type="checkbox" id="setBindleTags" ${bindleTagsMode ? 'checked' : ''}/><span>${bindleTagsMode ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
+
+      <!-- 扩展 -->
+      <details class="settings-block">
+        <summary class="settings-block-title">扩展</summary>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>新建默认抬头</b>
+            <span>新建或批量导入时自动带入，可在当前弹窗中修改</span>
+          </div>
+          <select id="setDefaultEntryTitle" class="settings-select">
+            ${titleChoiceOptions(defaultEntryTitleMode, '跟随发票识别')}
+          </select>
+        </div>
+        <div class="settings-requirements-head">
+          <div class="settings-row-copy">
+            <b>材料要求</b>
+            <span>只有标为“必需”的项目会影响条目的材料齐备状态</span>
+          </div>
+        </div>
+        <div class="settings-requirement-list">
+          <div class="settings-requirement-row">
+            <div class="settings-row-copy"><b>发票</b><span>发票 PDF 或 XML</span></div>
+            <span class="settings-fixed-required">必需</span>
+          </div>
+          ${[
+            ['payment_screenshot', '付款截图', '付款凭证图片'],
+            ['physical_image', '实物图', '物资照片'],
+            ['inspection_pdf', '查验单', '发票查验单 PDF'],
+            ['paid_amount', '实付金额', '实际支付金额'],
+          ].map(([key, label, hint]) => `
+            <div class="settings-requirement-row">
+              <div class="settings-row-copy"><b>${label}</b><span>${hint}</span></div>
+              <label class="switch-line"><input type="checkbox" data-material-requirement="${key}" ${materialRequirementsMode[key] ? 'checked' : ''}/><span>${materialRequirementsMode[key] ? '必需' : '可选'}</span></label>
+            </div>`).join('')}
+        </div>
+      </details>
 
       <!-- 查验单归档 -->
       <div class="settings-block">
@@ -2319,6 +2527,43 @@ async function openSettings() {
     $('#entryList').dataset.density = State.density;
     toast('已保存', 'ok');
   };
+  body.querySelector('#setDefaultEntryTitle').onchange = async (ev) => {
+    const value = ev.target.value;
+    ev.target.disabled = true;
+    try {
+      await Api.setAppPreference(DEFAULT_ENTRY_TITLE_KEY, value);
+      State.defaultEntryTitle = value;
+      if (value) localStorage.setItem(DEFAULT_ENTRY_TITLE_KEY, value);
+      else localStorage.removeItem(DEFAULT_ENTRY_TITLE_KEY);
+      toast(value ? `新建默认抬头已设为「${value}」` : '新建默认抬头已改为跟随发票识别', 'ok');
+    } catch (e) {
+      ev.target.value = State.defaultEntryTitle || '';
+      toast(e.message, 'err');
+    } finally {
+      ev.target.disabled = false;
+    }
+  };
+  body.querySelectorAll('[data-material-requirement]').forEach((input) => {
+    input.onchange = async () => {
+      const key = input.dataset.materialRequirement;
+      const enabled = input.checked;
+      const label = input.nextElementSibling;
+      input.disabled = true;
+      try {
+        const next = { ...State.materialRequirements, [key]: enabled, invoice: true };
+        State.materialRequirements = await Api.setMaterialRequirements(next);
+        label.textContent = enabled ? '必需' : '可选';
+        await loadBatches();
+        await refreshEntries();
+        toast(`${key === 'paid_amount' ? '实付金额' : key === 'payment_screenshot' ? '付款截图' : key === 'physical_image' ? '实物图' : '查验单'}已设为${enabled ? '必需' : '可选'}`, 'ok');
+      } catch (e) {
+        input.checked = !enabled;
+        toast(e.message, 'err');
+      } finally {
+        input.disabled = false;
+      }
+    };
+  });
   body.querySelector('#setMultiClaimant').onchange = async (ev) => {
     const enabled = ev.target.checked;
     const value = enabled ? '1' : '0';
@@ -2703,12 +2948,12 @@ async function maybeShowFirstUseGuide() {
 }
 
 function usageGuideStepsMarkup() {
-  return `<div><b>1 · 导入发票</b><span>把发票 PDF 或 XML 拖入、粘贴到主界面；文件较多时用“导入发票”选择多个文件或整个文件夹。</span></div>
-    <div><b>2 · 补齐材料</b><span>条目卡片的“查验”会打开税务官网并预填发票信息；手动填写验证码后，保存的查验单 PDF 会自动归入条目。已有材料也可直接拖入。</span></div>
-    <div><b>3 · 核对修正</b><span>用“待补材料”“识别提醒”“严重问题”筛出待处理条目，在详情中核对实付金额、明细和备注。</span></div>
-    <div><b>4 · 组织批次</b><span>勾选条目后装入报账批次、打标签或批量处理；按住 Shift 可连续选择，右键单条可快速移动或补材料。</span></div>
-    <div><b>5 · 导出打印</b><span>打印默认按每个条目的发票、付款截图、查验单依次拼接；也可选择按材料类型分别导出，并按需关闭页码编号。</span></div>
-    <div><b>6 · 后续查找</b><span>可按报账人、抬头、批次、状态、日期、金额或关键词筛选；打印导出组件与软件更新在“设置 → 组件与更新”统一管理。</span></div>`;
+  return `<div><b>1 · 导入发票</b><span>拖入或粘贴发票 PDF/XML；多张用“导入发票”。</span></div>
+    <div><b>2 · 补齐材料</b><span>在卡片或详情添加付款截图、实物图和查验单；右键可打开已有文件。</span></div>
+    <div><b>3 · 核对条目</b><span>从“待补材料”或“识别提醒”进入详情，确认实付、明细和备注。</span></div>
+    <div><b>4 · 组织批次</b><span>点击卡片上的报账人或批次标签编辑，也可勾选后批量处理。</span></div>
+    <div><b>5 · 导出打印</b><span>选中条目后导出绑定包、汇总或打印材料。</span></div>
+    <div><b>6 · 后续查找</b><span>用抬头、报账人、状态、日期、金额或关键词筛选。</span></div>`;
 }
 
 function openUsageGuide(firstRun) {
@@ -2739,7 +2984,7 @@ function openUsageGuide(firstRun) {
 function openNewEntry() {
   if (!State.currentProfileId) { toast('请先创建报账人', 'err'); openProfileManager(true); return; }
 
-  const picked = { xml: null, pdf: null, payments: [], inspection: null };
+  const picked = { xml: null, pdf: null, payments: [], physical: [], inspection: null };
   const body = el('div');
 
   function uploadTile(key, label, hint, ph, ico) {
@@ -2757,9 +3002,7 @@ function openNewEntry() {
     <div class="form-row" style="margin-top:14px">
       <label>抬头</label>
       <select id="neTitle">
-        <option value="">自动识别</option>
-        <option value="北京理工大学">北京理工大学</option>
-        <option value="北京理工大学教育基金会">北京理工大学教育基金会</option>
+        ${titleChoiceOptions(State.defaultEntryTitle)}
       </select>
     </div>
     ${claimantConfirmHtml()}
@@ -2767,6 +3010,7 @@ function openNewEntry() {
       ${uploadTile('pdf', '发票 PDF', '推荐上传', '选择文件', utIco(iconPdf()))}
       ${uploadTile('xml', '发票 XML', '让识别更准', '选择文件', utIco(iconXml()))}
       ${uploadTile('payment', '付款截图', '可多张 · 浅色背景', '选择图片', utIco(iconImage()))}
+      ${uploadTile('physical', '实物图', '可多张 · 可选', '选择图片', utIco(iconImage()))}
       ${uploadTile('inspection', '查验单 PDF', '可选', '选择文件', utIco(iconInspect()))}
     </div>
     <div id="nePreview"></div>`;
@@ -2775,7 +3019,7 @@ function openNewEntry() {
     btn.onclick = async () => {
       const key = btn.dataset.pick;
       try {
-        const multiple = key === 'payment';
+        const multiple = key === 'payment' || key === 'physical';
         const res = await Api.pickFiles(multiple);
         const paths = res.paths || [];
         if (!paths.length) return;
@@ -2784,6 +3028,9 @@ function openNewEntry() {
         if (key === 'payment') {
           picked.payments = paths;
           nameEl.textContent = `${paths.length} 张付款截图`;
+        } else if (key === 'physical') {
+          picked.physical = paths;
+          nameEl.textContent = `${paths.length} 张实物图`;
         } else if (key === 'inspection') {
           picked.inspection = paths[0];
           nameEl.textContent = baseName(paths[0]);
@@ -2831,10 +3078,12 @@ function openNewEntry() {
         profileId: selectedClaimantId(body),
         title: body.querySelector('#neTitle').value,
         xmlPath: picked.xml, pdfPath: picked.pdf,
-        paymentPaths: picked.payments, inspectionPath: picked.inspection,
+        paymentPaths: picked.payments, physicalPaths: picked.physical,
+        inspectionPath: picked.inspection,
         status: 'draft',
       });
       m.close();
+      await loadBatches();
       await refreshEntries();
       toast('已保存', 'ok');
     } catch (e) { toast(e.message, 'err'); }
@@ -3017,6 +3266,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
     const cleanupNow = allPreviewPaths().filter((p) => !manualPaths.has(p));
     cleanupOnClose = () => [];
     await cleanupDroppedPaths(cleanupNow);
+    await loadBatches();
     await refreshEntries();
     m.close();
     if (bind.auto && bind.auto.length) {
@@ -3048,7 +3298,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         }
         const progress = taskProgress(`正在创建 ${payload.length} 个报账条目…`);
         try {
-          const r = await Api.batchCreateEntries(selectedClaimantId(body), payload);
+          const r = await Api.batchCreateEntries(selectedClaimantId(body), payload, State.defaultEntryTitle);
           createdEntries.push(...(r.created_entries || []));
           const failedByKey = new Map((r.failed || []).map((item) => [item.key || item.group, item]));
           const createdKeys = new Set((r.created_entries || []).map((item) => item.group));
@@ -3063,6 +3313,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
               group.error = '';
             }
           });
+          await loadBatches();
           await refreshEntries();
           if (r.failed && r.failed.length) {
             render();
@@ -3116,10 +3367,13 @@ async function openEntryDetail(entryId, currentDetail = null) {
 
   // 附件按报账所需的三类分组展示：发票 / 付款截图 / 查验单；缺的类别显式提示
   const atts = e.attachments || [];
-  const attGroup = (label, types, hint) => {
+  const attGroup = (label, types, hint, requirementKey = types[0]) => {
     const list = atts.filter((a) => types.includes(a.type));
     const has = list.length > 0;
     const isInspection = types[0] === 'inspection_pdf';
+    const required = requirementKey in State.materialRequirements
+      ? State.materialRequirements[requirementKey] !== false
+      : false;
     const rows = list.map((a) => `
       <div class="attach-item">
         <span class="attach-name" title="${esc(a.abs_path || a.stored_path)}">${esc(a.original_name)}</span>
@@ -3135,21 +3389,25 @@ async function openEntryDetail(entryId, currentDetail = null) {
         </div>
       </div>`).join('');
     return `
-      <div class="att-group${has ? ' has' : ' missing'}" data-att-group="${types[0]}" data-att-hint="${esc(hint)}">
+      <div class="att-group${has ? ' has' : ' missing'}" data-att-group="${types[0]}" data-att-requirement="${requirementKey}" data-att-required="${required ? '1' : '0'}" data-att-hint="${esc(hint)}">
         <div class="att-group-head">
           <span class="att-group-dot"></span>
           <span class="att-group-title">${label}</span>
-          <span class="att-group-status">${has ? `已上传 ${list.length}` : '未上传'}</span>
-          ${isInspection ? '<button class="btn small att-group-add verify-online" data-online-verification>在线查验</button>' : ''}
-          <button class="btn small att-group-add" data-add-att-type="${types[0]}" data-add-att-label="${label}">＋ ${isInspection ? '上传' : '添加'}</button>
+          <span class="att-group-required">${required ? '必需' : '可选'}</span>
+          <span class="att-group-status">${has ? `已上传 ${list.length}` : (required ? '未上传' : '可选 · 未上传')}</span>
+          <span class="att-group-actions">
+            ${isInspection ? '<button class="btn small att-group-add verify-online" data-online-verification>在线查验</button>' : ''}
+            <button class="btn small att-group-add" data-add-att-type="${types[0]}" data-add-att-label="${label}">＋ ${isInspection ? '上传' : '添加'}</button>
+          </span>
         </div>
         ${has ? `<div class="attach-list">${rows}</div>` : `<div class="att-group-hint">${hint}</div>`}
       </div>`;
   };
   const attachSection = [
-    attGroup('发票', ['invoice_pdf', 'invoice_xml'], '上传发票 PDF 或 XML，用于识别发票信息。'),
-    attGroup('付款截图', ['payment_screenshot'], '上传付款截图，作为实付凭证。'),
-    attGroup('查验单', ['inspection_pdf'], '上传发票查验单 PDF。'),
+    attGroup('发票', ['invoice_pdf', 'invoice_xml'], '上传发票 PDF 或 XML，用于识别发票信息。', 'invoice'),
+    attGroup('付款截图', ['payment_screenshot'], '上传付款截图，作为实付凭证。', 'payment_screenshot'),
+    attGroup('实物图', ['physical_image'], '上传实物照片，作为物资凭证。', 'physical_image'),
+    attGroup('查验单', ['inspection_pdf'], '上传发票查验单 PDF。', 'inspection_pdf'),
     (atts.some((a) => a.type === 'other')
       ? attGroup('其他', ['other'], '') : ''),
   ].join('');
@@ -3172,9 +3430,10 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const materialFlow = `
     <div class="flow-strip">
       ${flowStep('invoice', e.has_invoice, '发票', e.has_invoice ? '已导入' : '需要 PDF')}
-      ${flowStep('payment', e.has_payment, '付款', e.has_payment ? '已上传' : '后续补截图')}
-      ${flowStep('inspection', e.has_inspection, '查验', e.has_inspection ? '已上传' : '后续补查验单')}
-      ${flowStep('paid', !!((f.paid_amount || {}).current), '实付', (f.paid_amount || {}).current ? fmtMoney((f.paid_amount || {}).current) : '待确认')}
+      ${flowStep('payment', e.has_payment, '付款截图', e.has_payment ? '已上传' : (State.materialRequirements.payment_screenshot ? '待补截图' : '可选'))}
+      ${flowStep('physical', e.has_physical, '实物图', e.has_physical ? '已上传' : (State.materialRequirements.physical_image ? '待补照片' : '可选'))}
+      ${flowStep('inspection', e.has_inspection, '查验', e.has_inspection ? '已上传' : (State.materialRequirements.inspection_pdf ? '待补查验单' : '可选'))}
+      ${flowStep('paid', !!((f.paid_amount || {}).current), '实付', (f.paid_amount || {}).current ? fmtMoney((f.paid_amount || {}).current) : (State.materialRequirements.paid_amount ? '待填写' : '可选'))}
     </div>`;
   const completenessLine = (detail) => {
     const state = detail.completeness || { ready: false, missing: [] };
@@ -3239,9 +3498,10 @@ async function openEntryDetail(entryId, currentDetail = null) {
     const paid = detail.fields?.paid_amount?.current || '';
     const states = {
       invoice: [detail.has_invoice, detail.has_invoice ? '已导入' : '需要 PDF'],
-      payment: [detail.has_payment, detail.has_payment ? '已上传' : '后续补截图'],
-      inspection: [detail.has_inspection, detail.has_inspection ? '已上传' : '后续补查验单'],
-      paid: [!!paid, paid ? fmtMoney(paid) : '待确认'],
+      payment: [detail.has_payment, detail.has_payment ? '已上传' : (State.materialRequirements.payment_screenshot ? '待补截图' : '可选')],
+      physical: [detail.has_physical, detail.has_physical ? '已上传' : (State.materialRequirements.physical_image ? '待补照片' : '可选')],
+      inspection: [detail.has_inspection, detail.has_inspection ? '已上传' : (State.materialRequirements.inspection_pdf ? '待补查验单' : '可选')],
+      paid: [!!paid, paid ? fmtMoney(paid) : (State.materialRequirements.paid_amount ? '待填写' : '可选')],
     };
     Object.entries(states).forEach(([key, [on, sub]]) => {
       const step = body.querySelector(`[data-flow-step="${key}"]`);
@@ -3484,7 +3744,9 @@ async function openEntryDetail(entryId, currentDetail = null) {
         if (group) {
           const count = group.querySelectorAll('.attach-item').length;
           const status = group.querySelector('.att-group-status');
-          if (status) status.textContent = count ? `已上传 ${count}` : '未上传';
+          if (status) status.textContent = count
+            ? `已上传 ${count}`
+            : (group.dataset.attRequired === '1' ? '未上传' : '可选 · 未上传');
           if (!count) {
             group.classList.remove('has');
             group.classList.add('missing');
@@ -3521,6 +3783,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
         try {
           const result = await Api.deleteEntry(entryId);
           mm.close();
+          await loadBatches();
           await refreshEntries();
           toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
         }
@@ -3533,6 +3796,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
 
 const ATTACHMENT_TYPE_OPTS = [
   ['payment_screenshot', '付款截图'],
+  ['physical_image', '实物图'],
   ['invoice_pdf', '发票 PDF'],
   ['invoice_xml', '发票 XML'],
   ['inspection_pdf', '查验单 PDF'],
@@ -3557,7 +3821,7 @@ function isInvoiceImportInfo(info) {
 }
 
 function isLooseMaterialInfo(info) {
-  return info && ['payment_screenshot', 'inspection_pdf', 'other'].includes(info.type);
+  return info && ['payment_screenshot', 'physical_image', 'inspection_pdf', 'other'].includes(info.type);
 }
 
 async function materialInfosForPaths(paths) {
@@ -3775,7 +4039,7 @@ function setupGlobalDrop() {
         return;
       }
       await cleanupDroppedPaths(paths);
-      toast('请拖入发票 PDF、XML、付款截图或查验单', 'err');
+      toast('请拖入发票 PDF、XML、付款截图、实物图或查验单', 'err');
     } catch (e) {
       await cleanupDroppedPaths(paths);
       toast(e.message || '处理拖入文件失败', 'err');
@@ -3863,7 +4127,7 @@ function showDragOverlay() {
   const ov = el('div', 'drag-overlay', `
     <div class="drag-guide">
       <b>空白列表区：导入发票 PDF/XML</b>
-      <span>拖到条目卡片：绑定付款截图或查验单</span>
+      <span>拖到条目卡片：绑定付款截图、实物图或查验单</span>
     </div>`);
   document.body.appendChild(ov);
 }
@@ -3911,7 +4175,7 @@ async function openAttachDroppedFiles(paths, options = {}) {
       </div>
       <select data-drop-entry="${idx}" aria-label="绑定到条目">${entryOptions}</select>
       <select data-drop-type="${idx}">
-        ${ATTACHMENT_TYPE_OPTS.filter(([v]) => ['payment_screenshot', 'inspection_pdf', 'other'].includes(v))
+        ${ATTACHMENT_TYPE_OPTS.filter(([v]) => ['payment_screenshot', 'physical_image', 'inspection_pdf', 'other'].includes(v))
           .map(([v, l]) => `<option value="${v}"${v === info.type ? ' selected' : ''}>${l}</option>`).join('')}
       </select>
     </div>`).join('');
@@ -3967,7 +4231,7 @@ function dropEntryLabel(e) {
 }
 
 function attachTypeLabel(t) {
-  return { invoice_pdf: '发票PDF', invoice_xml: '发票XML', payment_screenshot: '付款截图',
+  return { invoice_pdf: '发票PDF', invoice_xml: '发票XML', payment_screenshot: '付款截图', physical_image: '实物图',
     inspection_pdf: '查验单', other: '其他' }[t] || t;
 }
 async function addAttachmentFlow(entryId, parentModal, presetType) {
@@ -3986,7 +4250,7 @@ async function addAttachmentFlow(entryId, parentModal, presetType) {
         let progress = null;
         try {
           const type = body.querySelector('#atType').value;
-          const res = await Api.pickFiles(type === 'payment_screenshot');
+          const res = await Api.pickFiles(type === 'payment_screenshot' || type === 'physical_image');
           const paths = res.paths || [];
           if (!paths.length) return;
           progress = taskProgress(type === 'payment_screenshot'
@@ -4128,10 +4392,11 @@ function showExportResult(outputs) {
 }
 
 async function openBindleImportPreview(path, insp) {
-  const [batches, tags] = await Promise.all([
+  const [batchResult, tags] = await Promise.all([
     Api.listBatches(true),
     Api.listTags(),
   ]);
+  const batches = Array.isArray(batchResult) ? batchResult : (batchResult?.batches || []);
   const fallback = State.profileById[State.currentProfileId];
   const entries = insp.entries || [];
   const legacyProfiles = new Map();
@@ -4442,6 +4707,7 @@ async function batchDelete() {
   try {
     const result = await Api.deleteEntries(ids);
     State.selected.clear();
+    await loadBatches();
     await refreshEntries();
     toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
   } catch (e) { toast(e.message, 'err'); }

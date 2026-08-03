@@ -39,6 +39,7 @@ from .db import (
 AUTO_UPDATE_PREF_KEY = "tidoc.update.autoCheck"
 PAYMENT_OCR_PREF_KEY = "tidoc.paymentScreenshotOcr"
 DEFAULT_PAID_TO_INVOICE_PREF_KEY = "tidoc.defaultPaidToInvoiceTotal"
+DEFAULT_ENTRY_TITLE_PREF_KEY = "tidoc.defaultEntryTitle"
 BINDLE_INCLUDE_NOTES_PREF_KEY = "tidoc.bindle.includeNotes"
 BINDLE_INCLUDE_TAGS_PREF_KEY = "tidoc.bindle.includeTags"
 INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY = (
@@ -97,6 +98,7 @@ class Api:
         self._window = None
         self._verification_sessions: dict[str, dict] = {}
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
+        self._sync_entry_statuses()
 
     def __dir__(self):
         """只向 pywebview 暴露本类定义的公开方法。
@@ -173,6 +175,16 @@ class Api:
     def set_app_preference(self, key, value):
         self._set_preference_value(str(key), str(value))
         return {"key": str(key), "value": str(value)}
+
+    @_guard
+    def material_requirements(self):
+        return self.entries.material_requirements()
+
+    @_guard
+    def set_material_requirements(self, requirements=None):
+        values = self.entries.set_material_requirements(requirements or {})
+        self._sync_entry_statuses()
+        return values
 
     @_guard
     def invoice_verification_preferences(self):
@@ -319,7 +331,8 @@ class Api:
 
     @_guard
     def create_entry(self, profile_id, title="", xml_path=None, pdf_path=None,
-                     payment_paths=None, inspection_path=None, status="draft"):
+                     payment_paths=None, inspection_path=None, status="draft",
+                     physical_paths=None):
         """从上传文件创建条目：解析 → 校验 → 落库 → 复制附件。"""
         from .engine import check_invoice, parse_invoice_files
 
@@ -329,6 +342,7 @@ class Api:
             self._ensure_invoice_not_duplicate(parsed, [xml_path, pdf_path])
 
         entry_id = None
+        title = title or self._default_entry_title()
         try:
             entry_id = self.entries.create(
                 profile_id,
@@ -342,7 +356,13 @@ class Api:
                 check = check_invoice(parsed, expected_title=title)
                 self.entries.set_check(entry_id, check.status, check.message)
 
-            from .db import TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
+            from .db import (
+                TYPE_INSPECTION,
+                TYPE_INVOICE_PDF,
+                TYPE_INVOICE_XML,
+                TYPE_PAYMENT,
+                TYPE_PHYSICAL_IMAGE,
+            )
             if xml_path:
                 self.attachments.add(entry_id, xml_path, TYPE_INVOICE_XML)
             if pdf_path:
@@ -350,6 +370,9 @@ class Api:
             for pp in (payment_paths or []):
                 self.attachments.add(entry_id, pp, TYPE_PAYMENT)
                 self._maybe_apply_payment_ocr_amount(entry_id, pp)
+            for physical_path in (physical_paths or []):
+                self._validate_attachment_for_entry(entry_id, physical_path, TYPE_PHYSICAL_IMAGE)
+                self.attachments.add(entry_id, physical_path, TYPE_PHYSICAL_IMAGE)
             if inspection_path:
                 self.attachments.add(entry_id, inspection_path, TYPE_INSPECTION)
 
@@ -467,6 +490,7 @@ class Api:
                     TYPE_INVOICE_XML: "发票 XML",
                     TYPE_INSPECTION: "查验单 PDF",
                     TYPE_PAYMENT: "付款截图",
+                    "physical_image": "实物图",
                     "other": "其他",
                 }.get(att_type, att_type),
                 "invoice_no": invoice_no,
@@ -493,12 +517,13 @@ class Api:
         """按前端确认后的分组批量创建条目。
 
         groups: [{"files": [{"path", "type"}...]}...]
-        每组必须有发票 PDF，可附带 XML。付款截图 / 查验单在条目内添加。
+        每组必须有发票 PDF，可附带 XML。付款截图 / 实物图 / 查验单在条目内添加。
         """
         from .engine import check_invoice, parse_invoice_files
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
 
         created, created_entries, failed = [], [], []
+        title = title or self._default_entry_title()
         for g in (groups or []):
             files = g.get("files") or []
             invoice_files = [f for f in files if f.get("type") == TYPE_INVOICE_PDF]
@@ -655,7 +680,10 @@ class Api:
     # ------------------------------------------------------------ 批次（运营组工作单元）
     @_guard
     def list_batches(self, include_archived=False):
-        return self.batches.list(include_archived=include_archived)
+        return {
+            "batches": self.batches.list(include_archived=include_archived),
+            "unbatched_count": self.batches.unbatched_count(),
+        }
 
     @_guard
     def get_batch(self, batch_id):
@@ -689,6 +717,10 @@ class Api:
     @_guard
     def move_entries_between_batches(self, source_batch_id, target_batch_id, entry_ids):
         return self.batches.move_entries(source_batch_id, target_batch_id, entry_ids or [])
+
+    @_guard
+    def set_entry_batch(self, entry_id, batch_id=""):
+        return self.batches.set_entry_batch(entry_id, batch_id or None)
 
     @_guard
     def set_batch_entry_note(self, batch_id, entry_id, note):
@@ -779,7 +811,7 @@ class Api:
         return att
 
     def _validate_attachment_for_entry(self, entry_id, src_path, att_type) -> None:
-        from .db import TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML
+        from .db import TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PHYSICAL_IMAGE
         from .engine import parse_invoice_files
         from .services.folder_import import classify_pdf_attachment_type, extract_pdf_invoice_no
 
@@ -788,6 +820,11 @@ class Api:
         entry = self.entries.get(entry_id)
         if not entry:
             raise FileNotFoundError(f"条目不存在：{entry_id}")
+
+        if att_type == TYPE_PHYSICAL_IMAGE:
+            if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}:
+                raise ValueError("实物图只能添加图片文件。")
+            return
 
         if att_type == TYPE_INVOICE_XML:
             if suffix != ".xml":
@@ -1483,6 +1520,13 @@ class Api:
         self.entries = EntryRepo(self.db)
         self.attachments = AttachmentRepo(self.db, self.data_root)
         self.batches = BatchRepo(self.db)
+        self._sync_entry_statuses()
+
+    def _sync_entry_statuses(self) -> None:
+        """材料要求变化后让持久化状态与当前设置保持一致。"""
+        rows = self.db.conn.execute("SELECT id FROM entries").fetchall()
+        for row in rows:
+            self.entries.recompute_status(row["id"])
 
     def _paths_dict(self) -> dict:
         return {
@@ -1517,6 +1561,9 @@ class Api:
 
     def _default_paid_to_invoice(self) -> bool:
         return self._preference_value(DEFAULT_PAID_TO_INVOICE_PREF_KEY, "1") != "0"
+
+    def _default_entry_title(self) -> str:
+        return self._preference_value(DEFAULT_ENTRY_TITLE_PREF_KEY, "").strip()
 
     def _ensure_invoice_not_duplicate(self, parsed, source_paths) -> None:
         """按发票号优先、文件摘要兜底，在全库阻止同一发票重复建条目。"""
@@ -1759,7 +1806,11 @@ def _open_local_path(path: str | Path) -> None:
     if not p.exists():
         raise FileNotFoundError(f"文件不存在：{p}")
     if sys.platform == "darwin":
-        subprocess.Popen(["open", str(p)])
+        if p.suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}:
+            # 材料文件在 macOS 上优先交给系统预览，保持原生的多页/缩放体验。
+            subprocess.Popen(["open", "-a", "Preview", str(p)])
+        else:
+            subprocess.Popen(["open", str(p)])
     elif os.name == "nt":
         os.startfile(str(p))  # type: ignore[attr-defined]
     else:

@@ -18,6 +18,7 @@ from .paths import DataRoot
 TYPE_INVOICE_PDF = "invoice_pdf"
 TYPE_INVOICE_XML = "invoice_xml"
 TYPE_PAYMENT = "payment_screenshot"
+TYPE_PHYSICAL_IMAGE = "physical_image"
 TYPE_INSPECTION = "inspection_pdf"
 TYPE_OTHER = "other"
 
@@ -26,6 +27,7 @@ _NAME_PREFIX = {
     TYPE_INVOICE_PDF: "发票",
     TYPE_INVOICE_XML: "发票",
     TYPE_PAYMENT: "付款截图",
+    TYPE_PHYSICAL_IMAGE: "实物图",
     TYPE_INSPECTION: "查验单",
     TYPE_OTHER: "附件",
 }

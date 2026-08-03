@@ -282,6 +282,55 @@ def test_completeness_and_status_derivation(repos, sample_xmls):
     assert e["completeness"]["status"] == "complete"
 
 
+def test_material_requirements_keep_invoice_required_and_make_other_items_configurable(repos, sample_xmls):
+    from tidoc.db import TYPE_INVOICE_PDF
+
+    p = repos["profiles"].create("张三", "李老师")
+    parsed = parse_xml(sample_xmls[0])
+    eid = repos["entries"].create(p["id"], title=parsed.buyer_name, parsed=parsed)
+    repos["entries"].set_check(eid, "pass", "")
+    defaults = repos["entries"].material_requirements()
+    assert defaults == {
+        "invoice": True,
+        "payment_screenshot": True,
+        "physical_image": False,
+        "inspection_pdf": True,
+        "paid_amount": True,
+    }
+    repos["entries"].set_material_requirements({
+        "invoice": False,
+        "payment_screenshot": True,
+        "physical_image": True,
+        "inspection_pdf": False,
+        "paid_amount": True,
+    })
+    requirements = repos["entries"].material_requirements()
+    assert requirements["invoice"] is True
+    assert requirements["payment_screenshot"] is True
+    assert requirements["physical_image"] is True
+
+    repos["attachments"].add(eid, sample_xmls[0], TYPE_INVOICE_PDF)
+    repos["entries"].update_field(eid, "paid_amount", "", p["id"])
+    missing = repos["entries"].get(eid)["completeness"]["missing"]
+    assert "付款截图" in missing and "实物图" in missing and "实付金额" in missing
+
+    repos["entries"].set_material_requirements({
+        "payment_screenshot": False,
+        "physical_image": False,
+        "inspection_pdf": False,
+        "paid_amount": False,
+    })
+    assert repos["entries"].get(eid)["completeness"]["ready"] is True
+
+
+def test_api_uses_default_entry_title_preference(api):
+    profile = api.create_profile("张三", "李老师")["data"]
+    api.set_app_preference("tidoc.defaultEntryTitle", "北京理工大学")["data"]
+
+    entry = api.create_entry(profile["id"])["data"]
+    assert entry["title"] == "北京理工大学"
+
+
 def test_attachment_duplicate_rejected(repos, sample_xmls):
     import pytest
     from tidoc.db import TYPE_INVOICE_XML, TYPE_PAYMENT

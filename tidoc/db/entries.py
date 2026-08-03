@@ -30,6 +30,21 @@ STATUS_PARTIAL = "partial"
 STATUS_COMPLETE = "complete"
 VALID_STATUS = (STATUS_DRAFT, STATUS_PARTIAL, STATUS_COMPLETE)
 QUERY_BATCH_SIZE = 900
+MATERIAL_REQUIREMENTS_META_KEY = "tidoc.materialRequirements"
+MATERIAL_REQUIREMENT_KEYS = (
+    "invoice",
+    "payment_screenshot",
+    "physical_image",
+    "inspection_pdf",
+    "paid_amount",
+)
+DEFAULT_MATERIAL_REQUIREMENTS = {
+    "invoice": True,
+    "payment_screenshot": True,
+    "physical_image": False,
+    "inspection_pdf": True,
+    "paid_amount": True,
+}
 PAID_AMOUNT_DIFF_SQL = """
 TRIM(COALESCE(ef.current, '')) <> ''
 AND ROUND(CAST(REPLACE(ef.current, ',', '') AS REAL) * 100)
@@ -54,6 +69,7 @@ def paid_amount_differs(total, paid_amount) -> bool:
 class EntryRepo:
     def __init__(self, db: Database):
         self.db = db
+        self._material_requirements = self._read_material_requirements()
 
     # ------------------------------------------------------------------ 创建
     def create(
@@ -109,6 +125,43 @@ class EntryRepo:
             return p.items[0].actual_name if p.items else ""
         return ""
 
+    def material_requirements(self) -> dict[str, bool]:
+        return dict(self._material_requirements)
+
+    def _read_material_requirements(self) -> dict[str, bool]:
+        row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (MATERIAL_REQUIREMENTS_META_KEY,)
+        ).fetchone()
+        values = dict(DEFAULT_MATERIAL_REQUIREMENTS)
+        if row:
+            try:
+                raw = json.loads(row["value"] or "{}")
+                if isinstance(raw, dict):
+                    for key in MATERIAL_REQUIREMENT_KEYS:
+                        if key in raw:
+                            values[key] = bool(raw[key])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        # 发票是工作单元的根材料，不允许被设置为可选。
+        values["invoice"] = True
+        return values
+
+    def set_material_requirements(self, requirements: dict | None = None) -> dict[str, bool]:
+        values = dict(DEFAULT_MATERIAL_REQUIREMENTS)
+        requirements = requirements if isinstance(requirements, dict) else {}
+        for key in MATERIAL_REQUIREMENT_KEYS:
+            if key in requirements:
+                values[key] = bool(requirements[key])
+        values["invoice"] = True
+        self.db.conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (MATERIAL_REQUIREMENTS_META_KEY, json.dumps(values, ensure_ascii=False, sort_keys=True)),
+        )
+        self.db.conn.commit()
+        self._material_requirements = values
+        return values
+
     # ------------------------------------------------------------------ 读取
     def get(self, entry_id: str) -> dict | None:
         row = self.db.conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
@@ -125,6 +178,7 @@ class EntryRepo:
         types = {a["type"] for a in entry["attachments"]}
         entry["has_invoice"] = bool({"invoice_pdf", "invoice_xml"} & types)
         entry["has_payment"] = "payment_screenshot" in types
+        entry["has_physical"] = "physical_image" in types
         entry["has_inspection"] = "inspection_pdf" in types
         entry["completeness"] = self._completeness(entry, entry["fields"])
         return entry
@@ -237,14 +291,15 @@ class EntryRepo:
                 tag_clauses.append("e.tags LIKE ?")
                 params.append(f'%"{t}"%')
             where.append("(" + " OR ".join(tag_clauses) + ")")
-        # 批次维度：属于 / 不属于某批次
+        # 批次维度：属于某批次 / 不属于某批次
         if filters.get("batch_id"):
             where.append("EXISTS (SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id AND be.batch_id = ?)")
             params.append(filters["batch_id"])
         if filters.get("not_in_batch_id"):
             where.append("NOT EXISTS (SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id AND be.batch_id = ?)")
             params.append(filters["not_in_batch_id"])
-
+        if filters.get("unbatched"):
+            where.append("NOT EXISTS (SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id)")
         for key, operator in (("amount_min", ">="), ("amount_max", "<=")):
             value = filters.get(key)
             if value is None or value == "":
@@ -331,12 +386,13 @@ class EntryRepo:
             entry["tags"] = json.loads(entry.get("tags") or "[]")
             # “已修改”只表示实付金额与发票总金额不一致；字段留痕仍由 modified/history 独立保存。
             entry["modified_fields"] = modified_by_entry[entry["id"]]
-            # 按类型统计附件，供 UI 显示「发票/付款/查验」三个完整度状态点
+            # 按类型统计附件，供 UI 显示材料状态点
             by_type = attachments_by_entry[entry["id"]]
             entry["attachment_count"] = sum(by_type.values())
             entry["attachment_types"] = by_type
             entry["has_invoice"] = bool(by_type.get("invoice_pdf") or by_type.get("invoice_xml"))
             entry["has_payment"] = bool(by_type.get("payment_screenshot"))
+            entry["has_physical"] = bool(by_type.get("physical_image"))
             entry["has_inspection"] = bool(by_type.get("inspection_pdf"))
             entry["batches"] = batches_by_entry[entry["id"]]
             # 列表附上可改字段当前值（备注 / 实付金额 / 实际物资名），供卡片预览
@@ -346,30 +402,35 @@ class EntryRepo:
             result.append(entry)
         return result
 
-    @staticmethod
-    def _completeness(entry: dict, fields: dict) -> dict:
-        """派生「完整度」与状态：发票 + 付款截图 + 查验单三种附件齐、实付已填、校验通过。
+    def _completeness(self, entry: dict, fields: dict) -> dict:
+        """按设置派生完整度；发票固定必需，其余材料可分别设为必需。
 
         状态自动推导（不再纯手动）：
-        - complete：三种材料齐 + 实付已填 + 校验未 blocked。
+        - complete：所有设置为必需的材料齐全 + 校验未 blocked。
         - draft：什么材料都还没有。
         - partial：介于两者之间。
         返回 {ready, status, missing:[中文缺项...]}。
         """
+        requirements = self.material_requirements()
         missing = []
-        if not entry.get("has_invoice"):
+        if requirements["invoice"] and not entry.get("has_invoice"):
             missing.append("发票")
-        if not entry.get("has_payment"):
+        if requirements["payment_screenshot"] and not entry.get("has_payment"):
             missing.append("付款截图")
-        if not entry.get("has_inspection"):
+        if requirements["physical_image"] and not entry.get("has_physical"):
+            missing.append("实物图")
+        if requirements["inspection_pdf"] and not entry.get("has_inspection"):
             missing.append("查验单")
         paid = (fields.get("paid_amount") or {}).get("current") or ""
-        if not str(paid).strip():
+        if requirements["paid_amount"] and not str(paid).strip():
             missing.append("实付金额")
         if entry.get("check_status") == "blocked":
             missing.append("校验未通过")
         ready = not missing
-        any_material = entry.get("has_invoice") or entry.get("has_payment") or entry.get("has_inspection")
+        any_material = (
+            entry.get("has_invoice") or entry.get("has_payment")
+            or entry.get("has_physical") or entry.get("has_inspection")
+        )
         status = "complete" if ready else ("partial" if any_material else "draft")
         return {"ready": ready, "status": status, "missing": missing}
 
@@ -605,6 +666,7 @@ class EntryRepo:
             "check_status": entry["check_status"],
             "has_invoice": bool({"invoice_pdf", "invoice_xml"} & types),
             "has_payment": "payment_screenshot" in types,
+            "has_physical": "physical_image" in types,
             "has_inspection": "inspection_pdf" in types,
         }
         status = self._completeness(stub, self._fields(entry_id))["status"]

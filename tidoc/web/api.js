@@ -49,6 +49,8 @@ const Api = (() => {
     deleteProfile: (id) => call('delete_profile', id),
     appPreference: (key, defaultValue) => call('app_preference', key, defaultValue || ''),
     setAppPreference: (key, value) => call('set_app_preference', key, value || ''),
+    materialRequirements: () => call('material_requirements'),
+    setMaterialRequirements: (requirements) => call('set_material_requirements', requirements || {}),
     invoiceVerificationPreferences: () => call('invoice_verification_preferences'),
     setInvoiceVerificationPreferences: (options) => call('set_invoice_verification_preferences', options || {}),
     appInfo: () => call('app_info'),
@@ -58,7 +60,8 @@ const Api = (() => {
     reparseEntries: (ids) => call('reparse_entries', ids || []),
     createEntry: (args) => call('create_entry',
       args.profileId, args.title || '', args.xmlPath || null, args.pdfPath || null,
-      args.paymentPaths || [], args.inspectionPath || null, args.status || 'draft'),
+      args.paymentPaths || [], args.inspectionPath || null, args.status || 'draft',
+      args.physicalPaths || []),
 
     listEntries: (filters) => call('list_entries', filters || {}),
     listTitles: () => call('list_titles'),
@@ -88,6 +91,7 @@ const Api = (() => {
     addEntriesToBatch: (id, entryIds) => call('add_entries_to_batch', id, entryIds || []),
     removeEntriesFromBatch: (id, entryIds) => call('remove_entries_from_batch', id, entryIds || []),
     moveEntriesBetweenBatches: (sourceId, targetId, entryIds) => call('move_entries_between_batches', sourceId, targetId, entryIds || []),
+    setEntryBatch: (entryId, batchId) => call('set_entry_batch', entryId, batchId || ''),
     setBatchEntryNote: (id, entryId, note) => call('set_batch_entry_note', id, entryId, note || ''),
     batchesOfEntry: (entryId) => call('batches_of_entry', entryId),
 

@@ -19,6 +19,7 @@ _TYPE_PREFIX = {
     "invoice_pdf": "发票",
     "invoice_xml": "发票XML",
     "payment_screenshot": "付款截图",
+    "physical_image": "实物图",
     "inspection_pdf": "查验单",
     "other": "附件",
 }

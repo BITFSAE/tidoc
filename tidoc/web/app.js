@@ -17,7 +17,7 @@ const State = {
   groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
   tagFilter: '',         // 工具栏筛选：按标签
   notesFilter: '',       // 高级筛选：'' | 'yes' | 'no'（有 / 无记账备注）
-  batchFilter: '',       // 当前聚焦的批次 id；'unbatched' 表示未进批次
+  batchFilter: '',       // 当前聚焦的批次 id；'unbatched' 未进批次；'archived' 已收档
   batches: [],           // 批次列表缓存
   unbatchedCount: 0,     // 未进任何批次的条目数
   currentBatch: null,    // 当前批次详情（含批次级催办备注）
@@ -81,6 +81,7 @@ const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基
 const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
 const BUILTIN_TITLES = ['北京理工大学', '北京理工大学教育基金会'];
 const BILIBILI_GUIDE_URL = 'https://www.bilibili.com/video/BV1XN3q69EPi/';
+const DOC_GUIDE_URL = 'https://www.bitfsae.com/news/tidoc-guide';
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
 const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
 const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
@@ -162,6 +163,7 @@ const I = {
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   github: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-1.05-.01-1.9-2.78.62-3.37-1.21-3.37-1.21-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .08 1.53 1.06 1.53 1.06.9 1.57 2.35 1.12 2.92.85.09-.66.35-1.12.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.3 9.3 0 0 1 12 6.95a9.3 9.3 0 0 1 2.5.35c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.59.69.49A10.24 10.24 0 0 0 22 12.23C22 6.58 17.52 2 12 2Z"/></svg>',
   bilibili: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 3 3 3M16 3l-3 3"/><rect x="3" y="6" width="18" height="14" rx="3"/><path d="M8 12v2M16 12v2M9 17h6"/></svg>',
+  doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h8l4 4v14H7z"/><path d="M15 3v4h4"/><path d="M10 12h6M10 16h6"/></svg>',
 };
 function iconPencil(s) { return wrapSvg(I.pencil, s); }
 function iconNote(s) { return wrapSvg(I.note, s); }
@@ -521,9 +523,17 @@ function claimantConfirmHtml() {
 
 // ------------------------------------------------------------------ 筛选
 const UNBATCHED_BATCH_ID = 'unbatched';
+const ARCHIVED_BATCH_ID = 'archived';
 const inUnbatchedView = () => State.batchFilter === UNBATCHED_BATCH_ID;
+const inArchivedView = () => State.batchFilter === ARCHIVED_BATCH_ID;
 const activeBatchId = () => State.batchFilter || '';
-const actualBatchId = () => (inUnbatchedView() ? '' : activeBatchId());
+const actualBatchId = () => (
+  inUnbatchedView() || inArchivedView() ? '' : activeBatchId()
+);
+const focusedArchivedBatch = () => State.batches.find(
+  (batch) => batch.id === State.batchFilter && batch.archived
+) || null;
+const inArchivedShelf = () => inArchivedView() || !!focusedArchivedBatch();
 
 function currentFilters() {
   const val = (id) => $('#' + id)?.value || '';
@@ -555,7 +565,11 @@ function currentFilters() {
   if (State.tagFilter) f.tags = [State.tagFilter];
   if (State.notesFilter) f.has_notes = State.notesFilter;
   if (inUnbatchedView()) f.unbatched = true;
-  else if (State.batchFilter) f.batch_id = State.batchFilter;
+  else if (inArchivedView()) f.archived_only = true;
+  else if (State.batchFilter) {
+    // 聚焦具体批次时查看该批次完整成员；全局“已收档”才限定为只属于已收档批次的条目。
+    f.batch_id = State.batchFilter;
+  } else f.active_only = true;
   return f;
 }
 
@@ -610,10 +624,19 @@ function renderEntries() {
 
 function updateSelectionBar() {
   const hasSelection = State.selected.size > 0;
+  const allSelected = State.entries.length > 0 && State.entries.every((entry) => State.selected.has(entry.id));
   const reparseBtn = $('#batchReparseBtn');
   reparseBtn?.classList.toggle('hidden', State.quickView !== 'warning');
   $('#selectionBar').classList.toggle('empty', !hasSelection);
   $('#selCount').textContent = hasSelection ? `已选 ${State.selected.size}` : '选择条目';
+  const selectAllBtn = $('#selectAllBtn');
+  if (selectAllBtn) {
+    selectAllBtn.disabled = !State.entries.length;
+    selectAllBtn.title = allSelected ? '取消选择当前列表' : '选择当前列表';
+    selectAllBtn.setAttribute('aria-label', selectAllBtn.title);
+    const label = selectAllBtn.querySelector('span');
+    if (label) label.textContent = allSelected ? '取消全选' : '全选';
+  }
   $('#clearSelBtn').classList.toggle('hidden', !hasSelection);
   ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReparseBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
     const btn = $('#' + id);
@@ -629,13 +652,25 @@ function updateListSummary() {
     paidSum += isNaN(paid) ? 0 : paid;
     if (entryHasPaidDifference(entry)) modifiedCount++;
   });
-  $('#stats').innerHTML = State.entries.length
-    ? `<span><b>${State.entries.length}</b> 条</span>
-       <span class="sep">·</span>
-       <span>合计 <b class="stats-sum">${fmtMoney(sum)}</b></span>
-       ${paidSum ? `<span class="sep">·</span><span>实付 <b style="color:var(--pass)">${fmtMoney(paidSum)}</b></span>` : ''}
-       ${modifiedCount ? `<span class="sep">·</span><span>已改 <b>${modifiedCount}</b></span>` : ''}`
-    : '';
+  const batch = actualBatchId() ? (State.currentBatch || State.batches.find((item) => item.id === actualBatchId()) || null) : null;
+  const parts = [];
+  if (State.entries.length) {
+    parts.push(`<span><b>${State.entries.length}</b> 条</span>`);
+    parts.push(`<span class="sep">·</span><span>合计 <b class="stats-sum">${fmtMoney(sum)}</b></span>`);
+    if (paidSum) parts.push(`<span class="sep">·</span><span>实付 <b style="color:var(--pass)">${fmtMoney(paidSum)}</b></span>`);
+    if (modifiedCount) parts.push(`<span class="sep">·</span><span>已改 <b>${modifiedCount}</b></span>`);
+  }
+  if (batch?.note) {
+    if (parts.length) parts.push(`<span class="sep">·</span>`);
+    parts.push(`<span class="batch-stats-note" data-tooltip="批次备注：${esc(batch.note)}">${iconNote(11)}${esc(batch.note)}</span>`);
+  }
+  if (batch?.stats?.by_person?.length) {
+    batch.stats.by_person.forEach((person) => {
+      if (parts.length) parts.push(`<span class="sep">·</span>`);
+      parts.push(`<span><b>${esc(person.name)}</b> ${person.count} 条 · ${fmtMoney(person.total)}${person.incomplete ? ` · <i style="color:var(--warn);font-style:normal">缺 ${person.incomplete}</i>` : ''}</span>`);
+    });
+  }
+  $('#stats').innerHTML = parts.join('');
 }
 
 function listEntryFromDetail(entry) {
@@ -774,7 +809,7 @@ function entryCard(e) {
   const batchBadges = (e.batches || []).length
     ? e.batches.map((batch) =>
       `<button class="badge batch badge-action${batch.archived ? ' archived' : ''}" data-card-batch="${esc(batch.id)}" ` +
-      `title="${batch.archived ? '已归档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</button>`
+      `title="${batch.archived ? '已收档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</button>`
     ).join('')
     : '<button class="badge batch empty badge-action" data-card-batch="" title="点击设置报账批次">批次</button>';
 
@@ -1027,8 +1062,36 @@ function renderGroupedEntries(list) {
 
 function renderEmptyState() {
   const hasFilter = hasAnyFilter();
+  // 批次栏聚焦（含「已收档」）本身不算普通筛选；只有搜索/状态/日期等条件才应显示“没有匹配”。
+  const hasNonBatchFilter = !!(
+    ($('#filterStatus')?.value || '') || $('#filterCheck').value || $('#filterProfile').value ||
+    $('#filterTitle').value || $('#filterKeyword').value || $('#filterAmountMin').value ||
+    $('#filterAmountMax').value || $('#filterDateFrom').value || $('#filterDateTo').value ||
+    State.tagFilter || State.notesFilter || State.quickView !== 'all'
+  );
+  const hasArchivedEntries = State.batches.some((batch) => batch.archived && (batch.stats?.count || 0) > 0);
   const illus = $('#emptyIllus');
-  if (hasFilter) {
+  if (inArchivedShelf()) {
+    if (hasNonBatchFilter) {
+      illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="21" cy="21" r="13"/><path d="m31 31 7 7M16 21h10M21 16v10"/></svg>`;
+      $('#emptyTitle').textContent = '没有匹配的条目';
+      $('#emptySub').textContent = '清掉一些筛选，或换个关键词、抬头。';
+      $('#emptyNew').textContent = '清空筛选';
+      $('#emptyNew').onclick = () => clearAllFilters();
+    } else {
+      illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17h34v24H7z"/><path d="M5 11h38v6H5zM18 25h12"/></svg>`;
+      $('#emptyTitle').textContent = '还没有收档条目';
+      $('#emptySub').textContent = '批次收档后，只属于已收档批次的条目会放在这里。';
+      $('#emptyNew').textContent = '返回在办';
+      $('#emptyNew').onclick = () => focusBatch('');
+    }
+  } else if (!hasFilter && hasArchivedEntries) {
+    illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17h34v24H7z"/><path d="M5 11h38v6H5zM18 25h12"/></svg>`;
+    $('#emptyTitle').textContent = '在办没有条目';
+    $('#emptySub').textContent = '当前要处理的条目都已完成批次并收档；可到「已收档」查看或恢复。';
+    $('#emptyNew').textContent = '查看已收档';
+    $('#emptyNew').onclick = () => focusBatch(ARCHIVED_BATCH_ID);
+  } else if (hasFilter) {
     illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="21" cy="21" r="13"/><path d="m31 31 7 7M16 21h10M21 16v10"/></svg>`;
     $('#emptyTitle').textContent = '没有匹配的条目';
     $('#emptySub').textContent = '清掉一些筛选，或换个关键词、抬头。';
@@ -1092,8 +1155,11 @@ function setQuickView(v) {
 }
 
 function showSearchHintIfEmpty() {
+  const hasText = !!$('#filterKeyword').value;
   const kb = $('#searchKbd');
-  kb.hidden = !!$('#filterKeyword').value;
+  kb.hidden = hasText;
+  const clear = $('#searchClear');
+  if (clear) clear.classList.toggle('hidden', !hasText);
 }
 
 // ------------------------------------------------------------------ 选择 / 批量
@@ -1151,6 +1217,17 @@ async function selectAllVisible() {
   State.lastSelectedId = State.entries.length ? State.entries[State.entries.length - 1].id : null;
   renderEntries();
 }
+function toggleSelectAllVisible() {
+  const allSelected = State.entries.length > 0 && State.entries.every((entry) => State.selected.has(entry.id));
+  State.suppressListAnimation = true;
+  if (allSelected) {
+    State.selected.clear();
+    State.lastSelectedId = null;
+    renderEntries();
+    return;
+  }
+  selectAllVisible();
+}
 // ------------------------------------------------------------------ 批次（运营组）
 async function loadBatches() {
   try {
@@ -1169,27 +1246,50 @@ function renderBatchFolders() {
   if (!wrap) return;
   const folders = State.batches.filter((b) => !b.archived);
   const archived = State.batches.filter((b) => b.archived);
+  const shelf = inArchivedShelf();
   if (!folders.length && !archived.length && !State.batchFilter && !State.unbatchedCount) {
     wrap.innerHTML = '';
     wrap.classList.add('hidden');
     return;
-  } else {
-    wrap.classList.remove('hidden');
-    wrap.innerHTML = `
-      <button class="batch-folder all${State.batchFilter ? '' : ' active'}" data-folder="">全部条目</button>
-      <button class="batch-folder unbatched${inUnbatchedView() ? ' active' : ''}" data-folder="${UNBATCHED_BATCH_ID}">
-        <span>未进批次</span><small>${State.unbatchedCount} 条</small>
-      </button>
-      ${folders.map((b) => {
-        const st = b.stats || {};
-        return `<span class="batch-folder${State.batchFilter === b.id ? ' active' : ''}" data-folder="${esc(b.id)}">
-          <button class="folder-open"><span data-tooltip-overflow="${esc(b.name)}">${esc(b.name)}</span><small>${st.count || 0} 条${st.incomplete ? ` · <span class="miss">缺 ${st.incomplete}</span>` : ' · 齐'}</small></button>
-          <button class="folder-menu" data-folder-menu="${esc(b.id)}" title="批次操作">⋯</button>
-        </span>`;
-      }).join('')}
-      <button class="batch-folder new" id="folderNewBatch">新建批次</button>
-      ${archived.length ? `<button class="batch-archive-link" id="archivedBatchesBtn">已归档 ${archived.length}</button>` : ''}`;
   }
+  wrap.classList.remove('hidden');
+
+  const scopeChip = (id, label, active) =>
+    `<button type="button" class="batch-scope-btn${active ? ' active' : ''}" data-folder="${id}" role="tab" aria-selected="${active ? 'true' : 'false'}" title="${id === ARCHIVED_BATCH_ID ? '装入批次后可点击批次右侧 ⋯ 归档' : '查看在办条目'}">` +
+      `<span>${label}</span></button>`;
+  const folderChip = (batch) => {
+    const st = batch.stats || {};
+    const meta = batch.archived
+      ? ''
+      : `${st.count || 0} 条${st.incomplete ? ` · <span class="miss">缺 ${st.incomplete}</span>` : ' · 齐'}`;
+    const hint = batch.archived ? '恢复到在办' : '装入批次后可将批次归档';
+    return `<span class="batch-folder${batch.archived ? ' archived' : ''}${State.batchFilter === batch.id ? ' active' : ''}" data-folder="${esc(batch.id)}">
+      <button type="button" class="folder-open"><span data-tooltip-overflow="${esc(batch.name)}">${esc(batch.name)}</span>${meta ? `<small>${meta}</small>` : ''}</button>
+      ${batch.note ? `<span class="batch-folder-note" data-tooltip="批次备注：${esc(batch.note)}">${iconNote(11)}</span>` : ''}
+      <button type="button" class="folder-menu" data-folder-menu="${esc(batch.id)}" title="${hint}">⋯</button>
+    </span>`;
+  };
+
+  let track = '';
+  if (shelf) {
+    track = archived.map(folderChip).join('');
+  } else {
+    const showUnbatched = folders.length > 0 || inUnbatchedView();
+    track = `
+      ${showUnbatched ? `<button type="button" class="batch-folder unbatched${inUnbatchedView() ? ' active' : ''}" data-folder="${UNBATCHED_BATCH_ID}">
+        <span>未进批次</span><small>${State.unbatchedCount} 条</small>
+      </button>` : ''}
+      ${folders.map(folderChip).join('')}
+      <button type="button" class="batch-folder new" id="folderNewBatch">新建批次</button>`;
+  }
+  wrap.innerHTML = `
+    <div class="batch-scope" role="tablist" aria-label="报账批次视图">
+      ${scopeChip('', '在办', !shelf)}
+      ${scopeChip(ARCHIVED_BATCH_ID, '已收档', shelf)}
+    </div>
+    <span class="batch-scope-divider" aria-hidden="true"></span>
+    <div class="batch-folder-track">${track}</div>`;
+
   wrap.querySelectorAll('[data-folder]').forEach((node) => {
     node.onclick = (ev) => {
       if (ev.target instanceof Element && ev.target.closest('[data-folder-menu]')) return;
@@ -1205,8 +1305,6 @@ function renderBatchFolders() {
   });
   const newBtn = $('#folderNewBatch');
   if (newBtn) newBtn.onclick = () => newBatchFlow();
-  const archivedBtn = $('#archivedBatchesBtn');
-  if (archivedBtn) archivedBtn.onclick = openArchivedBatchesFlow;
 }
 
 function focusBatch(batchId) {
@@ -1219,32 +1317,13 @@ function focusBatch(batchId) {
 }
 
 function renderBatchContext() {
+  // 批次备注和分人汇总已合并到上方统计行，这里不再单独占一行。
   const bar = $('#batchContext');
-  if (!bar) return;
-  if (!actualBatchId()) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
-  const batch = State.currentBatch || State.batches.find((item) => item.id === actualBatchId());
-  if (!batch) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
-  const people = (batch.stats?.by_person || []).map((person) =>
-    `<span><b>${esc(person.name)}</b> ${person.count} 条 · ${fmtMoney(person.total)}${person.incomplete ? ` · <i>缺 ${person.incomplete}</i>` : ''}</span>`).join('');
-  bar.innerHTML = `${batch.note ? `<span class="batch-context-note">${esc(batch.note)}</span>` : ''}${people ? `<span class="batch-context-people">${people}</span>` : ''}`;
-  bar.classList.toggle('hidden', !bar.textContent.trim());
+  if (bar) { bar.classList.add('hidden'); bar.innerHTML = ''; }
 }
 
-function openArchivedBatchesFlow() {
-  const archived = State.batches.filter((batch) => batch.archived);
-  const body = el('div');
-  body.innerHTML = archived.length ? `<div class="archived-batch-list">${archived.map((batch) => `
-    <div class="archived-batch-row">
-      <div class="archived-batch-name"><b>${esc(batch.name)}</b><span>${batch.stats?.count || 0} 条</span></div>
-      <button class="btn small ghost" data-restore-batch="${esc(batch.id)}">恢复</button>
-    </div>`).join('')}</div>` : '<div class="hint">没有已归档批次。</div>';
-  const m = modal({ title: '已归档批次', body, footer: [mkBtn('关闭', 'ghost', () => m.close())] });
-  body.querySelectorAll('[data-restore-batch]').forEach((btn) => {
-    btn.onclick = async () => {
-      await Api.archiveBatch(btn.dataset.restoreBatch, false);
-      m.close(); await loadBatches(); await refreshEntries(); toast('批次已恢复', 'ok');
-    };
-  });
+function hasArchivedBatches() {
+  return State.batches.some((batch) => batch.archived);
 }
 
 function openBatchMenu(x, y, b) {
@@ -1256,19 +1335,15 @@ function openBatchMenu(x, y, b) {
     menu.appendChild(btn);
   };
   item('打开这批', () => focusBatch(b.id));
-  item('重命名', () => renameBatchFlow(b));
-  item(b.archived ? '取消归档' : '归档', async () => {
-    await Api.archiveBatch(b.id, !b.archived); await loadBatches();
-    if (!b.archived && State.batchFilter === b.id) focusBatch('');
-    else await refreshEntries();
-    toast(b.archived ? '已取消归档' : '已归档', 'ok');
-  });
+  item('编辑批次', () => renameBatchFlow(b));
+  item('批次备注', () => batchNoteFlow(b));
+  item(b.archived ? '恢复到在办' : '收档批次', () => archiveBatchFlow(b));
   item('删除批次', async () => {
     if (!confirm(`删除批次「${b.name}」？条目本身不会被删除。`)) return;
     const wasFocused = State.batchFilter === b.id;
     await Api.deleteBatch(b.id);
     await loadBatches();
-    if (wasFocused) focusBatch('');
+    if (wasFocused) focusBatch(b.archived && hasArchivedBatches() ? ARCHIVED_BATCH_ID : '');
     else await refreshEntries();
     toast('批次已删除', 'ok');
   }, true);
@@ -1278,11 +1353,52 @@ function openBatchMenu(x, y, b) {
   setTimeout(() => document.addEventListener('click', closeEntryMenu, { once: true }), 0);
 }
 
+async function archiveBatchFlow(batch) {
+  if (batch.archived) {
+    try {
+      await Api.archiveBatch(batch.id, false);
+      await loadBatches();
+      focusBatch(batch.id);
+      toast(`「${batch.name}」已恢复到在办`, 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    return;
+  }
+
+  const stats = batch.stats || {};
+  const body = el('div');
+  body.innerHTML = `
+    <div class="archive-confirm">
+      <div class="archive-confirm-summary">
+        <b>${esc(batch.name)}</b>
+        <span>${Number(stats.count || 0)} 条 · ${fmtMoney(stats.total || 0)}${stats.incomplete ? ` · 缺 ${stats.incomplete}` : ' · 材料齐备'}</span>
+      </div>
+      ${stats.incomplete ? `<div class="archive-confirm-warning">仍有 ${stats.incomplete} 条材料未齐</div>` : ''}
+      ${batch.note ? `<div class="archive-confirm-note"><b>批次备注</b><span>${esc(batch.note)}</span></div>` : ''}
+    </div>`;
+  const m = modal({
+    title: '确认收档批次',
+    body,
+    footer: [
+      mkBtn('取消', 'ghost', () => m.close()),
+      mkBtn('确认收档', 'primary', async () => {
+        try {
+          await Api.archiveBatch(batch.id, true);
+          m.close();
+          await loadBatches();
+          if (State.batchFilter === batch.id) focusBatch('');
+          else await refreshEntries();
+          toast(`已收档「${batch.name}」`, 'ok');
+        } catch (e) { toast(e.message, 'err'); }
+      }),
+    ],
+  });
+}
+
 async function renameBatchFlow(b) {
   const body = el('div');
   body.innerHTML = `
     <div class="form-row"><label>批次名称</label><input id="bName" value="${esc(b.name)}"/></div>
-    <div class="form-row"><label>说明（可选）</label><textarea id="bNote" rows="3" style="width:100%;font-family:inherit;font-size:13px;padding:10px;border-radius:9px;border:1px solid var(--line);resize:vertical">${esc(b.note || '')}</textarea></div>`;
+    <div class="form-row"><label>批次备注（可选）</label><textarea id="bNote" rows="3" style="width:100%;font-family:inherit;font-size:13px;padding:10px;border-radius:9px;border:1px solid var(--line);resize:vertical">${esc(b.note || '')}</textarea></div>`;
   const m = modal({
     title: '编辑批次', body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('保存', 'primary', async () => {
@@ -1299,12 +1415,34 @@ async function renameBatchFlow(b) {
   setTimeout(() => body.querySelector('#bName')?.focus(), 20);
 }
 
+async function batchNoteFlow(b) {
+  const body = el('div');
+  body.innerHTML = `<div class="form-row"><label>批次备注</label><textarea id="batchNote" rows="4" placeholder="记录这批的用途、注意事项或交接说明">${esc(b.note || '')}</textarea></div>`;
+  const m = modal({
+    title: '批次备注',
+    body,
+    footer: [
+      mkBtn('取消', 'ghost', () => m.close()),
+      mkBtn('保存', 'primary', async () => {
+        try {
+          await Api.updateBatch(b.id, { note: body.querySelector('#batchNote').value });
+          m.close();
+          await loadBatches();
+          await refreshEntries();
+          toast('批次备注已保存', 'ok');
+        } catch (e) { toast(e.message, 'err'); }
+      }),
+    ],
+  });
+  setTimeout(() => body.querySelector('#batchNote')?.focus(), 20);
+}
+
 async function newBatchFlow(presetIds) {
   const ids = presetIds || [...State.selected];
   const body = el('div');
   body.innerHTML = `
     <div class="form-row"><label>批次名称</label><input id="bName" placeholder="如：7月第一批 / 张三这次的"/></div>
-    <div class="form-row"><label>说明（可选）</label><input id="bNote" placeholder="备注这批的用途"/></div>`;
+    <div class="form-row"><label>批次备注（可选）</label><input id="bNote" placeholder="备注这批的用途或注意事项"/></div>`;
   const m = modal({
     title: ids.length ? `新建批次 · ${ids.length} 条` : '新建批次', body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('创建', 'primary', async () => {
@@ -1393,7 +1531,7 @@ async function openEntryBatchFlow(entry) {
       </div>`;
     }).join('');
     const currentLabel = memberships.length
-      ? memberships.map((batch) => `${esc(batch.name)}${batch.archived ? ' · 已归档' : ''}`).join('、')
+      ? memberships.map((batch) => `${esc(batch.name)}${batch.archived ? ' · 已收档' : ''}`).join('、')
       : '不在任何批次';
     body.innerHTML = `
       <div class="entry-batch-current"><span>当前归属</span><b>${currentLabel}</b></div>
@@ -2022,6 +2160,13 @@ function bindEvents() {
   $('#filterProfile').onchange = relist;
   $('#sortSelect').onchange = relist;
   $('#filterKeyword').oninput = () => { showSearchHintIfEmpty(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
+  $('#searchClear').onclick = () => {
+    $('#filterKeyword').value = '';
+    showSearchHintIfEmpty();
+    clearTimeout(kwTimer);
+    relist();
+    $('#filterKeyword').focus();
+  };
   $('#filterAmountMin').oninput = () => { clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
   $('#filterAmountMax').oninput = () => { clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
   $('#filterDateFrom').onchange = relist;
@@ -2057,6 +2202,7 @@ function bindEvents() {
   $('#actionImport').onclick = doImport;
 
   $('#clearSelBtn').onclick = () => { State.suppressListAnimation = true; State.selected.clear(); State.lastSelectedId = null; renderEntries(); };
+  $('#selectAllBtn').onclick = toggleSelectAllVisible;
   $('#addToBatchBtn').onclick = addSelectionToBatch;
   $('#tagBtn').onclick = () => tagSelectionFlow();
   $('#changeProfileBtn').onclick = () => changeSelectionProfile();
@@ -2138,6 +2284,7 @@ function modal({ title, subhead, titleChip, body, footer, wide, onClose }) {
   box.append(head, bodyEl, foot);
   mask.appendChild(box);
   $('#modalRoot').appendChild(mask);
+  mask.style.zIndex = String(50 + $('#modalRoot').children.length);
 
   let closed = false;
   const close = () => {
@@ -2503,6 +2650,7 @@ async function openSettings() {
           <div class="settings-about-actions">
             <button class="link-btn with-icon" id="setRepo">${wrapSvg(I.github, 14)}<span>GitHub</span></button>
             <button class="link-btn with-icon" id="setBilibili">${wrapSvg(I.bilibili, 14)}<span>视频说明</span></button>
+            <button class="link-btn with-icon" id="setDocGuide">${wrapSvg(I.doc, 14)}<span>说明文档</span></button>
             <button class="link-btn" id="setGuide">使用提示</button>
           </div>
         </div>
@@ -2743,10 +2891,11 @@ async function openSettings() {
 
   body.querySelector('#setProfilesManage').onclick = () => { m.close(); openProfileManager(false); };
   body.querySelector('#setComponentsUpdate').onclick = () => { m.close(); openUpdateDialog(); };
-  body.querySelector('#setGuide').onclick = () => { m.close(); openUsageGuide(false); };
+  body.querySelector('#setGuide').onclick = () => openUsageGuide(false);
   body.querySelector('#setBitfsae').onclick = () => Api.openExternalUrl('https://www.bitfsae.com').catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setBilibili').onclick = () => Api.openExternalUrl(BILIBILI_GUIDE_URL).catch((e) => toast(e.message, 'err'));
+  body.querySelector('#setDocGuide').onclick = () => Api.openExternalUrl(DOC_GUIDE_URL).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepoLogo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenData').onclick = () => Api.openPath(paths.root).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenExports').onclick = () => Api.openPath(paths.exports).catch((e) => toast(e.message, 'err'));
@@ -2951,7 +3100,7 @@ function usageGuideStepsMarkup() {
   return `<div><b>1 · 导入发票</b><span>拖入或粘贴发票 PDF/XML；多张用“导入发票”。</span></div>
     <div><b>2 · 补齐材料</b><span>在卡片或详情添加付款截图、实物图和查验单；右键可打开已有文件。</span></div>
     <div><b>3 · 核对条目</b><span>从“待补材料”或“识别提醒”进入详情，确认实付、明细和备注。</span></div>
-    <div><b>4 · 组织批次</b><span>点击卡片上的报账人或批次标签编辑，也可勾选后批量处理。</span></div>
+    <div><b>4 · 组织批次</b><span>勾选条目后装入批次；点击批次右侧“⋯”可编辑批次、填写批次备注、归档，已收档批次可从“已收档”查看并恢复。</span></div>
     <div><b>5 · 导出打印</b><span>选中条目后导出绑定包、汇总或打印材料。</span></div>
     <div><b>6 · 后续查找</b><span>用抬头、报账人、状态、日期、金额或关键词筛选。</span></div>`;
 }
@@ -3924,7 +4073,7 @@ async function autoBindMaterialInfos(infos, extraEntries = [], options = {}) {
 
 async function handleLooseMaterialInfos(infos, cleanupPaths) {
   if (!infos.length) return false;
-  // 独立拖入或粘贴的材料应在全部条目中匹配。只有与一批发票同时导入的
+  // 独立拖入或粘贴的材料应按全库匹配，含已收档条目。只有与一批发票同时导入的
   // 材料才由 openBatchImportPreview 显式限定到本次新建条目。
   const bind = await autoBindMaterialInfos(infos, [], { cleanupPaths });
   const manualPaths = new Set(bind.manual.map((info) => info.path));
@@ -4593,6 +4742,7 @@ async function doImport() {
 // ------------------------------------------------------------------ 打印导出组件
 async function openPrintDialog(ids) {
   if (!ids || !ids.length) { toast('请先选择要打印的条目', 'err'); return; }
+  const focusedBatch = actualBatchId() ? (State.currentBatch || State.batches.find((item) => item.id === actualBatchId()) || null) : null;
   let status;
   try { status = await Api.printComponentStatus(); } catch (e) { toast(e.message, 'err'); return; }
 
@@ -4637,7 +4787,7 @@ async function openPrintDialog(ids) {
     <div class="form-grid">
       <div class="form-row"><label>文档日期</label><input id="pDate" placeholder="如 2026年7月5日"/></div>
       <div class="form-row"><label>存放地点</label><input id="pLoc" value="工训楼"/></div>
-      <div class="form-row"><label>批次备注</label><input id="pNote" placeholder="可选"/></div>
+      <div class="form-row"><label>批次备注</label><input id="pNote" value="${esc(focusedBatch?.note || '')}" placeholder="可选"/></div>
     </div>`;
 
   const genBtn = mkBtn('生成打印件', 'primary', async () => {

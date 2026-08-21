@@ -233,7 +233,7 @@ class EntryRepo:
 
     # ------------------------------------------------------------------ 列表 / 筛选
     def list(self, **filters) -> list[dict]:
-        """按抬头、报账人、销售方、状态、类别、关键词、金额区间、日期过滤（设计文档 8.7）。"""
+        """按抬头、报账人、销售方、状态、类别、关键词、金额区间、日期、在办/已收档过滤（设计文档 8.7）。"""
         where, params = [], []
         if filters.get("title"):
             where.append("title = ?"); params.append(filters["title"])
@@ -300,6 +300,34 @@ class EntryRepo:
             params.append(filters["not_in_batch_id"])
         if filters.get("unbatched"):
             where.append("NOT EXISTS (SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id)")
+        # 在办：未进批次，或至少还属于一个未归档批次。
+        # 已收档：有批次归属，且全部所属批次都已归档。
+        if filters.get("active_only"):
+            where.append(
+                """(
+                    NOT EXISTS (
+                        SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM batch_entries be
+                        JOIN batches b ON b.id = be.batch_id
+                        WHERE be.entry_id = e.id AND COALESCE(b.archived, 0) = 0
+                    )
+                )"""
+            )
+        if filters.get("archived_only"):
+            where.append(
+                """(
+                    EXISTS (
+                        SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM batch_entries be
+                        JOIN batches b ON b.id = be.batch_id
+                        WHERE be.entry_id = e.id AND COALESCE(b.archived, 0) = 0
+                    )
+                )"""
+            )
         for key, operator in (("amount_min", ">="), ("amount_max", "<=")):
             value = filters.get(key)
             if value is None or value == "":

@@ -41,39 +41,63 @@
         </div>
       </header>
 
-      <!-- 工具条：搜索 / 快速筛选 / 排序 / 高级 -->
+      <!-- 工具条：快速筛选 / 排序 / 高级 -->
       <div class="toolbar" id="toolbar">
-        <div class="search">
-          <svg class="search-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="m20 20-3-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          <input id="filterKeyword" type="search" placeholder="搜索发票号、销售方、金额、备注、物资" autocomplete="off"/>
-          <kbd id="searchKbd">/</kbd>
+        <div class="toolbar-query-row">
+          <div class="search">
+            <svg class="search-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="m20 20-3-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <input id="filterKeyword" type="search" placeholder="搜索发票号、销售方、金额、备注、物资" autocomplete="off"/>
+            <button type="button" id="searchClear" class="search-clear hidden" aria-label="清除搜索" title="清除搜索">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </button>
+            <kbd id="searchKbd">/</kbd>
+          </div>
+
+          <div class="quick-chips" id="quickChips" aria-label="筛选">
+            <label class="chip-select title-filter-chip">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12M8 20v-7h8v7M3 20h18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+              <span class="chip-label">抬头</span>
+              <select id="filterTitle">
+                <option value="">全部</option>
+                <option value="北京理工大学">北京理工大学</option>
+                <option value="北京理工大学教育基金会">教育基金会</option>
+              </select>
+              <span class="title-notice-dot" title="存在非内置抬头" aria-hidden="true"></span>
+            </label>
+            <label class="chip-select">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 20c.7-4 3-6 7-6s6.3 2 7 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+              <span class="chip-label">报账人</span>
+              <select id="filterProfile">
+                <option value="">全部</option>
+              </select>
+            </label>
+            <label class="chip-select">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 5h9l7 7-8 8-8-8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="9" cy="10" r="1.3" fill="currentColor"/></svg>
+              <span class="chip-label">标签</span>
+              <select id="filterTag">
+                <option value="">全部</option>
+              </select>
+            </label>
+          </div>
+          <button class="chip-toggle" id="advancedToggle">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <span>高级</span>
+            <span class="dot hidden" id="advancedDot"></span>
+          </button>
+
+          <label class="chip-select chip-toggle sort-chip">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 6h11M8 12h8M8 18h5M4 5v14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            <select id="sortSelect">
+              <option value="updated">最近更新</option>
+              <option value="created">创建时间</option>
+              <option value="date">发票日期</option>
+              <option value="amount">金额从高</option>
+              <option value="seller">销售方</option>
+            </select>
+          </label>
         </div>
 
-        <div class="quick-chips" id="quickChips" aria-label="筛选">
-          <label class="chip-select title-filter-chip">
-            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12M8 20v-7h8v7M3 20h18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-            <span class="chip-label">抬头</span>
-            <select id="filterTitle">
-              <option value="">全部</option>
-              <option value="北京理工大学">北京理工大学</option>
-              <option value="北京理工大学教育基金会">教育基金会</option>
-            </select>
-            <span class="title-notice-dot" title="存在非内置抬头" aria-hidden="true"></span>
-          </label>
-          <label class="chip-select">
-            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 20c.7-4 3-6 7-6s6.3 2 7 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-            <span class="chip-label">报账人</span>
-            <select id="filterProfile">
-              <option value="">全部</option>
-            </select>
-          </label>
-          <label class="chip-select">
-            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 5h9l7 7-8 8-8-8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="9" cy="10" r="1.3" fill="currentColor"/></svg>
-            <span class="chip-label">标签</span>
-            <select id="filterTag">
-              <option value="">全部</option>
-            </select>
-          </label>
+        <div class="toolbar-view-row">
           <div class="view-presets" id="viewPresets" role="group" aria-label="状态">
             <button class="preset-btn active" data-view="all">全部</button>
             <button class="preset-btn" data-view="incomplete">待补材料</button>
@@ -82,25 +106,6 @@
             <button class="preset-btn" data-view="complete">齐备</button>
           </div>
         </div>
-
-        <div class="toolbar-spacer"></div>
-
-        <button class="chip-toggle" id="advancedToggle">
-          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          <span>高级</span>
-          <span class="dot hidden" id="advancedDot"></span>
-        </button>
-
-        <label class="chip-select chip-toggle sort-chip">
-          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 6h11M8 12h8M8 18h5M4 5v14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-          <select id="sortSelect">
-            <option value="updated">最近更新</option>
-            <option value="created">创建时间</option>
-            <option value="date">发票日期</option>
-            <option value="amount">金额从高</option>
-            <option value="seller">销售方</option>
-          </select>
-        </label>
 
       </div>
 
@@ -159,6 +164,9 @@
           </div>
           <div class="selection-bar empty" id="selectionBar" aria-label="批量操作">
             <span id="selCount">选择条目</span>
+            <button class="selection-select-all" id="selectAllBtn" title="选择当前列表" aria-label="选择当前列表">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m8 12 2.5 2.5L16 9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>全选</span>
+            </button>
             <button class="selection-clear hidden" id="clearSelBtn" title="取消选择" aria-label="取消选择">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             </button>

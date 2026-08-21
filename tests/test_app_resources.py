@@ -74,6 +74,14 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "tidoc.paymentScreenshotOcr" in source
     assert "tidoc.defaultPaidToInvoiceTotal" in source
     assert "setDefaultPaidInvoice" in source
+    assert 'id="searchClear"' in html
+    assert ".search-clear" in css
+    assert 'class="topbar-search"' not in html
+    assert ".topbar-search" not in css
+    assert 'class="search"' in html
+    assert "toolbar-view-row" in html
+    assert "toolbar-query-row" in html
+    assert 'class="view-presets"' in html
     assert "tidoc.bindle.includeNotes" in source
     assert "tidoc.bindle.includeTags" in source
     assert "setBindleNotes" in source
@@ -106,6 +114,40 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert 'id="filterUnbatched"' not in html
     assert "unbatched_count" in source
     assert 'class="batch-folder unbatched' in source
+    assert "scopeChip('', '在办'" in source
+    assert 'class="batch-folder-track"' in source
+    assert 'class="batch-scope"' in source
+    assert "archiveBatchFlow" in source
+    assert "确认收档批次" in source
+    assert 'id="selectAllBtn"' in html
+    assert "toggleSelectAllVisible" in source
+    assert "装入批次后可点击批次右侧 ⋯ 归档" in source
+    assert "装入批次后可将批次归档" in source
+    assert "点击批次右侧“⋯”可编辑批次、填写批次备注、归档" in source
+    assert "batchNoteFlow" in source
+    assert "batch-folder-note" in source
+    assert "批次备注：" in source
+    assert "focusedBatch?.note" in source
+    assert "批次备注" in source
+    assert "批次备注已保存" in source
+    assert "批次备注（可选）" in source
+    assert "已收档批次" in source
+    assert "已归档批次" not in source
+    assert "inArchivedShelf()" in source
+    assert "在办没有条目" in source
+    assert "查看已收档" in source
+    assert "当前要处理的条目都已完成批次并收档" in source
+    assert 'id="archivedBatchesMenu"' not in source
+    assert "已从在办收起" not in source
+    assert "已收档，条目已从在办收起" not in source
+    assert "f.active_only = true" in source
+    assert "f.archived_only = true" in source
+    assert "DOC_GUIDE_URL" in source
+    assert "https://www.bitfsae.com/news/tidoc-guide" in source
+    assert 'id="setDocGuide"' in source
+    assert "说明文档" in source
+    assert "setGuide').onclick = () => openUsageGuide(false)" in source
+    assert "m.close(); openUsageGuide" not in source
     assert "actionBtn('pay', '付款'" in source
     assert "actionBtn('physical', '实物'" in source
     assert "showPhysicalAction" in source
@@ -114,6 +156,7 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert '<details class="settings-block">' in source
     assert ".att-group-actions" in css
     assert ".att-group.has .attach-item" in css
+    assert ".archive-confirm-note" in css
     assert "State.quickView !== 'warning'" in source
     assert "Api.reparseEntries(ids)" in source
     assert "reparseEntries:" in (web / "api.js").read_text("utf-8")

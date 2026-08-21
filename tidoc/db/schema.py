@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS batches (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     note        TEXT DEFAULT '',            -- 批次说明
-    archived    INTEGER NOT NULL DEFAULT 0, -- 归档（已交/收档）后不占主列表
+    archived    INTEGER NOT NULL DEFAULT 0, -- 归档后批次不占主列表；只属于已归档批次的条目退出在办
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );

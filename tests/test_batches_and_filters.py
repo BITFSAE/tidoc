@@ -79,6 +79,15 @@ def test_batch_entry_note(repos, sample_xmls):
     assert got["count"] == 1  # 设备注会自动装入
 
 
+def test_batch_note_create_and_update(repos, sample_xmls):
+    _, ids = _make_entries(repos, sample_xmls, 1)
+    b = repos["batches"].create("批次", note="原始备注", entry_ids=ids)
+    assert b["note"] == "原始备注"
+    updated = repos["batches"].update(b["id"], note="更新后的批次备注")
+    assert updated["note"] == "更新后的批次备注"
+    assert repos["batches"].get(b["id"])["note"] == "更新后的批次备注"
+
+
 def test_batch_delete_cascades_when_entry_deleted(repos, sample_xmls):
     _, ids = _make_entries(repos, sample_xmls, 2)
     b = repos["batches"].create("批次", entry_ids=ids)
@@ -107,6 +116,33 @@ def test_batch_archive_excluded_from_list(repos, sample_xmls):
     assert all(not x["archived"] for x in active)
     assert len(active) == 1
     assert len(repos["batches"].list(include_archived=True)) == 2
+
+
+def test_archived_batch_entries_leave_working_surface(repos, sample_xmls):
+    _, ids = _make_entries(repos, sample_xmls, 3)
+    archived = repos["batches"].create("已交批", entry_ids=ids[:2])
+    active = repos["batches"].create("在办批", entry_ids=[ids[1]])
+    repos["batches"].set_archived(archived["id"], True)
+
+    working = {entry["id"] for entry in repos["entries"].list(active_only=True)}
+    shelved = {entry["id"] for entry in repos["entries"].list(archived_only=True)}
+    assert working == {ids[1], ids[2]}
+    assert shelved == {ids[0]}
+    repos["batches"].set_archived(archived["id"], False)
+    assert {entry["id"] for entry in repos["entries"].list(active_only=True)} == set(ids)
+    assert repos["entries"].list(archived_only=True) == []
+    assert repos["batches"].get(active["id"])["entry_ids"] == [ids[1]]
+
+
+def test_focused_archived_batch_shows_full_membership(repos, sample_xmls):
+    _, ids = _make_entries(repos, sample_xmls, 3)
+    archived = repos["batches"].create("已交批", entry_ids=ids[:2])
+    active = repos["batches"].create("在办批", entry_ids=[ids[1]])
+    repos["batches"].set_archived(archived["id"], True)
+
+    focused = {entry["id"] for entry in repos["entries"].list(batch_id=archived["id"])}
+    assert focused == {ids[0], ids[1]}
+    assert {entry["id"] for entry in repos["entries"].list(archived_only=True)} == {ids[0]}
 
 
 def test_batches_of_entry(repos, sample_xmls):
@@ -186,6 +222,13 @@ def test_api_batch_listing_includes_unbatched_count(api):
     listing = api.list_batches(True)["data"]
     assert len(listing["batches"]) == 1
     assert listing["unbatched_count"] == 0
+
+    batch_id = listing["batches"][0]["id"]
+    api.archive_batch(batch_id, True)
+    listing = api.list_batches(True)["data"]
+    assert listing["unbatched_count"] == 0
+    assert api.list_entries({"active_only": True})["data"] == []
+    assert [item["id"] for item in api.list_entries({"archived_only": True})["data"]] == [entry["id"]]
 
 
 def test_entry_list_uses_bounded_query_count(repos, sample_xmls):

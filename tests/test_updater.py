@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from tidoc.services.updater import (
+    _prune_old_component_versions,
     check_updates,
     download_update,
     downloaded_core_update_info,
@@ -176,6 +177,90 @@ def test_print_install_records_and_validates_installed_executable(tmp_path):
     assert info["valid"] is True
     assert info["version"] == "0.2.0"
     assert installed_component_version(components, "print", "windows") == "0.2.0"
+
+
+def test_print_install_prunes_previous_version_directories(tmp_path):
+    artifact = tmp_path / "tidoc_print.exe"
+
+    def manifest_for(version: str) -> dict:
+        artifact.write_bytes(f"print-component-{version}".encode("utf-8"))
+        return {
+            "components": {
+                "print": {
+                    "name": "打印导出组件",
+                    "latest": version,
+                    "platforms": {
+                        "windows": {
+                            "url": artifact.as_uri(),
+                            "sha256": sha256_file(artifact),
+                            "filename": artifact.name,
+                            "format": "exe",
+                            "executable_name": artifact.name,
+                        }
+                    },
+                }
+            }
+        }
+
+    components = tmp_path / "components"
+    install_print_component(
+        manifest_for("0.1.9"), components, tmp_path / "updates", plat="windows"
+    )
+    legacy = components / "print" / "windows" / "0.1.8"
+    legacy.mkdir(parents=True)
+    (legacy / "tidoc_print.exe").write_bytes(b"stale")
+
+    install_print_component(
+        manifest_for("0.2.0"), components, tmp_path / "updates", plat="windows"
+    )
+
+    platform_root = components / "print" / "windows"
+    assert [p.name for p in platform_root.iterdir() if p.is_dir()] == ["0.2.0"]
+    assert (platform_root / "current.json").exists()
+    assert installed_component_version(components, "print", "windows") == "0.2.0"
+
+
+def test_print_install_keeps_unknown_dir_when_version_missing(tmp_path):
+    artifact = tmp_path / "tidoc_print.exe"
+    artifact.write_bytes(b"print-component")
+    manifest = {
+        "components": {
+            "print": {
+                "name": "打印导出组件",
+                "platforms": {
+                    "windows": {
+                        "url": artifact.as_uri(),
+                        "sha256": sha256_file(artifact),
+                        "filename": artifact.name,
+                        "format": "exe",
+                        "executable_name": artifact.name,
+                    }
+                },
+            }
+        }
+    }
+    components = tmp_path / "components"
+    leftover = components / "print" / "windows" / "0.1.8"
+    leftover.mkdir(parents=True)
+    (leftover / "tidoc_print.exe").write_bytes(b"stale")
+
+    install_print_component(
+        manifest, components, tmp_path / "updates", plat="windows"
+    )
+
+    platform_root = components / "print" / "windows"
+    assert sorted(p.name for p in platform_root.iterdir() if p.is_dir()) == ["unknown"]
+    assert (platform_root / "unknown" / artifact.name).exists()
+
+
+def test_prune_skips_when_keep_version_empty(tmp_path):
+    kept = tmp_path / "print" / "windows" / "unknown"
+    kept.mkdir(parents=True)
+    (kept / "tidoc_print.exe").write_bytes(b"keep")
+
+    _prune_old_component_versions(tmp_path, "print", "windows", "")
+
+    assert kept.exists()
 
 
 def test_frozen_core_does_not_treat_bundled_package_fragment_as_component(monkeypatch, tmp_path):

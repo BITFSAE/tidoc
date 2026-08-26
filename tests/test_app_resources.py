@@ -204,7 +204,10 @@ def test_export_names_include_local_time_and_settings_show_export_storage():
     assert 'id="setOpenExports"' in actions
     assert 'id="setCleanup"' in actions
     settings_title = styles.split(".settings-block-title {", 1)[1].split("}", 1)[0]
-    assert 'font-family: "Microsoft YaHei UI"' in settings_title
+    assert "font-family" not in settings_title
+    font_sans = styles.split("--font-sans:", 1)[1].split(";", 1)[0]
+    assert '"Microsoft YaHei UI"' in font_sans and '"Segoe UI"' in font_sans
+    assert font_sans.index('"Segoe UI"') < font_sans.index('"Microsoft YaHei')
     assert "font-size: 12px" in settings_title
     assert "letter-spacing: 0" in settings_title
     assert "text-transform: none" in settings_title

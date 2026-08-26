@@ -390,6 +390,9 @@ def install_print_component(
     marker_path = _component_root(components_dir, COMPONENT_PRINT, asset.get("platform")).joinpath("current.json")
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     marker_path.write_text(json.dumps(marker, ensure_ascii=False, indent=2), "utf-8")
+    _prune_old_component_versions(
+        components_dir, COMPONENT_PRINT, marker["platform"], install_dir.name
+    )
     return DownloadResult(
         component=COMPONENT_PRINT,
         version=marker["version"],
@@ -412,6 +415,26 @@ def _component_root(components_dir: str | Path, component: str, plat: str | None
 
 def _component_version_dir(components_dir: str | Path, component: str, version: str, plat: str) -> Path:
     return _component_root(components_dir, component, plat) / version
+
+
+def _prune_old_component_versions(
+    components_dir: str | Path, component: str, plat: str, keep_version: str
+) -> None:
+    """安装成功后清掉同平台其他版本目录，避免历史版本随更新无限累积占磁盘。
+
+    清理尽力而为：个别目录删不掉（如正被占用）时忽略，不影响安装结果；
+    残留目录等下次安装再试。
+    """
+    if not keep_version:
+        # 安装目录 fallback 是 unknown/，空 keep 对不上，继续会把刚装上的目录删掉。
+        return
+    root = _component_root(components_dir, component, plat)
+    if not root.is_dir():
+        return
+    for child in root.iterdir():
+        if child.name == keep_version or not child.is_dir():
+            continue
+        shutil.rmtree(child, ignore_errors=True)
 
 
 def _core_update_marker(updates_dir: str | Path, plat: str | None = None) -> Path:

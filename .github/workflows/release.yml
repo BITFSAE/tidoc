@@ -139,6 +139,17 @@ jobs:
           --add-data "tidoc/web:tidoc/web"
           scripts/tidoc_app_entry.py
 
+      - name: Strip symbols and re-sign macOS app
+        run: |
+          APP="dist/tidoc.app"
+          find "$APP" -type f \( -name '*.so' -o -name '*.dylib' -o -name 'Python' \) \
+            -exec xcrun strip -x {} +
+          MAIN="$APP/Contents/MacOS/tidoc"
+          if [ -f "$MAIN" ]; then
+            xcrun strip -x "$MAIN"
+          fi
+          codesign --force --deep --sign - "$APP"
+
       - name: Create DMG
         run: |
           mkdir -p release
@@ -148,14 +159,14 @@ jobs:
           ln -s /Applications "dmg-root/Applications"
           hdiutil create -volname "Tidoc" \
             -srcfolder "dmg-root" \
-            -ov -format UDZO "release/tidoc-core-macos-v${VERSION}.dmg"
+            -ov -format ULMO "release/tidoc-core-macos-v${VERSION}.dmg"
 
       - name: Install print dependencies
         run: pip install -r requirements-print.txt
 
       - name: Build macOS print component
         run: >
-          pyinstaller --noconfirm --clean --onefile
+          pyinstaller --noconfirm --clean --onefile --strip
           --name tidoc_print
           --paths "."
           --collect-submodules tidoc_print

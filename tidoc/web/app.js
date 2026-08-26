@@ -587,7 +587,6 @@ async function refreshEntries() {
   }
   renderEntries();
   renderActiveFilters();
-  renderBatchContext();
 }
 
 // ------------------------------------------------------------------ 渲染列表
@@ -637,7 +636,7 @@ function updateSelectionBar() {
     const label = selectAllBtn.querySelector('span');
     if (label) label.textContent = allSelected ? '取消全选' : '全选';
   }
-  $('#clearSelBtn').classList.toggle('hidden', !hasSelection);
+  $('#clearSelBtn').classList.toggle('hidden', !hasSelection || allSelected);
   ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReparseBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
     const btn = $('#' + id);
     if (btn) btn.disabled = !hasSelection;
@@ -1311,15 +1310,8 @@ function focusBatch(batchId) {
   State.batchFilter = batchId || '';
   State.currentBatch = null;
   State.selected.clear();
-  renderBatchContext();
   renderBatchFolders();
   refreshEntries();
-}
-
-function renderBatchContext() {
-  // 批次备注和分人汇总已合并到上方统计行，这里不再单独占一行。
-  const bar = $('#batchContext');
-  if (bar) { bar.classList.add('hidden'); bar.innerHTML = ''; }
 }
 
 function hasArchivedBatches() {
@@ -1385,7 +1377,7 @@ async function archiveBatchFlow(batch) {
           await Api.archiveBatch(batch.id, true);
           m.close();
           await loadBatches();
-          if (State.batchFilter === batch.id) focusBatch('');
+          if (State.batchFilter === batch.id) focusBatch(batch.id);
           else await refreshEntries();
           toast(`已收档「${batch.name}」`, 'ok');
         } catch (e) { toast(e.message, 'err'); }

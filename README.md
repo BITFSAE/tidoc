@@ -84,7 +84,7 @@ tests/            pytest 测试
 - [x] 可选打印导出组件（PDF / Word）
 - [x] Windows / macOS 安装包与 CI 发布流程
 - [x] 核心与打印组件独立更新、SHA256 校验和组件修复
-- [ ] 体积优化
+- [x] macOS 核心安装包体积优化（构建剥离符号、DMG 使用 LZMA 压缩）
 
 设计细节见 [DESIGN.md](DESIGN.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)，更新发布流程见 [docs/UPDATE.md](docs/UPDATE.md)。
 

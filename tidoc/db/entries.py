@@ -24,6 +24,9 @@ VALUE_SOURCE_PAYMENT_OCR = "payment_ocr"
 VALUE_SOURCE_MANUAL = "manual"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
 LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "invoice_date")
+# 阿里云 OCR 采用值写入关键信息时的留痕前缀（区别于人工修正）
+OCR_HISTORY_LABEL = "[阿里云OCR]"
+MANUAL_HISTORY_PREFIX = "[人工修正]"
 
 STATUS_DRAFT = "draft"
 STATUS_PARTIAL = "partial"
@@ -591,6 +594,35 @@ class EntryRepo:
         self._touch(entry_id)
         self.db.conn.commit()
         return self.get(entry_id)
+
+    def ocr_update_locked_field(self, entry_id: str, field: str, value: str) -> dict:
+        """阿里云 OCR 采用值写入关键信息：更新列值 + 留痕，但不打人工修正标记。
+
+        仅限 OCR 可参与的发票字段；抬头（title）关系到分区隔离，绝不自动改。
+        """
+        allowed = ("invoice_no", "invoice_date", "seller", "total", "buyer_name", "buyer_tax_id")
+        if field not in allowed:
+            raise ValueError(f"字段「{field}」不在阿里云 OCR 采用范围内。")
+        row = self.db.conn.execute(f"SELECT {field} v FROM entries WHERE id = ?", (entry_id,)).fetchone()
+        if row is None:
+            raise ValueError("条目不存在。")
+        old_value = row["v"] or ""
+        new_value = str(value) if value is not None else ""
+        if new_value == old_value:
+            return self.get(entry_id)
+        self.db.conn.execute(f"UPDATE entries SET {field} = ? WHERE id = ?", (new_value, entry_id))
+        self._log_history(entry_id, f"{OCR_HISTORY_LABEL}{field}", old_value, new_value, "")
+        self._touch(entry_id)
+        self.db.conn.commit()
+        return self.get(entry_id)
+
+    def human_modified_locked_fields(self, entry_id: str) -> set[str]:
+        """被人工修正过的关键信息字段集合；OCR 不静默覆盖这些值。"""
+        rows = self.db.conn.execute(
+            "SELECT field FROM field_history WHERE entry_id = ? AND field LIKE ?",
+            (entry_id, f"{MANUAL_HISTORY_PREFIX}%"),
+        ).fetchall()
+        return {row["field"][len(MANUAL_HISTORY_PREFIX):] for row in rows}
 
     def set_profile(self, entry_id: str, new_profile_id: str, operator_profile_id: str = "") -> dict:
         """修改条目归属的报账人。"""

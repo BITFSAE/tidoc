@@ -19,6 +19,7 @@ from .entries import (
     STATUS_PARTIAL,
     EntryRepo,
 )
+from .ocr_results import OcrRepo
 from .paths import DataRoot, default_data_root
 from .profiles import ProfileRepo
 
@@ -30,6 +31,7 @@ __all__ = [
     "EntryRepo",
     "AttachmentRepo",
     "BatchRepo",
+    "OcrRepo",
     "EDITABLE_FIELDS",
     "LOCKED_FIELDS",
     "STATUS_DRAFT",

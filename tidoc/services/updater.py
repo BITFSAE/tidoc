@@ -27,7 +27,10 @@ from tidoc import __version__ as CORE_VERSION
 MANIFEST_URL = "https://img.bitfsae.com/tidoc/manifest.json"
 USER_AGENT = f"tidoc/{CORE_VERSION}"
 COMPONENT_PRINT = "print"
+COMPONENT_OCR = "ocr"
 COMPONENT_CORE = "core"
+# 更新对话框逐行展示的可选组件（核心不在其中，单独渲染）
+INSTALLABLE_COMPONENTS = (COMPONENT_PRINT, COMPONENT_OCR)
 
 
 @dataclass(frozen=True)
@@ -236,11 +239,19 @@ def check_updates(
         "updates": [],
         "components": manifest.get("components") or {},
     }
-    for name in (COMPONENT_CORE, COMPONENT_PRINT):
+    for name in (COMPONENT_CORE, *INSTALLABLE_COMPONENTS):
+        manifest_missing = False
         try:
             asset = get_platform_asset(manifest, name, plat)
         except KeyError:
-            continue
+            if name == COMPONENT_CORE:
+                continue
+            if name != COMPONENT_OCR:
+                continue
+            # OCR 组件刚随本版本新增、线上 manifest 可能还未发布时，
+            # 也在更新页显示一行，避免用户看不到入口。
+            asset = {}
+            manifest_missing = True
         if name == COMPONENT_CORE:
             current = CORE_VERSION
             component_info: dict[str, Any] = {}
@@ -263,13 +274,17 @@ def check_updates(
                 downloaded = candidate
         result["updates"].append({
             "component": name,
-            "name": asset.get("name") or name,
+            "name": asset.get("name") or (
+                "OCR 识别组件" if name == COMPONENT_OCR
+                else "打印导出组件" if name == COMPONENT_PRINT else name
+            ),
             "current_version": component_info.get("version", current),
             "latest_version": latest,
             "available": available,
             "installed_valid": component_info.get("valid", True),
             "needs_repair": component_info.get("needs_repair", False),
             "install_issue": component_info.get("issue", ""),
+            "manifest_missing": manifest_missing,
             "downloaded": bool(downloaded),
             "downloaded_path": downloaded.get("file_path", ""),
             "state": "current" if not available else ("downloaded" if downloaded else "available"),
@@ -353,10 +368,30 @@ def install_print_component(
     updates_dir: str | Path,
     plat: str | None = None,
 ) -> DownloadResult:
-    asset = get_platform_asset(manifest, COMPONENT_PRINT, plat)
+    return install_component(manifest, components_dir, updates_dir, COMPONENT_PRINT, plat)
+
+
+def install_ocr_component(
+    manifest: dict[str, Any],
+    components_dir: str | Path,
+    updates_dir: str | Path,
+    plat: str | None = None,
+) -> DownloadResult:
+    return install_component(manifest, components_dir, updates_dir, COMPONENT_OCR, plat)
+
+
+def install_component(
+    manifest: dict[str, Any],
+    components_dir: str | Path,
+    updates_dir: str | Path,
+    component: str,
+    plat: str | None = None,
+) -> DownloadResult:
+    """下载、校验并安装一个可选组件（打印导出 / OCR 识别共用）。"""
+    asset = get_platform_asset(manifest, component, plat)
     downloaded = download_asset(asset, updates_dir)
     install_dir = _component_version_dir(
-        components_dir, COMPONENT_PRINT, asset.get("version") or "unknown", asset.get("platform") or current_platform()
+        components_dir, component, asset.get("version") or "unknown", asset.get("platform") or current_platform()
     )
     if install_dir.exists():
         shutil.rmtree(install_dir)
@@ -374,12 +409,12 @@ def install_print_component(
 
     executable = _find_executable(install_dir, asset)
     if not executable:
-        raise RuntimeError("打印组件已下载，但没有找到可执行文件。")
+        raise RuntimeError("组件已下载，但没有找到可执行文件。")
     if asset.get("platform") != "windows":
         executable.chmod(executable.stat().st_mode | 0o755)
 
     marker = {
-        "component": COMPONENT_PRINT,
+        "component": component,
         "version": asset.get("version") or "",
         "platform": asset.get("platform") or current_platform(),
         "executable": str(executable),
@@ -387,14 +422,14 @@ def install_print_component(
         "sha256": asset.get("sha256") or "",
         "installed_sha256": sha256_file(executable),
     }
-    marker_path = _component_root(components_dir, COMPONENT_PRINT, asset.get("platform")).joinpath("current.json")
+    marker_path = _component_root(components_dir, component, asset.get("platform")).joinpath("current.json")
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     marker_path.write_text(json.dumps(marker, ensure_ascii=False, indent=2), "utf-8")
     _prune_old_component_versions(
-        components_dir, COMPONENT_PRINT, marker["platform"], install_dir.name
+        components_dir, component, marker["platform"], install_dir.name
     )
     return DownloadResult(
-        component=COMPONENT_PRINT,
+        component=component,
         version=marker["version"],
         platform=marker["platform"],
         file_path=downloaded,

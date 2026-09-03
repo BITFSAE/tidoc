@@ -33,11 +33,14 @@ from .db import (
     Database,
     DataRoot,
     EntryRepo,
+    OcrRepo,
     ProfileRepo,
 )
 
 AUTO_UPDATE_PREF_KEY = "tidoc.update.autoCheck"
 PAYMENT_OCR_PREF_KEY = "tidoc.paymentScreenshotOcr"
+OCR_ACCESS_KEY_ID_PREF_KEY = "tidoc.ocr.accessKeyId"
+OCR_ACCESS_KEY_SECRET_PREF_KEY = "tidoc.ocr.accessKeySecret"
 DEFAULT_PAID_TO_INVOICE_PREF_KEY = "tidoc.defaultPaidToInvoiceTotal"
 DEFAULT_ENTRY_TITLE_PREF_KEY = "tidoc.defaultEntryTitle"
 BINDLE_INCLUDE_NOTES_PREF_KEY = "tidoc.bindle.includeNotes"
@@ -71,6 +74,16 @@ class DuplicateInvoiceError(ValueError):
         )
 
 
+def _mask_access_key(key_id: str) -> str:
+    """AccessKey ID 展示用掩码：只露前几位，避免整串出现在界面里。"""
+    text = str(key_id or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 6:
+        return text[:2] + "****"
+    return text[:6] + "****"
+
+
 def _guard(func):
     """把返回值包成 {ok:True,...}，异常包成 {ok:False,error:...}。"""
     @functools.wraps(func)
@@ -95,6 +108,7 @@ class Api:
         self.entries = EntryRepo(self.db)
         self.attachments = AttachmentRepo(self.db, self.data_root)
         self.batches = BatchRepo(self.db)
+        self.ocr = OcrRepo(self.db)
         self._window = None
         self._verification_sessions: dict[str, dict] = {}
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
@@ -584,7 +598,17 @@ class Api:
     # ------------------------------------------------------------ 条目管理
     @_guard
     def list_entries(self, filters=None):
-        return self.entries.list(**(filters or {}))
+        filters = filters or {}
+        entries = self.entries.list(**filters)
+        pending_ids, recognized_ids = self._sync_ocr_states([entry["id"] for entry in entries])
+        if filters.get("ocr_pending"):
+            entries = [entry for entry in entries if entry["id"] in pending_ids]
+        elif filters.get("ocr_recognized"):
+            entries = [entry for entry in entries if entry["id"] in recognized_ids]
+        for entry in entries:
+            entry["ocr_pending"] = entry["id"] in pending_ids
+            entry["ocr_recognized"] = entry["id"] in recognized_ids
+        return entries
 
     @_guard
     def list_titles(self):
@@ -592,7 +616,33 @@ class Api:
 
     @_guard
     def get_entry(self, entry_id):
-        return self.entries.get(entry_id)
+        entry = self.entries.get(entry_id)
+        if entry:
+            pending_ids, recognized_ids = self._sync_ocr_states([entry_id])
+            entry["ocr_pending"] = entry_id in pending_ids
+            entry["ocr_recognized"] = entry_id in recognized_ids
+        return entry
+
+    def _sync_ocr_states(self, entry_ids: list[str]) -> tuple[set[str], set[str]]:
+        """按当前数据重算 OCR 状态，并清理旧版本残留标记。"""
+        from .services.ocr import result_view
+        pending_ids: set[str] = set()
+        recognized_ids: set[str] = set()
+        for entry_id in entry_ids:
+            view = result_view(self.entries, self.ocr, entry_id)
+            plan = view.get("plan")
+            latest = view.get("latest")
+            if plan is not None and latest is not None:
+                recognized_ids.add(entry_id)
+                pending = list(plan.get("pending") or [])
+                self.ocr.mark_applied(int(latest["id"]), pending)
+                if pending:
+                    pending_ids.add(entry_id)
+            elif self.ocr.pending_fields(entry_id):
+                pending_ids.add(entry_id)
+            if self.ocr.latest(entry_id) is not None:
+                recognized_ids.add(entry_id)
+        return pending_ids, recognized_ids
 
     @_guard
     def update_field(self, entry_id, field, value, profile_id=""):
@@ -1325,6 +1375,128 @@ class Api:
         return _build(self.entries, self.profiles, self.data_root.attachments_dir,
                       entry_ids, out_dir, options, self.data_root.components_dir)
 
+    # ------------------------------------------------------------ OCR 识别组件（可选）
+    def _ocr_status_data(self) -> dict:
+        """组件安装状态 + 密钥配置 + 累计调用次数（供入口置灰与设置展示）。"""
+        from .services.ocr import component_status
+        status = component_status(self.data_root.components_dir)
+        key_id = self._preference_value(OCR_ACCESS_KEY_ID_PREF_KEY).strip()
+        status.update({
+            "credentials_configured": bool(key_id and self._preference_value(OCR_ACCESS_KEY_SECRET_PREF_KEY).strip()),
+            "access_key_id_masked": _mask_access_key(key_id),
+            "total_calls": self.ocr.count_calls(),
+        })
+        return status
+
+    @_guard
+    def ocr_component_status(self):
+        return self._ocr_status_data()
+
+    @_guard
+    def save_ocr_credentials(self, access_key_id, access_key_secret):
+        """保存阿里云 AccessKey。仅存本机设置，不导出、不进绑定包。"""
+        key_id = str(access_key_id or "").strip()
+        secret = str(access_key_secret or "").strip()
+        if not key_id or not secret:
+            raise ValueError("AccessKey ID 和 AccessKey Secret 都需要填写。")
+        self._set_preference_value(OCR_ACCESS_KEY_ID_PREF_KEY, key_id)
+        self._set_preference_value(OCR_ACCESS_KEY_SECRET_PREF_KEY, secret)
+        return {
+            "configured": True,
+            "access_key_id_masked": _mask_access_key(key_id),
+        }
+
+    @_guard
+    def clear_ocr_credentials(self):
+        self._set_preference_value(OCR_ACCESS_KEY_ID_PREF_KEY, "")
+        self._set_preference_value(OCR_ACCESS_KEY_SECRET_PREF_KEY, "")
+        return {"configured": False}
+
+    @_guard
+    def ocr_preview(self, entry_ids):
+        """批量识别前的预检：哪些会调用、哪些跳过及原因（不联网、不计费）。"""
+        from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
+        preview = []
+        seen = set()
+        for entry_id in entry_ids or []:
+            if not entry_id or entry_id in seen:
+                continue
+            seen.add(entry_id)
+            entry = self.entries.get(entry_id)
+            if not entry:
+                preview.append({"entry_id": entry_id, "has_invoice_pdf": False, "has_invoice_xml": False,
+                                "existing_result": False, "pending_count": 0})
+                continue
+            attachments = entry.get("attachments") or []
+            has_pdf = any(a["type"] == TYPE_INVOICE_PDF for a in attachments)
+            has_xml = any(a["type"] == TYPE_INVOICE_XML for a in attachments)
+            pending = self.ocr.pending_fields(entry_id)
+            preview.append({
+                "entry_id": entry_id,
+                "invoice_no": entry.get("invoice_no") or "",
+                "seller": entry.get("seller") or "",
+                "has_invoice_pdf": has_pdf,
+                "has_invoice_xml": has_xml,
+                "existing_result": self.ocr.latest(entry_id) is not None,
+                "pending_count": len(pending),
+            })
+        return {"entries": preview}
+
+    @_guard
+    def run_ocr_recognition(self, entry_ids, options=None):
+        """对条目调用阿里云 OCR（用户明确触发才调用，按量计费）。"""
+        from .services.ocr import run_ocr_for_entries
+
+        options = options or {}
+        include_xml = bool(options.get("include_xml"))
+        status = self._ocr_status_data()
+        if not status.get("available"):
+            missing = ", ".join(status.get("missing") or ["OCR 识别组件"])
+            raise RuntimeError(f"OCR 识别组件未安装或缺少依赖：{missing}。")
+        if not status.get("credentials_configured"):
+            raise RuntimeError("尚未配置阿里云 AccessKey，请先在设置的「阿里云 OCR」中填写。")
+
+        credentials = {
+            "access_key_id": self._preference_value(OCR_ACCESS_KEY_ID_PREF_KEY).strip(),
+            "access_key_secret": self._preference_value(OCR_ACCESS_KEY_SECRET_PREF_KEY).strip(),
+        }
+        result = run_ocr_for_entries(
+            self.entries,
+            self.ocr,
+            self.data_root.attachments_dir,
+            entry_ids or [],
+            credentials,
+            self.data_root.components_dir,
+            include_xml=include_xml,
+        )
+        result["total_calls"] = self.ocr.count_calls()
+        return result
+
+    @_guard
+    def get_ocr_result(self, entry_id):
+        """详情页 OCR 区块：最新结果 + 基于当前值的实时差异与决策。"""
+        from .services.ocr import result_view
+        return result_view(self.entries, self.ocr, entry_id)
+
+    @_guard
+    def apply_ocr_field(self, entry_id, field):
+        from .services.ocr import apply_ocr_field as _apply
+        return _apply(self.entries, self.ocr, entry_id, str(field))
+
+    @_guard
+    def apply_ocr_items(self, entry_id):
+        from .services.ocr import apply_ocr_items as _apply
+        return _apply(self.entries, self.ocr, entry_id)
+
+    @_guard
+    def install_ocr_component(self):
+        from .services.updater import install_ocr_component, load_manifest
+        manifest = load_manifest()
+        result = install_ocr_component(
+            manifest, self.data_root.components_dir, self.data_root.updates_dir
+        )
+        return result.to_dict()
+
     # ------------------------------------------------------------ 联网更新（腾讯云 COS）
     @_guard
     def check_updates(self):
@@ -1520,6 +1692,7 @@ class Api:
         self.entries = EntryRepo(self.db)
         self.attachments = AttachmentRepo(self.db, self.data_root)
         self.batches = BatchRepo(self.db)
+        self.ocr = OcrRepo(self.db)
         self._sync_entry_statuses()
 
     def _sync_entry_statuses(self) -> None:

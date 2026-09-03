@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>tidoc</title>
   <link rel="icon" type="image/png" href="assets/favicon.png" />
-  <link rel="stylesheet" href="styles.css?v=0.1.24" />
+  <link rel="stylesheet" href="styles.css?v=0.1.25" />
 </head>
 <body>
   <div id="app" class="app">
@@ -102,6 +102,8 @@
             <button class="preset-btn active" data-view="all">全部</button>
             <button class="preset-btn" data-view="incomplete">待补材料</button>
             <button class="preset-btn" data-view="warning">识别提醒</button>
+            <button class="preset-btn hidden" data-view="ocr" data-ocr-ui>已识别</button>
+            <button class="preset-btn hidden" data-view="ocr_pending" title="存在阿里云识别差异待确认的条目" data-ocr-ui>OCR 待确认</button>
             <button class="preset-btn" data-view="modified">已修改</button>
             <button class="preset-btn" data-view="complete">齐备</button>
           </div>
@@ -157,6 +159,7 @@
       <!-- 条目区 -->
       <main class="content">
         <div class="batch-folders" id="batchFolders"></div>
+        <div class="ocr-suggest hidden" id="ocrSuggestBar"></div>
         <div class="content-head">
           <div class="content-summary">
             <div class="stats" id="stats"></div>
@@ -181,6 +184,9 @@
             </button>
             <button class="btn small ghost hidden" id="batchReparseBtn" title="用原发票重新识别所选条目的明细">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M19 7v5h-5M5 17v-5h5M7.2 9A6 6 0 0 1 17.8 7M16.8 15A6 6 0 0 1 6.2 17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>重新识别</span>
+            </button>
+            <button class="btn small ghost hidden" id="batchOcrBtn" data-ocr-ui title="用阿里云 OCR 识别所选发票（按量计费）">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M6.5 18a4.5 4.5 0 0 1-.4-8.98A6 6 0 0 1 17.7 8.1 4.5 4.5 0 0 1 17.5 18h-11z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8 13.5h8M8.5 13.5l1.5-1.8M8.5 13.5l1.5 1.8M15.5 13.5 14 11.7M15.5 13.5 14 15.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>云识别</span>
             </button>
             <span class="selection-divider"></span>
             <button class="btn small ghost" id="batchSummaryBtn">
@@ -214,7 +220,7 @@
   <div id="modalRoot"></div>
   <div id="toastRoot" class="toast-root" aria-live="polite"></div>
 
-  <script src="api.js?v=0.1.24"></script>
-  <script src="app.js?v=0.1.24"></script>
+  <script src="api.js?v=0.1.25"></script>
+  <script src="app.js?v=0.1.25"></script>
 </body>
 </html>

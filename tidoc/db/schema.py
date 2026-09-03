@@ -19,8 +19,9 @@ import sqlite3
 
 # v1：初版；v2：新增 batches / batch_entries（运营组批次）；
 # v3：明细识别合计不一致从 blocked 降为 warning；
-# v4：可改字段增加 value_source，用于区分付款 OCR 自动值与人工值。
-SCHEMA_VERSION = 4
+# v4：可改字段增加 value_source，用于区分付款 OCR 自动值与人工值；
+# v5：新增 ocr_results，保存阿里云 OCR 原始响应与解析快照（防重复计费）。
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -151,6 +152,27 @@ CREATE TABLE IF NOT EXISTS batch_entries (
 
 CREATE INDEX IF NOT EXISTS idx_batch_entries_batch ON batch_entries(batch_id);
 CREATE INDEX IF NOT EXISTS idx_batch_entries_entry ON batch_entries(entry_id);
+
+-- 阿里云 OCR 识别结果（第 10 节）：原始响应永久落库，重复识别追加不覆盖，
+-- 既是对账依据（按量计费）也避免同一发票再次计费后丢失历史。
+CREATE TABLE IF NOT EXISTS ocr_results (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id     TEXT NOT NULL,
+    provider     TEXT NOT NULL DEFAULT 'aliyun',
+    file_sha256  TEXT DEFAULT '',     -- 识别时发票 PDF 的摘要，换文件后旧结果可标记过期
+    file_name    TEXT DEFAULT '',
+    raw_json     TEXT DEFAULT '',     -- 阿里云返回的完整 data 原文
+    normalized   TEXT DEFAULT '',     -- 解析后的字段 + 明细快照 JSON
+    closure_pass INTEGER NOT NULL DEFAULT 0,  -- 明细含税合计与价税合计是否闭合
+    applied_at   TEXT DEFAULT '',     -- 自动补齐 / 修复发生的时间
+    pending      TEXT DEFAULT '',     -- 待人工确认的差异 JSON 列表（字段名 + "items"）
+    status       TEXT NOT NULL DEFAULT 'ok',  -- ok / failed
+    error        TEXT DEFAULT '',
+    created_at   TEXT NOT NULL,
+    FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ocr_results_entry ON ocr_results(entry_id);
 """
 
 

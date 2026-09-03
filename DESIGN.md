@@ -50,7 +50,7 @@
 
 > 总览 Excel 由核心直接手写 OXML + zip 生成（见 `services/exports.py`），不引 openpyxl；PDF 拼接用 pypdf，不引 pikepdf。
 
-**不打包通用 OCR SDK：** 默认发票识别走 XML 优先、PDF 文本其次。核心只调用系统原生能力做轻量兜底：查验单发票号归属确认、付款截图实付金额提取；阿里云 OCR 这类通用识别能力仍作为可选组件设想（见第 10 节），SDK 不进核心包。
+**不打包通用 OCR SDK：** 默认发票识别走 XML 优先、PDF 文本其次。核心只调用系统原生能力做轻量兜底：查验单发票号归属确认、付款截图实付金额提取；阿里云 OCR 作为可选组件实现（见第 10 节），SDK 不进核心包，只在用户安装组件并明确点击时调用。
 
 > 系统原生 OCR 不增加打包体积：macOS 侧复用 pywebview 已引入的 pyobjc（Quartz / Foundation），并在运行时用 `objc.loadBundle` 动态加载系统 `Vision.framework`，无需单独安装 `pyobjc-framework-Vision`；Windows 侧走系统 PowerShell / WinRT，无额外 Python 依赖。PyInstaller 打包时需为这些隐式导入配置 hidden-imports。
 
@@ -74,9 +74,10 @@ tidoc App
 │   ├─ 每页信息标注（可选填哪些字段）
 │   └─ 报账说明 Word / 验收单 Word（移植自 engine.py）
 │
-└─ OCR 识别组件（设想中，可选安装，暂缓）
-    ├─ 阿里云 OCR（移植自 engine.py，SDK 随组件安装）
-    └─ 用户自填 Key，off/auto/always + 手动四档触发
+└─ OCR 识别组件（可选安装，按需从 COS 下载）
+    ├─ 阿里云增值税发票识别（移植自 invoice2docx，SDK 随组件安装）
+    ├─ 用户在设置内自填 AccessKey，仅保存在本机
+    └─ 手动触发（批量 / 单条）+ 识别提醒视图建议条，不做后台识别
 ```
 
 前后端通信走 PyWebView 的 JS↔Python 桥（`window.pywebview.api`），无需开本地 HTTP 端口，更安全也更简单。
@@ -284,26 +285,37 @@ tidoc App
 
 ## 10. OCR 识别组件（可选安装）
 
-> **当前通用发票 OCR 尚未实现，已暂缓**。核心已实现轻量的系统原生 OCR 兜底，仅用于查验单 PDF 发票号归属确认和付款截图金额提取，不用于重识别发票明细。
+> **已实现。** 核心另有一层轻量的系统原生 OCR 兜底，仅用于查验单 PDF 发票号归属确认和付款截图金额提取，不用于重识别发票明细；通用发票识别由本组件承担。
 
-默认核心的发票识别仍走 XML 优先、PDF 文本其次，不打包阿里云 OCR SDK，保证体积小（见第 3 节）。查验单归属确认和付款截图金额提取使用系统原生 OCR 能力，不引入云服务。通用 OCR 作为**独立可选组件**设想，后续若需要再按需从 COS 下载；移植自参考仓库 `engine.py` 的 `parse_aliyun_ocr_invoice`。
+默认核心的发票识别仍走 XML 优先、PDF 文本其次，不打包阿里云 OCR SDK，保证体积小（见第 3 节）。阿里云识别作为**独立可选组件**，从 COS 按需下载；识别调用移植自参考仓库 `engine.py` 的 `parse_aliyun_ocr_invoice`，并按当前 API 文档修正字段名（`purchaserName` / `purchaserTaxNumber` / `specification` 等）。
 
 **定位与依赖下沉**
-- 归入可选组件层，和「打印导出组件」并列；组件独立版本、独立更新。
-- 阿里云 OCR SDK（`alibabacloud_ocr_api20210707`、`alibabacloud_credentials`、`alibabacloud_tea_openapi` 等）随组件安装，**不进核心包**。
+- 归入可选组件层，与「打印导出组件」并列；组件独立版本、独立更新，安装到 `components/ocr/<platform>/`，更新对话框单独一行管理。
+- 阿里云 OCR SDK（`alibabacloud-ocr-api20210707`、`alibabacloud_credentials`、`alibabacloud_tea_openapi` 等，见 `requirements-ocr.txt`）随组件安装，**不进核心包**。
+- 组件进程接口与打印组件同构：`--input/--result` JSON 文件 IPC + `--self-test` 自检（不联网）。核心通过 `services/ocr.py` 适配层探测（python / external / missing / repair 四态）与调用。
 
 **调用方式：用户自填阿里云 Key**
-- 由用户在设置里填自己的阿里云 `AccessKey ID / Secret`；不内置密钥、不走统一云端中转。
-- Key 存本地设置，不写入导出、不随绑定包外传。
-- 未填 Key 或未装组件时，OCR 相关入口置灰，并提示如何启用。
+- 用户在「设置 → 阿里云 OCR」填写自己的 `AccessKey ID / Secret`；不内置密钥、不走统一云端中转。界面建议使用只授权「文字识别 OCR」的 RAM 账号 Key 以限定泄露损失面。
+- Key 存本地 SQLite `meta`（`tidoc.ocr.accessKeyId/Secret`），不写入导出、不随绑定包外传；界面只显示掩码，更换时需完整重填 ID 和 Secret。
+- 密钥通过权限 600 的临时 input.json 传给组件子进程，不进命令行参数（避免 `ps` 泄露）。
+- 未装组件或未填 Key 时，云识别入口引导安装 / 填写，不静默失败。
 
-**触发时机：四档**
-1. `off` 默认：完全不调 OCR。
-2. `auto` 兜底：仅当本地 PDF 解析结果不理想（无明细，或明细含税合计与价税合计对不上，即 `invoice_needs_better_items`）时，自动用 OCR 兜底重识别。
-3. `always`：每张发票都走 OCR。
-4. 手动：不受上面档位影响，用户在某条目上点「用 OCR 重新识别」即时触发单张。
+**触发时机：只有用户点击，不自动花钱**
+- 批量：选中工具条「云识别」按钮 → 预检确认对话框（本次调用张数、计费提示、跳过原因）→ 逐张识别并汇报进度。
+- 单条：条目详情「阿里云识别」区块、条目右键菜单。
+- 建议条：识别提醒视图顶部提示「N 条可用云识别补齐」并一键执行——**自动建议、手动触发**，替代早期的 auto/always 档位设想（付费接口不在用户无感知时调用）。
+- 已有 XML 权威数据的条目默认跳过（可勾选「仅作比对」纳入）；无发票 PDF 的条目自动跳过；已有结果的条目再次识别会提示重复计费。
 
-档位 1–3 在设置里选默认值；第 4 档为条目级即时操作。OCR 识别结果同样走第 6 节的字段级修改追踪与校验，识别来源标注为 OCR。
+**结果持久化（防重复计费）**
+- 每次调用（含失败）都追加写入 `ocr_results` 表：原始 `data` JSON 全文、解析快照、发票文件 sha256、金额闭合结果、待确认差异列表、时间。
+- 结果与识别时的发票附件 sha256 绑定；发票文件被替换后旧结果标记过期。
+- 设置中展示本机累计调用次数，方便对账；重复识别不覆盖历史。
+
+**结果应用：分档可信，绝不静默覆盖人工值**
+- 自动补齐：本地为空的字段（发票号、日期、销售方、抬头、税号）直接填入，记 `[阿里云OCR]` 留痕。
+- 自动修复：仅限本地来源为 PDF 文本启发式、阿里云结果通过金额闭合校验、且字段未被人工修正的`invoice_date`/`seller` 与整套明细（`replace_recognized_items`，保留人工修改过的实际物资名称）。
+- 待确认：其余差异（发票号口径、总额、抬头相关字段、XML 来源条目的明细、闭合失败的明细）只在详情「阿里云识别」折叠区展示逐字段对照与明细左右比对，由用户逐项或整套采用；条目卡片挂 OCR 徽标直到处理完。
+- XML 是税务口径权威数据：XML 来源条目不做任何自动修复，只补空 + 比对。
 
 ---
 
@@ -339,4 +351,4 @@ tidoc App
 - 不做多人云同步（单机 + 绑定包交换）。
 - 命名：tidoc，后缀 `.tidoc`。
 - 参考仓库 `invoice2docx` 只读，`engine.py` 移植复用。
-- OCR：做成独立可选组件（不进核心包），用户自填阿里云 Key，off/auto/always + 手动共四档触发（见第 10 节）。
+- OCR：做成独立可选组件（不进核心包），用户在软件内自填阿里云 Key，仅用户点击时触发（批量 / 单条 + 识别提醒建议条），结果落库并可逐项比对采用（见第 10 节）。

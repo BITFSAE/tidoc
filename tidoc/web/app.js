@@ -37,6 +37,7 @@ const State = {
   verificationTrashSource: false,
   activeDetailEntryId: null,
   updateStatus: null,
+  ocrStatus: null,      // 阿里云 OCR：组件安装 + 密钥配置状态（本地检查，不联网）
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -112,11 +113,25 @@ const FIELD_LABEL = {
   invoice_no: '发票号码', total: '价税合计', buyer_name: '购买方抬头',
   buyer_tax_id: '税号', title: '抬头',
 };
+const OCR_FIELD_LABEL = {
+  invoice_no: '发票号码', invoice_date: '发票日期', seller: '销售方',
+  total: '价税合计', buyer_name: '购买方抬头', buyer_tax_id: '购买方税号',
+  items: '物品明细',
+};
+const OCR_CONSOLE_URL = 'https://ocr.console.aliyun.com/overview';
+const OCR_QUOTA_NOTE = '每个阿里云账号每月有免费额度，超出后按量计费。免费额度与费用可在阿里云 OCR 控制台查看。';
 
 function fmtMoney(v) {
   if (v == null || v === '') return '—';
   const n = Number(v);
   return isNaN(n) ? v : '¥' + n.toFixed(2);
+}
+
+function fmtQuantity(v) {
+  if (v == null || v === '') return '—';
+  const text = String(v).trim();
+  if (!/^-?\d+(\.\d+)?$/.test(text)) return text;
+  return text.replace(/\.?0+$/, '') || '0';
 }
 function initials(name) {
   if (!name) return '—';
@@ -183,6 +198,7 @@ async function init() {
   bindEvents();
   let startupUpdate = null;
   try { startupUpdate = await Api.startupUpdateState(); } catch (e) {}
+  refreshOcrStatus();
   await loadWorkflowPreferences();
   await loadProfiles();
   await loadBatches();
@@ -192,6 +208,23 @@ async function init() {
   if (startupUpdate?.upgraded) setTimeout(() => { openReleaseHighlights('updated', startupUpdate); }, 450);
   else await maybeShowFirstUseGuide();
   setTimeout(() => { maybeAutoCheckUpdates(); }, 1200);
+}
+
+function refreshOcrStatus() {
+  Api.ocrComponentStatus()
+    .then((status) => { State.ocrStatus = status; applyOcrUiVisibility(); updateOcrSuggestBar(); })
+    .catch(() => { State.ocrStatus = null; applyOcrUiVisibility(); updateOcrSuggestBar(); });
+}
+
+function applyOcrUiVisibility() {
+  const enabled = !!State.ocrStatus?.available;
+  document.querySelectorAll('[data-ocr-ui]').forEach((el) => {
+    el.classList.toggle('hidden', !enabled);
+  });
+}
+
+function ocrReady() {
+  return !!(State.ocrStatus?.available && State.ocrStatus?.credentials_configured);
 }
 
 function setupFastTooltips() {
@@ -552,6 +585,8 @@ function currentFilters() {
   if (State.quickView === 'warning') f.check_status = 'warning';
   else if (State.quickView === 'modified') f.modified_only = true;
   else if (State.quickView === 'complete') f.status = 'complete';
+  else if (State.quickView === 'ocr') f.ocr_recognized = true;
+  else if (State.quickView === 'ocr_pending') f.ocr_pending = true;
 
   if (status) f.status = status;
   if (check) f.check_status = check;
@@ -607,6 +642,7 @@ function renderEntries() {
   }
 
   updateListSummary();
+  updateOcrSuggestBar();
 
   empty.hidden = !emptyAll;
   if (emptyAll) renderEmptyState();
@@ -637,7 +673,7 @@ function updateSelectionBar() {
     if (label) label.textContent = allSelected ? '取消全选' : '全选';
   }
   $('#clearSelBtn').classList.toggle('hidden', !hasSelection || allSelected);
-  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReparseBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
+  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReparseBtn', 'batchOcrBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
     const btn = $('#' + id);
     if (btn) btn.disabled = !hasSelection;
   });
@@ -705,6 +741,16 @@ async function refreshEntryCard(entryId, currentDetail = null) {
     return;
   }
   if (State.quickView === 'modified' && !entryHasPaidDifference(entry)) {
+    State.entries.splice(index, 1);
+    renderEntries();
+    return;
+  }
+  if (State.quickView === 'ocr' && !entry.ocr_recognized) {
+    State.entries.splice(index, 1);
+    renderEntries();
+    return;
+  }
+  if (State.quickView === 'ocr_pending' && !entry.ocr_pending) {
     State.entries.splice(index, 1);
     renderEntries();
     return;
@@ -802,6 +848,10 @@ function entryCard(e) {
   const paidDiff = entryHasPaidDifference(e);
   const modified = paidDiff
     ? `<span class="badge modified">${iconPencil(11)}已修改</span>` : '';
+  const ocrBadge = e.ocr_pending
+    ? `<button class="badge ocr badge-action" data-card-ocr="1" title="阿里云识别存在待确认差异，点击查看">OCR</button>` : '';
+  const recognizedBadge = (e.ocr_recognized && !e.ocr_pending)
+    ? `<button class="badge ocr badge-action" data-card-ocr="1" title="已用阿里云识别，点击查看">已识别</button>` : '';
   const owner = State.profileById[e.profile_id];
   const ownerBadge = owner
     ? `<button class="badge person badge-action" data-card-owner="${esc(e.profile_id)}"${owner.reviewer ? ` title="审核人：${esc(owner.reviewer)} · 点击编辑"` : ' title="点击编辑报账人"'}>${esc(owner.name)}</button>` : '';
@@ -828,6 +878,8 @@ function entryCard(e) {
       ${batchBadges}
       ${checkBadge}
       ${modified}
+      ${ocrBadge}
+      ${recognizedBadge}
     </div>
     <div class="entry-line2">
       <span class="seller-muted" data-tooltip-overflow="${esc(e.seller || '')}">${esc(e.seller || '未识别销售方')}</span>
@@ -888,6 +940,11 @@ function entryCard(e) {
     ev.preventDefault();
     ev.stopPropagation();
     changeSelectionProfile([e.id], e.profile_id);
+  });
+  main.querySelector('[data-card-ocr]')?.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    openEntryDetail(e.id);
   });
   main.querySelectorAll('[data-card-batch]').forEach((badge) => {
     badge.addEventListener('click', (ev) => {
@@ -2055,6 +2112,7 @@ function openEntryMenu(x, y, e) {
   item('在线查验', () => onlineVerificationFlow(e.id));
   item('上传已有查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
   item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'));
+  if (State.ocrStatus?.available) item('阿里云识别', () => openOcrDialog([e.id]));
   item('编辑条目备注', () => quickNoteFlow(e));
   item('打标签', () => tagSelectionFlow([e.id]));
   if (actualBatchId()) item('批次催办备注', () => batchEntryNoteFlow(e));
@@ -2199,6 +2257,7 @@ function bindEvents() {
   $('#tagBtn').onclick = () => tagSelectionFlow();
   $('#changeProfileBtn').onclick = () => changeSelectionProfile();
   $('#batchReparseBtn').onclick = batchReparse;
+  $('#batchOcrBtn').onclick = () => openOcrDialog([...State.selected]);
   $('#batchSummaryBtn').onclick = () => exportSummary([...State.selected]);
   $('#batchExportBtn').onclick = () => doExport([...State.selected]);
   $('#batchPrintBtn').onclick = () => openPrintDialog([...State.selected]);
@@ -2393,10 +2452,11 @@ function editProfileFlow(p, onDone) {
 async function openSettings() {
   let paths, printStatus, appInfo, operatorPrefs, multiMode, paymentOcrMode;
   let defaultPaidMode, defaultEntryTitleMode, materialRequirementsMode, bindleNotesMode, bindleTagsMode;
-  let autoUpdateMode, maintenance, verificationPrefs;
+  let autoUpdateMode, maintenance, verificationPrefs, ocrStatus;
   try {
     paths = await Api.dataRoot();
     printStatus = await Api.printComponentStatus();
+    ocrStatus = await Api.ocrComponentStatus();
     appInfo = await Api.appInfo();
     maintenance = await Api.storageMaintenanceStatus();
     const prefValues = await Promise.all([
@@ -2439,6 +2499,9 @@ async function openSettings() {
   const profileCount = State.profiles.length;
   const defaultProfile = State.profiles.find((p) => p.is_default);
   const printBadge = printStatus.available
+    ? '<span class="settings-ok">已安装</span>'
+    : '<span class="settings-warn">未安装</span>';
+  const ocrBadge = ocrStatus.available
     ? '<span class="settings-ok">已安装</span>'
     : '<span class="settings-warn">未安装</span>';
   const hasAvailableUpdate = (State.updateStatus?.updates || []).some(
@@ -2615,13 +2678,45 @@ async function openSettings() {
         </details>
       </div>
 
+      <!-- 阿里云 OCR -->
+      <div class="settings-block">
+        <div class="settings-block-title">阿里云 OCR</div>
+        <div class="settings-row is-actionable" id="setOcrManage">
+          <div class="settings-row-copy">
+            <b>识别组件 ${ocrBadge}</b>
+            <span>识别发票明细的数量、规格等字段；按量计费</span>
+          </div>
+          <button class="btn small ghost">管理</button>
+        </div>
+        <div class="settings-row ocr-key-row">
+          <div class="settings-row-copy">
+            <b>AccessKey</b>
+            <span id="setOcrKeyHint">${ocrStatus.credentials_configured
+              ? `已配置 ${esc(ocrStatus.access_key_id_masked)} · 本机累计调用 ${ocrStatus.total_calls} 次`
+              : `未配置 · 建议使用只授权「文字识别 OCR」的 RAM 账号 Key`}</span>
+          </div>
+          <div class="ocr-key-controls">
+            <input id="setOcrKeyId" placeholder="AccessKey ID" autocomplete="off"/>
+            <input id="setOcrKeySecret" type="password" placeholder="AccessKey Secret" autocomplete="new-password"/>
+            <button class="btn small" id="setOcrSaveKey">保存</button>
+            <button class="btn small ghost" id="setOcrClearKey" ${ocrStatus.credentials_configured ? '' : 'disabled'}>清除</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>密钥说明</b>
+            <span>密钥仅保存在本机数据里，不随导出、绑定包外传；调用只在点击「云识别」时发生 <button class="link-btn" id="setOcrConsole">阿里云 OCR 控制台</button></span>
+          </div>
+        </div>
+      </div>
+
       <!-- 可选组件与更新 -->
       <div class="settings-block">
         <div class="settings-block-title">组件与更新</div>
         <div class="settings-row is-actionable" id="setComponentsUpdate">
           <div class="settings-row-copy">
             <b>软件与组件 ${hasAvailableUpdate ? '<span class="settings-warn">有可用更新</span>' : ''}</b>
-            <span>tidoc v${esc(appInfo.version)} · 打印导出组件 ${printBadge}</span>
+            <span>tidoc v${esc(appInfo.version)} · 打印导出组件 ${printBadge} · OCR 识别组件 ${ocrBadge}</span>
           </div>
           <button class="btn small ghost">管理</button>
         </div>
@@ -2883,6 +2978,44 @@ async function openSettings() {
 
   body.querySelector('#setProfilesManage').onclick = () => { m.close(); openProfileManager(false); };
   body.querySelector('#setComponentsUpdate').onclick = () => { m.close(); openUpdateDialog(); };
+  body.querySelector('#setOcrManage').onclick = () => { m.close(); openUpdateDialog(); };
+  body.querySelector('#setOcrConsole').onclick = () => Api.openExternalUrl(OCR_CONSOLE_URL).catch((e) => toast(e.message, 'err'));
+  body.querySelector('#setOcrSaveKey').onclick = async (ev) => {
+    const keyId = body.querySelector('#setOcrKeyId').value.trim();
+    const secret = body.querySelector('#setOcrKeySecret').value.trim();
+    if (!keyId || !secret) { toast('更换密钥需完整填写 AccessKey ID 和 Secret', 'err'); return; }
+    ev.target.disabled = true;
+    try {
+      const r = await Api.saveOcrCredentials(keyId, secret);
+      State.ocrStatus = await Api.ocrComponentStatus();
+      body.querySelector('#setOcrKeyHint').innerHTML =
+        `已配置 ${esc(r.access_key_id_masked)} · 本机累计调用 ${State.ocrStatus.total_calls} 次`;
+      body.querySelector('#setOcrKeyId').value = '';
+      body.querySelector('#setOcrKeySecret').value = '';
+      body.querySelector('#setOcrClearKey').disabled = false;
+      refreshOcrStatus();
+      toast('阿里云密钥已保存', 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+    } finally {
+      ev.target.disabled = false;
+    }
+  };
+  body.querySelector('#setOcrClearKey').onclick = async (ev) => {
+    if (!confirm('清除已保存的阿里云密钥？清除后云识别不可用，直到重新填写。')) return;
+    ev.target.disabled = true;
+    try {
+      await Api.clearOcrCredentials();
+      State.ocrStatus = await Api.ocrComponentStatus();
+      body.querySelector('#setOcrKeyHint').innerHTML =
+        '未配置 · 建议使用只授权「文字识别 OCR」的 RAM 账号 Key';
+      refreshOcrStatus();
+      toast('已清除阿里云密钥', 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+      ev.target.disabled = false;
+    }
+  };
   body.querySelector('#setGuide').onclick = () => openUsageGuide(false);
   body.querySelector('#setBitfsae').onclick = () => Api.openExternalUrl('https://www.bitfsae.com').catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
@@ -2926,6 +3059,22 @@ async function openSettings() {
   });
 }
 
+// 更新对话框里的可选组件：安装/修复走同一套流程，只差名称与安装入口
+const UPDATE_COMPONENTS = {
+  print: {
+    name: '打印导出组件',
+    description: '负责材料 PDF 拼接、付款截图排版与编号，以及报账说明、验收单 Word；独立版本，只有组件本身变化时才需更新。',
+    busy: '正在下载、校验并安装打印导出组件…',
+    install: () => Api.installPrintComponent(),
+  },
+  ocr: {
+    name: 'OCR 识别组件',
+    description: '负责调用阿里云发票识别，补齐明细的数量、规格等字段；需要在设置的「阿里云 OCR」里填写密钥后使用；独立版本。',
+    busy: '正在下载、校验并安装 OCR 识别组件…',
+    install: () => Api.installOcrComponent(),
+  },
+};
+
 async function openUpdateDialog() {
   const body = el('div', 'update-shell', `
     <div class="update-loading">
@@ -2967,25 +3116,29 @@ async function openUpdateDialog() {
       ? 'DMG 已打开。请将 tidoc 拖到“应用程序”，再退出并重新打开。'
       : '安装器已打开。完成安装后请退出并重新打开 tidoc。';
     const rows = (status.updates || []).map((u) => {
-      const available = u.available;
-      const assetSize = fmtBytes(u.asset?.size);
-      const meta = [
-        `当前 ${u.current_version ? 'v' + esc(u.current_version) : '未安装'}`,
-        `最新 v${esc(u.latest_version || '未知')}`,
-        assetSize,
-      ].filter(Boolean).join(' · ');
-      let state = available ? '<span class="update-badge available">可更新</span>' : '<span class="update-badge current">已是最新</span>';
-      let action = '';
-      if (u.component === 'print') {
+    const available = u.available;
+    const assetSize = fmtBytes(u.asset?.size);
+    const meta = [
+      `当前 ${u.current_version ? 'v' + esc(u.current_version) : '未安装'}`,
+      `最新 v${esc(u.latest_version || '未知')}`,
+      assetSize,
+    ].filter(Boolean).join(' · ');
+      let state = u.manifest_missing
+        ? '<span class="update-badge current">等待发布</span>'
+        : available ? '<span class="update-badge available">可更新</span>' : '<span class="update-badge current">已是最新</span>';
+    let action = '';
+      const installable = u.manifest_missing ? null : UPDATE_COMPONENTS[u.component];
+      if (installable) {
+        const attr = `data-install-component="${esc(u.component)}"`;
         if (u.needs_repair) {
           state = '<span class="update-badge available">需要修复</span>';
-          action = '<button class="btn small" data-install-print>修复组件</button>';
+          action = `<button class="btn small" ${attr}>修复组件</button>`;
         } else if (available) {
           state = `<span class="update-badge available">${u.current_version ? '可更新' : '可安装'}</span>`;
-          action = `<button class="btn small" data-install-print>${u.current_version ? '更新组件' : '安装组件'}</button>`;
+          action = `<button class="btn small" ${attr}>${u.current_version ? '更新组件' : '安装组件'}</button>`;
         } else {
           state = '<span class="update-badge current">已安装</span>';
-          action = '<button class="btn small ghost" data-install-print>重新安装</button>';
+          action = `<button class="btn small ghost" ${attr}>重新安装</button>`;
         }
       } else if (!available) {
         action = '';
@@ -2996,8 +3149,8 @@ async function openUpdateDialog() {
         action = '<button class="btn small" data-download-core>下载并打开</button>';
       }
       const notes = Array.isArray(u.asset?.notes) ? u.asset.notes : (u.asset?.notes ? [u.asset.notes] : []);
-      const responsibility = u.component === 'print'
-        ? '<span class="update-component-description">负责材料 PDF 拼接、付款截图排版与编号，以及报账说明、验收单 Word；独立版本，只有组件本身变化时才需更新。</span>'
+      const responsibility = installable
+        ? `<span class="update-component-description">${installable.description}</span>`
         : '';
       return `<div class="update-component">
         <div class="update-component-main">
@@ -3055,18 +3208,21 @@ async function openUpdateDialog() {
       } catch (e) { toast(e.message, 'err'); }
       finally { if (!ok) await render().catch((e) => renderError(e.message)); }
     };
-    const printBtn = body.querySelector('[data-install-print]');
-    if (printBtn) printBtn.onclick = async () => {
-      setBusy('正在下载、校验并安装打印导出组件…');
-      let ok = false;
-      try {
-        const r = await Api.installPrintComponent();
-        toast('打印导出组件已安装：' + r.version, 'ok');
-        await render('打印导出组件已安装：v' + r.version);
-        ok = true;
-      } catch (e) { toast(e.message, 'err'); }
-      finally { if (!ok) await render().catch((e) => renderError(e.message)); }
-    };
+    body.querySelectorAll('[data-install-component]').forEach((btn) => {
+      btn.onclick = async () => {
+        const comp = UPDATE_COMPONENTS[btn.dataset.installComponent];
+        if (!comp) return;
+        setBusy(comp.busy);
+        let ok = false;
+        try {
+          const r = await comp.install();
+          toast(`${comp.name}已安装：v${r.version}`, 'ok');
+          await render(`${comp.name}已安装：v${r.version}`);
+          ok = true;
+        } catch (e) { toast(e.message, 'err'); }
+        finally { if (!ok) await render().catch((e) => renderError(e.message)); }
+      };
+    });
   };
   try {
     await render();
@@ -3502,7 +3658,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
       { f: 'total', v: it.total, cls: 'num' },
     ];
     return `<tr data-item-id="${it.id}">${cols.map((c) =>
-      `<td class="${c.cls}"><span class="cell-val">${c.cls === 'num' ? fmtMoney(c.v) : esc(c.v || '\u2014')}</span><input class="cell-input${c.cls === 'num' ? ' num' : ''}" data-item-field="${c.f}" value="${esc(c.v || '')}"/></td>`
+      `<td class="${c.cls}"><span class="cell-val">${c.f === 'quantity' ? fmtQuantity(c.v) : (c.f === 'total' || c.f === 'unit_price' ? fmtMoney(c.v) : esc(c.v || '\u2014'))}</span><input class="cell-input${c.cls === 'num' ? ' num' : ''}" data-item-field="${c.f}" value="${esc(c.v || '')}"/></td>`
     ).join('')}<td class="act"><button class="del-row" data-del-item="${it.id}" title="删除此行">\u00d7</button></td></tr>`;
   }).join('') || `<tr><td colspan="6" style="color:var(--ink-soft)">无明细</td></tr>`;
 
@@ -3561,21 +3717,6 @@ async function openEntryDetail(entryId, currentDetail = null) {
     </div>`).join('')
     || '<div class="attach-item" style="color:var(--ink-soft)">暂无修改记录</div>';
 
-  const comp = e.completeness || { ready: false, missing: [] };
-  const flowStep = (key, on, label, sub) => `
-    <div class="flow-step${on ? ' on' : ''}" data-flow-step="${key}">
-      <span class="flow-dot"></span>
-      <b>${label}</b>
-      <small>${sub}</small>
-    </div>`;
-  const materialFlow = `
-    <div class="flow-strip">
-      ${flowStep('invoice', e.has_invoice, '发票', e.has_invoice ? '已导入' : '需要 PDF')}
-      ${flowStep('payment', e.has_payment, '付款截图', e.has_payment ? '已上传' : (State.materialRequirements.payment_screenshot ? '待补截图' : '可选'))}
-      ${flowStep('physical', e.has_physical, '实物图', e.has_physical ? '已上传' : (State.materialRequirements.physical_image ? '待补照片' : '可选'))}
-      ${flowStep('inspection', e.has_inspection, '查验', e.has_inspection ? '已上传' : (State.materialRequirements.inspection_pdf ? '待补查验单' : '可选'))}
-      ${flowStep('paid', !!((f.paid_amount || {}).current), '实付', (f.paid_amount || {}).current ? fmtMoney((f.paid_amount || {}).current) : (State.materialRequirements.paid_amount ? '待填写' : '可选'))}
-    </div>`;
   const completenessLine = (detail) => {
     const state = detail.completeness || { ready: false, missing: [] };
     return state.ready
@@ -3585,7 +3726,6 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const compLine = completenessLine(e);
 
   body.innerHTML = `
-    ${materialFlow}
     <div class="detail-top-grid">
       <div class="detail-section">
         <h3>关键信息 ${e.check_status && e.check_status !== 'pass' ? `<span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status]}</span>` : ''}<span class="h3-line"></span></h3>
@@ -3630,30 +3770,15 @@ async function openEntryDetail(entryId, currentDetail = null) {
       <div class="items-add-row"><button class="btn small" id="deAddItem">＋ 添加明细行</button></div>
     </details>
 
+    ${(e.ocr_recognized || State.ocrStatus?.available) ? `<details class="detail-section minor-section${e.ocr_pending ? ' ocr-has-pending' : ''}" id="deOcrSection">
+      <summary>阿里云识别${e.ocr_pending ? ' <span class="badge warning">待确认</span>' : ''}</summary>
+      <div class="ocr-detail-body" id="deOcrBody"><div class="hint">正在读取识别结果…</div></div>
+    </details>` : ''}
+
     <details class="detail-section minor-section">
       <summary>修改记录</summary>
       <div class="history-list">${history}</div>
     </details>`;
-
-  const updateDetailMaterialState = (detail) => {
-    const paid = detail.fields?.paid_amount?.current || '';
-    const states = {
-      invoice: [detail.has_invoice, detail.has_invoice ? '已导入' : '需要 PDF'],
-      payment: [detail.has_payment, detail.has_payment ? '已上传' : (State.materialRequirements.payment_screenshot ? '待补截图' : '可选')],
-      physical: [detail.has_physical, detail.has_physical ? '已上传' : (State.materialRequirements.physical_image ? '待补照片' : '可选')],
-      inspection: [detail.has_inspection, detail.has_inspection ? '已上传' : (State.materialRequirements.inspection_pdf ? '待补查验单' : '可选')],
-      paid: [!!paid, paid ? fmtMoney(paid) : (State.materialRequirements.paid_amount ? '待填写' : '可选')],
-    };
-    Object.entries(states).forEach(([key, [on, sub]]) => {
-      const step = body.querySelector(`[data-flow-step="${key}"]`);
-      if (!step) return;
-      step.classList.toggle('on', !!on);
-      const small = step.querySelector('small');
-      if (small) small.textContent = sub;
-    });
-    const completeness = body.querySelector('[data-detail-completeness]');
-    if (completeness) completeness.innerHTML = completenessLine(detail);
-  };
 
   function lockedKV(label, field, val, mono, money) {
     const display = money ? fmtMoney(val) : esc(val || '\u2014');
@@ -3897,7 +4022,6 @@ async function openEntryDetail(entryId, currentDetail = null) {
         }
         const detail = await Api.getEntry(entryId);
         await syncEntryAfterChange(entryId, { affectsStatus: true }, detail);
-        updateDetailMaterialState(detail);
         const reset = result.paid_amount_reset;
         const message = reset?.reset
           ? `已删除最后一张付款截图，实付已恢复为 ${fmtMoney(reset.value)}`
@@ -3933,6 +4057,14 @@ async function openEntryDetail(entryId, currentDetail = null) {
       mkBtn('关闭', 'ghost', () => mm.close()),
     ],
   });
+
+  // ---- 阿里云识别结果（有差异时默认展开）：必须在 modal 创建后再加载，
+  // loadOcrDetail 的回调会引用 mm，提前调用会触发 TDZ 错误。
+  const ocrSection = body.querySelector('#deOcrSection');
+  if (ocrSection) {
+    if (e.ocr_pending) ocrSection.open = true;
+    loadOcrDetail(body.querySelector('#deOcrBody'), mm, entryId, e.items || []);
+  }
 }
 
 const ATTACHMENT_TYPE_OPTS = [
@@ -4840,6 +4972,308 @@ function showPrintResult(results) {
       catch (e) { toast(e.message, 'err'); }
     };
   });
+}
+
+// ------------------------------------------------------------------ 阿里云 OCR
+function updateOcrSuggestBar() {
+  const bar = $('#ocrSuggestBar');
+  if (!bar) return;
+  const applicable = State.quickView === 'warning'
+    ? State.entries.filter((entry) =>
+        entry.attachment_types?.invoice_pdf && !entry.attachment_types?.invoice_xml)
+    : [];
+  if (!applicable.length || !ocrReady()) {
+    bar.classList.add('hidden');
+    bar.innerHTML = '';
+    return;
+  }
+  bar.classList.remove('hidden');
+  bar.innerHTML = `
+    <span class="ocr-suggest-text">当前视图有 ${applicable.length} 条发票可用阿里云识别</span>
+    <button class="btn small" id="ocrSuggestRun">识别全部</button>`;
+  bar.querySelector('#ocrSuggestRun').onclick = () => {
+    const ids = applicable.map((entry) => entry.id);
+    State.selected = new Set(ids);
+    State.lastSelectedId = null;
+    renderEntries();
+    openOcrDialog(ids);
+  };
+}
+
+async function openOcrDialog(ids) {
+  if (!ids || !ids.length) { toast('请先选择要用阿里云识别的条目', 'err'); return; }
+  let status;
+  try { status = await Api.ocrComponentStatus(); } catch (e) { toast(e.message, 'err'); return; }
+  State.ocrStatus = status;
+  if (!status.available) {
+    let m;
+    const needsRepair = !!status.needs_repair;
+    m = modal({
+      title: needsRepair ? 'OCR 识别组件需要修复' : 'OCR 识别组件未安装',
+      body: `<div class="hint warn">${needsRepair ? '组件文件缺失或损坏，请重新安装后继续。' : '安装 OCR 识别组件后，即可用阿里云识别补齐发票明细。'}</div>`,
+      footer: [
+        mkBtn('取消', 'ghost', () => m.close()),
+        mkBtn(needsRepair ? '修复组件' : '安装组件', 'primary', () => { m.close(); openUpdateDialog(); }),
+      ],
+    });
+    return;
+  }
+  if (!status.credentials_configured) {
+    let m;
+    m = modal({
+      title: '尚未配置阿里云密钥',
+      body: `<div class="hint warn">请先在设置 → 阿里云 OCR 填写 AccessKey。每个账号每月有免费额度，超出后按量计费。</div>`,
+      footer: [
+        mkBtn('取消', 'ghost', () => m.close()),
+        mkBtn('打开设置', 'primary', () => { m.close(); openSettings(); }),
+      ],
+    });
+    return;
+  }
+
+  let preview;
+  try { preview = await Api.ocrPreview(ids); } catch (e) { toast(e.message, 'err'); return; }
+  const entries = preview.entries || [];
+  const withPdf = entries.filter((it) => it.has_invoice_pdf);
+  const xmlCount = withPdf.filter((it) => it.has_invoice_xml).length;
+  const existingCount = withPdf.filter((it) => !it.has_invoice_xml && it.existing_result).length;
+  const noPdfCount = entries.length - withPdf.length;
+
+  const body = el('div');
+  body.innerHTML = `
+    <div class="ocr-confirm-copy">
+      将识别 <b id="ocrCallCount">0</b> 张发票。${OCR_QUOTA_NOTE} <button class="link-btn" id="ocrQuotaLink">查看免费额度</button>
+    </div>
+    <div class="ocr-confirm-notes">
+      ${xmlCount ? `<label class="chk"><input type="checkbox" id="ocrIncludeXml"/> 包含已有 XML 数据的 ${xmlCount} 条（结果仅作比对，同样计费）</label>` : ''}
+      ${existingCount ? `<div class="hint">其中 ${existingCount} 条已有识别结果，再次识别会重复计费，一般无需重试。</div>` : ''}
+      ${noPdfCount ? `<div class="hint">另有 ${noPdfCount} 条没有发票 PDF，自动跳过。</div>` : ''}
+    </div>`;
+
+  const countEl = body.querySelector('#ocrCallCount');
+  body.querySelector('#ocrQuotaLink')?.addEventListener('click', () => {
+    Api.openExternalUrl(OCR_CONSOLE_URL).catch((e) => toast(e.message, 'err'));
+  });
+  const chk = body.querySelector('#ocrIncludeXml');
+  const renderCount = () => {
+    const includeXml = !!(chk && chk.checked);
+    countEl.textContent = String(withPdf.filter((it) => includeXml || !it.has_invoice_xml).length);
+  };
+  if (chk) chk.onchange = renderCount;
+  renderCount();
+
+  const runBtn = mkBtn('开始识别', 'primary', async () => {
+    runBtn.disabled = true;
+    runBtn.textContent = '识别中…';
+    const includeXml = !!(chk && chk.checked);
+    const targets = withPdf
+      .filter((it) => includeXml || !it.has_invoice_xml)
+      .map((it) => it.entry_id);
+    if (!targets.length) { toast('没有可识别的发票', 'err'); runBtn.disabled = false; runBtn.textContent = '开始识别'; return; }
+
+    const progress = taskProgress(`正在识别 0/${targets.length}…`);
+    const rows = [];
+    const skipped = [];
+    let done = 0;
+    for (const entryId of targets) {
+      try {
+        const r = await Api.runOcrRecognition([entryId], { include_xml: includeXml });
+        const row = (r.results || [])[0];
+        if (row) rows.push(row);
+        else (r.skipped || []).forEach((s) => skipped.push(s));
+      } catch (e) {
+        rows.push({ entry_id: entryId, ok: false, error: e.message });
+      }
+      done += 1;
+      progress.update(`正在识别 ${done}/${targets.length}…`);
+    }
+    progress.close();
+    m.close();
+    State.selected.clear();
+    await refreshEntries();
+    refreshOcrStatus();
+    showOcrSummary(rows, skipped, targets.length);
+  });
+
+  const m = modal({
+    title: '阿里云识别',
+    subhead: '比对阿里云识别结果，按需采用；不自动改已经确认的数据',
+    body,
+    footer: [mkBtn('取消', 'ghost', () => m.close()), runBtn],
+  });
+}
+
+function showOcrSummary(rows, skipped, total) {
+  const labelFor = (entryId) => {
+    const entry = State.entries.find((it) => it.id === entryId);
+    if (!entry) return '条目';
+    return entry.invoice_no ? `发票 ${entry.invoice_no}` : (entry.seller || '未识别销售方');
+  };
+  const okCount = rows.filter((r) => r.ok).length;
+  const pendingCount = rows.filter((r) => r.ok && r.pending_count).length;
+  const failedCount = rows.filter((r) => !r.ok).length;
+  const rowHtml = rows.map((r) => {
+    if (!r.ok) {
+      return `<div class="ocr-summary-row err">
+        <span class="ocr-summary-icon">✗</span>
+        <span class="ocr-summary-label">${esc(labelFor(r.entry_id))}</span>
+        <span class="ocr-summary-note">${esc(r.error || '识别失败')}</span>
+      </div>`;
+    }
+    const bits = [];
+    if (r.applied_fields?.length) bits.push(`已补齐 ${r.applied_fields.map((f) => OCR_FIELD_LABEL[f] || f).join('、')}`);
+    if (r.items_replaced) bits.push('明细已按识别结果修复');
+    if (r.pending_count) bits.push(`${r.pending_count} 项差异待确认`);
+    if (!bits.length) bits.push('与当前数据一致');
+    return `<button class="ocr-summary-row${r.pending_count ? ' warn' : ' ok'}" data-ocr-goto="${esc(r.entry_id)}">
+      <span class="ocr-summary-icon">${r.pending_count ? '!' : '✓'}</span>
+      <span class="ocr-summary-label">${esc(labelFor(r.entry_id))}</span>
+      <span class="ocr-summary-note">${esc(bits.join(' · '))}</span>
+    </button>`;
+  }).join('');
+  const skippedHtml = (skipped || []).map((s) => `
+    <div class="ocr-summary-row muted">
+      <span class="ocr-summary-icon">–</span>
+      <span class="ocr-summary-label">${esc(labelFor(s.entry_id))}</span>
+      <span class="ocr-summary-note">${esc(s.reason || '跳过')}</span>
+    </div>`).join('');
+  const m = modal({
+    title: '阿里云识别完成',
+    subhead: `调用 ${total} 次 · 成功 ${okCount}${pendingCount ? ` · 待确认 ${pendingCount}` : ''}${failedCount ? ` · 失败 ${failedCount}` : ''}`,
+    wide: true,
+    body: `<div class="ocr-summary-list">${rowHtml || '<div class="hint">没有识别结果。</div>'}</div>${skippedHtml ? `<div class="ocr-summary-list muted-list">${skippedHtml}</div>` : ''}`,
+    footer: [mkBtn('完成', 'primary', () => m.close())],
+  });
+  m.body.querySelectorAll('[data-ocr-goto]').forEach((btn) => {
+    btn.onclick = () => { m.close(); openEntryDetail(btn.dataset.ocrGoto); };
+  });
+}
+
+async function runOcrFromDetail(mm, entryId) {
+  if (!confirm('将调用阿里云识别这张发票（按量计费）。继续？')) return;
+  const progress = taskProgress('正在调用阿里云识别…');
+  try {
+    const r = await Api.runOcrRecognition([entryId], { include_xml: true });
+    progress.close();
+    const row = (r.results || [])[0];
+    const skip = (r.skipped || [])[0];
+    if (row && row.ok) {
+      toast(row.pending_count ? `识别完成，${row.pending_count} 项差异待确认` : '识别完成', row.pending_count ? '' : 'ok');
+      await reopenEntryDetail(mm, entryId, { relist: true });
+    } else {
+      toast((row && row.error) || (skip && skip.reason) || '识别失败', 'err');
+    }
+  } catch (e) {
+    progress.close();
+    toast(e.message, 'err');
+  }
+}
+
+function ocrItemsMiniTable(items) {
+  const rows = (items || []).map((it) => `
+    <tr>
+      <td>${esc(it.actual_name || it.name || '—')}</td>
+      <td>${esc(it.spec || '—')}</td>
+      <td>${esc(it.unit || '—')}</td>
+      <td class="num">${esc(it.quantity || '—')}</td>
+      <td class="num">${fmtMoney(it.total)}</td>
+    </tr>`).join('');
+  return `<table class="ocr-items-table"><thead><tr>
+    <th>名称</th><th>规格</th><th>单位</th><th style="text-align:right">数量</th><th style="text-align:right">金额</th>
+  </tr></thead><tbody>${rows || '<tr><td colspan="5" style="color:var(--ink-soft)">无明细</td></tr>'}</tbody></table>`;
+}
+
+const OCR_ACTION_LABEL = {
+  same: '一致', ocr_empty: '阿里云为空', fill: '可补齐', autofix: '可修复', pending: '有差异',
+};
+
+async function loadOcrDetail(container, mm, entryId, currentItems) {
+  let view;
+  try { view = await Api.getOcrResult(entryId); } catch (e) {
+    container.innerHTML = `<div class="hint warn">${esc(e.message)}</div>`;
+    return;
+  }
+  const plan = view.plan;
+  const latest = view.latest;
+  if (!latest || !plan) {
+    const failed = view.latest_failed;
+    container.innerHTML = `
+      ${failed ? `<div class="hint warn">上次识别失败：${esc(failed.error || '')}</div>` : ''}
+      <div class="hint">尚未进行阿里云识别。</div>
+      <div class="ocr-detail-actions"><button class="btn small" id="deOcrRun">${failed ? '重新识别' : '识别此发票'}</button></div>`;
+    container.querySelector('#deOcrRun').onclick = () => runOcrFromDetail(mm, entryId);
+    return;
+  }
+
+  const closure = plan.closure_pass
+    ? '<span class="settings-ok">通过</span>'
+    : '<span class="settings-warn">未通过</span>';
+  const fieldRows = (plan.field_rows || []).map((row) => {
+    const isMoney = row.field === 'total';
+    const local = row.local === '' ? '—' : (isMoney ? fmtMoney(row.local) : esc(row.local));
+    const ocr = row.ocr === '' ? '—' : (isMoney ? fmtMoney(row.ocr) : esc(row.ocr));
+    const adoptable = ['fill', 'autofix', 'pending'].includes(row.action);
+    return `<tr>
+      <td>${esc(row.label)}</td>
+      <td>${local}</td>
+      <td class="ocr-ocr-col">${ocr}</td>
+      <td><span class="ocr-status ${row.action}">${OCR_ACTION_LABEL[row.action] || row.action}</span></td>
+      <td>${adoptable ? `<button class="btn small ghost" data-adopt-field="${esc(row.field)}" ${row.ocr === '' ? 'disabled' : ''}>采用</button>` : ''}</td>
+    </tr>`;
+  }).join('');
+
+  const itemsBlock = !plan.items_differ
+    ? `<div class="hint ok-hint">明细与当前一致。</div>`
+    : `
+      <div class="ocr-compare">
+        <div><div class="ocr-compare-title">当前明细</div>${ocrItemsMiniTable(currentItems)}</div>
+        <div><div class="ocr-compare-title">阿里云明细</div>${ocrItemsMiniTable(view.ocr_items)}</div>
+      </div>
+      ${plan.closure_pass ? '' : '<div class="hint warn">阿里云明细未通过金额闭合校验，采用前请逐行核对。</div>'}
+      <div class="ocr-detail-actions"><button class="btn small" id="deOcrAdoptItems">采用阿里云明细</button></div>`;
+
+  container.innerHTML = `
+    <div class="ocr-detail-meta">
+      <span>识别于 ${esc(latest.created_at)}</span>
+      ${latest.file_name ? `<span class="sep">·</span><span data-tooltip-overflow="${esc(latest.file_name)}">${esc(latest.file_name)}</span>` : ''}
+      <span class="sep">·</span><span>金额闭合 ${closure}</span>
+      <span class="sep">·</span><span>本机累计调用 ${view.call_count} 次</span>
+    </div>
+    ${view.stale ? '<div class="hint warn">发票文件在识别后被替换过，以下结果对应旧文件，建议重新识别。</div>' : ''}
+    ${plan.pending?.length ? `<div class="hint">待确认：${plan.pending.map((f) => OCR_FIELD_LABEL[f] || f).map(esc).join('、')}。</div>` : ''}
+    <table class="ocr-diff-table"><thead><tr>
+      <th>字段</th><th>当前值</th><th>阿里云值</th><th>状态</th><th style="width:56px"></th>
+    </tr></thead><tbody>${fieldRows}</tbody></table>
+    ${itemsBlock}
+    <div class="ocr-detail-actions"><button class="btn small ghost" id="deOcrRerun">重新识别</button></div>`;
+
+  container.querySelector('#deOcrRerun').onclick = () => runOcrFromDetail(mm, entryId);
+  container.querySelectorAll('[data-adopt-field]').forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const r = await Api.applyOcrField(entryId, btn.dataset.adoptField);
+        toast(r.pending?.length ? `已采用；剩余待确认 ${r.pending.length} 项` : '已采用并记录', 'ok');
+        await reopenEntryDetail(mm, entryId, { relist: true });
+      } catch (e) {
+        toast(e.message, 'err');
+        btn.disabled = false;
+      }
+    };
+  });
+  const adoptItemsBtn = container.querySelector('#deOcrAdoptItems');
+  if (adoptItemsBtn) adoptItemsBtn.onclick = async () => {
+    if (!confirm('用阿里云明细替换当前明细？明细表内的手动修改会被覆盖；人工修改过的「实际物资名称」会保留。')) return;
+    adoptItemsBtn.disabled = true;
+    try {
+      await Api.applyOcrItems(entryId);
+      toast('明细已采用', 'ok');
+      await reopenEntryDetail(mm, entryId, { relist: true });
+    } catch (e) {
+      toast(e.message, 'err');
+      adoptItemsBtn.disabled = false;
+    }
+  };
 }
 
 async function batchDelete() {

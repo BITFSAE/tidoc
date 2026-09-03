@@ -54,6 +54,10 @@ jobs:
         shell: bash
         run: python -c "import tidoc_print; print(f'PRINT_VERSION={tidoc_print.__version__}')" >> "$GITHUB_ENV"
 
+      - name: Read OCR component version
+        shell: bash
+        run: python -c "import tidoc_ocr; print(f'OCR_VERSION={tidoc_ocr.__version__}')" >> "$GITHUB_ENV"
+
       - name: Install core dependencies
         run: |
           python -m pip install --upgrade pip
@@ -91,11 +95,26 @@ jobs:
       - name: Smoke-test Windows print component
         run: .\dist\tidoc_print.exe --self-test
 
+      - name: Install OCR component dependencies
+        run: pip install -r requirements-ocr.txt
+
+      - name: Build Windows OCR component
+        run: >
+          pyinstaller --noconfirm --clean --onefile
+          --name tidoc_ocr
+          --paths "."
+          --collect-submodules tidoc_ocr
+          scripts/tidoc_ocr_entry.py
+
+      - name: Smoke-test Windows OCR component
+        run: .\dist\tidoc_ocr.exe --self-test
+
       - name: Collect Windows artifacts
         shell: bash
         run: |
           mkdir -p release
           cp dist/tidoc_print.exe "release/tidoc-print-windows-v${PRINT_VERSION}.exe"
+          cp dist/tidoc_ocr.exe "release/tidoc-ocr-windows-v${OCR_VERSION}.exe"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -123,6 +142,9 @@ jobs:
 
       - name: Read print component version
         run: python -c "import tidoc_print; print(f'PRINT_VERSION={tidoc_print.__version__}')" >> "$GITHUB_ENV"
+
+      - name: Read OCR component version
+        run: python -c "import tidoc_ocr; print(f'OCR_VERSION={tidoc_ocr.__version__}')" >> "$GITHUB_ENV"
 
       - name: Install core dependencies
         run: |
@@ -182,6 +204,27 @@ jobs:
           chmod +x release/tidoc_print
           (cd release && zip "tidoc-print-macos-v${PRINT_VERSION}.zip" tidoc_print)
           rm release/tidoc_print
+
+      - name: Install OCR component dependencies
+        run: pip install -r requirements-ocr.txt
+
+      - name: Build macOS OCR component
+        run: >
+          pyinstaller --noconfirm --clean --onefile --strip
+          --name tidoc_ocr
+          --paths "."
+          --collect-submodules tidoc_ocr
+          scripts/tidoc_ocr_entry.py
+
+      - name: Smoke-test macOS OCR component
+        run: dist/tidoc_ocr --self-test
+
+      - name: Zip macOS OCR component
+        run: |
+          cp dist/tidoc_ocr release/tidoc_ocr
+          chmod +x release/tidoc_ocr
+          (cd release && zip "tidoc-ocr-macos-v${OCR_VERSION}.zip" tidoc_ocr)
+          rm release/tidoc_ocr
 
       - uses: actions/upload-artifact@v4
         with:
@@ -285,7 +328,9 @@ jobs:
           )
           for component_asset in \
             release/tidoc-print-macos-v*.zip \
-            release/tidoc-print-windows-v*.exe; do
+            release/tidoc-print-windows-v*.exe \
+            release/tidoc-ocr-macos-v*.zip \
+            release/tidoc-ocr-windows-v*.exe; do
             [ -e "$component_asset" ] && assets+=("$component_asset")
           done
           if gh release view "$tag" >/dev/null 2>&1; then

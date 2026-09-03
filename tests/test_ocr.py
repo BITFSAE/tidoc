@@ -169,19 +169,29 @@ out.write_text(json.dumps({"ok": True, "data": {"results": [
 """
 
 
+def _fake_component_path(tmp_path: Path) -> Path:
+    # Windows 的 CreateProcess 不能直接执行脚本文件，需要 .bat 包装
+    return tmp_path / ("tidoc_ocr.bat" if sys.platform == "win32" else "tidoc_ocr")
+
+
 def _write_fake_component(path: Path, raw: dict, normalized: dict) -> None:
     head = (
         FAKE_COMPONENT_HEAD
         + f"RAW = {raw!r}\nNORM = {normalized!r}\n"
     )
-    path.write_text(head + FAKE_COMPONENT_BODY, "utf-8")
+    if sys.platform == "win32":
+        impl = path.with_suffix(".impl.py")
+        impl.write_text(head + FAKE_COMPONENT_BODY, "utf-8")
+        path.write_text(f'@echo off\r\n"{sys.executable}" "{impl}" %*\r\n', "utf-8")
+    else:
+        path.write_text(head + FAKE_COMPONENT_BODY, "utf-8")
 
 
 def test_invoke_ocr_external_mode(tmp_path, monkeypatch):
     """外部组件模式：input.json 传递任务与密钥，result.json 回传逐条结果。"""
     from tidoc.services import ocr as ocr_service
 
-    fake = tmp_path / "tidoc_ocr"
+    fake = _fake_component_path(tmp_path)
     _write_fake_component(fake, SAMPLE_DATA, _normalized())
     fake.chmod(0o755)
     monkeypatch.setattr(ocr_service, "component_status", lambda cd=None: {

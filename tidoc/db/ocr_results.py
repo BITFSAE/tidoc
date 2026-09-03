@@ -16,6 +16,9 @@ from .database import Database
 
 PROVIDER_ALIYUN = "aliyun"
 
+# SQLite 变量数上限远高于此，分块只为稳妥（与 entries.QUERY_BATCH_SIZE 同思路）
+_QUERY_BATCH_SIZE = 500
+
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -75,6 +78,22 @@ class OcrRepo:
         row = self.db.conn.execute(sql, (entry_id,)).fetchone()
         return self._to_dict(row)
 
+    def latest_ok_rows(self, entry_ids: list[str]) -> dict[str, dict]:
+        """每个条目最新一次成功结果（列表徽标批量重算用，避免逐条查询）。"""
+        latest: dict = {}
+        ids = [i for i in entry_ids if i]
+        for offset in range(0, len(ids), _QUERY_BATCH_SIZE):
+            batch = ids[offset:offset + _QUERY_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.db.conn.execute(
+                f"SELECT * FROM ocr_results WHERE status = 'ok' "
+                f"AND entry_id IN ({placeholders}) ORDER BY id",
+                batch,
+            ).fetchall()
+            for row in rows:
+                latest[row["entry_id"]] = row  # 按 id 升序遍历，后行覆盖前行即最新
+        return {entry_id: self._to_dict(row) for entry_id, row in latest.items()}
+
     def latest_failed(self, entry_id: str) -> dict | None:
         row = self.db.conn.execute(
             "SELECT * FROM ocr_results WHERE entry_id = ? AND status = 'failed' "
@@ -96,7 +115,21 @@ class OcrRepo:
         return int(row[0]) if row else 0
 
     def mark_applied(self, result_id: int, pending: list[str]) -> None:
-        """自动补齐 / 用户采用后更新待确认差异；全清时记录应用时间。"""
+        """自动补齐 / 用户采用后更新待确认差异；全清时记录应用时间。
+
+        列表刷新会高频重算差异，与已存值一致时跳过写入，不产生磁盘 commit。
+        """
+        pending = list(pending)
+        row = self.db.conn.execute(
+            "SELECT pending FROM ocr_results WHERE id = ?", (result_id,)
+        ).fetchone()
+        if row is not None:
+            try:
+                current = json.loads(row["pending"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                current = None
+            if isinstance(current, list) and current == pending:
+                return
         applied_at = "" if pending else _now()
         if pending:
             self.db.conn.execute(

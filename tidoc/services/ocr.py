@@ -505,6 +505,76 @@ def result_view(entries_repo: EntryRepo, ocr_repo: OcrRepo, entry_id: str) -> di
     return view
 
 
+def _xml_flag(entry: dict) -> bool | None:
+    """判断条目是否以 XML 为权威来源；列表与详情两种条目形态都兼容。
+
+    返回 None 表示没有任何发票附件，回退到 source 字段判断
+    （见 plan_entry_update 的回退逻辑）。
+    """
+    attachments = entry.get("attachments")
+    if attachments is not None:
+        types = {a["type"] for a in attachments}
+        has_xml = TYPE_INVOICE_XML in types
+        has_any = bool(types & {TYPE_INVOICE_PDF, TYPE_INVOICE_XML})
+    else:
+        by_type = entry.get("attachment_types") or {}
+        has_xml = bool(by_type.get(TYPE_INVOICE_XML))
+        has_any = bool(by_type.get(TYPE_INVOICE_PDF) or by_type.get(TYPE_INVOICE_XML))
+    return has_xml if has_any else None
+
+
+def sync_ocr_states(
+    entries_repo: EntryRepo,
+    ocr_repo: OcrRepo,
+    entries: list[dict],
+) -> tuple[set[str], set[str]]:
+    """批量重算条目的 OCR 徽标状态（待确认 / 已识别），供列表与详情。
+
+    与逐条 result_view 等价，但只需 3 条批量 SQL：最新成功结果、人工修正
+    字段、明细。差异与落库值不一致时才写回，避免列表刷新产生大量 commit。
+    解析快照损坏的条目保留原待确认状态，等用户重新识别。
+    """
+    entries = [entry for entry in entries if entry]
+    if not entries:
+        return set(), set()
+    latest_rows = ocr_repo.latest_ok_rows([entry["id"] for entry in entries])
+    if not latest_rows:
+        return set(), set()
+
+    human_map = entries_repo.human_modified_locked_fields_map(list(latest_rows))
+    items_map: dict[str, list[dict]] | None = None
+    pending_ids = {entry_id for entry_id, row in latest_rows.items() if row["pending_list"]}
+    recognized_ids = set(latest_rows)
+
+    for entry in entries:
+        row = latest_rows.get(entry["id"])
+        if row is None:
+            continue
+        try:
+            normalized = json.loads(row.get("normalized") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            normalized = {}
+        if not normalized:
+            continue
+        if "items" not in entry:
+            # 列表条目不带明细，取批量快照参与比对；不回写，避免撑大列表载荷
+            if items_map is None:
+                items_map = entries_repo.items_by_entry(list(latest_rows))
+            entry = {**entry, "items": items_map.get(entry["id"], [])}
+        plan = plan_entry_update(
+            entry, normalized, human_map.get(entry["id"], set()),
+            xml_authoritative=_xml_flag(entry),
+        )
+        pending = list(plan["pending"])
+        if pending != row["pending_list"]:
+            ocr_repo.mark_applied(row["id"], pending)
+        if pending:
+            pending_ids.add(entry["id"])
+        else:
+            pending_ids.discard(entry["id"])
+    return pending_ids, recognized_ids
+
+
 def apply_ocr_field(entries_repo: EntryRepo, ocr_repo: OcrRepo, entry_id: str, field: str) -> dict:
     """用户在详情里采用某个 OCR 字段值。"""
     latest = ocr_repo.latest(entry_id)

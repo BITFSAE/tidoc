@@ -17,6 +17,7 @@ release-local/
 *.sqlite-journal
 attachments/
 exports/
+output/
 
 # 系统
 .DS_Store

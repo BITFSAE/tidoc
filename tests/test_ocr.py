@@ -471,6 +471,56 @@ def test_run_ocr_records_failures(repos, monkeypatch):
     assert ocr.latest(entry["id"]) is None
 
 
+# ---------------------------------------------------------------- 徽标批量重算
+def test_latest_ok_rows_and_mark_applied_skip_write(repos):
+    from tidoc.db import OcrRepo
+
+    ocr = OcrRepo(repos["db"])
+    entry = _entry(repos)
+    first = ocr.record(entry["id"], normalized="{}", pending=["seller"])
+    second = ocr.record(entry["id"], normalized="{}", pending=[])
+
+    rows = ocr.latest_ok_rows([entry["id"]])
+    assert list(rows) == [entry["id"]]
+    assert rows[entry["id"]]["id"] == second["id"]      # 取最新成功行，而非旧行
+    assert rows[entry["id"]]["id"] != first["id"]
+    assert rows[entry["id"]]["pending_list"] == []
+    assert ocr.latest_ok_rows(["missing-entry"]) == {}
+
+    # 差异与已存值一致时跳过写入：列表刷新高频重算不能每次都 commit
+    conn = repos["db"].conn
+    before = conn.total_changes
+    ocr.mark_applied(second["id"], [])
+    assert conn.total_changes == before
+    ocr.mark_applied(second["id"], ["seller"])
+    assert conn.total_changes > before
+
+
+def test_sync_ocr_states_recomputes_after_manual_correction(repos):
+    """人工修正后与已存识别结果出现差异时，徽标要在下次列表刷新时出现。"""
+    from tidoc.db import OcrRepo
+    from tidoc.services.ocr import sync_ocr_states
+
+    ocr = OcrRepo(repos["db"])
+    entry = _entry(repos, source="pdf")
+    normalized = _normalized()  # seller 与本地一致
+    ocr.record(entry["id"], normalized=json.dumps(normalized, ensure_ascii=False),
+               closure_pass=True)
+
+    listed = repos["entries"].list()
+    pending, recognized = sync_ocr_states(repos["entries"], ocr, listed)
+    assert pending == set()
+    assert recognized == {entry["id"]}
+
+    repos["entries"].correct_locked_field(entry["id"], "seller", "人工确认销售方", "")
+    listed = repos["entries"].list()
+    pending, _ = sync_ocr_states(repos["entries"], ocr, listed)
+    assert pending == {entry["id"]}
+    assert ocr.pending_fields(entry["id"]) == ["seller"]
+    # 列表条目未被注入明细（保持列表载荷轻量），明细只参与比对
+    assert "items" not in listed[0]
+
+
 # ---------------------------------------------------------------- API 桥
 @pytest.fixture
 def ocr_component_ready(monkeypatch):

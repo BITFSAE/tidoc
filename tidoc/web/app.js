@@ -131,7 +131,9 @@ function fmtQuantity(v) {
   if (v == null || v === '') return '—';
   const text = String(v).trim();
   if (!/^-?\d+(\.\d+)?$/.test(text)) return text;
-  return text.replace(/\.?0+$/, '') || '0';
+  // 只对带小数点的数值去尾零，整数（10、100…）原样展示
+  if (!text.includes('.')) return text;
+  return text.replace(/0+$/, '').replace(/\.$/, '') || '0';
 }
 function initials(name) {
   if (!name) return '—';
@@ -3116,17 +3118,17 @@ async function openUpdateDialog() {
       ? 'DMG 已打开。请将 tidoc 拖到“应用程序”，再退出并重新打开。'
       : '安装器已打开。完成安装后请退出并重新打开 tidoc。';
     const rows = (status.updates || []).map((u) => {
-    const available = u.available;
-    const assetSize = fmtBytes(u.asset?.size);
-    const meta = [
-      `当前 ${u.current_version ? 'v' + esc(u.current_version) : '未安装'}`,
-      `最新 v${esc(u.latest_version || '未知')}`,
-      assetSize,
-    ].filter(Boolean).join(' · ');
+      const available = u.available;
+      const assetSize = fmtBytes(u.asset?.size);
+      const meta = [
+        `当前 ${u.current_version ? 'v' + esc(u.current_version) : '未安装'}`,
+        `最新 v${esc(u.latest_version || '未知')}`,
+        assetSize,
+      ].filter(Boolean).join(' · ');
       let state = u.manifest_missing
         ? '<span class="update-badge current">等待发布</span>'
         : available ? '<span class="update-badge available">可更新</span>' : '<span class="update-badge current">已是最新</span>';
-    let action = '';
+      let action = '';
       const installable = u.manifest_missing ? null : UPDATE_COMPONENTS[u.component];
       if (installable) {
         const attr = `data-install-component="${esc(u.component)}"`;
@@ -5150,7 +5152,10 @@ function showOcrSummary(rows, skipped, total) {
 }
 
 async function runOcrFromDetail(mm, entryId) {
-  if (!confirm('将调用阿里云识别这张发票（按量计费）。继续？')) return;
+  const entry = State.entries.find((it) => it.id === entryId);
+  const xmlNote = entry?.attachment_types?.invoice_xml
+    ? '该条目已有 XML 权威数据，本次结果仅作比对。' : '';
+  if (!confirm(`将调用阿里云识别这张发票（按量计费）。${xmlNote}继续？`)) return;
   const progress = taskProgress('正在调用阿里云识别…');
   try {
     const r = await Api.runOcrRecognition([entryId], { include_xml: true });

@@ -600,7 +600,8 @@ class Api:
     def list_entries(self, filters=None):
         filters = filters or {}
         entries = self.entries.list(**filters)
-        pending_ids, recognized_ids = self._sync_ocr_states([entry["id"] for entry in entries])
+        from .services.ocr import sync_ocr_states
+        pending_ids, recognized_ids = sync_ocr_states(self.entries, self.ocr, entries)
         if filters.get("ocr_pending"):
             entries = [entry for entry in entries if entry["id"] in pending_ids]
         elif filters.get("ocr_recognized"):
@@ -618,31 +619,11 @@ class Api:
     def get_entry(self, entry_id):
         entry = self.entries.get(entry_id)
         if entry:
-            pending_ids, recognized_ids = self._sync_ocr_states([entry_id])
+            from .services.ocr import sync_ocr_states
+            pending_ids, recognized_ids = sync_ocr_states(self.entries, self.ocr, [entry])
             entry["ocr_pending"] = entry_id in pending_ids
             entry["ocr_recognized"] = entry_id in recognized_ids
         return entry
-
-    def _sync_ocr_states(self, entry_ids: list[str]) -> tuple[set[str], set[str]]:
-        """按当前数据重算 OCR 状态，并清理旧版本残留标记。"""
-        from .services.ocr import result_view
-        pending_ids: set[str] = set()
-        recognized_ids: set[str] = set()
-        for entry_id in entry_ids:
-            view = result_view(self.entries, self.ocr, entry_id)
-            plan = view.get("plan")
-            latest = view.get("latest")
-            if plan is not None and latest is not None:
-                recognized_ids.add(entry_id)
-                pending = list(plan.get("pending") or [])
-                self.ocr.mark_applied(int(latest["id"]), pending)
-                if pending:
-                    pending_ids.add(entry_id)
-            elif self.ocr.pending_fields(entry_id):
-                pending_ids.add(entry_id)
-            if self.ocr.latest(entry_id) is not None:
-                recognized_ids.add(entry_id)
-        return pending_ids, recognized_ids
 
     @_guard
     def update_field(self, entry_id, field, value, profile_id=""):

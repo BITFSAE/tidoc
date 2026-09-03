@@ -624,6 +624,36 @@ class EntryRepo:
         ).fetchall()
         return {row["field"][len(MANUAL_HISTORY_PREFIX):] for row in rows}
 
+    def human_modified_locked_fields_map(self, entry_ids: list[str]) -> dict[str, set[str]]:
+        """批量版 human_modified_locked_fields（OCR 徽标批量重算用）。"""
+        out: dict[str, set[str]] = {entry_id: set() for entry_id in entry_ids}
+        for offset in range(0, len(entry_ids), QUERY_BATCH_SIZE):
+            batch = entry_ids[offset:offset + QUERY_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.db.conn.execute(
+                f"SELECT entry_id, field FROM field_history "
+                f"WHERE field LIKE ? AND entry_id IN ({placeholders})",
+                [f"{MANUAL_HISTORY_PREFIX}%"] + batch,
+            ).fetchall()
+            for row in rows:
+                out[row["entry_id"]].add(row["field"][len(MANUAL_HISTORY_PREFIX):])
+        return out
+
+    def items_by_entry(self, entry_ids: list[str]) -> dict[str, list[dict]]:
+        """批量取条目明细（OCR 徽标批量比对用），键为条目 id。"""
+        out: dict[str, list[dict]] = {entry_id: [] for entry_id in entry_ids}
+        for offset in range(0, len(entry_ids), QUERY_BATCH_SIZE):
+            batch = entry_ids[offset:offset + QUERY_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.db.conn.execute(
+                f"SELECT * FROM items WHERE entry_id IN ({placeholders}) "
+                f"ORDER BY entry_id, ordinal",
+                batch,
+            ).fetchall()
+            for row in rows:
+                out[row["entry_id"]].append(_row_to_dict(row))
+        return out
+
     def set_profile(self, entry_id: str, new_profile_id: str, operator_profile_id: str = "") -> dict:
         """修改条目归属的报账人。"""
         row = self.db.conn.execute(

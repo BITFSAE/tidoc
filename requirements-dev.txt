@@ -1,4 +1,4 @@
 -r requirements.txt
- -r requirements-ocr.txt
+-r requirements-ocr.txt
 pytest>=8.0     # Tests
 # pyinstaller   # Install only when building release packages

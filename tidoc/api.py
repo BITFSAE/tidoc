@@ -324,11 +324,13 @@ class Api:
                     check.status,
                     check.message,
                 )
+                self.entries.mark_invoice_recognized(entry_id)
+                refreshed = self.entries.get(entry_id) or {}
                 results.append({
                     "entry_id": entry_id,
                     "ok": True,
-                    "check_status": check.status,
-                    "check_message": check.message,
+                    "check_status": refreshed.get("check_status", check.status),
+                    "check_message": refreshed.get("check_message", check.message),
                     "item_count": len(parsed.items),
                 })
             except Exception as exc:  # noqa: BLE001 — 单条失败不阻断其余批量任务
@@ -381,9 +383,11 @@ class Api:
                 self.attachments.add(entry_id, xml_path, TYPE_INVOICE_XML)
             if pdf_path:
                 self.attachments.add(entry_id, pdf_path, TYPE_INVOICE_PDF)
+            if parsed:
+                self.entries.mark_invoice_recognized(entry_id)
             for pp in (payment_paths or []):
-                self.attachments.add(entry_id, pp, TYPE_PAYMENT)
-                self._maybe_apply_payment_ocr_amount(entry_id, pp)
+                attachment = self.attachments.add(entry_id, pp, TYPE_PAYMENT)
+                self._maybe_apply_payment_ocr_amount(entry_id, attachment)
             for physical_path in (physical_paths or []):
                 self._validate_attachment_for_entry(entry_id, physical_path, TYPE_PHYSICAL_IMAGE)
                 self.attachments.add(entry_id, physical_path, TYPE_PHYSICAL_IMAGE)
@@ -566,6 +570,7 @@ class Api:
                     self.attachments.add(entry_id, f["path"], TYPE_INVOICE_PDF)
                 for f in xml_files:
                     self.attachments.add(entry_id, f["path"], TYPE_INVOICE_XML)
+                self.entries.mark_invoice_recognized(entry_id)
                 self.entries.recompute_status(entry_id)
                 created.append(entry_id)
                 created_entries.append({
@@ -787,25 +792,41 @@ class Api:
     # ------------------------------------------------------------ 附件
     @_guard
     def add_attachment(self, entry_id, src_path, att_type, note="", options=None):
-        from .db import TYPE_PAYMENT
+        from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
 
         options = options or {}
         self._validate_attachment_for_entry(entry_id, src_path, att_type)
         att = self.attachments.add(entry_id, src_path, att_type, note)
+        if att_type in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}:
+            self.entries.clear_invoice_recognition(entry_id)
         if att_type == TYPE_PAYMENT and not options.get("skip_payment_ocr", False):
             amount, applied = self._maybe_apply_payment_ocr_amount(
                 entry_id,
-                src_path,
+                att,
                 apply=options.get("apply_payment_ocr", True),
             )
             if amount:
                 att["payment_ocr"] = {"paid_amount": amount, "applied": applied}
+        elif att_type == TYPE_PAYMENT and options.get("payment_ocr_attempted", False):
+            from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION
+
+            amount = str(options.get("recognized_payment_amount") or "").strip()
+            self.attachments.set_recognition(
+                att["id"],
+                LOCAL_PAYMENT_RECOGNITION_VERSION,
+                "recognized" if amount else "unrecognized",
+                amount,
+                "" if amount else "未识别到付款金额",
+            )
+            self.entries.refresh_payment_check(entry_id)
+        elif att_type == TYPE_PAYMENT:
+            self.entries.clear_payment_check(entry_id)
         self.entries.recompute_status(entry_id)
         return att
 
     @_guard
     def delete_attachment(self, att_id):
-        from .db import TYPE_PAYMENT
+        from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
 
         att = self.attachments.get(att_id)
         result = self.attachments.delete(att_id)
@@ -815,6 +836,9 @@ class Api:
                 paid_reset = self.entries.restore_paid_amount_after_last_payment(
                     att["entry_id"], att.get("added_at") or ""
                 )
+                self.entries.refresh_payment_check(att["entry_id"])
+            elif att.get("type") in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}:
+                self.entries.clear_invoice_recognition(att["entry_id"])
             self.entries.recompute_status(att["entry_id"])
         return {"deleted": att_id, "paid_amount_reset": paid_reset, **result}
 
@@ -824,7 +848,7 @@ class Api:
 
     @_guard
     def update_attachment(self, att_id, fields=None):
-        from .db import TYPE_PAYMENT
+        from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
 
         fields = fields or {}
         current = self.attachments.get(att_id)
@@ -846,6 +870,18 @@ class Api:
                 paid_reset = self.entries.restore_paid_amount_after_last_payment(
                     att["entry_id"], current.get("added_at") or ""
                 )
+            if current.get("type") == TYPE_PAYMENT or att.get("type") == TYPE_PAYMENT:
+                if att.get("type") == TYPE_PAYMENT and (
+                    fields.get("src_path") or current.get("type") != TYPE_PAYMENT
+                ):
+                    self._maybe_apply_payment_ocr_amount(att["entry_id"], att, apply=False)
+                else:
+                    self.entries.refresh_payment_check(att["entry_id"])
+            if (
+                current.get("type") in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}
+                or att.get("type") in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}
+            ):
+                self.entries.clear_invoice_recognition(att["entry_id"])
             self.entries.recompute_status(att["entry_id"])
             att["paid_amount_reset"] = paid_reset
         return att
@@ -903,16 +939,36 @@ class Api:
             if invoice_no:
                 _validate_same_invoice(entry, invoice_no, path.name)
 
-    def _maybe_apply_payment_ocr_amount(self, entry_id, src_path, apply: bool = True) -> tuple[str, bool]:
-        from .db.entries import VALUE_SOURCE_PAYMENT_OCR
+    def _maybe_apply_payment_ocr_amount(self, entry_id, attachment, apply: bool = True) -> tuple[str, bool]:
+        from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION, VALUE_SOURCE_PAYMENT_OCR
         from .services.folder_import import extract_payment_image_amount
 
         if not self._payment_ocr_enabled():
+            self.entries.clear_payment_check(entry_id)
             return "", False
-        amount = extract_payment_image_amount(src_path)
+        att = attachment if isinstance(attachment, dict) else None
+        if not att:
+            raise ValueError("付款截图附件不存在。")
+        try:
+            amount = extract_payment_image_amount(att["abs_path"])
+            self.attachments.set_recognition(
+                att["id"],
+                LOCAL_PAYMENT_RECOGNITION_VERSION,
+                "recognized" if amount else "unrecognized",
+                amount,
+                "" if amount else "未识别到付款金额",
+            )
+        except Exception as exc:  # noqa: BLE001 - 识别失败不撤销已添加的截图
+            self.attachments.set_recognition(
+                att["id"], LOCAL_PAYMENT_RECOGNITION_VERSION, "error", "", str(exc)
+            )
+            self.entries.refresh_payment_check(entry_id)
+            return "", False
         if not amount:
+            self.entries.refresh_payment_check(entry_id)
             return "", False
         if not apply:
+            self.entries.refresh_payment_check(entry_id)
             return amount, False
         entry = self.entries.get(entry_id)
         if not entry:
@@ -921,6 +977,7 @@ class Api:
         current = ((fields.get("paid_amount") or {}).get("current") or "").strip()
         total = str(entry.get("total") or "").strip()
         if current and total and not _same_money(current, total):
+            self.entries.refresh_payment_check(entry_id)
             return amount, False
         self.entries.update_field(
             entry_id,
@@ -929,7 +986,108 @@ class Api:
             "",
             value_source=VALUE_SOURCE_PAYMENT_OCR,
         )
+        self.entries.refresh_payment_check(entry_id)
         return amount, True
+
+    @_guard
+    def recognition_preview(self, entry_ids):
+        """预览本地重新识别任务；已由当前规则处理的材料会自动跳过。"""
+        from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
+        from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION
+
+        invoice_total = invoice_pending = payment_total = payment_pending = 0
+        seen = set()
+        for entry_id in entry_ids or []:
+            if not entry_id or entry_id in seen:
+                continue
+            seen.add(entry_id)
+            entry = self.entries.get(entry_id)
+            if not entry:
+                continue
+            attachments = entry.get("attachments") or []
+            if any(a["type"] in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML} for a in attachments):
+                invoice_total += 1
+                if not self.entries.invoice_recognition_current(entry_id):
+                    invoice_pending += 1
+            payments = [a for a in attachments if a["type"] == TYPE_PAYMENT]
+            payment_total += len(payments)
+            payment_pending += sum(
+                a.get("recognition_version") != LOCAL_PAYMENT_RECOGNITION_VERSION
+                for a in payments
+            )
+        return {
+            "invoice": {"total": invoice_total, "pending": invoice_pending, "current": invoice_total - invoice_pending},
+            "payment": {
+                "total": payment_total,
+                "pending": payment_pending,
+                "current": payment_total - payment_pending,
+                "enabled": self._payment_ocr_enabled(),
+            },
+        }
+
+    @_guard
+    def rerecognize_materials(self, entry_ids, kinds=None):
+        """按当前本地规则识别发票或付款截图，同版且文件未变的材料自动跳过。"""
+        from .db import TYPE_PAYMENT
+        from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION
+
+        requested = set(kinds or []) & {"invoice", "payment"}
+        ids = list(dict.fromkeys(entry_id for entry_id in (entry_ids or []) if entry_id))
+        result = {"invoice": None, "payment": None}
+        if "invoice" in requested:
+            candidates = [
+                entry_id for entry_id in ids
+                if self.entries.invoice_recognition_fingerprint(entry_id)
+            ]
+            targets = [
+                entry_id for entry_id in candidates
+                if not self.entries.invoice_recognition_current(entry_id)
+            ]
+            invoice_result = self.reparse_entries(targets)["data"] if targets else {
+                "processed": 0, "resolved": 0, "remaining": 0, "failed": [], "results": []
+            }
+            invoice_result["skipped_current"] = len(candidates) - len(targets)
+            result["invoice"] = invoice_result
+        if "payment" in requested:
+            if not self._payment_ocr_enabled():
+                result["payment"] = {
+                    "processed": 0, "recognized": 0, "unrecognized": 0,
+                    "failed": 0, "skipped_current": 0, "disabled": True,
+                }
+                return result
+            processed = recognized = unrecognized = failed = skipped_current = 0
+            affected_entries = set()
+            for entry_id in ids:
+                entry = self.entries.get(entry_id)
+                if not entry:
+                    continue
+                for att in entry.get("attachments") or []:
+                    if att.get("type") != TYPE_PAYMENT:
+                        continue
+                    if att.get("recognition_version") == LOCAL_PAYMENT_RECOGNITION_VERSION:
+                        skipped_current += 1
+                        continue
+                    processed += 1
+                    affected_entries.add(entry_id)
+                    stored_att = self.attachments.get(att["id"])
+                    amount, _ = self._maybe_apply_payment_ocr_amount(entry_id, stored_att, apply=False)
+                    refreshed = self.attachments.get(att["id"])
+                    if amount:
+                        recognized += 1
+                    elif refreshed.get("recognition_status") == "error":
+                        failed += 1
+                    else:
+                        unrecognized += 1
+            for entry_id in affected_entries:
+                self.entries.refresh_payment_check(entry_id)
+            result["payment"] = {
+                "processed": processed,
+                "recognized": recognized,
+                "unrecognized": unrecognized,
+                "failed": failed,
+                "skipped_current": skipped_current,
+            }
+        return result
 
     @_guard
     def open_attachment(self, att_id):

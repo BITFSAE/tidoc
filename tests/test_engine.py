@@ -134,6 +134,39 @@ def test_pdf_layout_fallback_handles_user_supplied_messy_invoices(monkeypatch, t
         assert parsed.items[0].quantity == quantity
 
 
+def test_pdf_layout_removes_overlaid_headers_from_item_rows(monkeypatch, tmp_path):
+    cases = [
+        (
+            "发票号码：26952000003669031936\n开票日期：2026年08月28日\n"
+            "价税合计（小写） ¥215.00\n",
+            "*有色金属压延材*铝板加项目名称 规格型号 单 位 数 量 单 价 "
+            "212.87金 额税率/征收率1% 税 额2.13\n"
+            "工定制\n",
+            "铝板加工定制", "", Decimal("1"), Decimal("215.00"),
+        ),
+        (
+            "发票号码：26922000000972420271\n开票日期：2026年08月19日\n"
+            "价税合计（小写） ¥65.70\n",
+            "*化学合成材料*结构胶项目名称 规格型号 单 位支 "
+            "数 量165.049504950495单 价金 额65.05税率/征收率1% 税 额0.65\n",
+            "结构胶", "支", Decimal("1"), Decimal("65.70"),
+        ),
+    ]
+
+    for index, (normal_text, layout_text, name, unit, quantity, total) in enumerate(cases):
+        path = tmp_path / f"overlaid-{index}.pdf"
+        monkeypatch.setattr(parser_module, "_pdf_text", lambda _path, value=normal_text: value)
+        monkeypatch.setattr(parser_module, "_pdf_layout_text", lambda _path, value=layout_text: value)
+
+        parsed = parse_pdf(path)
+
+        assert len(parsed.items) == 1
+        assert parsed.items[0].actual_name == name
+        assert parsed.items[0].unit == unit
+        assert parsed.items[0].quantity == quantity
+        assert parsed.items[0].total == total
+
+
 def test_pdf_parses_wrapped_item_with_standard_numeric_tail():
     text = """电子发票（普通发票） 发票号码：26337000000651169782
 开票日期：2026年07月06日
@@ -365,7 +398,7 @@ def test_xml_amount_closure(sample_xmls):
 def test_check_pass():
     inv = ParsedInvoice(
         invoice_no="1", total=Decimal("100.00"), buyer_name="北京理工大学",
-        buyer_tax_id="12100000400008888X",
+        buyer_tax_id="12100000400009127B",
         items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("100.00"))],
     )
     assert check_invoice(inv).status == CHECK_PASS
@@ -381,14 +414,14 @@ def test_supported_title_without_buyer_tax_id_is_recognition_warning():
 
     assert result.status == CHECK_WARNING
     assert "未能识别「北京理工大学」的购买方税号" in result.message
-    assert "12100000400008888X" in result.message
+    assert "12100000400009127B" in result.message
 
 
 def test_supported_title_with_wrong_buyer_tax_id_is_recognition_warning():
     inv = ParsedInvoice(
         invoice_no="1", total=Decimal("100.00"),
         buyer_name="北京理工大学教育基金会",
-        buyer_tax_id="12100000400008888X",
+        buyer_tax_id="12100000400009127B",
         items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("100.00"))],
     )
 
@@ -416,7 +449,7 @@ def test_known_tax_id_reveals_unrecognized_buyer_title():
 def test_item_sum_mismatch_is_non_blocking_recognition_warning():
     inv = ParsedInvoice(
         invoice_no="1", total=Decimal("100.00"), buyer_name="北京理工大学",
-        buyer_tax_id="12100000400008888X",
+        buyer_tax_id="12100000400009127B",
         items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("90.00"))],
     )
     r = check_invoice(inv)

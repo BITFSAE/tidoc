@@ -146,6 +146,25 @@ class AttachmentRepo:
         self.db.conn.commit()
         return self.get(att_id)
 
+    def set_recognition(
+        self,
+        att_id: str,
+        version: str,
+        status: str,
+        value: str = "",
+        message: str = "",
+    ) -> dict:
+        """保存本地材料识别缓存；版本变化或文件替换后可重新识别。"""
+        self.db.conn.execute(
+            """UPDATE attachments
+                  SET recognition_version = ?, recognition_status = ?,
+                      recognized_value = ?, recognition_message = ?
+                WHERE id = ?""",
+            (version, status, value or "", message or "", att_id),
+        )
+        self.db.conn.commit()
+        return self.get(att_id)
+
     def update(self, att_id: str, att_type: str | None = None,
                src_path: str | Path | None = None, note: str | None = None) -> dict:
         att = self.get(att_id)
@@ -195,13 +214,22 @@ class AttachmentRepo:
                 rollback_rename = True
                 stored_path = f"{att['entry_id']}/{stored_name}"
 
+        recognition_changed = bool(src_path or (att_type and att_type != att["type"]))
         try:
             self.db.conn.execute(
                 """UPDATE attachments
                    SET type = ?, original_name = ?, stored_path = ?, sha256 = ?,
-                       note = COALESCE(?, note)
+                       note = COALESCE(?, note),
+                       recognition_version = CASE WHEN ? THEN '' ELSE recognition_version END,
+                       recognition_status = CASE WHEN ? THEN '' ELSE recognition_status END,
+                       recognized_value = CASE WHEN ? THEN '' ELSE recognized_value END,
+                       recognition_message = CASE WHEN ? THEN '' ELSE recognition_message END
                    WHERE id = ?""",
-                (new_type, original_name, stored_path, sha, note, att_id),
+                (
+                    new_type, original_name, stored_path, sha, note,
+                    recognition_changed, recognition_changed,
+                    recognition_changed, recognition_changed, att_id,
+                ),
             )
             self.db.conn.commit()
         except Exception:

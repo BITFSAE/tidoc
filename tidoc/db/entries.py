@@ -22,6 +22,9 @@ from .database import Database
 EDITABLE_FIELDS = ("paid_amount", "actual_item_name", "notes")
 VALUE_SOURCE_PAYMENT_OCR = "payment_ocr"
 VALUE_SOURCE_MANUAL = "manual"
+LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-09-06"
+LOCAL_PAYMENT_RECOGNITION_VERSION = "payment-local-2026-09-06"
+PAYMENT_CHECK_PREFIX = "[付款截图识别]"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
 LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "invoice_date")
 # 阿里云 OCR 采用值写入关键信息时的留痕前缀（区别于人工修正）
@@ -236,7 +239,7 @@ class EntryRepo:
 
     # ------------------------------------------------------------------ 列表 / 筛选
     def list(self, **filters) -> list[dict]:
-        """按抬头、报账人、销售方、状态、类别、关键词、金额区间、日期、在办/已归档过滤（设计文档 8.7）。"""
+        """按抬头、报账人、状态、材料数量、关键词、金额、日期和归档状态过滤（设计文档 8.7）。"""
         where, params = [], []
         if filters.get("title"):
             where.append("title = ?"); params.append(filters["title"])
@@ -284,6 +287,11 @@ class EntryRepo:
             where.append("EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id AND ef.field='notes' AND TRIM(ef.current) <> '')")
         elif has_notes is False or has_notes == "no":
             where.append("NOT EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id AND ef.field='notes' AND TRIM(ef.current) <> '')")
+        if filters.get("payment_count") == "multiple":
+            where.append(
+                "(SELECT COUNT(*) FROM attachments a "
+                "WHERE a.entry_id = e.id AND a.type = 'payment_screenshot') >= 2"
+            )
         # 标签维度：命中任一标签即可（tags 以 JSON 数组字符串存，用 LIKE 粗匹配带引号的标签值）
         tags = filters.get("tags")
         if isinstance(tags, str):
@@ -765,9 +773,14 @@ class EntryRepo:
         return status
 
     def set_check(self, entry_id: str, check_status: str, message: str = "") -> None:
+        payment_messages = self._payment_check_messages(entry_id)
+        combined_message = "；".join(filter(None, [message, *payment_messages]))
+        combined_status = check_status
+        if payment_messages and check_status != "blocked":
+            combined_status = "warning"
         self.db.conn.execute(
             "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
-            (check_status, message, entry_id),
+            (combined_status, combined_message, entry_id),
         )
         self._touch(entry_id)
         self.db.conn.commit()
@@ -782,7 +795,7 @@ class EntryRepo:
     ) -> None:
         """用重新识别结果原子替换明细，同时保留用户修改过的条目级字段。"""
         exists = self.db.conn.execute(
-            "SELECT 1 FROM entries WHERE id = ?", (entry_id,)
+            "SELECT check_message FROM entries WHERE id = ?", (entry_id,)
         ).fetchone()
         if not exists:
             raise ValueError("条目不存在。")
@@ -815,12 +828,156 @@ class EntryRepo:
                     WHERE entry_id = ? AND field = 'actual_item_name' AND modified = 0""",
                 (first_name, first_name, entry_id),
             )
+            payment_messages = self._payment_messages_from_text(exists["check_message"])
+            combined_message = "；".join(filter(None, [check_message, *payment_messages]))
+            combined_status = (
+                "warning" if payment_messages and check_status != "blocked" else check_status
+            )
             self.db.conn.execute(
                 """UPDATE entries
                       SET source = ?, check_status = ?, check_message = ?, updated_at = ?
                     WHERE id = ?""",
-                (source, check_status, check_message, _now(), entry_id),
+                (source, combined_status, combined_message, _now(), entry_id),
             )
+        self.recompute_status(entry_id)
+
+    @staticmethod
+    def _payment_messages_from_text(message: str) -> list[str]:
+        return [
+            part for part in str(message or "").split("；")
+            if part.startswith(PAYMENT_CHECK_PREFIX)
+        ]
+
+    def _payment_check_messages(self, entry_id: str) -> list[str]:
+        row = self.db.conn.execute(
+            "SELECT check_message FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        return self._payment_messages_from_text(row["check_message"] if row else "")
+
+    def invoice_recognition_fingerprint(self, entry_id: str) -> str:
+        rows = self.db.conn.execute(
+            """SELECT type, sha256 FROM attachments
+                WHERE entry_id = ? AND type IN ('invoice_pdf', 'invoice_xml')
+                ORDER BY type, sha256""",
+            (entry_id,),
+        ).fetchall()
+        return "|".join(f"{row['type']}:{row['sha256'] or ''}" for row in rows)
+
+    def mark_invoice_recognized(self, entry_id: str) -> None:
+        self.db.conn.execute(
+            """UPDATE entries SET recognition_version = ?, recognition_fingerprint = ?
+                WHERE id = ?""",
+            (
+                LOCAL_INVOICE_RECOGNITION_VERSION,
+                self.invoice_recognition_fingerprint(entry_id),
+                entry_id,
+            ),
+        )
+        self.db.conn.commit()
+
+    def clear_invoice_recognition(self, entry_id: str) -> None:
+        self.db.conn.execute(
+            "UPDATE entries SET recognition_version = '', recognition_fingerprint = '' WHERE id = ?",
+            (entry_id,),
+        )
+        self.db.conn.commit()
+
+    def invoice_recognition_current(self, entry_id: str) -> bool:
+        row = self.db.conn.execute(
+            "SELECT recognition_version, recognition_fingerprint FROM entries WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        return bool(
+            row
+            and row["recognition_version"] == LOCAL_INVOICE_RECOGNITION_VERSION
+            and row["recognition_fingerprint"] == self.invoice_recognition_fingerprint(entry_id)
+        )
+
+    def refresh_payment_check(self, entry_id: str) -> None:
+        """把当前规则的付款截图识别结果合并进条目识别提醒。"""
+        entry = self.db.conn.execute(
+            "SELECT total, check_status, check_message FROM entries WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        if not entry:
+            return
+        rows = self.db.conn.execute(
+            """SELECT recognition_version, recognition_status, recognized_value
+                 FROM attachments
+                WHERE entry_id = ? AND type = 'payment_screenshot'""",
+            (entry_id,),
+        ).fetchall()
+        base_messages = [
+            part for part in str(entry["check_message"] or "").split("；")
+            if part and not part.startswith(PAYMENT_CHECK_PREFIX)
+        ]
+        payment_messages: list[str] = []
+        if rows:
+            pending = sum(
+                row["recognition_version"] != LOCAL_PAYMENT_RECOGNITION_VERSION
+                for row in rows
+            )
+            failed = sum(
+                row["recognition_version"] == LOCAL_PAYMENT_RECOGNITION_VERSION
+                and row["recognition_status"] in {"unrecognized", "error"}
+                for row in rows
+            )
+            if pending:
+                payment_messages.append(
+                    f"{PAYMENT_CHECK_PREFIX} {pending} 张付款截图尚未按当前规则识别，请重新识别。"
+                )
+            if failed:
+                payment_messages.append(
+                    f"{PAYMENT_CHECK_PREFIX} {failed} 张付款截图未识别到金额，请核对。"
+                )
+            if not pending and not failed:
+                try:
+                    recognized_total = sum(
+                        (Decimal(str(row["recognized_value"] or "0")) for row in rows),
+                        Decimal("0"),
+                    )
+                    invoice_total = Decimal(str(entry["total"] or "0"))
+                    if money(recognized_total) != money(invoice_total):
+                        payment_messages.append(
+                            f"{PAYMENT_CHECK_PREFIX} 付款截图识别合计 {money(recognized_total)} "
+                            f"与发票总额 {money(invoice_total)} 不一致，请核对。"
+                        )
+                except (InvalidOperation, ValueError):
+                    payment_messages.append(
+                        f"{PAYMENT_CHECK_PREFIX} 付款截图金额无法汇总，请核对。"
+                    )
+        message = "；".join([*base_messages, *payment_messages])
+        if entry["check_status"] == "blocked":
+            status = "blocked"
+        else:
+            status = "warning" if message else "pass"
+        self.db.conn.execute(
+            "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
+            (status, message, entry_id),
+        )
+        self.db.conn.commit()
+        self.recompute_status(entry_id)
+
+    def clear_payment_check(self, entry_id: str) -> None:
+        """材料集合无法完整识别时移除旧的付款金额结论，保留发票校验结果。"""
+        row = self.db.conn.execute(
+            "SELECT check_status, check_message FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not row:
+            return
+        base_messages = [
+            part for part in str(row["check_message"] or "").split("；")
+            if part and not part.startswith(PAYMENT_CHECK_PREFIX)
+        ]
+        if row["check_status"] == "blocked":
+            status = "blocked"
+        else:
+            status = "warning" if base_messages else "pass"
+        self.db.conn.execute(
+            "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
+            (status, "；".join(base_messages), entry_id),
+        )
+        self.db.conn.commit()
         self.recompute_status(entry_id)
 
     def set_meta(self, entry_id: str, category: str | None = None, tags: list | None = None) -> None:

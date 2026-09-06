@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 from tidoc.db import Database
+from tidoc.db.attachments import TYPE_PAYMENT
 from tidoc.db.batches import BatchRepo
 from tidoc.db.schema import SCHEMA_VERSION
 from tidoc.engine import parse_xml
@@ -198,6 +199,24 @@ def test_has_notes_filter(repos, sample_xmls):
     assert len(without_notes) == 2
 
 
+def test_multiple_payment_screenshot_filter_and_count(repos, tmp_path):
+    profile = repos["profiles"].create("张三", "李老师")
+    ids = [repos["entries"].create(profile["id"]) for _ in range(3)]
+    screenshots = []
+    for index in range(3):
+        path = tmp_path / f"payment-{index}.png"
+        path.write_bytes(f"payment screenshot {index}".encode())
+        screenshots.append(path)
+
+    repos["attachments"].add(ids[0], screenshots[0], TYPE_PAYMENT)
+    repos["attachments"].add(ids[1], screenshots[1], TYPE_PAYMENT)
+    repos["attachments"].add(ids[1], screenshots[2], TYPE_PAYMENT)
+
+    matches = repos["entries"].list(payment_count="multiple")
+    assert [entry["id"] for entry in matches] == [ids[1]]
+    assert matches[0]["attachment_types"][TYPE_PAYMENT] == 2
+
+
 def test_batch_filter_on_entries(repos, sample_xmls):
     _, ids = _make_entries(repos, sample_xmls, 3)
     b = repos["batches"].create("批", entry_ids=ids[:1])
@@ -353,6 +372,46 @@ def test_v3_db_adds_editable_value_source_column(tmp_path):
     ).fetchone()["value"] == str(SCHEMA_VERSION)
 
 
+def test_v6_db_adds_local_recognition_cache_columns(tmp_path):
+    db_path = tmp_path / "v6.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE entries (
+            id TEXT PRIMARY KEY, profile_id TEXT, title TEXT, invoice_no TEXT,
+            invoice_date TEXT, seller TEXT, total TEXT, buyer_name TEXT,
+            buyer_tax_id TEXT, category TEXT, tags TEXT, status TEXT,
+            check_status TEXT, check_message TEXT, source TEXT,
+            created_at TEXT, updated_at TEXT
+        );
+        CREATE TABLE attachments (
+            id TEXT PRIMARY KEY, entry_id TEXT, type TEXT, original_name TEXT,
+            stored_path TEXT, sha256 TEXT, note TEXT, added_at TEXT
+        );
+        INSERT INTO meta(key, value) VALUES('schema_version', '6');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = Database(db_path)
+    entry_columns = {
+        row["name"] for row in migrated.conn.execute("PRAGMA table_info(entries)").fetchall()
+    }
+    attachment_columns = {
+        row["name"] for row in migrated.conn.execute("PRAGMA table_info(attachments)").fetchall()
+    }
+
+    assert {"recognition_version", "recognition_fingerprint"} <= entry_columns
+    assert {
+        "recognition_version", "recognition_status", "recognized_value", "recognition_message"
+    } <= attachment_columns
+    assert migrated.conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()["value"] == str(SCHEMA_VERSION)
+
+
 def test_v2_migration_downgrades_only_item_recognition_mismatch(tmp_path):
     db_path = tmp_path / "old.sqlite"
     db = Database(db_path)
@@ -392,6 +451,42 @@ def test_v2_migration_downgrades_only_item_recognition_mismatch(tmp_path):
     assert rows["item-only"][0] == "warning"
     assert "明细识别不完整" in rows["item-only"][1]
     assert rows["title-conflict"][0] == "blocked"
+
+
+def test_v5_migration_corrects_university_tax_id_checks(tmp_path):
+    db_path = tmp_path / "v5.sqlite"
+    db = Database(db_path)
+    db.conn.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
+    db.conn.execute(
+        "INSERT INTO profiles(id, name, reviewer, is_default, created_at) "
+        "VALUES('p1', '张三', '李老师', 1, '')"
+    )
+    common = (
+        "INSERT INTO entries("
+        "id, profile_id, title, buyer_name, buyer_tax_id, status, check_status, "
+        "check_message, created_at, updated_at"
+        ") VALUES(?, 'p1', '北京理工大学', '北京理工大学', ?, 'partial', ?, ?, '', '')"
+    )
+    old_message = (
+        "购买方税号「12100000400009127B」与「北京理工大学」不一致，"
+        "应为 12100000400008888X，请核对。"
+    )
+    db.conn.execute(common, ("correct", "12100000400009127B", "warning", old_message))
+    db.conn.execute(common, ("old-pass", "12100000400008888X", "pass", ""))
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(db_path)
+    rows = {
+        row["id"]: (row["check_status"], row["check_message"])
+        for row in migrated.conn.execute(
+            "SELECT id, check_status, check_message FROM entries"
+        ).fetchall()
+    }
+
+    assert rows["correct"] == ("pass", "")
+    assert rows["old-pass"][0] == "warning"
+    assert "12100000400009127B" in rows["old-pass"][1]
 
 
 # ------------------------------------------------------------------ 数据目录迁移

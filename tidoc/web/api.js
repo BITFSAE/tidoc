@@ -58,6 +58,8 @@ const Api = (() => {
 
     parseFiles: (xml, pdf) => call('parse_files', xml, pdf),
     reparseEntries: (ids) => call('reparse_entries', ids || []),
+    recognitionPreview: (ids) => call('recognition_preview', ids || []),
+    rerecognizeMaterials: (ids, kinds) => call('rerecognize_materials', ids || [], kinds || []),
     createEntry: (args) => call('create_entry',
       args.profileId, args.title || '', args.xmlPath || null, args.pdfPath || null,
       args.paymentPaths || [], args.inspectionPath || null, args.status || 'draft',

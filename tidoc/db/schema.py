@@ -20,8 +20,10 @@ import sqlite3
 # v1：初版；v2：新增 batches / batch_entries（运营组批次）；
 # v3：明细识别合计不一致从 blocked 降为 warning；
 # v4：可改字段增加 value_source，用于区分付款 OCR 自动值与人工值；
-# v5：新增 ocr_results，保存阿里云 OCR 原始响应与解析快照（防重复计费）。
-SCHEMA_VERSION = 5
+# v5：新增 ocr_results，保存阿里云 OCR 原始响应与解析快照（防重复计费）；
+# v6：校正北京理工大学购买方税号，并刷新由旧税号规则产生的提醒；
+# v7：记录本地发票 / 付款截图识别规则版本与结果，避免同版重复识别。
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -61,6 +63,8 @@ CREATE TABLE IF NOT EXISTS entries (
     check_status  TEXT NOT NULL DEFAULT 'warning', -- pass/warning/blocked
     check_message TEXT DEFAULT '',
     source        TEXT DEFAULT '',            -- 数据来源 xml/pdf/xml+pdf/manual
+    recognition_version TEXT DEFAULT '',      -- 本地发票解析规则版本（缓存，不随绑定包迁移）
+    recognition_fingerprint TEXT DEFAULT '',  -- 本次解析对应的原发票附件摘要
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL,
     FOREIGN KEY (profile_id) REFERENCES profiles(id)
@@ -121,6 +125,10 @@ CREATE TABLE IF NOT EXISTS attachments (
     stored_path   TEXT DEFAULT '',   -- 相对 attachments/ 的路径
     sha256        TEXT DEFAULT '',
     note          TEXT DEFAULT '',   -- 付款截图可关联实付金额备注
+    recognition_version TEXT DEFAULT '', -- 本地付款截图识别规则版本
+    recognition_status TEXT DEFAULT '',  -- recognized/unrecognized/error
+    recognized_value TEXT DEFAULT '',    -- 本地 OCR 识别出的单张付款金额
+    recognition_message TEXT DEFAULT '', -- 未识别或失败原因
     added_at      TEXT NOT NULL,
     FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
 );
@@ -214,6 +222,64 @@ def init_db(conn: sqlite3.Connection) -> None:
                AND check_message NOT LIKE '%与当前分区%'
             """
         )
+
+    if previous_version < 6:
+        old_tax_id = "12100000400008888X"
+        current_tax_id = "12100000400009127B"
+        conn.execute(
+            """UPDATE entries
+                  SET check_message = REPLACE(check_message, ?, ?)
+                WHERE buyer_name = '北京理工大学'
+                  AND check_message LIKE '%' || ? || '%'""",
+            (old_tax_id, current_tax_id, old_tax_id),
+        )
+        rows = conn.execute(
+            """SELECT id, buyer_tax_id, check_status, check_message
+                 FROM entries
+                WHERE buyer_name = '北京理工大学'"""
+        ).fetchall()
+        for entry_id, raw_tax_id, check_status, check_message in rows:
+            tax_id = "".join(
+                char for char in str(raw_tax_id or "").upper() if char.isalnum()
+            )
+            problems = [part for part in str(check_message or "").split("；") if part]
+            if tax_id == current_tax_id:
+                problems = [
+                    part for part in problems
+                    if not (
+                        "购买方税号" in part
+                        and "与「北京理工大学」不一致" in part
+                    )
+                ]
+            elif tax_id == old_tax_id and not any("购买方税号" in part for part in problems):
+                problems.append(
+                    f"购买方税号「{raw_tax_id}」与「北京理工大学」不一致，"
+                    f"应为 {current_tax_id}，请核对。"
+                )
+            status = check_status if check_status == "blocked" else ("warning" if problems else "pass")
+            conn.execute(
+                "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
+                (status, "；".join(problems), entry_id),
+            )
+
+    if previous_version < 7:
+        entry_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(entries)").fetchall()
+        }
+        for name in ("recognition_version", "recognition_fingerprint"):
+            if name not in entry_columns:
+                conn.execute(f"ALTER TABLE entries ADD COLUMN {name} TEXT DEFAULT ''")
+        attachment_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(attachments)").fetchall()
+        }
+        for name in (
+            "recognition_version",
+            "recognition_status",
+            "recognized_value",
+            "recognition_message",
+        ):
+            if name not in attachment_columns:
+                conn.execute(f"ALTER TABLE attachments ADD COLUMN {name} TEXT DEFAULT ''")
 
     # CREATE TABLE IF NOT EXISTS 不会给历史表补列，因此按真实列结构兜底迁移。
     entry_field_columns = {

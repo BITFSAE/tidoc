@@ -17,6 +17,7 @@ const State = {
   groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
   tagFilter: '',         // 工具栏筛选：按标签
   notesFilter: '',       // 高级筛选：'' | 'yes' | 'no'（有 / 无记账备注）
+  paymentCountFilter: '', // 高级筛选：'' | 'multiple'（多张付款截图）
   batchFilter: '',       // 当前聚焦的批次 id；'unbatched' 未进批次；'archived' 已归档
   batches: [],           // 批次列表缓存
   unbatchedCount: 0,     // 未进任何批次的条目数
@@ -50,6 +51,7 @@ const el = (tag, cls, html) => {
 };
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const CLOSE_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
 
 function toast(msg, kind) {
   const t = el('div', 'toast' + (kind ? ' ' + kind : ''), esc(msg));
@@ -601,6 +603,7 @@ function currentFilters() {
   if (sort) f.sort = sort;
   if (State.tagFilter) f.tags = [State.tagFilter];
   if (State.notesFilter) f.has_notes = State.notesFilter;
+  if (State.paymentCountFilter) f.payment_count = State.paymentCountFilter;
   if (inUnbatchedView()) f.unbatched = true;
   else if (inArchivedView()) f.archived_only = true;
   else if (State.batchFilter) {
@@ -663,7 +666,7 @@ function updateSelectionBar() {
   const hasSelection = State.selected.size > 0;
   const allSelected = State.entries.length > 0 && State.entries.every((entry) => State.selected.has(entry.id));
   const reparseBtn = $('#batchReparseBtn');
-  reparseBtn?.classList.toggle('hidden', State.quickView !== 'warning');
+  reparseBtn?.classList.remove('hidden');
   $('#selectionBar').classList.toggle('empty', !hasSelection);
   $('#selCount').textContent = hasSelection ? `已选 ${State.selected.size}` : '选择条目';
   const selectAllBtn = $('#selectAllBtn');
@@ -775,7 +778,9 @@ async function refreshEntryCard(entryId, currentDetail = null) {
 async function syncEntryAfterChange(entryId, { searchable = false, notes = false, affectsStatus = false, relist = false } = {}, detail = null) {
   const keywordActive = !!$('#filterKeyword')?.value;
   const statusActive = !!$('#filterStatus')?.value;
-  if (relist || (searchable && keywordActive) || (notes && State.notesFilter) || (affectsStatus && statusActive)) {
+  const derivedViewActive = ['incomplete', 'warning', 'complete'].includes(State.quickView);
+  if (relist || (searchable && keywordActive) || (notes && State.notesFilter) ||
+      (affectsStatus && (statusActive || derivedViewActive || State.paymentCountFilter))) {
     await refreshEntries();
     return;
   }
@@ -904,10 +909,14 @@ function entryCard(e) {
   const right = el('div', 'entry-right');
   const showPhysicalAction = State.materialRequirements.physical_image || e.has_physical;
   const detailAction = `<button class="entry-detail-action" data-card-action="detail">${showPhysicalAction ? '详情' : '打开详情'}</button>`;
+  const paymentCount = Number(e.attachment_types?.payment_screenshot || 0);
+  const paymentActionLabel = paymentCount > 1
+    ? `付款<span class="payment-count">×${paymentCount}</span>`
+    : '付款';
   const commonActions = `
       ${actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '左键补充发票 PDF；右键打开已有材料' : '添加发票 PDF')}
       ${actionBtn('paid', '实付', !!paidCur, paidCur ? '已填写实付金额；点击修改' : '填写实付金额')}
-      ${actionBtn('pay', '付款', e.has_payment, e.has_payment ? '左键继续添加付款截图；右键打开已有截图' : '添加付款截图')}
+      ${actionBtn('pay', paymentActionLabel, e.has_payment, e.has_payment ? `已有 ${paymentCount} 张付款截图；左键继续添加，右键打开最近一张` : '添加付款截图')}
       ${actionBtn('inspect', '查验', e.has_inspection, e.has_inspection ? '左键重新查验或补充；右键打开已有查验单' : '打开官网查验并自动归档 PDF')}`;
   const physicalAction = actionBtn('physical', '实物', e.has_physical, e.has_physical ? '左键继续添加实物图；右键打开已有实物图' : '添加实物图');
   right.innerHTML = `
@@ -1125,7 +1134,7 @@ function renderEmptyState() {
     ($('#filterStatus')?.value || '') || $('#filterCheck').value || $('#filterProfile').value ||
     $('#filterTitle').value || $('#filterKeyword').value || $('#filterAmountMin').value ||
     $('#filterAmountMax').value || $('#filterDateFrom').value || $('#filterDateTo').value ||
-    State.tagFilter || State.notesFilter || State.quickView !== 'all'
+    State.tagFilter || State.notesFilter || State.paymentCountFilter || State.quickView !== 'all'
   );
   const hasArchivedEntries = State.batches.some((batch) => batch.archived && (batch.stats?.count || 0) > 0);
   const illus = $('#emptyIllus');
@@ -1169,7 +1178,7 @@ function renderActiveFilters() {
   const chips = [];
   const mkChip = (label, onClear) => {
     const c = el('span', 'filter-chip', `<span>${esc(label)}</span>`);
-    const x = el('button', null, '×');
+    const x = el('button', null, CLOSE_ICON);
     x.onclick = () => { State.selected.clear(); onClear(); }; c.appendChild(x);
     chips.push(c);
   };
@@ -1181,6 +1190,7 @@ function renderActiveFilters() {
   if ($('#filterDateFrom').value || $('#filterDateTo').value) mkChip(`日期 ${$('#filterDateFrom').value || '…'}–${$('#filterDateTo').value || '…'}`, () => { $('#filterDateFrom').value = ''; $('#filterDateTo').value = ''; refreshEntries(); });
   if (State.tagFilter) mkChip('标签：' + State.tagFilter, () => { State.tagFilter = ''; $('#filterTag').value = ''; refreshEntries(); });
   if (State.notesFilter) mkChip('备注：' + (State.notesFilter === 'yes' ? '有' : '无'), () => { State.notesFilter = ''; $('#filterNotes').value = ''; refreshEntries(); });
+  if (State.paymentCountFilter) mkChip('付款截图：多张', () => { State.paymentCountFilter = ''; $('#filterPaymentCount').value = ''; refreshEntries(); });
 
   wrap.innerHTML = '';
   if (!chips.length) {
@@ -1197,7 +1207,7 @@ function hasAnyFilter() {
   return !!(($('#filterStatus')?.value || '') || $('#filterCheck').value || $('#filterProfile').value || $('#filterTitle').value ||
     $('#filterKeyword').value || $('#filterAmountMin').value || $('#filterAmountMax').value ||
     $('#filterDateFrom').value || $('#filterDateTo').value ||
-    State.tagFilter || State.notesFilter || State.batchFilter ||
+    State.tagFilter || State.notesFilter || State.paymentCountFilter || State.batchFilter ||
     State.quickView !== 'all');
 }
 
@@ -1718,7 +1728,7 @@ async function manageTagsFlow() {
   body.innerHTML = State.allTags.length ? `<div class="tag-manage-list">${State.allTags.map((tag) => `
     <div class="tag-manage-row" data-managed-tag="${esc(tag)}">
       <button class="tag-name-btn" data-rename-tag="${esc(tag)}" title="重命名">${esc(tag)}</button>
-      <button class="tag-delete-btn" data-delete-tag="${esc(tag)}" title="删除标签" aria-label="删除标签 ${esc(tag)}">×</button>
+      <button class="tag-delete-btn" data-delete-tag="${esc(tag)}" title="删除标签" aria-label="删除标签 ${esc(tag)}">${CLOSE_ICON}</button>
     </div>`).join('')}</div>` : '<div class="hint">还没有标签。</div>';
   const m = modal({ title: '管理标签', body, footer: [mkBtn('关闭', 'ghost', () => m.close())] });
   body.querySelectorAll('[data-rename-tag]').forEach((btn) => {
@@ -2278,6 +2288,7 @@ function bindEvents() {
   // 新增筛选维度
   $('#filterTag').onchange = () => { State.tagFilter = $('#filterTag').value; relistFromAdvanced(); };
   $('#filterNotes').onchange = () => { State.notesFilter = $('#filterNotes').value; relistFromAdvanced(); };
+  $('#filterPaymentCount').onchange = () => { State.paymentCountFilter = $('#filterPaymentCount').value; relistFromAdvanced(); };
   setupGlobalDrop();
   setupClipboardUpload();
 
@@ -2305,13 +2316,14 @@ function bindEvents() {
 }
 
 function clearAllFilters() {
-  ['filterStatus', 'filterCheck', 'filterProfile', 'filterTitle', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo', 'filterTag', 'filterNotes'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
+  ['filterStatus', 'filterCheck', 'filterProfile', 'filterTitle', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo', 'filterTag', 'filterNotes', 'filterPaymentCount'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
   State.quickView = 'all';
   updateQuickViewButtons();
   State.activeTitle = '';
   State.batchFilter = '';
   State.tagFilter = '';
   State.notesFilter = '';
+  State.paymentCountFilter = '';
   showSearchHintIfEmpty();
   renderBatchFolders();
   refreshEntries();
@@ -2327,7 +2339,7 @@ function modal({ title, subhead, titleChip, body, footer, wide, onClose }) {
   titleRow.appendChild(el('h2', null, esc(title)));
   if (subhead) titleRow.appendChild(el('div', 'modal-subhead', esc(subhead)));
   head.appendChild(titleRow);
-  const closeBtn = el('button', 'modal-close', '×');
+  const closeBtn = el('button', 'modal-close', CLOSE_ICON);
   head.appendChild(closeBtn);
   const bodyEl = el('div', 'modal-body');
   if (typeof body === 'string') bodyEl.innerHTML = body; else bodyEl.appendChild(body);
@@ -3661,7 +3673,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
     ];
     return `<tr data-item-id="${it.id}">${cols.map((c) =>
       `<td class="${c.cls}"><span class="cell-val">${c.f === 'quantity' ? fmtQuantity(c.v) : (c.f === 'total' || c.f === 'unit_price' ? fmtMoney(c.v) : esc(c.v || '\u2014'))}</span><input class="cell-input${c.cls === 'num' ? ' num' : ''}" data-item-field="${c.f}" value="${esc(c.v || '')}"/></td>`
-    ).join('')}<td class="act"><button class="del-row" data-del-item="${it.id}" title="删除此行">\u00d7</button></td></tr>`;
+    ).join('')}<td class="act"><button class="del-row" data-del-item="${it.id}" title="删除此行">${CLOSE_ICON}</button></td></tr>`;
   }).join('') || `<tr><td colspan="6" style="color:var(--ink-soft)">无明细</td></tr>`;
 
   // 附件按报账所需的三类分组展示：发票 / 付款截图 / 查验单；缺的类别显式提示
@@ -4153,7 +4165,12 @@ async function addMaterialInfosToEntry(entryId, infos) {
   const paymentInfos = [];
   for (const info of infos) {
     const options = info.type === 'payment_screenshot'
-      ? { apply_payment_ocr: false, skip_payment_ocr: true }
+      ? {
+          apply_payment_ocr: false,
+          skip_payment_ocr: true,
+          payment_ocr_attempted: State.paymentOcrEnabled,
+          recognized_payment_amount: info.paid_amount || '',
+        }
       : null;
     const att = await Api.addAttachment(entryId, info.path, info.type, '', options);
     if (info.type === 'payment_screenshot') {
@@ -5333,34 +5350,66 @@ async function batchDelete() {
 
 async function batchReparse() {
   const ids = [...State.selected];
-  if (!ids.length || State.quickView !== 'warning') return;
-  if (!confirm(
-    `重新识别所选 ${ids.length} 条？\n\n` +
-    '将使用已有的原发票 PDF / XML 重新生成发票明细并刷新识别提醒。' +
-    '实际物资名称、实付金额和备注不会改变；明细表内的手动修改会被新识别结果替换。'
-  )) return;
+  if (!ids.length) return;
+  let preview;
+  try { preview = await Api.recognitionPreview(ids); }
+  catch (e) { toast(e.message, 'err'); return; }
 
-  const btn = $('#batchReparseBtn');
-  const oldHtml = btn.innerHTML;
-  const progress = taskProgress(`正在重新识别 ${ids.length} 条发票…`);
-  btn.disabled = true;
-  btn.querySelector('span').textContent = '识别中…';
-  try {
-    const result = await Api.reparseEntries(ids);
-    State.selected.clear();
-    await refreshEntries();
-    const parts = [];
-    if (result.resolved) parts.push(`${result.resolved} 条提醒已消除`);
-    if (result.remaining) parts.push(`${result.remaining} 条仍需核对`);
-    if (result.failed?.length) parts.push(`${result.failed.length} 条失败`);
-    toast(parts.join('，') || '重新识别完成', result.failed?.length ? 'err' : 'ok');
-  } catch (e) {
-    toast(e.message, 'err');
-  } finally {
-    progress.close();
-    btn.innerHTML = oldHtml;
-    updateSelectionBar();
-  }
+  const invoice = preview.invoice || {};
+  const payment = preview.payment || {};
+  const body = el('div');
+  body.innerHTML = `
+    <div class="recognition-choice-list">
+      <label class="recognition-choice${invoice.total ? '' : ' disabled'}">
+        <input type="checkbox" id="recognizeInvoice" ${invoice.pending ? 'checked' : ''} ${invoice.total ? '' : 'disabled'}/>
+        <span><b>发票</b><small>${invoice.pending || 0} 条待识别${invoice.current ? `，${invoice.current} 条已是当前规则、会自动跳过` : ''}</small></span>
+      </label>
+      <label class="recognition-choice${payment.total && payment.enabled ? '' : ' disabled'}">
+        <input type="checkbox" id="recognizePayment" ${payment.pending && payment.enabled ? 'checked' : ''} ${payment.total && payment.enabled ? '' : 'disabled'}/>
+        <span><b>付款截图</b><small>${payment.enabled ? `${payment.pending || 0} 张待识别${payment.current ? `，${payment.current} 张已由当前规则处理、会自动跳过` : ''}` : '付款截图 OCR 已关闭，可在设置中开启'}</small></span>
+      </label>
+    </div>
+    <p class="hint">发票重新识别会更新票面明细和识别提醒；实际物资名称、实付金额与备注保持不变。付款截图只刷新识别金额与提醒，不自动改动已确认的实付金额。</p>`;
+
+  const runBtn = mkBtn('开始识别', 'primary', async () => {
+    const kinds = [];
+    if (body.querySelector('#recognizeInvoice')?.checked) kinds.push('invoice');
+    if (body.querySelector('#recognizePayment')?.checked) kinds.push('payment');
+    if (!kinds.length) { toast('请选择要重新识别的材料', 'err'); return; }
+    runBtn.disabled = true;
+    runBtn.textContent = '识别中…';
+    const progress = taskProgress('正在按当前规则重新识别…');
+    try {
+      const result = await Api.rerecognizeMaterials(ids, kinds);
+      m.close();
+      State.selected.clear();
+      await refreshEntries();
+      const parts = [];
+      if (result.invoice) {
+        if (result.invoice.processed) parts.push(`发票 ${result.invoice.processed} 条`);
+        if (result.invoice.skipped_current) parts.push(`发票跳过 ${result.invoice.skipped_current} 条`);
+      }
+      if (result.payment) {
+        if (result.payment.recognized) parts.push(`付款截图识别 ${result.payment.recognized} 张`);
+        if (result.payment.unrecognized) parts.push(`${result.payment.unrecognized} 张未识别到金额`);
+        if (result.payment.skipped_current) parts.push(`付款截图跳过 ${result.payment.skipped_current} 张`);
+      }
+      const failed = (result.invoice?.failed?.length || 0) + (result.payment?.failed || 0);
+      toast(parts.join('，') || '当前规则已处理，无需重复识别', failed ? 'err' : 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+      runBtn.disabled = false;
+      runBtn.textContent = '开始识别';
+    } finally {
+      progress.close();
+    }
+  });
+  const m = modal({
+    title: '重新识别',
+    subhead: `已选择 ${ids.length} 条，可分别处理发票和付款截图`,
+    body,
+    footer: [mkBtn('取消', 'ghost', () => m.close()), runBtn],
+  });
 }
 
 window.addEventListener('error', (e) => {

@@ -148,7 +148,10 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "说明文档" in source
     assert "setGuide').onclick = () => openUsageGuide(false)" in source
     assert "m.close(); openUsageGuide" not in source
-    assert "actionBtn('pay', '付款'" in source
+    assert "paymentActionLabel" in source
+    assert "actionBtn('pay', paymentActionLabel" in source
+    assert 'id="filterPaymentCount"' in html
+    assert "f.payment_count = State.paymentCountFilter" in source
     assert "actionBtn('physical', '实物'" in source
     assert "showPhysicalAction" in source
     assert "左键点击条目上的批次标签" not in source
@@ -157,9 +160,13 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert ".att-group-actions" in css
     assert ".att-group.has .attach-item" in css
     assert ".archive-confirm-note" in css
-    assert "State.quickView !== 'warning'" in source
-    assert "Api.reparseEntries(ids)" in source
+    assert "reparseBtn?.classList.remove('hidden')" in source
+    assert "Api.rerecognizeMaterials(ids, kinds)" in source
+    assert "Api.recognitionPreview(ids)" in source
     assert "reparseEntries:" in (web / "api.js").read_text("utf-8")
+    assert "rerecognizeMaterials:" in (web / "api.js").read_text("utf-8")
+    assert 'class="payment-count"' in source
+    assert ".entry-inline-actions .payment-count" in css
     assert ".main { display: flex; flex-direction: column; min-width: 0; min-height: 0;" in css
     assert "flex: 1; min-height: 0; overflow-y: auto" in css
 

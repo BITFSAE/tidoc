@@ -161,7 +161,7 @@ def test_correcting_buyer_tax_id_refreshes_recognition_warning(api):
     api.entries.set_check(entry_id, initial.status, initial.message)
 
     corrected = api.correct_locked_field(
-        entry_id, "buyer_tax_id", "12100000400008888X", profile["id"]
+        entry_id, "buyer_tax_id", "12100000400009127B", profile["id"]
     )["data"]
 
     assert corrected["check_status"] == "pass"
@@ -406,6 +406,96 @@ def test_api_can_recognize_payment_ocr_without_applying(api, sample_xmls, tmp_pa
     assert res["payment_ocr"] == {"paid_amount": "27.00", "applied": False}
     updated = api.get_entry(e["id"])["data"]
     assert updated["fields"]["paid_amount"]["current"] == before
+
+
+def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
+    api, tmp_path, monkeypatch
+):
+    from tidoc.db import TYPE_INVOICE_XML
+    from tidoc.engine.models import ParsedInvoice
+    from tidoc.services import folder_import
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(
+        profile["id"], parsed=ParsedInvoice(total=Decimal("10.00"))
+    )
+    api.entries.set_check(entry_id, "pass", "")
+    invoice = tmp_path / "source.xml"
+    invoice.write_bytes(b"current invoice source")
+    api.attachments.add(entry_id, invoice, TYPE_INVOICE_XML)
+    api.entries.mark_invoice_recognized(entry_id)
+    entry = api.entries.get(entry_id)
+    first = tmp_path / "付款一.png"
+    second = tmp_path / "付款二.png"
+    first.write_bytes(b"payment one")
+    second.write_bytes(b"payment two")
+    calls = []
+
+    def recognize(path):
+        calls.append(str(path))
+        return "2.00" if "_02" in str(path) else "1.00"
+
+    monkeypatch.setattr(folder_import, "extract_payment_image_amount", recognize)
+    api.add_attachment(
+        entry["id"], str(first), "payment_screenshot",
+        options={"apply_payment_ocr": False},
+    )
+    api.add_attachment(
+        entry["id"], str(second), "payment_screenshot",
+        options={"apply_payment_ocr": False},
+    )
+
+    refreshed = api.get_entry(entry["id"])["data"]
+    assert "付款截图识别合计 3.00 与发票总额" in refreshed["check_message"]
+    assert refreshed["check_status"] == "warning"
+
+    preview = api.recognition_preview([entry["id"]])["data"]
+    assert preview["invoice"] == {"total": 1, "pending": 0, "current": 1}
+    assert preview["payment"]["pending"] == 0
+    assert preview["payment"]["current"] == 2
+
+    calls.clear()
+    skipped = api.rerecognize_materials([entry["id"]], ["invoice", "payment"])["data"]
+    assert skipped["invoice"]["processed"] == 0
+    assert skipped["invoice"]["skipped_current"] == 1
+    assert skipped["payment"]["processed"] == 0
+    assert skipped["payment"]["skipped_current"] == 2
+    assert calls == []
+
+    first_att = next(a for a in refreshed["attachments"] if a["original_name"] == first.name)
+    api.db.conn.execute(
+        "UPDATE attachments SET recognition_version = '' WHERE id = ?", (first_att["id"],)
+    )
+    api.db.conn.commit()
+    rerun = api.rerecognize_materials([entry["id"]], ["payment"])["data"]
+    assert rerun["payment"]["processed"] == 1
+    assert rerun["payment"]["skipped_current"] == 1
+    assert len(calls) == 1
+
+
+def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypatch):
+    from tidoc.engine.models import ParsedInvoice
+    from tidoc.services import folder_import
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(
+        profile["id"], parsed=ParsedInvoice(total=Decimal("10.00"))
+    )
+    api.entries.set_check(entry_id, "pass", "")
+    entry = api.entries.get(entry_id)
+    payment = tmp_path / "未识别付款.png"
+    payment.write_bytes(b"unrecognized payment")
+    monkeypatch.setattr(folder_import, "extract_payment_image_amount", lambda _path: "")
+
+    attachment = api.add_attachment(entry["id"], str(payment), "payment_screenshot")["data"]
+    refreshed = api.get_entry(entry["id"])["data"]
+    assert refreshed["check_status"] == "warning"
+    assert "1 张付款截图未识别到金额" in refreshed["check_message"]
+
+    api.delete_attachment(attachment["id"])
+    cleared = api.get_entry(entry["id"])["data"]
+    assert cleared["check_status"] == "pass"
+    assert cleared["check_message"] == ""
 
 
 def test_api_payment_ocr_preference_disables_recognition(api, tmp_path, monkeypatch):

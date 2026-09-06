@@ -19,7 +19,7 @@ SAMPLE_DATA = {
     "invoiceNumber": "24122000000012345678",
     "invoiceDate": "2026年01月31日",
     "purchaserName": "北京理工大学",
-    "purchaserTaxNumber": "12100000400008888X",
+    "purchaserTaxNumber": "12100000400009127B",
     "totalAmount": "¥1,130.00",
     "sellerName": "某某科技有限公司",
     "invoiceDetails": [
@@ -52,7 +52,7 @@ def test_normalize_maps_official_fields():
     out = _normalized()
     assert out["invoice_no"] == "24122000000012345678"
     assert out["buyer_name"] == "北京理工大学"
-    assert out["buyer_tax_id"] == "12100000400008888X"
+    assert out["buyer_tax_id"] == "12100000400009127B"
     assert out["invoice_date"] == "2026-01-31"
     assert out["total"] == "1130.00"
     assert out["closure_pass"] is True
@@ -650,11 +650,13 @@ def test_api_run_ocr_pending_drives_entry_flag(api, monkeypatch, ocr_component_r
 
 
 # ---------------------------------------------------------------- schema / 更新安装
-def test_schema_v5_creates_ocr_results_table(repos):
+def test_latest_schema_keeps_ocr_results_table(repos):
+    from tidoc.db.schema import SCHEMA_VERSION
+
     version = repos["db"].conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()["value"]
-    assert int(version) == 5
+    assert int(version) == SCHEMA_VERSION
     tables = {
         row["name"] for row in repos["db"].conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"

@@ -607,6 +607,35 @@ def _normalize_name(parts: list[str]) -> str:
     return re.sub(r"\s+", "", "".join(parts)).strip()
 
 
+def _strip_overlaid_item_headers(line: str) -> str:
+    """Remove table headers that some PDFs interleave with the first item row.
+
+    A few invoice generators place the column labels and their values in separate
+    PDF text layers.  ``pypdf`` then exposes a visual row such as::
+
+        *分类*结构胶项目名称 规格型号 单 位支 数 量165.04... 金 额65.05 ...
+
+    The values remain usable after removing the labels.  Restrict this cleanup to
+    starred item rows containing ``项目名称`` so ordinary product names are left
+    untouched.
+    """
+    if not line.lstrip().startswith("*") or "项目名称" not in line:
+        return line
+    cleaned = line
+    for label in (
+        r"项目\s*名称",
+        r"规格\s*型号",
+        r"单\s*位",
+        r"数\s*量",
+        r"单\s*价",
+        r"金\s*额",
+        r"税率\s*/\s*征收率",
+        r"税\s*额",
+    ):
+        cleaned = re.sub(label, " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedItem]:
     """从 PDF 文本行里抽物品明细。
 
@@ -624,6 +653,7 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
     last_base_name = ""
     pending_name_parts: list[str] = []
     allow_layout_suffix = False
+    layout_blank_lines = 0
 
     def layout_name_part(raw_line: str) -> str:
         stripped = raw_line.strip()
@@ -680,8 +710,12 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
     for raw_line in lines:
         line = raw_line.strip()
         if not line:
-            allow_layout_suffix = False
+            if allow_layout_suffix:
+                layout_blank_lines += 1
+                if layout_blank_lines > 1:
+                    allow_layout_suffix = False
             continue
+        layout_blank_lines = 0
         if is_item_boundary(line):
             allow_layout_suffix = False
             continue
@@ -707,12 +741,14 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             if allow_layout_suffix:
                 allow_layout_suffix = append_layout_name_suffix(raw_line)
             continue
+        item_line = _strip_overlaid_item_headers(line) if layout else line
+        has_overlaid_headers = item_line != line
         # 部分发票把折扣行按“同品名 税率 折扣金额 折扣税额”输出，
         # 例如 ``*衡器*电子秤 13%-0.88 -0.12``。
         discount = re.fullmatch(
             r"(?P<name>\*.+?)\s+(?P<rate>\d+(?:\.\d+)?)%"
             r"\s*(?P<amount>-\d+\.\d{2})\s+(?P<tax>-\d+\.\d{2})",
-            line,
+            item_line,
         )
         if discount and last and clean_item_name(discount.group("name")) == last_base_name:
             last.total = money(
@@ -720,14 +756,18 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             )
             allow_layout_suffix = False
             continue
-        parsed = _parse_amount_tax_line(line)
+        parsed = _parse_amount_tax_line(item_line)
         if parsed and layout and (not parsed[0] or parsed[1] is None):
             # The generic folded-line regex can match the tail but lose the
             # unit/quantity when layout extraction joins numeric columns.
-            loose = _parse_loose_amount_tax_line(line)
+            loose = _parse_loose_amount_tax_line(item_line)
             if loose:
                 unit, quantity, amount, tax = loose
-                raw_name = layout_name_part(raw_line)
+                raw_name = (
+                    item_line[:item_line.find(unit)].strip()
+                    if has_overlaid_headers and unit
+                    else layout_name_part(raw_line)
+                )
                 item = make_item(raw_name, unit, quantity, amount, tax)
                 items.append(item)
                 last = item
@@ -735,11 +775,17 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
                 allow_layout_suffix = True
                 continue
         if not parsed:
-            loose = _parse_loose_amount_tax_line(line)
+            loose = _parse_loose_amount_tax_line(item_line)
             if loose:
                 unit, quantity, amount, tax = loose
-                marker = re.search(r"\d+(?:\.\d+)?%[\u4e00-\u9fffA-Za-z]{1,4}\s+-?\d+\.\d{2}", line)
-                raw_name = layout_name_part(raw_line) if layout else (line[:marker.start()].strip() if marker else line)
+                marker = re.search(r"\d+(?:\.\d+)?%[\u4e00-\u9fffA-Za-z]{1,4}\s+-?\d+\.\d{2}", item_line)
+                raw_name = (
+                    item_line[:item_line.find(unit)].strip()
+                    if has_overlaid_headers and unit
+                    else layout_name_part(raw_line) if layout
+                    else item_line[:marker.start()].strip() if marker
+                    else item_line
+                )
                 item = make_item(raw_name, unit, quantity, amount, tax)
                 items.append(item)
                 last = item
@@ -751,7 +797,12 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             continue
         unit, quantity, amount, tax, name_end = parsed
         # raw_name 从行首到「名称末尾位置」（正则1 给出）截取
-        raw_name = layout_name_part(raw_line) if layout else line[:name_end].strip()
+        raw_name = (
+            item_line[:name_end].strip()
+            if has_overlaid_headers
+            else layout_name_part(raw_line) if layout
+            else line[:name_end].strip()
+        )
         base_name = clean_item_name(raw_name)
         if not raw_name and last:
             # 名称没拿到版面给空——把这个修正并入上一条

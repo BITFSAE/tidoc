@@ -480,7 +480,9 @@ class Api:
             paid_amount = ""
             warning = ""
             try:
-                if suffix == ".xml":
+                if suffix == ".tidoc":
+                    att_type = "bindle_package"
+                elif suffix == ".xml":
                     att_type = TYPE_INVOICE_XML
                     invoice_no = parse_invoice_files(xml_path=path).invoice_no or ""
                 elif suffix == ".pdf":
@@ -504,6 +506,7 @@ class Api:
                     TYPE_INVOICE_XML: "发票 XML",
                     TYPE_INSPECTION: "查验单 PDF",
                     TYPE_PAYMENT: "付款截图",
+                    "bindle_package": "绑定包",
                     "physical_image": "实物图",
                     "other": "其他",
                 }.get(att_type, att_type),
@@ -647,7 +650,13 @@ class Api:
 
     @_guard
     def correct_locked_field(self, entry_id, field, value, profile_id=""):
-        return self.entries.correct_locked_field(entry_id, field, value, profile_id)
+        result = self.entries.correct_locked_field(entry_id, field, value, profile_id)
+        if field in {"total", "buyer_name", "buyer_tax_id", "title"}:
+            from .services.ocr import refresh_entry_check
+
+            refresh_entry_check(self.entries, entry_id)
+            result = self.entries.get(entry_id)
+        return result
 
     @_guard
     def update_entry_profile(self, entry_id, profile_id, operator_profile_id=""):

@@ -365,14 +365,58 @@ def test_xml_amount_closure(sample_xmls):
 def test_check_pass():
     inv = ParsedInvoice(
         invoice_no="1", total=Decimal("100.00"), buyer_name="北京理工大学",
+        buyer_tax_id="12100000400008888X",
         items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("100.00"))],
     )
     assert check_invoice(inv).status == CHECK_PASS
 
 
+def test_supported_title_without_buyer_tax_id_is_recognition_warning():
+    inv = ParsedInvoice(
+        invoice_no="1", total=Decimal("100.00"), buyer_name="北京理工大学",
+        items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("100.00"))],
+    )
+
+    result = check_invoice(inv)
+
+    assert result.status == CHECK_WARNING
+    assert "未能识别「北京理工大学」的购买方税号" in result.message
+    assert "12100000400008888X" in result.message
+
+
+def test_supported_title_with_wrong_buyer_tax_id_is_recognition_warning():
+    inv = ParsedInvoice(
+        invoice_no="1", total=Decimal("100.00"),
+        buyer_name="北京理工大学教育基金会",
+        buyer_tax_id="12100000400008888X",
+        items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("100.00"))],
+    )
+
+    result = check_invoice(inv)
+
+    assert result.status == CHECK_WARNING
+    assert "与「北京理工大学教育基金会」不一致" in result.message
+    assert "53100000500021676K" in result.message
+    assert "该税号属于「北京理工大学」" in result.message
+
+
+def test_known_tax_id_reveals_unrecognized_buyer_title():
+    inv = ParsedInvoice(
+        invoice_no="1", total=Decimal("100.00"), buyer_name="北京某大学",
+        buyer_tax_id="5310 0000-5000 2167 6k",
+        items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("100.00"))],
+    )
+
+    result = check_invoice(inv)
+
+    assert result.status == CHECK_WARNING
+    assert "税号 53100000500021676K 属于「北京理工大学教育基金会」" in result.message
+
+
 def test_item_sum_mismatch_is_non_blocking_recognition_warning():
     inv = ParsedInvoice(
         invoice_no="1", total=Decimal("100.00"), buyer_name="北京理工大学",
+        buyer_tax_id="12100000400008888X",
         items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("90.00"))],
     )
     r = check_invoice(inv)
@@ -385,6 +429,7 @@ def test_check_title_isolation():
     """抬头与所属分区不一致时 blocked（第 7 节强隔离）。"""
     inv = ParsedInvoice(
         invoice_no="1", total=Decimal("100.00"), buyer_name="北京理工大学教育基金会",
+        buyer_tax_id="53100000500021676K",
         items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("100.00"))],
     )
     r = check_invoice(inv, expected_title="北京理工大学")

@@ -17,7 +17,7 @@ const State = {
   groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
   tagFilter: '',         // 工具栏筛选：按标签
   notesFilter: '',       // 高级筛选：'' | 'yes' | 'no'（有 / 无记账备注）
-  batchFilter: '',       // 当前聚焦的批次 id；'unbatched' 未进批次；'archived' 已收档
+  batchFilter: '',       // 当前聚焦的批次 id；'unbatched' 未进批次；'archived' 已归档
   batches: [],           // 批次列表缓存
   unbatchedCount: 0,     // 未进任何批次的条目数
   currentBatch: null,    // 当前批次详情（含批次级催办备注）
@@ -604,7 +604,7 @@ function currentFilters() {
   if (inUnbatchedView()) f.unbatched = true;
   else if (inArchivedView()) f.archived_only = true;
   else if (State.batchFilter) {
-    // 聚焦具体批次时查看该批次完整成员；全局“已收档”才限定为只属于已收档批次的条目。
+    // 聚焦具体批次时查看该批次完整成员；全局“已归档”才限定为只属于已归档批次的条目。
     f.batch_id = State.batchFilter;
   } else f.active_only = true;
   return f;
@@ -860,7 +860,7 @@ function entryCard(e) {
   const batchBadges = (e.batches || []).length
     ? e.batches.map((batch) =>
       `<button class="badge batch badge-action${batch.archived ? ' archived' : ''}" data-card-batch="${esc(batch.id)}" ` +
-      `title="${batch.archived ? '已收档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</button>`
+      `title="${batch.archived ? '已归档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</button>`
     ).join('')
     : '<button class="badge batch empty badge-action" data-card-batch="" title="点击设置报账批次">批次</button>';
 
@@ -1120,7 +1120,7 @@ function renderGroupedEntries(list) {
 
 function renderEmptyState() {
   const hasFilter = hasAnyFilter();
-  // 批次栏聚焦（含「已收档」）本身不算普通筛选；只有搜索/状态/日期等条件才应显示“没有匹配”。
+  // 批次栏聚焦（含「已归档」）本身不算普通筛选；只有搜索/状态/日期等条件才应显示“没有匹配”。
   const hasNonBatchFilter = !!(
     ($('#filterStatus')?.value || '') || $('#filterCheck').value || $('#filterProfile').value ||
     $('#filterTitle').value || $('#filterKeyword').value || $('#filterAmountMin').value ||
@@ -1138,16 +1138,16 @@ function renderEmptyState() {
       $('#emptyNew').onclick = () => clearAllFilters();
     } else {
       illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17h34v24H7z"/><path d="M5 11h38v6H5zM18 25h12"/></svg>`;
-      $('#emptyTitle').textContent = '还没有收档条目';
-      $('#emptySub').textContent = '批次收档后，只属于已收档批次的条目会放在这里。';
+      $('#emptyTitle').textContent = '还没有归档条目';
+      $('#emptySub').textContent = '批次归档后，只属于已归档批次的条目会放在这里。';
       $('#emptyNew').textContent = '返回在办';
       $('#emptyNew').onclick = () => focusBatch('');
     }
   } else if (!hasFilter && hasArchivedEntries) {
     illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17h34v24H7z"/><path d="M5 11h38v6H5zM18 25h12"/></svg>`;
     $('#emptyTitle').textContent = '在办没有条目';
-    $('#emptySub').textContent = '当前要处理的条目都已完成批次并收档；可到「已收档」查看或恢复。';
-    $('#emptyNew').textContent = '查看已收档';
+    $('#emptySub').textContent = '当前要处理的条目都已完成批次并归档；可到「已归档」查看或恢复。';
+    $('#emptyNew').textContent = '查看已归档';
     $('#emptyNew').onclick = () => focusBatch(ARCHIVED_BATCH_ID);
   } else if (hasFilter) {
     illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="21" cy="21" r="13"/><path d="m31 31 7 7M16 21h10M21 16v10"/></svg>`;
@@ -1343,7 +1343,7 @@ function renderBatchFolders() {
   wrap.innerHTML = `
     <div class="batch-scope" role="tablist" aria-label="报账批次视图">
       ${scopeChip('', '在办', !shelf)}
-      ${scopeChip(ARCHIVED_BATCH_ID, '已收档', shelf)}
+      ${scopeChip(ARCHIVED_BATCH_ID, '已归档', shelf)}
     </div>
     <span class="batch-scope-divider" aria-hidden="true"></span>
     <div class="batch-folder-track">${track}</div>`;
@@ -1388,7 +1388,7 @@ function openBatchMenu(x, y, b) {
   item('打开这批', () => focusBatch(b.id));
   item('编辑批次', () => renameBatchFlow(b));
   item('批次备注', () => batchNoteFlow(b));
-  item(b.archived ? '恢复到在办' : '收档批次', () => archiveBatchFlow(b));
+  item(b.archived ? '恢复到在办' : '归档批次', () => archiveBatchFlow(b));
   item('删除批次', async () => {
     if (!confirm(`删除批次「${b.name}」？条目本身不会被删除。`)) return;
     const wasFocused = State.batchFilter === b.id;
@@ -1427,18 +1427,18 @@ async function archiveBatchFlow(batch) {
       ${batch.note ? `<div class="archive-confirm-note"><b>批次备注</b><span>${esc(batch.note)}</span></div>` : ''}
     </div>`;
   const m = modal({
-    title: '确认收档批次',
+    title: '确认归档批次',
     body,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
-      mkBtn('确认收档', 'primary', async () => {
+      mkBtn('确认归档', 'primary', async () => {
         try {
           await Api.archiveBatch(batch.id, true);
           m.close();
           await loadBatches();
           if (State.batchFilter === batch.id) focusBatch(batch.id);
           else await refreshEntries();
-          toast(`已收档「${batch.name}」`, 'ok');
+          toast(`已归档「${batch.name}」`, 'ok');
         } catch (e) { toast(e.message, 'err'); }
       }),
     ],
@@ -1582,7 +1582,7 @@ async function openEntryBatchFlow(entry) {
       </div>`;
     }).join('');
     const currentLabel = memberships.length
-      ? memberships.map((batch) => `${esc(batch.name)}${batch.archived ? ' · 已收档' : ''}`).join('、')
+      ? memberships.map((batch) => `${esc(batch.name)}${batch.archived ? ' · 已归档' : ''}`).join('、')
       : '不在任何批次';
     body.innerHTML = `
       <div class="entry-batch-current"><span>当前归属</span><b>${currentLabel}</b></div>
@@ -3250,7 +3250,7 @@ function usageGuideStepsMarkup() {
   return `<div><b>1 · 导入发票</b><span>拖入或粘贴发票 PDF/XML；多张用“导入发票”。</span></div>
     <div><b>2 · 补齐材料</b><span>在卡片或详情添加付款截图、实物图和查验单；右键可打开已有文件。</span></div>
     <div><b>3 · 核对条目</b><span>从“待补材料”或“识别提醒”进入详情，确认实付、明细和备注。</span></div>
-    <div><b>4 · 组织批次</b><span>勾选条目后装入批次；点击批次右侧“⋯”可编辑批次、填写批次备注、归档，已收档批次可从“已收档”查看并恢复。</span></div>
+    <div><b>4 · 组织批次</b><span>勾选条目后装入批次；点击批次右侧“⋯”可编辑批次、填写批次备注、归档，已归档批次可从“已归档”查看并恢复。</span></div>
     <div><b>5 · 导出打印</b><span>选中条目后导出绑定包、汇总或打印材料。</span></div>
     <div><b>6 · 后续查找</b><span>用抬头、报账人、状态、日期、金额或关键词筛选。</span></div>`;
 }
@@ -4080,6 +4080,7 @@ const ATTACHMENT_TYPE_OPTS = [
 
 function classifyAttachmentByName(name) {
   const n = String(name || '').toLowerCase();
+  if (n.endsWith('.tidoc')) return 'bindle_package';
   if (n.endsWith('.xml')) return 'invoice_xml';
   if (/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(n)) return 'payment_screenshot';
   if (n.endsWith('.pdf') && (name.includes('查验') || name.includes('验真'))) return 'inspection_pdf';
@@ -4095,6 +4096,10 @@ function isInvoiceImportInfo(info) {
   return info && (info.type === 'invoice_pdf' || info.type === 'invoice_xml');
 }
 
+function isBindlePackageInfo(info) {
+  return info && info.type === 'bindle_package';
+}
+
 function isLooseMaterialInfo(info) {
   return info && ['payment_screenshot', 'physical_image', 'inspection_pdf', 'other'].includes(info.type);
 }
@@ -4107,17 +4112,38 @@ async function materialInfosForPaths(paths) {
   }));
 }
 
+async function openInboundBindle(infos, cleanupPaths, progress = null) {
+  const packages = (infos || []).filter(isBindlePackageInfo);
+  if (!packages.length) return false;
+  if (packages.length !== 1 || infos.length !== 1) {
+    throw new Error('绑定包需要单独导入：一次请只拖入或粘贴一个 .tidoc 文件。');
+  }
+  if (!State.currentProfileId) throw new Error('请先创建报账人，再导入绑定包。');
+  progress?.update('正在检查绑定包完整性…');
+  const info = packages[0];
+  const insp = await Api.inspectBindle(info.path);
+  await openBindleImportPreview(info.path, insp, {
+    onClose: () => cleanupDroppedPaths(cleanupPaths || [info.path]),
+  });
+  return true;
+}
+
 async function addDroppedMaterialFiles(entryId, files, progress = null) {
   if (!files.length) return false;
   progress?.update('正在读取拖入材料…');
   const paths = await droppedFilesToPaths(files);
+  let cleanupDeferred = false;
   try {
     progress?.update(State.paymentOcrEnabled ? '正在识别文件类型和付款金额…' : '正在识别文件类型…');
     const infos = await materialInfosForPaths(paths);
+    if (await openInboundBindle(infos, paths, progress)) {
+      cleanupDeferred = true;
+      return false;
+    }
     progress?.update('正在校验并添加到当前条目…');
     await addMaterialInfosToEntry(entryId, infos);
   } finally {
-    await cleanupDroppedPaths(paths);
+    if (!cleanupDeferred) await cleanupDroppedPaths(paths);
   }
   return true;
 }
@@ -4199,7 +4225,7 @@ async function autoBindMaterialInfos(infos, extraEntries = [], options = {}) {
 
 async function handleLooseMaterialInfos(infos, cleanupPaths) {
   if (!infos.length) return false;
-  // 独立拖入或粘贴的材料应按全库匹配，含已收档条目。只有与一批发票同时导入的
+  // 独立拖入或粘贴的材料应按全库匹配，含已归档条目。只有与一批发票同时导入的
   // 材料才由 openBatchImportPreview 显式限定到本次新建条目。
   const bind = await autoBindMaterialInfos(infos, [], { cleanupPaths });
   const manualPaths = new Set(bind.manual.map((info) => info.path));
@@ -4293,10 +4319,15 @@ function setupGlobalDrop() {
     if (ev.target instanceof Element && ev.target.closest('.entry-card, .material-drop, .modal-mask')) return;
     const progress = taskProgress('正在读取拖入文件…');
     let paths = [];
+    let cleanupDeferred = false;
     try {
       paths = await droppedFilesToPaths([...ev.dataTransfer.files]);
       progress.update('正在识别文件类型和材料信息…');
       const infos = await materialInfosForPaths(paths);
+      if (await openInboundBindle(infos, paths, progress)) {
+        cleanupDeferred = true;
+        return;
+      }
       const invoiceInfos = infos.filter(isInvoiceImportInfo);
       const materialInfos = infos.filter(isLooseMaterialInfo);
       if (invoiceInfos.length) {
@@ -4316,7 +4347,7 @@ function setupGlobalDrop() {
       await cleanupDroppedPaths(paths);
       toast('请拖入发票 PDF、XML、付款截图、实物图或查验单', 'err');
     } catch (e) {
-      await cleanupDroppedPaths(paths);
+      if (!cleanupDeferred) await cleanupDroppedPaths(paths);
       toast(e.message || '处理拖入文件失败', 'err');
     } finally {
       progress.close();
@@ -4359,10 +4390,15 @@ function setupClipboardUpload() {
     const activeEntryId = State.activeDetailEntryId;
     const progress = taskProgress('正在读取剪切板材料…');
     let paths = [];
+    let cleanupDeferred = false;
     try {
       paths = await droppedFilesToPaths(files);
       progress.update('正在识别文件类型和材料信息…');
       const infos = await materialInfosForPaths(paths);
+      if (await openInboundBindle(infos, paths, progress)) {
+        cleanupDeferred = true;
+        return;
+      }
       if (activeEntryId) {
         progress.update(State.paymentOcrEnabled ? '正在添加材料并识别付款金额…' : '正在添加材料…');
         await addMaterialInfosToEntry(activeEntryId, infos);
@@ -4388,7 +4424,7 @@ function setupClipboardUpload() {
         toast('剪切板里没有可导入的发票或材料', 'err');
       }
     } catch (e) {
-      await cleanupDroppedPaths(paths);
+      if (!cleanupDeferred) await cleanupDroppedPaths(paths);
       toast(e.message || '读取剪切板失败', 'err');
     } finally {
       progress.close();
@@ -4401,8 +4437,8 @@ function showDragOverlay() {
   if ($('.drag-overlay')) return;
   const ov = el('div', 'drag-overlay', `
     <div class="drag-guide">
-      <b>空白列表区：导入发票 PDF/XML</b>
-      <span>拖到条目卡片：绑定付款截图、实物图或查验单</span>
+      <b>空白列表区：导入发票 PDF/XML 或 .tidoc 绑定包</b>
+      <span>拖到条目卡片：绑定付款截图、实物图或查验单；绑定包会进入导入预览</span>
     </div>`);
   document.body.appendChild(ov);
 }
@@ -4666,7 +4702,7 @@ function showExportResult(outputs) {
   });
 }
 
-async function openBindleImportPreview(path, insp) {
+async function openBindleImportPreview(path, insp, options = {}) {
   const [batchResult, tags] = await Promise.all([
     Api.listBatches(true),
     Api.listTags(),
@@ -4802,6 +4838,7 @@ async function openBindleImportPreview(path, insp) {
     title: '导入绑定包',
     wide: true,
     body,
+    onClose: options.onClose,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
       mkBtn(entries.length ? `导入 ${entries.length} 条` : '确认导入', 'primary', async () => {

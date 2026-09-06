@@ -108,6 +108,7 @@ def test_batch_reparse_replaces_items_and_preserves_user_fields(api, tmp_path, m
         parsed=ParsedInvoice(
             invoice_no="123",
             buyer_name=TITLE_FOUNDATION,
+            buyer_tax_id="53100000500021676K",
             total=Decimal("84.00"),
             source="pdf",
         ),
@@ -120,6 +121,7 @@ def test_batch_reparse_replaces_items_and_preserves_user_fields(api, tmp_path, m
     reparsed = ParsedInvoice(
         invoice_no="123",
         buyer_name=TITLE_FOUNDATION,
+        buyer_tax_id="53100000500021676K",
         total=Decimal("84.00"),
         source="pdf",
         items=[ParsedItem(
@@ -142,6 +144,28 @@ def test_batch_reparse_replaces_items_and_preserves_user_fields(api, tmp_path, m
     assert entry["items"][0]["unit"] == "卷"
     assert entry["fields"]["actual_item_name"]["current"] == "用户核对名称"
     assert entry["fields"]["actual_item_name"]["modified"] is True
+
+
+def test_correcting_buyer_tax_id_refreshes_recognition_warning(api):
+    from tidoc.engine import check_invoice
+
+    profile = api.profiles.create("张三", "李老师")
+    parsed = ParsedInvoice(
+        invoice_no="123",
+        buyer_name="北京理工大学",
+        total=Decimal("84.00"),
+        items=[ParsedItem("*材料*线缆", "线缆", "卷", Decimal("1"), Decimal("84.00"))],
+    )
+    entry_id = api.entries.create(profile["id"], parsed=parsed)
+    initial = check_invoice(parsed)
+    api.entries.set_check(entry_id, initial.status, initial.message)
+
+    corrected = api.correct_locked_field(
+        entry_id, "buyer_tax_id", "12100000400008888X", profile["id"]
+    )["data"]
+
+    assert corrected["check_status"] == "pass"
+    assert corrected["check_message"] == ""
 
 
 def test_entry_profile_can_be_changed_and_logged(repos, sample_xmls):
@@ -443,6 +467,23 @@ def test_dropped_file_cleanup(api):
     res = api.cleanup_dropped_files(saved["paths"])["data"]
     assert res["deleted"] == 1
     assert not os.path.exists(path)
+
+
+def test_dropped_tidoc_is_classified_as_bindle_package(api, tmp_path):
+    package = tmp_path / "待导入.tidoc"
+    package.write_bytes(b"placeholder")
+
+    result = api.classify_material_files([str(package)])["data"]
+
+    assert result == [{
+        "path": str(package),
+        "name": package.name,
+        "type": "bindle_package",
+        "type_label": "绑定包",
+        "invoice_no": "",
+        "paid_amount": "",
+        "warning": "",
+    }]
 
 
 def test_dropped_file_rejects_invalid_base64(api):

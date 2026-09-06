@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 from .models import CHECK_BLOCKED, CHECK_PASS, CHECK_WARNING, CheckResult, ParsedInvoice
@@ -15,6 +16,21 @@ from .money import fmt_money, money
 TITLE_UNIVERSITY = "北京理工大学"
 TITLE_FOUNDATION = "北京理工大学教育基金会"
 SUPPORTED_TITLES = (TITLE_UNIVERSITY, TITLE_FOUNDATION)
+
+# 购买方统一社会信用代码 / 纳税人识别号。发票抬头与税号共同确定报账主体；
+# 名称识别正确但税号缺失或串到另一主体时，也必须留在“识别提醒”中供人工核对。
+TAX_ID_UNIVERSITY = "12100000400008888X"
+TAX_ID_FOUNDATION = "53100000500021676K"
+EXPECTED_BUYER_TAX_IDS = {
+    TITLE_UNIVERSITY: TAX_ID_UNIVERSITY,
+    TITLE_FOUNDATION: TAX_ID_FOUNDATION,
+}
+_TITLE_BY_TAX_ID = {tax_id: title for title, tax_id in EXPECTED_BUYER_TAX_IDS.items()}
+
+
+def normalize_tax_id(value: str) -> str:
+    """税号比较用标准形态：忽略空白/分隔符，并统一为大写。"""
+    return re.sub(r"[^0-9A-Z]", "", str(value or "").upper())
 
 
 def check_invoice(invoice: ParsedInvoice, expected_title: str = "") -> CheckResult:
@@ -41,13 +57,40 @@ def check_invoice(invoice: ParsedInvoice, expected_title: str = "") -> CheckResu
     else:
         problems_warning.append("未能自动识别物品明细，请确认或补充。")
 
-    # 抬头识别
+    # 抬头与购买方税号识别。税号不参与材料齐备度，但会形成可恢复、可重识别的
+    # 识别提醒，避免只凭名称把主体判断为北理工或教育基金会。
     if not invoice.buyer_name:
         problems_warning.append("未能识别购买方抬头。")
     elif invoice.buyer_name not in SUPPORTED_TITLES:
         problems_warning.append(
             f"购买方抬头「{invoice.buyer_name}」不在受支持的两个抬头内。"
         )
+
+    buyer_tax_id = normalize_tax_id(invoice.buyer_tax_id)
+    expected_tax_id = EXPECTED_BUYER_TAX_IDS.get(invoice.buyer_name)
+    if expected_tax_id:
+        if not buyer_tax_id:
+            problems_warning.append(
+                f"未能识别「{invoice.buyer_name}」的购买方税号，应为 {expected_tax_id}，请核对。"
+            )
+        elif buyer_tax_id != expected_tax_id:
+            recognized_title = _TITLE_BY_TAX_ID.get(buyer_tax_id)
+            belongs_to = f"（该税号属于「{recognized_title}」）" if recognized_title else ""
+            problems_warning.append(
+                f"购买方税号「{invoice.buyer_tax_id}」与「{invoice.buyer_name}」不一致，"
+                f"应为 {expected_tax_id}{belongs_to}，请核对。"
+            )
+    elif buyer_tax_id in _TITLE_BY_TAX_ID:
+        tax_title = _TITLE_BY_TAX_ID[buyer_tax_id]
+        if invoice.buyer_name:
+            problems_warning.append(
+                f"购买方税号 {buyer_tax_id} 属于「{tax_title}」，"
+                f"但识别到的抬头为「{invoice.buyer_name}」，请核对。"
+            )
+        else:
+            problems_warning.append(
+                f"购买方税号 {buyer_tax_id} 属于「{tax_title}」，但购买方抬头未识别，请核对。"
+            )
 
     # 抬头与所属分区一致性（强隔离）
     if expected_title and invoice.buyer_name and invoice.buyer_name != expected_title:

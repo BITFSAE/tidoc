@@ -290,8 +290,8 @@ def _ocr_items_to_parsed(normalized: dict):
     return items
 
 
-def _refresh_check(entries_repo: EntryRepo, entry_id: str) -> None:
-    """关键值变化后重算校验状态（明细合计 vs 条目总额 / 抬头）。"""
+def refresh_entry_check(entries_repo: EntryRepo, entry_id: str) -> None:
+    """关键值变化后重算校验状态（明细合计、抬头与购买方税号）。"""
     from ..engine import check_invoice
     from ..engine.models import ParsedInvoice
 
@@ -301,6 +301,7 @@ def _refresh_check(entries_repo: EntryRepo, entry_id: str) -> None:
     parsed = ParsedInvoice(
         invoice_no=entry.get("invoice_no") or "",
         buyer_name=entry.get("buyer_name") or "",
+        buyer_tax_id=entry.get("buyer_tax_id") or "",
         total=d(entry.get("total")),
         items=_entry_items_to_parsed(entry.get("items") or []),
     )
@@ -341,7 +342,7 @@ def apply_plan(entries_repo: EntryRepo, entry_id: str, plan: dict, normalized: d
 
     # 关键信息变化会改变校验结论（抬头、总额），不能只在 total 变化时刷新。
     if applied_fields or items_replaced:
-        _refresh_check(entries_repo, entry_id)
+        refresh_entry_check(entries_repo, entry_id)
 
     return {"applied_fields": applied_fields, "items_replaced": items_replaced}
 
@@ -357,6 +358,7 @@ def _replace_items(entries_repo: EntryRepo, entry_id: str, normalized: dict) -> 
     parsed = ParsedInvoice(
         invoice_no=entry.get("invoice_no") or "",
         buyer_name=entry.get("buyer_name") or "",
+        buyer_tax_id=entry.get("buyer_tax_id") or "",
         total=d(entry.get("total")),  # 条目总额是权威值，明细向总额对齐
         items=parsed_items,
     )
@@ -599,7 +601,7 @@ def apply_ocr_field(entries_repo: EntryRepo, ocr_repo: OcrRepo, entry_id: str, f
 
     entry = entries_repo.ocr_update_locked_field(entry_id, field, value)
     # 采用抬头也会影响校验状态，统一重算，避免卡片状态停留在旧结论。
-    _refresh_check(entries_repo, entry_id)
+    refresh_entry_check(entries_repo, entry_id)
     entry = entries_repo.get(entry_id)
 
     view = result_view(entries_repo, ocr_repo, entry_id)

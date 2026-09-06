@@ -236,7 +236,7 @@ class EntryRepo:
 
     # ------------------------------------------------------------------ 列表 / 筛选
     def list(self, **filters) -> list[dict]:
-        """按抬头、报账人、销售方、状态、类别、关键词、金额区间、日期、在办/已收档过滤（设计文档 8.7）。"""
+        """按抬头、报账人、销售方、状态、类别、关键词、金额区间、日期、在办/已归档过滤（设计文档 8.7）。"""
         where, params = [], []
         if filters.get("title"):
             where.append("title = ?"); params.append(filters["title"])
@@ -304,7 +304,7 @@ class EntryRepo:
         if filters.get("unbatched"):
             where.append("NOT EXISTS (SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id)")
         # 在办：未进批次，或至少还属于一个未归档批次。
-        # 已收档：有批次归属，且全部所属批次都已归档。
+        # 已归档：有批次归属，且全部所属批次都已归档。
         if filters.get("active_only"):
             where.append(
                 """(

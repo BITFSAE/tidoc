@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tidoc.engine.models import CheckResult, ParsedInvoice
+from tidoc.engine.models import CheckResult, ParsedInvoice, ParsedItem
 
 
 def _parsed(invoice_no="26957000000168907686"):
@@ -50,6 +50,34 @@ def test_batch_duplicate_returns_specific_existing_entry(api, tmp_path, monkeypa
     assert parsed.invoice_no in failure["error"]
     assert "张三" in failure["error"]
     assert len(api.entries.list()) == 1
+
+
+def test_drag_paste_batch_path_keeps_missing_tax_id_as_warning(api, tmp_path, monkeypatch):
+    import tidoc.engine
+
+    pdf = tmp_path / "拖入发票.pdf"
+    pdf.write_bytes(b"invoice")
+    parsed = ParsedInvoice(
+        invoice_no="26957000000168907687",
+        seller="深圳市测试有限公司",
+        buyer_name="北京理工大学",
+        total=Decimal("32.29"),
+        items=[ParsedItem("*材料*线缆", "线缆", "卷", Decimal("1"), Decimal("32.29"))],
+        source="pdf",
+    )
+    monkeypatch.setattr(tidoc.engine, "parse_invoice_files", lambda *_args, **_kwargs: parsed)
+    profile = api.create_profile("张三", "李老师")["data"]
+
+    result = api.batch_create_entries(profile["id"], [{
+        "key": "dropped-1",
+        "label": "拖入发票",
+        "files": [{"path": str(pdf), "type": "invoice_pdf"}],
+    }])["data"]
+
+    assert result["created"] == 1
+    entry = api.entries.get(result["entry_ids"][0])
+    assert entry["check_status"] == "warning"
+    assert "购买方税号" in entry["check_message"]
 
 
 def test_single_create_uses_same_global_duplicate_check(api, tmp_path, monkeypatch):

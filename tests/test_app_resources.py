@@ -118,7 +118,7 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert 'class="batch-folder-track"' in source
     assert 'class="batch-scope"' in source
     assert "archiveBatchFlow" in source
-    assert "确认收档批次" in source
+    assert "确认归档批次" in source
     assert 'id="selectAllBtn"' in html
     assert "toggleSelectAllVisible" in source
     assert "装入批次后可点击批次右侧 ⋯ 归档" in source
@@ -131,15 +131,15 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "批次备注" in source
     assert "批次备注已保存" in source
     assert "批次备注（可选）" in source
-    assert "已收档批次" in source
-    assert "已归档批次" not in source
+    assert "已归档批次" in source
+    assert "\u6536\u6863" not in source
     assert "inArchivedShelf()" in source
     assert "在办没有条目" in source
-    assert "查看已收档" in source
-    assert "当前要处理的条目都已完成批次并收档" in source
+    assert "查看已归档" in source
+    assert "当前要处理的条目都已完成批次并归档" in source
     assert 'id="archivedBatchesMenu"' not in source
     assert "已从在办收起" not in source
-    assert "已收档，条目已从在办收起" not in source
+    assert "已归档，条目已从在办收起" not in source
     assert "f.active_only = true" in source
     assert "f.archived_only = true" in source
     assert "DOC_GUIDE_URL" in source
@@ -186,6 +186,21 @@ def test_bindle_preview_is_compact_and_keeps_legacy_profile_mapping():
     assert 'class="bindle-entry-head"' in preview
     assert "已读取 ${esc(baseName(path))}" not in preview
     assert "给全部导入条目添加标签" not in preview
+
+
+def test_drag_and_paste_route_tidoc_to_bindle_preview():
+    source = (app.web_dir() / "app.js").read_text("utf-8")
+    inbound = source.split(
+        "async function openInboundBindle", 1
+    )[1].split("async function addDroppedMaterialFiles", 1)[0]
+
+    assert "n.endsWith('.tidoc')" in source
+    assert "type === 'bindle_package'" in source
+    assert "Api.inspectBindle(info.path)" in inbound
+    assert "openBindleImportPreview(info.path, insp" in inbound
+    assert "一次请只拖入或粘贴一个 .tidoc 文件" in inbound
+    assert "onClose: () => cleanupDroppedPaths" in inbound
+    assert source.count("await openInboundBindle(infos, paths, progress)") == 3
 
 
 def test_export_names_include_local_time_and_settings_show_export_storage():

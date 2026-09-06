@@ -388,8 +388,9 @@ def test_apply_ocr_field_and_items_from_saved_result(repos):
     updated = repos["entries"].get(entry["id"])
     assert len(updated["items"]) == 1
     assert ocr.pending_entry_ids() == set()
-    # 采用明细后重算校验：合计应与总额一致
-    assert updated["check_status"] == "pass"
+    # 采用明细后重算校验：金额已闭合，但 XML 原值仍缺购买方税号，继续提醒核对。
+    assert updated["check_status"] == "warning"
+    assert "购买方税号" in updated["check_message"]
 
 
 # ---------------------------------------------------------------- 编排（API 级，不联网）

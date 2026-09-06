@@ -10,10 +10,14 @@ from .models import (
 )
 from .money import d, fmt_decimal, fmt_money, money
 from .validator import (
+    EXPECTED_BUYER_TAX_IDS,
     SUPPORTED_TITLES,
+    TAX_ID_FOUNDATION,
+    TAX_ID_UNIVERSITY,
     TITLE_FOUNDATION,
     TITLE_UNIVERSITY,
     check_invoice,
+    normalize_tax_id,
 )
 
 _PARSER_EXPORTS = {"clean_item_name", "parse_xml", "parse_pdf", "parse_aspose_xml", "parse_invoice_files"}
@@ -44,6 +48,10 @@ __all__ = [
     "parse_invoice_files",
     "check_invoice",
     "SUPPORTED_TITLES",
+    "EXPECTED_BUYER_TAX_IDS",
     "TITLE_UNIVERSITY",
     "TITLE_FOUNDATION",
+    "TAX_ID_UNIVERSITY",
+    "TAX_ID_FOUNDATION",
+    "normalize_tax_id",
 ]

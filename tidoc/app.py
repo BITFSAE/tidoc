@@ -7,6 +7,7 @@ window.pywebview.api 暴露给前端。不开本地 HTTP 端口（设计文档�
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
 import warnings
@@ -22,6 +23,9 @@ _STDERR_SUPPRESS_PATTERNS = (
     "error messaging the mach port for IMKCFRunLoopWakeUpReliable",
     "Ignoring wrong pointing object",
 )
+_THEME_PREFERENCE_KEY = "tidoc.themeMode"
+_LIGHT_WINDOW_BACKGROUND = "#f4f1ea"
+_DARK_WINDOW_BACKGROUND = "#12161c"
 
 
 def _install_native_stderr_filter() -> None:
@@ -94,6 +98,42 @@ def _configure_webview_settings() -> None:
         pass
 
 
+def _system_uses_dark_mode() -> bool:
+    """Read the OS app-theme preference before the web view paints its first frame."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                return int(value) == 0
+        except (OSError, ValueError, TypeError):
+            return False
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=1,
+            )
+            return result.stdout.strip().lower() == "dark"
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return False
+
+
+def _initial_window_background(api: Api) -> str:
+    mode = api._preference_value(_THEME_PREFERENCE_KEY, "system")
+    if mode == "dark" or (mode == "system" and _system_uses_dark_mode()):
+        return _DARK_WINDOW_BACKGROUND
+    return _LIGHT_WINDOW_BACKGROUND
+
+
 def main() -> None:
     _install_native_stderr_filter()
     from .db.paths import resolve_data_root
@@ -107,6 +147,7 @@ def main() -> None:
         width=1160,
         height=780,
         min_size=(920, 640),
+        background_color=_initial_window_background(api),
     )
     api.bind_window(window)
     debug = "--debug" in sys.argv

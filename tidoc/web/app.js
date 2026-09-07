@@ -14,6 +14,7 @@ const State = {
   focusedEntryId: null,
   suppressListAnimation: false,
   density: 'comfortable',
+  themeMode: document.documentElement.dataset.themeMode || 'system',
   groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
   tagFilter: '',         // 工具栏筛选：按标签
   notesFilter: '',       // 高级筛选：'' | 'yes' | 'no'（有 / 无记账备注）
@@ -92,6 +93,7 @@ const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
 const PAYMENT_OCR_KEY = 'tidoc.paymentScreenshotOcr';
 const DEFAULT_PAID_TO_INVOICE_KEY = 'tidoc.defaultPaidToInvoiceTotal';
 const DEFAULT_ENTRY_TITLE_KEY = 'tidoc.defaultEntryTitle';
+const THEME_KEY = 'tidoc.themeMode';
 const DEFAULT_MATERIAL_REQUIREMENTS = {
   invoice: true,
   payment_screenshot: true,
@@ -110,6 +112,91 @@ const OPERATOR_PREF_KEYS = {
   bank_name: 'tidoc.operator.bank_name',
   bank_card: 'tidoc.operator.bank_card',
 };
+
+const systemThemeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+
+function normalizeThemeMode(value) {
+  return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+}
+
+function applyTheme(mode, { persist = false } = {}) {
+  const nextMode = normalizeThemeMode(mode);
+  const resolved = nextMode === 'dark' || (nextMode === 'system' && systemThemeMedia.matches)
+    ? 'dark'
+    : 'light';
+  State.themeMode = nextMode;
+  document.documentElement.dataset.themeMode = nextMode;
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved;
+  syncThemeToggle();
+  if (persist) {
+    try { localStorage.setItem(THEME_KEY, nextMode); } catch (e) {}
+  }
+}
+
+async function animateThemeChange(mode, trigger, options = {}) {
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduceMotion || !document.body) {
+    applyTheme(mode, options);
+    return;
+  }
+
+  const root = document.documentElement;
+  if (typeof document.startViewTransition === 'function') {
+    const rect = trigger?.getBoundingClientRect();
+    const x = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+    const y = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
+    const radius = Math.hypot(
+      Math.max(x, window.innerWidth - x),
+      Math.max(y, window.innerHeight - y),
+    );
+    root.style.setProperty('--theme-origin-x', `${x}px`);
+    root.style.setProperty('--theme-origin-y', `${y}px`);
+    root.style.setProperty('--theme-reveal-radius', `${Math.ceil(radius)}px`);
+    try {
+      const transition = document.startViewTransition(() => applyTheme(mode, options));
+      await transition.updateCallbackDone;
+      return;
+    } catch (e) {}
+  }
+
+  root.classList.add('theme-transition');
+  document.body.offsetWidth;
+  applyTheme(mode, options);
+  window.setTimeout(() => root.classList.remove('theme-transition'), 280);
+}
+
+function syncThemeToggle() {
+  const button = $('#themeToggle');
+  if (!button) return;
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const label = dark ? '切换到浅色模式' : '切换到深色模式';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+}
+
+async function toggleTheme() {
+  const button = $('#themeToggle');
+  const previousMode = State.themeMode;
+  const nextMode = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  button.disabled = true;
+  await animateThemeChange(nextMode, button, { persist: true });
+  try {
+    await Api.setAppPreference(THEME_KEY, nextMode);
+  } catch (e) {
+    applyTheme(previousMode, { persist: true });
+    toast(e.message, 'err');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function handleSystemThemeChange() {
+  if (State.themeMode === 'system') applyTheme('system');
+}
+
+if (systemThemeMedia.addEventListener) systemThemeMedia.addEventListener('change', handleSystemThemeChange);
+else if (systemThemeMedia.addListener) systemThemeMedia.addListener(handleSystemThemeChange);
 const FIELD_LABEL = {
   paid_amount: '实付金额', actual_item_name: '实际物资名称', notes: '备注',
   invoice_no: '发票号码', total: '价税合计', buyer_name: '购买方抬头',
@@ -395,15 +482,17 @@ function setUpdateNotice(status) {
 
 async function loadWorkflowPreferences() {
   const local = localStorage.getItem(MULTI_CLAIMANT_KEY);
+  const localTheme = normalizeThemeMode(localStorage.getItem(THEME_KEY));
   const legacyVerificationWatch = localStorage.getItem(VERIFICATION_WATCH_DIR_KEY) || '';
   const localDefaultEntryTitle = localStorage.getItem(DEFAULT_ENTRY_TITLE_KEY) || '';
   State.multiClaimantMode = local === '1';
   try {
-    const [multiMode, paymentOcr, defaultPaidToInvoice, defaultEntryTitle, materialRequirements, verification] = await Promise.all([
+    const [multiMode, paymentOcr, defaultPaidToInvoice, defaultEntryTitle, themeMode, materialRequirements, verification] = await Promise.all([
       Api.appPreference(MULTI_CLAIMANT_KEY, local || ''),
       Api.appPreference(PAYMENT_OCR_KEY, '1'),
       Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, '1'),
       Api.appPreference(DEFAULT_ENTRY_TITLE_KEY, localDefaultEntryTitle),
+      Api.appPreference(THEME_KEY, localTheme),
       Api.materialRequirements(),
       Api.invoiceVerificationPreferences(),
     ]);
@@ -411,6 +500,7 @@ async function loadWorkflowPreferences() {
     State.paymentOcrEnabled = paymentOcr !== '0';
     State.defaultPaidToInvoice = defaultPaidToInvoice !== '0';
     State.defaultEntryTitle = defaultEntryTitle || localDefaultEntryTitle || '';
+    applyTheme(themeMode, { persist: true });
     State.materialRequirements = {
       ...DEFAULT_MATERIAL_REQUIREMENTS,
       ...(materialRequirements || {}),
@@ -432,6 +522,7 @@ async function loadWorkflowPreferences() {
 
 // 启动时套用用户在设置里选的默认抬头 / 密度
 function applyPreferences() {
+  applyTheme(localStorage.getItem(THEME_KEY));
   const dt = localStorage.getItem('tidoc.defaultTitle') || '';
   if (dt) {
     State.activeTitle = dt;
@@ -2253,6 +2344,7 @@ function bindEvents() {
   $('#newEntryBtn').onclick = openNewEntry;
   $('#batchImportBtn').onclick = openBatchImport;
   $('#settingsBtn').onclick = openSettings;
+  $('#themeToggle').onclick = toggleTheme;
   $('#appTitle').onclick = () => Api.openExternalUrl('https://github.com/totok22/tidoc').catch((e) => toast(e.message, 'err'));
   $('#appTitle').onkeydown = (e) => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -2468,6 +2560,7 @@ async function openSettings() {
   let paths, printStatus, appInfo, operatorPrefs, multiMode, paymentOcrMode;
   let defaultPaidMode, defaultEntryTitleMode, materialRequirementsMode, bindleNotesMode, bindleTagsMode;
   let autoUpdateMode, maintenance, verificationPrefs, ocrStatus;
+  const themeMode = State.themeMode;
   try {
     paths = await Api.dataRoot();
     printStatus = await Api.printComponentStatus();
@@ -2566,6 +2659,19 @@ async function openSettings() {
             <option value="comfortable">标准</option>
             <option value="compact">精简</option>
           </select>
+        </div>
+        <div class="settings-row settings-theme-row">
+          <div class="settings-row-copy">
+            <b>外观主题</b>
+            <span>跟随系统时会随电脑的浅色、深色外观切换</span>
+          </div>
+          <div class="segmented compact theme-segmented" role="group" aria-label="外观主题">
+            ${[
+              ['system', '跟随系统'],
+              ['light', '浅色'],
+              ['dark', '深色'],
+            ].map(([value, label]) => `<button type="button" class="seg theme-mode-btn${themeMode === value ? ' active' : ''}" data-theme-mode="${value}" aria-pressed="${themeMode === value ? 'true' : 'false'}">${label}</button>`).join('')}
+          </div>
         </div>
         <div class="settings-row">
           <div class="settings-row-copy">
@@ -2777,6 +2883,34 @@ async function openSettings() {
     $('#entryList').dataset.density = State.density;
     toast('已保存', 'ok');
   };
+  const themeButtons = [...body.querySelectorAll('[data-theme-mode]')];
+  const syncThemeButtons = (mode) => {
+    themeButtons.forEach((button) => {
+      const active = button.dataset.themeMode === mode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  };
+  themeButtons.forEach((button) => {
+    button.onclick = async () => {
+      const nextMode = normalizeThemeMode(button.dataset.themeMode);
+      if (nextMode === State.themeMode) return;
+      const previousMode = State.themeMode;
+      themeButtons.forEach((item) => { item.disabled = true; });
+      await animateThemeChange(nextMode, button, { persist: true });
+      syncThemeButtons(nextMode);
+      try {
+        await Api.setAppPreference(THEME_KEY, nextMode);
+        toast('外观主题已保存', 'ok');
+      } catch (e) {
+        applyTheme(previousMode, { persist: true });
+        syncThemeButtons(previousMode);
+        toast(e.message, 'err');
+      } finally {
+        themeButtons.forEach((item) => { item.disabled = false; });
+      }
+    };
+  });
   body.querySelector('#setDefaultEntryTitle').onchange = async (ev) => {
     const value = ev.target.value;
     ev.target.disabled = true;

@@ -45,6 +45,45 @@ def test_webview_settings_allow_tax_site_certificate_fallback():
         webview.settings["IGNORE_SSL_ERRORS"] = original_ssl
 
 
+def test_frontend_theme_modes_are_early_persistent_and_quiet():
+    web = app.web_dir()
+    html = (web / "index.html").read_text("utf-8")
+    source = (web / "app.js").read_text("utf-8")
+    styles = (web / "styles.css").read_text("utf-8")
+
+    assert html.index("tidoc.themeMode") < html.index("styles.css")
+    assert "prefers-color-scheme: dark" in html
+    assert "data-theme-mode" in source
+    assert "跟随系统" in source
+    assert "外观主题已保存" in source
+    assert "Api.setAppPreference(THEME_KEY, nextMode)" in source
+    assert "systemThemeMedia.addEventListener('change'" in source
+    assert ':root[data-theme="dark"]' in styles
+    assert "color-scheme: light !important" in styles
+    assert 'id="themeToggle"' in html
+    assert "$('#themeToggle').onclick = toggleTheme" in source
+    assert "切换到浅色模式" in source
+    assert "document.startViewTransition" in source
+    assert "prefers-reduced-motion: reduce" in source
+    assert "@keyframes themeReveal" in styles
+    assert "::view-transition-new(root)" in styles
+
+
+def test_native_window_background_matches_theme_preference(monkeypatch):
+    class StubApi:
+        def __init__(self, mode):
+            self.mode = mode
+
+        def _preference_value(self, key, default):
+            assert key == "tidoc.themeMode"
+            return self.mode or default
+
+    assert app._initial_window_background(StubApi("dark")) == "#12161c"
+    assert app._initial_window_background(StubApi("light")) == "#f4f1ea"
+    monkeypatch.setattr(app, "_system_uses_dark_mode", lambda: True)
+    assert app._initial_window_background(StubApi("system")) == "#12161c"
+
+
 def test_normal_startup_filters_known_native_and_pdf_noise():
     patterns = "\n".join(app._STDERR_SUPPRESS_PATTERNS)
     assert "IMKCFRunLoopWakeUpReliable" in patterns

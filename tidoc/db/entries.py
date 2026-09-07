@@ -22,6 +22,9 @@ from .database import Database
 EDITABLE_FIELDS = ("paid_amount", "actual_item_name", "notes")
 VALUE_SOURCE_PAYMENT_OCR = "payment_ocr"
 VALUE_SOURCE_MANUAL = "manual"
+# These versions describe recognition rules, not the Tidoc release. Keep them
+# unchanged for ordinary app releases and bump only the affected value when its
+# local recognition logic or result contract changes.
 LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-09-06"
 LOCAL_PAYMENT_RECOGNITION_VERSION = "payment-local-2026-09-06"
 PAYMENT_CHECK_PREFIX = "[付款截图识别]"

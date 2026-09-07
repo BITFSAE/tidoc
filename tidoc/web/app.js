@@ -5362,14 +5362,13 @@ async function batchReparse() {
     <div class="recognition-choice-list">
       <label class="recognition-choice${invoice.total ? '' : ' disabled'}">
         <input type="checkbox" id="recognizeInvoice" ${invoice.pending ? 'checked' : ''} ${invoice.total ? '' : 'disabled'}/>
-        <span><b>发票</b><small>${invoice.pending || 0} 条待识别${invoice.current ? `，${invoice.current} 条已是当前规则、会自动跳过` : ''}</small></span>
+        <span><b>发票</b><small>${invoice.pending || 0} 条待识别${invoice.current ? `，${invoice.current} 条已处理` : ''}</small></span>
       </label>
       <label class="recognition-choice${payment.total && payment.enabled ? '' : ' disabled'}">
         <input type="checkbox" id="recognizePayment" ${payment.pending && payment.enabled ? 'checked' : ''} ${payment.total && payment.enabled ? '' : 'disabled'}/>
-        <span><b>付款截图</b><small>${payment.enabled ? `${payment.pending || 0} 张待识别${payment.current ? `，${payment.current} 张已由当前规则处理、会自动跳过` : ''}` : '付款截图 OCR 已关闭，可在设置中开启'}</small></span>
+        <span><b>付款截图</b><small>${payment.enabled ? `${payment.pending || 0} 张待识别${payment.current ? `，${payment.current} 张已处理` : ''}` : '付款截图 OCR 已关闭，可在设置中开启'}</small></span>
       </label>
-    </div>
-    <p class="hint">发票重新识别会更新票面明细和识别提醒；实际物资名称、实付金额与备注保持不变。付款截图只刷新识别金额与提醒，不自动改动已确认的实付金额。</p>`;
+    </div>`;
 
   const runBtn = mkBtn('开始识别', 'primary', async () => {
     const kinds = [];

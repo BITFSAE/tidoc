@@ -152,6 +152,17 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "actionBtn('pay', paymentActionLabel" in source
     assert 'id="filterPaymentCount"' in html
     assert "f.payment_count = State.paymentCountFilter" in source
+    assert 'id="activeFilters"' not in html
+    assert 'id="advancedDot"' not in html
+    assert "syncFilterControlStates" in source
+    assert ".chip-select.is-filtered" in css
+    assert ".adv-field.is-filtered" in css
+    assert ".adv-field.is-filtered select:focus" in css
+    assert ".adv-field.is-filtered .adv-range:focus-within" in css
+    assert 'class="btn small adv-clear-btn" id="clearFilters" disabled' in html
+    assert "clearButton.disabled = !hasAnyFilter()" in source
+    assert ".adv-clear-btn:disabled" in css
+    assert "background: linear-gradient(180deg, var(--primary-soft)" not in css
     assert "actionBtn('physical', '实物'" in source
     assert "showPhysicalAction" in source
     assert "左键点击条目上的批次标签" not in source

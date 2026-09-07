@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>tidoc</title>
   <link rel="icon" type="image/png" href="assets/favicon.png" />
-  <link rel="stylesheet" href="styles.css?v=0.1.27" />
+  <link rel="stylesheet" href="styles.css?v=0.1.28" />
 </head>
 <body>
   <div id="app" class="app">
@@ -79,10 +79,9 @@
               </select>
             </label>
           </div>
-          <button class="chip-toggle" id="advancedToggle">
+          <button type="button" class="chip-toggle" id="advancedToggle" aria-expanded="false">
             <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             <span>高级</span>
-            <span class="dot hidden" id="advancedDot"></span>
           </button>
 
           <label class="chip-select chip-toggle sort-chip">
@@ -155,13 +154,13 @@
             </select>
           </div>
           <div class="adv-actions">
-            <button class="btn small ghost" id="clearFilters">清空筛选</button>
+            <button type="button" class="btn small adv-clear-btn" id="clearFilters" disabled>
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 8V4m0 0h4M5 4l3.2 3.2a7 7 0 1 1-1.1 8.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span>清空全部筛选</span>
+            </button>
           </div>
         </div>
       </div>
-
-      <!-- 活跃筛选标签 -->
-      <div class="active-filters hidden" id="activeFilters"></div>
 
       <!-- 条目区 -->
       <main class="content">
@@ -227,7 +226,7 @@
   <div id="modalRoot"></div>
   <div id="toastRoot" class="toast-root" aria-live="polite"></div>
 
-  <script src="api.js?v=0.1.27"></script>
-  <script src="app.js?v=0.1.27"></script>
+  <script src="api.js?v=0.1.28"></script>
+  <script src="app.js?v=0.1.28"></script>
 </body>
 </html>

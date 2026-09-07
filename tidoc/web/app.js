@@ -626,7 +626,7 @@ async function refreshEntries() {
     State.entries = [];
   }
   renderEntries();
-  renderActiveFilters();
+  syncFilterControlStates();
 }
 
 // ------------------------------------------------------------------ 渲染列表
@@ -1173,34 +1173,33 @@ function renderEmptyState() {
   }
 }
 
-function renderActiveFilters() {
-  const wrap = $('#activeFilters');
-  const chips = [];
-  const mkChip = (label, onClear) => {
-    const c = el('span', 'filter-chip', `<span>${esc(label)}</span>`);
-    const x = el('button', null, CLOSE_ICON);
-    x.onclick = () => { State.selected.clear(); onClear(); }; c.appendChild(x);
-    chips.push(c);
-  };
-  // 工具条上已经可见的筛选条件不再生成 active chip，避免同一状态重复占位。
-  if ($('#filterStatus')?.value) mkChip('状态：' + STATUS_LABEL[$('#filterStatus').value], () => { $('#filterStatus').value = ''; refreshEntries(); });
-  if ($('#filterCheck').value) mkChip('校验：' + CHECK_LABEL[$('#filterCheck').value], () => { $('#filterCheck').value = ''; refreshEntries(); });
-  // 批次聚焦已经由上方批次标签表达，避免同一状态在筛选 chip 里重复出现。
-  if ($('#filterAmountMin').value || $('#filterAmountMax').value) mkChip(`金额 ${$('#filterAmountMin').value || '∞'}–${$('#filterAmountMax').value || '∞'}`, () => { $('#filterAmountMin').value = ''; $('#filterAmountMax').value = ''; refreshEntries(); });
-  if ($('#filterDateFrom').value || $('#filterDateTo').value) mkChip(`日期 ${$('#filterDateFrom').value || '…'}–${$('#filterDateTo').value || '…'}`, () => { $('#filterDateFrom').value = ''; $('#filterDateTo').value = ''; refreshEntries(); });
-  if (State.tagFilter) mkChip('标签：' + State.tagFilter, () => { State.tagFilter = ''; $('#filterTag').value = ''; refreshEntries(); });
-  if (State.notesFilter) mkChip('备注：' + (State.notesFilter === 'yes' ? '有' : '无'), () => { State.notesFilter = ''; $('#filterNotes').value = ''; refreshEntries(); });
-  if (State.paymentCountFilter) mkChip('付款截图：多张', () => { State.paymentCountFilter = ''; $('#filterPaymentCount').value = ''; refreshEntries(); });
+function syncFilterControlStates() {
+  ['filterTitle', 'filterProfile', 'filterTag'].forEach((id) => {
+    const control = $('#' + id);
+    control?.closest('.chip-select')?.classList.toggle('is-filtered', !!control.value);
+  });
 
-  wrap.innerHTML = '';
-  if (!chips.length) {
-    wrap.classList.add('hidden');
-    $('#advancedDot').classList.add('hidden');
-    return;
-  }
-  wrap.classList.remove('hidden');
-  chips.forEach((c) => wrap.appendChild(c));
-  $('#advancedDot').classList.toggle('hidden', !chips.length);
+  const advancedGroups = [
+    ['filterDateFrom', 'filterDateTo'],
+    ['filterAmountMin', 'filterAmountMax'],
+    ['filterCheck'],
+    ['filterNotes'],
+    ['filterPaymentCount'],
+  ];
+  let hasAdvancedFilter = false;
+  advancedGroups.forEach((ids) => {
+    const filtered = ids.some((id) => !!$('#' + id)?.value);
+    const field = $('#' + ids[0])?.closest('.adv-field');
+    field?.classList.toggle('is-filtered', filtered);
+    hasAdvancedFilter ||= filtered;
+  });
+
+  const toggle = $('#advancedToggle');
+  toggle?.classList.toggle('is-filtered', hasAdvancedFilter);
+  if (toggle) toggle.title = hasAdvancedFilter ? '已启用高级筛选' : '高级筛选';
+
+  const clearButton = $('#clearFilters');
+  if (clearButton) clearButton.disabled = !hasAnyFilter();
 }
 
 function hasAnyFilter() {
@@ -2214,14 +2213,14 @@ function bindEvents() {
   });
 
   let kwTimer;
-  const relist = () => { State.selected.clear(); refreshEntries(); };
-  const relistFromAdvanced = () => { State.selected.clear(); State.quickView = 'all'; updateQuickViewButtons(); refreshEntries(); };
+  const relist = () => { State.selected.clear(); syncFilterControlStates(); refreshEntries(); };
+  const relistFromAdvanced = () => { State.selected.clear(); State.quickView = 'all'; updateQuickViewButtons(); syncFilterControlStates(); refreshEntries(); };
   if ($('#filterStatus')) $('#filterStatus').onchange = relistFromAdvanced;
   $('#filterTitle').onchange = () => { State.activeTitle = $('#filterTitle').value; relist(); };
   $('#filterCheck').onchange = relistFromAdvanced;
   $('#filterProfile').onchange = relist;
   $('#sortSelect').onchange = relist;
-  $('#filterKeyword').oninput = () => { showSearchHintIfEmpty(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
+  $('#filterKeyword').oninput = () => { showSearchHintIfEmpty(); syncFilterControlStates(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
   $('#searchClear').onclick = () => {
     $('#filterKeyword').value = '';
     showSearchHintIfEmpty();
@@ -2229,8 +2228,8 @@ function bindEvents() {
     relist();
     $('#filterKeyword').focus();
   };
-  $('#filterAmountMin').oninput = () => { clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
-  $('#filterAmountMax').oninput = () => { clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
+  $('#filterAmountMin').oninput = () => { syncFilterControlStates(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
+  $('#filterAmountMax').oninput = () => { syncFilterControlStates(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
   $('#filterDateFrom').onchange = relist;
   $('#filterDateTo').onchange = relist;
 
@@ -2238,6 +2237,7 @@ function bindEvents() {
     const p = $('#advancedPanel');
     p.classList.toggle('hidden');
     $('#advancedToggle').classList.toggle('active', !p.classList.contains('hidden'));
+    $('#advancedToggle').setAttribute('aria-expanded', p.classList.contains('hidden') ? 'false' : 'true');
   };
   $('#clearFilters').onclick = () => clearAllFilters();
 
@@ -2325,6 +2325,7 @@ function clearAllFilters() {
   State.notesFilter = '';
   State.paymentCountFilter = '';
   showSearchHintIfEmpty();
+  syncFilterControlStates();
   renderBatchFolders();
   refreshEntries();
 }

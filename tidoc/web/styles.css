@@ -105,20 +105,22 @@ body {
   position: relative; height: 36px;
   border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink);
   border-radius: 10px; display: inline-flex; align-items: center; overflow: hidden;
-  cursor: pointer; flex: 0 0 auto; box-shadow: var(--shadow-sm);
-  transition: border-color .14s, box-shadow .14s, transform .14s, background .14s;
+  cursor: pointer; flex: 0 0 auto; box-shadow: none;
+  transition: border-color .14s, background-color .14s, color .14s;
 }
-.batch-folder:hover { border-color: #cfd6e0; transform: translateY(-1px); box-shadow: var(--shadow); }
+.batch-folder:hover { border-color: #bcc8dc; background: #f8faff; }
 .batch-folder.active {
-  border-color: var(--primary);
-  background: linear-gradient(180deg, var(--primary-soft), var(--panel-raised) 60%);
-  box-shadow: 0 0 0 2px rgba(43, 95, 209, .12);
+  border-color: #9ab8ef; color: var(--primary);
+  background: var(--primary-soft);
 }
+.batch-folder.active:hover { border-color: #7fa5e9; background: #dfeafb; }
+.batch-folder:focus-visible { outline: 2px solid rgba(43, 95, 209, .32); outline-offset: 2px; }
 .batch-folder.unbatched {
   padding: 5px 12px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 2px;
 }
 .batch-folder.unbatched > span { font-size: 12px; font-weight: 600; }
 .batch-folder.unbatched small { color: var(--ink-faint); font-size: 10.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.batch-folder.unbatched.active small { color: #607caf; }
 .batch-folder.archived { color: var(--ink-soft); }
 .batch-folder.archived.active { color: var(--ink); }
 .batch-folder.new {
@@ -398,6 +400,12 @@ body {
 .chip-select > svg, .chip-toggle > svg { flex: 0 0 auto; color: var(--ink-faint); }
 .chip-select:hover, .chip-toggle:hover { border-color: var(--primary); color: var(--ink); }
 .chip-select:hover > svg, .chip-toggle:hover > svg { color: var(--primary); }
+.chip-select.is-filtered, .chip-toggle.is-filtered {
+  background: var(--primary-soft); border-color: #a9c3f2; color: var(--primary);
+}
+.chip-select.is-filtered > svg, .chip-toggle.is-filtered > svg,
+.chip-select.is-filtered .chip-label { color: var(--primary); }
+.chip-select.is-filtered select { color: var(--univ-ink); font-weight: 600; }
 .chip-label { font-weight: 600; color: var(--ink-soft); white-space: nowrap; }
 .chip-select select {
   border: none; background: transparent; font-size: 12px; padding: 0 0 0 2px; outline: none; cursor: pointer; color: var(--ink);
@@ -432,10 +440,6 @@ body {
   margin-left: -10px;
   pointer-events: none;
 }
-.chip-toggle .dot {
-  width: 6px; height: 6px; border-radius: 50%; background: var(--primary); display: inline-block;
-}
-.chip-toggle .dot.hidden { display: none; }
 .chip-toggle.active { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
 
 @media (max-width: 920px) {
@@ -468,7 +472,10 @@ body {
 .adv-grid { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; }
 .adv-field { display: flex; flex-direction: column; gap: 5px; }
 .adv-field > label { font-size: 10.5px; font-weight: 600; color: var(--ink-faint); letter-spacing: .06em; text-transform: uppercase; }
-.adv-field select { min-width: 116px; height: 34px; }
+.adv-field select {
+  min-width: 116px; height: 34px; line-height: 31px;
+  padding: 0 30px 1px 12px;
+}
 /* “起—止”区间合并为单个控件，消除两框之间的死白 */
 .adv-range {
   display: inline-flex; align-items: center; gap: 2px;
@@ -476,29 +483,34 @@ body {
   transition: .15s;
 }
 .adv-range:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(43, 95, 209, .12); }
-.adv-range input { width: 116px; border: none; background: transparent; padding: 5px 6px; border-radius: 6px; }
+.adv-range input {
+  width: 116px; height: 28px; border: none; background: transparent;
+  padding: 0 8px 1px; line-height: 27px; border-radius: 6px;
+}
 .adv-range input:focus { box-shadow: none; }
 .adv-range span { color: var(--ink-faint); font-size: 12px; flex-shrink: 0; }
-.adv-actions { margin-left: auto; align-self: flex-end; }
+.adv-field.is-filtered > label { color: var(--primary); }
+.adv-field.is-filtered select,
+.adv-field.is-filtered .adv-range { background: var(--primary-soft); border-color: #a9c3f2; color: var(--univ-ink); }
+.adv-field.is-filtered select { font-weight: 600; }
+.adv-field.is-filtered select:focus,
+.adv-field.is-filtered .adv-range:focus-within { border-color: #a9c3f2; box-shadow: none; }
+.adv-actions { margin-left: 0; align-self: flex-end; }
+.adv-clear-btn {
+  height: 34px; padding: 0 12px; gap: 6px;
+  border-color: #a9c3f2; background: var(--panel-raised); color: var(--primary);
+  font-size: 12px; font-weight: 650;
+}
+.adv-clear-btn:hover { border-color: var(--primary); background: var(--primary-soft); }
+.adv-clear-btn:disabled {
+  border-color: var(--line); background: transparent; color: var(--ink-faint);
+  cursor: default; opacity: .68;
+}
+.adv-clear-btn:disabled:hover { border-color: var(--line); background: transparent; }
 .adv-hint { font-size: 12px; color: var(--ink-faint); line-height: 1.6; max-width: 22ch; }
 @media (max-width: 720px) {
-  .adv-actions { margin-left: 0; }
   .adv-range input { width: 88px; }
 }
-
-.active-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 24px; border-bottom: 1px solid var(--line-soft); background: var(--panel); }
-.active-filters.hidden { display: none; }
-.filter-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: var(--primary-soft); border: 1px solid #c6d8f7; color: var(--univ-ink);
-  padding: 3px 4px 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 500;
-}
-.filter-chip button {
-  border: none; background: transparent; cursor: pointer; color: inherit; opacity: .6; padding: 0;
-  width: 16px; height: 16px; flex: 0 0 16px; border-radius: 50%; display: grid; place-items: center; line-height: 0;
-}
-.filter-chip button svg { display: block; width: 12px; height: 12px; }
-.filter-chip button:hover { opacity: 1; background: rgba(0, 0, 0, .06); }
 
 /* ---------------------------------------------------------------- content */
 .content { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 16px 24px 24px; overflow: hidden; }

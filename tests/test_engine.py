@@ -2,6 +2,8 @@
 
 from decimal import Decimal
 
+import pytest
+
 from tidoc.engine import (
     CHECK_BLOCKED,
     CHECK_PASS,
@@ -12,6 +14,9 @@ from tidoc.engine import (
     clean_item_name,
     money,
     parse_xml,
+    set_title_profiles,
+    supported_titles,
+    title_profiles,
 )
 import tidoc.engine.parser as parser_module
 from tidoc.engine.money import d
@@ -536,3 +541,86 @@ def test_check_title_isolation():
     r = check_invoice(inv, expected_title="北京理工大学")
     assert r.status == CHECK_BLOCKED
     assert "不一致" in r.message
+
+
+# ---------------- 可配置抬头与税号（多学校可用） ----------------
+
+@pytest.fixture
+def restore_title_profiles():
+    """抬头配置是进程内全局状态，测试后必须恢复内置默认。"""
+    yield
+    set_title_profiles(None)
+
+
+def _closed_invoice(buyer_name, buyer_tax_id=""):
+    return ParsedInvoice(
+        invoice_no="1", total=Decimal("100.00"), buyer_name=buyer_name,
+        buyer_tax_id=buyer_tax_id,
+        items=[ParsedItem("*x*甲", "甲", "个", Decimal("1"), Decimal("100.00"))],
+    )
+
+
+def test_custom_school_title_passes_when_configured(restore_title_profiles):
+    set_title_profiles([{"name": "清华大学", "tax_id": "1210000 4000-0999 99xa"}])
+
+    assert check_invoice(
+        _closed_invoice("清华大学", "1210000400009999 9XA")
+    ).status == CHECK_PASS
+
+
+def test_default_title_warns_after_switching_profiles(restore_title_profiles):
+    set_title_profiles([{"name": "清华大学", "tax_id": ""}])
+
+    result = check_invoice(_closed_invoice("北京理工大学", "12100000400009127B"))
+
+    assert result.status == CHECK_WARNING
+    assert "购买方抬头「北京理工大学」不在已配置的抬头内" in result.message
+
+
+def test_title_without_tax_id_only_warns_on_name(restore_title_profiles):
+    set_title_profiles([{"name": "清华大学", "tax_id": ""}])
+
+    result = check_invoice(_closed_invoice("清华大学", "123456789012345678"))
+
+    assert result.status == CHECK_PASS
+
+
+def test_empty_title_profiles_skip_title_checks(restore_title_profiles):
+    set_title_profiles([])
+
+    result = check_invoice(_closed_invoice("任意单位"))
+
+    assert result.status == CHECK_PASS
+    assert "抬头" not in result.message
+
+
+def test_reset_title_profiles_restores_builtin_defaults(restore_title_profiles):
+    set_title_profiles([])
+    assert supported_titles() == ()
+
+    set_title_profiles(None)
+
+    assert supported_titles() == ("北京理工大学", "北京理工大学教育基金会")
+    assert title_profiles() == (
+        ("北京理工大学", "12100000400009127B"),
+        ("北京理工大学教育基金会", "53100000500021676K"),
+    )
+
+
+def test_set_title_profiles_dedupes_and_normalizes():
+    profiles = set_title_profiles([
+        {"name": " 复旦大学 ", "tax_id": "1210 0000-4000 0000 0a"},
+        {"name": "复旦大学", "tax_id": "dup"},
+        {"name": "", "tax_id": "x"},
+    ])
+
+    assert profiles == (("复旦大学", "12100000400000000A"),)
+    set_title_profiles(None)
+
+
+def test_parser_buyer_detection_uses_configured_titles(restore_title_profiles):
+    set_title_profiles([{"name": "清华大学", "tax_id": ""}])
+
+    assert parser_module._split_combined_party_names("清华大学资产公司") == [
+        "清华大学", "资产公司",
+    ]

@@ -276,9 +276,9 @@ def test_export_names_include_local_time_and_settings_show_export_storage():
     assert 'data-export="excel" checked' not in export_dialog
     assert 'data-export="archive" checked' not in export_dialog
     assert "打开导出目录 · ${fmtBytes(maintenance.exports_size || 0)}" in source
-    actions = source.split('<div class="settings-row-actions">', 1)[1].split("</div>", 1)[0]
-    assert 'id="setOpenExports"' in actions
-    assert 'id="setCleanup"' in actions
+    data_block = source.split('<div class="settings-block-title">数据位置</div>', 1)[1].split("阿里云 OCR", 1)[0]
+    assert 'id="setOpenExports"' in data_block
+    assert 'id="setCleanup"' in data_block
     settings_title = styles.split(".settings-block-title {", 1)[1].split("}", 1)[0]
     assert "font-family" not in settings_title
     font_sans = styles.split("--font-sans:", 1)[1].split(";", 1)[0]

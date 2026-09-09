@@ -7,6 +7,7 @@ const State = {
   currentProfileId: null,
   activeTitle: '',
   titleOptions: [],
+  titleProfiles: [{ name: '北京理工大学' }, { name: '北京理工大学教育基金会' }], // 启动时由后端覆盖
   quickView: 'all',
   entries: [],
   selected: new Set(),
@@ -84,6 +85,11 @@ function taskProgress(message) {
 const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基金会': 'found' };
 const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
 const BUILTIN_TITLES = ['北京理工大学', '北京理工大学教育基金会'];
+
+function configuredTitleNames() {
+  // 设置里维护的报账抬头（多学校可用）；为空时列表只显示条目里出现过的抬头。
+  return State.titleProfiles.map((p) => p.name).filter(Boolean);
+}
 const BILIBILI_GUIDE_URL = 'https://www.bilibili.com/video/BV1XN3q69EPi/';
 const DOC_GUIDE_URL = 'https://www.bitfsae.com/news/tidoc-guide';
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
@@ -296,6 +302,10 @@ async function init() {
   await refreshEntries();
   await refreshTagOptions();
   showSearchHintIfEmpty();
+  try {
+    const launch = await Api.takeLaunchFile();
+    if (launch?.path) await importBindleFlow(launch.path);
+  } catch (e) { toast(e.message, 'err'); }
   if (startupUpdate?.upgraded) setTimeout(() => { openReleaseHighlights('updated', startupUpdate); }, 450);
   else await maybeShowFirstUseGuide();
   setTimeout(() => { maybeAutoCheckUpdates(); }, 1200);
@@ -487,7 +497,7 @@ async function loadWorkflowPreferences() {
   const localDefaultEntryTitle = localStorage.getItem(DEFAULT_ENTRY_TITLE_KEY) || '';
   State.multiClaimantMode = local === '1';
   try {
-    const [multiMode, paymentOcr, defaultPaidToInvoice, defaultEntryTitle, themeMode, materialRequirements, verification] = await Promise.all([
+    const [multiMode, paymentOcr, defaultPaidToInvoice, defaultEntryTitle, themeMode, materialRequirements, verification, titleProfiles] = await Promise.all([
       Api.appPreference(MULTI_CLAIMANT_KEY, local || ''),
       Api.appPreference(PAYMENT_OCR_KEY, '1'),
       Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, '1'),
@@ -495,7 +505,11 @@ async function loadWorkflowPreferences() {
       Api.appPreference(THEME_KEY, localTheme),
       Api.materialRequirements(),
       Api.invoiceVerificationPreferences(),
+      Api.titleProfiles(),
     ]);
+    State.titleProfiles = Array.isArray(titleProfiles?.profiles) && titleProfiles.profiles.length
+      ? titleProfiles.profiles
+      : [];
     State.multiClaimantMode = multiMode === '1';
     State.paymentOcrEnabled = paymentOcr !== '0';
     State.defaultPaidToInvoice = defaultPaidToInvoice !== '0';
@@ -551,8 +565,9 @@ async function refreshTitleOptions() {
   const current = State.activeTitle || sel.value || '';
   try {
     const usedTitles = await Api.listTitles();
-    const customTitles = usedTitles.filter((title) => !BUILTIN_TITLES.includes(title));
-    const titles = [...BUILTIN_TITLES, ...customTitles];
+    const configured = configuredTitleNames();
+    const customTitles = usedTitles.filter((title) => !configured.includes(title));
+    const titles = [...configured, ...customTitles];
     State.titleOptions = titles;
     sel.innerHTML = '<option value="">全部</option>' + titles.map((title) =>
       `<option value="${esc(title)}">${esc(TITLE_SHORT[title] || title)}</option>`
@@ -569,7 +584,7 @@ async function refreshTitleOptions() {
 
 function knownTitleValues() {
   return [...new Set([
-    ...BUILTIN_TITLES,
+    ...configuredTitleNames(),
     ...State.titleOptions,
     ...State.entries.map((entry) => entry.title).filter(Boolean),
     State.defaultEntryTitle,
@@ -2655,6 +2670,21 @@ async function openSettings() {
         </div>
       </div>
 
+      <!-- 抬头与税号 -->
+      <div class="settings-block">
+        <div class="settings-block-title">抬头与税号</div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>报账抬头</b>
+            <span>发票识别与校验按这些抬头、税号进行，可添加其他学校或单位</span>
+          </div>
+        </div>
+        <div id="setTitleProfiles" class="settings-titleprofile-list"></div>
+        <div class="settings-row-actions">
+          <button class="btn small ghost" id="setTpAdd">添加抬头</button>
+        </div>
+      </div>
+
       <!-- 偏好 -->
       <div class="settings-block">
         <div class="settings-block-title">偏好</div>
@@ -2665,8 +2695,8 @@ async function openSettings() {
           </div>
           <select id="setDefaultTitle" class="settings-select">
             <option value="">全部</option>
-            <option value="北京理工大学">北京理工大学</option>
-            <option value="北京理工大学教育基金会">教育基金会</option>
+            ${(State.titleOptions.length ? State.titleOptions : configuredTitleNames()).map((title) =>
+              `<option value="${esc(title)}">${esc(TITLE_SHORT[title] || title)}</option>`).join('')}
           </select>
         </div>
         <div class="settings-row">
@@ -2967,6 +2997,65 @@ async function openSettings() {
       }
     };
   });
+  // 抬头与税号配置：就地编辑，失焦/移除即保存，并同步各处抬头下拉。
+  const tpList = body.querySelector('#setTitleProfiles');
+  const titleProfileRowHtml = (profile = {}) => `
+    <input data-tp-name placeholder="抬头名称" value="${esc(profile.name || '')}"/>
+    <input data-tp-tax placeholder="税号（可选）" value="${esc(profile.tax_id || '')}"/>
+    <button type="button" class="btn small ghost" data-tp-remove title="移除该抬头">移除</button>`;
+  const renderTitleProfileRows = () => {
+    tpList.innerHTML = '';
+    State.titleProfiles.forEach((profile) => {
+      tpList.appendChild(el('div', 'settings-titleprofile-row', titleProfileRowHtml(profile)));
+    });
+    if (!State.titleProfiles.length) {
+      tpList.appendChild(el('div', 'settings-titleprofile-empty', '未配置抬头：只提示明细与金额问题，不按抬头校验。'));
+    }
+  };
+  const refillSettingsTitleSelects = () => {
+    const defSel = body.querySelector('#setDefaultTitle');
+    const current = defSel.value;
+    const titles = State.titleOptions.length ? State.titleOptions : configuredTitleNames();
+    defSel.innerHTML = '<option value="">全部</option>' + titles.map((title) =>
+      `<option value="${esc(title)}"${title === current ? ' selected' : ''}>${esc(TITLE_SHORT[title] || title)}</option>`).join('');
+    if (current && !titles.includes(current)) {
+      defSel.value = '';
+      State.activeTitle = '';
+    }
+    const entrySel = body.querySelector('#setDefaultEntryTitle');
+    if (entrySel) entrySel.innerHTML = titleChoiceOptions(State.defaultEntryTitle, '跟随发票识别');
+  };
+  const saveTitleProfiles = async () => {
+    const profiles = [...tpList.querySelectorAll('.settings-titleprofile-row')].map((row) => ({
+      name: row.querySelector('[data-tp-name]').value.trim(),
+      tax_id: row.querySelector('[data-tp-tax]').value.trim(),
+    })).filter((profile) => profile.name || profile.tax_id);
+    try {
+      const r = await Api.setTitleProfiles(profiles);
+      State.titleProfiles = r.profiles || [];
+      renderTitleProfileRows();
+      await refreshTitleOptions();
+      refillSettingsTitleSelects();
+      toast('抬头与税号已保存', 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  renderTitleProfileRows();
+  tpList.addEventListener('click', (ev) => {
+    const remove = ev.target.closest('[data-tp-remove]');
+    if (remove) {
+      remove.closest('.settings-titleprofile-row').remove();
+      saveTitleProfiles();
+    }
+  });
+  tpList.addEventListener('change', (ev) => {
+    if (ev.target.matches('[data-tp-name], [data-tp-tax]')) saveTitleProfiles();
+  });
+  body.querySelector('#setTpAdd').onclick = () => {
+    renderTitleProfileRows();
+    const row = el('div', 'settings-titleprofile-row', titleProfileRowHtml());
+    tpList.appendChild(row);
+    row.querySelector('[data-tp-name]').focus();
+  };
   body.querySelector('#setMultiClaimant').onchange = async (ev) => {
     const enabled = ev.target.checked;
     const value = enabled ? '1' : '0';
@@ -5057,20 +5146,25 @@ async function openBindleImportPreview(path, insp, options = {}) {
   });
 }
 
+async function importBindleFlow(path) {
+  if (!State.currentProfileId) { toast('请先创建报账人', 'err'); return; }
+  const progress = taskProgress('正在检查绑定包完整性…');
+  try {
+    const insp = await Api.inspectBindle(path);
+    progress.close();
+    await openBindleImportPreview(path, insp);
+  } finally {
+    progress.close();
+  }
+}
+
 async function doImport() {
   if (!State.currentProfileId) { toast('请先创建报账人', 'err'); return; }
   try {
     const res = await Api.pickFiles(false, ['绑定包 (*.tidoc)']);
     const paths = res.paths || [];
     if (!paths.length) return;
-    const progress = taskProgress('正在检查绑定包完整性…');
-    try {
-      const insp = await Api.inspectBindle(paths[0]);
-      progress.close();
-      await openBindleImportPreview(paths[0], insp);
-    } finally {
-      progress.close();
-    }
+    await importBindleFlow(paths[0]);
   } catch (e) { toast(e.message, 'err'); }
 }
 

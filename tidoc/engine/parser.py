@@ -280,11 +280,12 @@ def _looks_like_invoice_meta(line: str) -> bool:
 
 def _split_combined_party_names(line: str) -> list[str]:
     """拆分同一行里连写的销售方/购买方名称。"""
-    from .validator import SUPPORTED_TITLES
+    from .validator import supported_titles
 
-    if line in SUPPORTED_TITLES:
+    titles = supported_titles()
+    if line in titles:
         return [line]
-    for title in sorted(SUPPORTED_TITLES, key=len, reverse=True):
+    for title in sorted(titles, key=len, reverse=True):
         if title and title in line and line != title:
             before, after = line.split(title, 1)
             parts: list[str] = []
@@ -414,13 +415,15 @@ def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
     seller_name = seller_tax_id = buyer_name = buyer_tax_id = ""
     if len(parties) >= 2:
         # 数电普通发票的两个抬头通常是「销售方」+「购买方」。版面排版有时销售方在前、
-        # 有时购买方在前；用 SUPPORTED_TITLES 直接识别本校抬头作为购买方，更稳。
+        # 有时购买方在前；用已配置抬头直接识别本校抬头作为购买方，更稳。
+        from .validator import supported_titles
+
+        titles = supported_titles()
         first, second = parties[0], parties[1]
-        from .validator import SUPPORTED_TITLES
-        if any(t and t in first[0] for t in SUPPORTED_TITLES):
+        if any(t and t in first[0] for t in titles):
             buyer_name, buyer_tax_id = first
             seller_name, seller_tax_id = second
-        elif any(t and t in second[0] for t in SUPPORTED_TITLES):
+        elif any(t and t in second[0] for t in titles):
             buyer_name, buyer_tax_id = second
             seller_name, seller_tax_id = first
         else:
@@ -428,9 +431,10 @@ def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
             seller_name, seller_tax_id = first
             buyer_name, buyer_tax_id = second
     elif len(parties) == 1:
-        from .validator import SUPPORTED_TITLES
+        from .validator import supported_titles
+
         only_name, only_tax = parties[0]
-        if any(t and t in only_name for t in SUPPORTED_TITLES):
+        if any(t and t in only_name for t in supported_titles()):
             buyer_name, buyer_tax_id = only_name, only_tax
         else:
             seller_name, seller_tax_id = only_name, only_tax

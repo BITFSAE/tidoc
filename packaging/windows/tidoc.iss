@@ -43,5 +43,12 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 Name: "{autoprograms}\Tidoc"; Filename: "{app}\tidoc.exe"
 Name: "{autodesktop}\Tidoc"; Filename: "{app}\tidoc.exe"; Tasks: desktopicon
 
+; .tidoc 绑定包关联：双击用 Tidoc 打开，图标取自 tidoc.exe 内嵌 logo。
+[Registry]
+Root: HKA; Subkey: "Software\Classes\.tidoc"; ValueType: string; ValueName: ""; ValueData: "Tidoc.Bindle"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Tidoc.Bindle"; ValueType: string; ValueName: ""; ValueData: "Tidoc 绑定包"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Tidoc.Bindle\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\tidoc.exe,0"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Tidoc.Bindle\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\tidoc.exe"" ""%1"""; Flags: uninsdeletekey
+
 [Run]
 Filename: "{app}\tidoc.exe"; Description: "启动 Tidoc"; Flags: nowait postinstall skipifsilent unchecked

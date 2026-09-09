@@ -134,10 +134,21 @@ def _initial_window_background(api: Api) -> str:
     return _LIGHT_WINDOW_BACKGROUND
 
 
+def _launch_bindle_path() -> str:
+    """双击 .tidoc 绑定包启动时，取第一个存在的 .tidoc 参数。"""
+    for arg in sys.argv[1:]:
+        if arg.startswith("-"):
+            continue
+        path = Path(arg)
+        if path.suffix.lower() == ".tidoc" and path.is_file():
+            return str(path)
+    return ""
+
+
 def main() -> None:
     _install_native_stderr_filter()
     from .db.paths import resolve_data_root
-    api = Api(resolve_data_root())
+    api = Api(resolve_data_root(), launch_file=_launch_bindle_path())
     index = web_dir() / "index.html"
     _configure_webview_settings()
     window = webview.create_window(

@@ -17,7 +17,11 @@ from .validator import (
     TITLE_FOUNDATION,
     TITLE_UNIVERSITY,
     check_invoice,
+    expected_tax_ids,
     normalize_tax_id,
+    set_title_profiles,
+    supported_titles,
+    title_profiles,
 )
 
 _PARSER_EXPORTS = {"clean_item_name", "parse_xml", "parse_pdf", "parse_aspose_xml", "parse_invoice_files"}
@@ -54,4 +58,8 @@ __all__ = [
     "TAX_ID_UNIVERSITY",
     "TAX_ID_FOUNDATION",
     "normalize_tax_id",
+    "set_title_profiles",
+    "title_profiles",
+    "supported_titles",
+    "expected_tax_ids",
 ]

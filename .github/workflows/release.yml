@@ -69,7 +69,7 @@ jobs:
           --name tidoc
           --paths "."
           --collect-submodules tidoc
-          --icon "tidoc/web/assets/tidoc-logo.icns"
+          --icon "tidoc/web/assets/tidoc-logo.ico"
           --add-data "tidoc/web;tidoc/web"
           scripts/tidoc_app_entry.py
 

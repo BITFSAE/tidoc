@@ -1305,6 +1305,17 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .settings-row-copy span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
 .settings-requirements-head { padding: 12px 0 6px; border-top: 1px solid var(--line-soft); }
 .settings-requirement-list { padding-bottom: 4px; }
+.settings-titleprofile-list { display: flex; flex-direction: column; gap: 8px; padding: 2px 0 10px; }
+.settings-titleprofile-row {
+  display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto;
+  gap: 7px; align-items: center;
+}
+.settings-titleprofile-row input {
+  min-width: 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
+  font-size: 12.5px; font-family: inherit; background: var(--panel); color: var(--ink);
+}
+.settings-titleprofile-row input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-ring); }
+.settings-titleprofile-empty { padding: 2px 0 6px; font-size: 12px; color: var(--ink-soft); }
 .settings-requirement-row {
   display: flex; align-items: center; justify-content: space-between; gap: 14px;
   padding: 10px 0; border-top: 1px solid var(--line-soft);

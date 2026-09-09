@@ -43,6 +43,7 @@ OCR_ACCESS_KEY_ID_PREF_KEY = "tidoc.ocr.accessKeyId"
 OCR_ACCESS_KEY_SECRET_PREF_KEY = "tidoc.ocr.accessKeySecret"
 DEFAULT_PAID_TO_INVOICE_PREF_KEY = "tidoc.defaultPaidToInvoiceTotal"
 DEFAULT_ENTRY_TITLE_PREF_KEY = "tidoc.defaultEntryTitle"
+TITLE_PROFILES_PREF_KEY = "tidoc.titleProfiles"
 BINDLE_INCLUDE_NOTES_PREF_KEY = "tidoc.bindle.includeNotes"
 BINDLE_INCLUDE_TAGS_PREF_KEY = "tidoc.bindle.includeTags"
 INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY = (
@@ -100,7 +101,7 @@ def _guard(func):
 
 
 class Api:
-    def __init__(self, data_root: str | Path | None = None):
+    def __init__(self, data_root: str | Path | None = None, launch_file: str = ""):
         self._api_lock = threading.RLock()
         self.data_root = DataRoot(data_root, manage_pointer=True)
         self.db = Database(self.data_root.db_path)
@@ -111,7 +112,9 @@ class Api:
         self.ocr = OcrRepo(self.db)
         self._window = None
         self._verification_sessions: dict[str, dict] = {}
+        self._launch_file = launch_file
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
+        self._apply_title_profiles()
         self._sync_entry_statuses()
 
     def __dir__(self):
@@ -199,6 +202,58 @@ class Api:
         values = self.entries.set_material_requirements(requirements or {})
         self._sync_entry_statuses()
         return values
+
+    # ------------------------------------------------------------ 抬头与税号
+    def _apply_title_profiles(self):
+        """把持久化的抬头配置应用到识别引擎；没有保存过时恢复内置默认。"""
+        from .engine import set_title_profiles
+
+        raw = self._preference_value(TITLE_PROFILES_PREF_KEY)
+        if not raw:
+            set_title_profiles(None)
+            return
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+        if isinstance(parsed, list):
+            set_title_profiles([item for item in parsed if isinstance(item, dict)])
+
+    @_guard
+    def title_profiles(self):
+        from .engine import title_profiles as current_profiles
+
+        return {
+            "profiles": [
+                {"name": name, "tax_id": tax_id}
+                for name, tax_id in current_profiles()
+            ]
+        }
+
+    @_guard
+    def set_title_profiles(self, profiles=None):
+        """保存抬头与购买方税号配置，并让识别、校验立即按新配置执行。"""
+        from .engine import set_title_profiles
+
+        normalized = set_title_profiles(profiles or [])
+        value = json.dumps(
+            [{"name": name, "tax_id": tax_id} for name, tax_id in normalized],
+            ensure_ascii=False,
+        )
+        self._set_preference_value(TITLE_PROFILES_PREF_KEY, value)
+        return {
+            "profiles": [
+                {"name": name, "tax_id": tax_id}
+                for name, tax_id in normalized
+            ]
+        }
+
+    @_guard
+    def take_launch_file(self):
+        """返回双击 .tidoc 文件启动时携带的路径；只消费一次。"""
+        path = self._launch_file
+        self._launch_file = ""
+        return {"path": path or ""}
 
     @_guard
     def invoice_verification_preferences(self):

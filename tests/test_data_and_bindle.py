@@ -13,6 +13,7 @@ from tidoc.db import (
     Database,
     DataRoot,
     EntryRepo,
+    OcrRepo,
     ProfileRepo,
 )
 from tidoc.engine import parse_xml
@@ -771,7 +772,68 @@ def test_bindle_restores_claimants_and_respects_optional_notes_and_tags(repos, t
 
     with zipfile.ZipFile(package) as archive:
         payload = json.loads(archive.read("entries.json"))
-    assert payload["bindle_version"] == 2
+    assert payload["bindle_version"] == 3
+
+
+def test_bindle_round_trip_preserves_ocr_result_and_badge_state(repos, tmp_path):
+    profile = repos["profiles"].create("张三", "李老师")
+    entry_id = repos["entries"].create(
+        profile["id"],
+        parsed=ParsedInvoice(
+            invoice_no="26952000001672381653", seller="本地销售方",
+            total=Decimal("12.00"), source="xml",
+        ),
+    )
+    ocr = OcrRepo(repos["db"])
+    normalized = json.dumps({
+        "invoice_no": "26952000001672381653",
+        "seller": "阿里云销售方",
+        "total": "12.00",
+        "items": [],
+        "closure_pass": True,
+    }, ensure_ascii=False)
+    ocr.record(
+        entry_id,
+        file_sha256="abc",
+        raw_json='{"invoiceNumber":"26952000001672381653"}',
+        normalized=normalized,
+        closure_pass=True,
+        pending=["seller"],
+        applied_changes={"fields": [{
+            "field": "invoice_date", "label": "发票日期", "before": "",
+            "after": "2026-09-01", "action": "fill",
+        }], "items": None},
+    )
+    package = export_bindle(
+        repos["entries"], repos["attachments"], [entry_id],
+        tmp_path / "含识别结果.tidoc", {profile["id"]: profile},
+    )
+    inspected = inspect_bindle(package)
+    assert inspected["entries"][0]["ocr_results"][0]["raw_json"].startswith("{")
+
+    target_root = DataRoot(tmp_path / "ocr-target")
+    target_db = Database(target_root.db_path)
+    target_profiles = ProfileRepo(target_db)
+    fallback = target_profiles.create("王五", "赵老师")
+    target_entries = EntryRepo(target_db)
+    target_attachments = AttachmentRepo(target_db, target_root)
+    result = import_bindle(
+        target_entries, target_attachments, package, fallback["id"]
+    )
+
+    imported_id = result["entry_ids"][0]
+    imported_ocr = OcrRepo(target_db)
+    saved = imported_ocr.latest(imported_id)
+    assert saved["pending_list"] == ["seller"]
+    assert saved["applied_changes_data"]["fields"][0]["after"] == "2026-09-01"
+    assert saved["is_local_call"] is False
+    assert imported_ocr.count_calls() == 0
+    from tidoc.services.ocr import sync_ocr_states
+    pending, recognized = sync_ocr_states(
+        target_entries, imported_ocr, target_entries.list()
+    )
+    assert pending == {imported_id}
+    assert recognized == {imported_id}
 
 
 def test_bindle_import_applies_profile_tag_and_existing_batch_before_commit(repos, tmp_path):

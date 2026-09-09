@@ -23,7 +23,8 @@ import sqlite3
 # v5：新增 ocr_results，保存阿里云 OCR 原始响应与解析快照（防重复计费）；
 # v6：校正北京理工大学购买方税号，并刷新由旧税号规则产生的提醒；
 # v7：记录本地发票 / 付款截图识别规则版本与结果，避免同版重复识别。
-SCHEMA_VERSION = 7
+# v8：阿里云 OCR 记录保存当次自动修正快照，并区分本机调用与绑定包导入。
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -174,6 +175,8 @@ CREATE TABLE IF NOT EXISTS ocr_results (
     closure_pass INTEGER NOT NULL DEFAULT 0,  -- 明细含税合计与价税合计是否闭合
     applied_at   TEXT DEFAULT '',     -- 自动补齐 / 修复发生的时间
     pending      TEXT DEFAULT '',     -- 待人工确认的差异 JSON 列表（字段名 + "items"）
+    applied_changes TEXT DEFAULT '', -- 当次自动修正的修正前 / 修正后快照 JSON
+    is_local_call INTEGER NOT NULL DEFAULT 1, -- 0 表示随绑定包导入，不计入本机调用次数
     status       TEXT NOT NULL DEFAULT 'ok',  -- ok / failed
     error        TEXT DEFAULT '',
     created_at   TEXT NOT NULL,
@@ -280,6 +283,19 @@ def init_db(conn: sqlite3.Connection) -> None:
         ):
             if name not in attachment_columns:
                 conn.execute(f"ALTER TABLE attachments ADD COLUMN {name} TEXT DEFAULT ''")
+
+    if previous_version < 8:
+        ocr_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(ocr_results)").fetchall()
+        }
+        if "applied_changes" not in ocr_columns:
+            conn.execute(
+                "ALTER TABLE ocr_results ADD COLUMN applied_changes TEXT DEFAULT ''"
+            )
+        if "is_local_call" not in ocr_columns:
+            conn.execute(
+                "ALTER TABLE ocr_results ADD COLUMN is_local_call INTEGER NOT NULL DEFAULT 1"
+            )
 
     # CREATE TABLE IF NOT EXISTS 不会给历史表补列，因此按真实列结构兜底迁移。
     entry_field_columns = {

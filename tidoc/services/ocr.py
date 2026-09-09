@@ -153,8 +153,16 @@ def _invoke_ocr_external(executable: str, tasks: list[dict], credentials: dict) 
         cmd = [executable, "--input", str(in_path), "--result", str(out_path)]
         if sys.platform == "darwin" and executable.endswith(".app"):
             cmd = ["open", "-W", "-a", executable, "--args", "--input", str(in_path), "--result", str(out_path)]
+        run_options = {}
+        if sys.platform.startswith("win"):
+            # The OCR component is a console executable. Launch it without creating a
+            # terminal window so a batch does not flash one black window per invoice.
+            run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         try:
-            proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=300)
+            proc = subprocess.run(
+                cmd, text=True, capture_output=True, check=False, timeout=300,
+                **run_options,
+            )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("OCR 识别组件执行超时。") from exc
         if proc.returncode != 0:
@@ -200,6 +208,75 @@ def _items_same(local_items: list[dict], ocr_items: list[dict]) -> bool:
     if len(local_items or []) != len(ocr_items or []):
         return False
     return all(_item_tuple(a) == _item_tuple(b) for a, b in zip(local_items, ocr_items))
+
+
+def _items_have_useful_ocr_change(local_items: list[dict], ocr_items: list[dict]) -> bool:
+    """Return whether OCR adds or changes a value instead of merely omitting one."""
+    if len(local_items or []) != len(ocr_items or []):
+        return True
+    fields = ("name", "actual_name", "unit", "quantity", "total", "spec")
+    for local, ocr in zip(local_items, ocr_items):
+        for field in fields:
+            ocr_value = str(ocr.get(field) or "").strip()
+            if not ocr_value:
+                continue
+            if field == "total":
+                if money(d(local.get(field))) != money(d(ocr_value)):
+                    return True
+            elif field == "spec":
+                if "".join(str(local.get(field) or "").split()) != "".join(ocr_value.split()):
+                    return True
+            elif "".join(str(local.get(field) or "").split()) != "".join(ocr_value.split()):
+                return True
+    return False
+
+
+def _merge_ocr_items_without_dropping_local_values(
+    local_items: list[dict], ocr_items: list[dict]
+) -> list[dict]:
+    """Use OCR improvements while retaining populated local cells OCR left empty."""
+    if len(local_items or []) != len(ocr_items or []):
+        return [dict(item) for item in (ocr_items or [])]
+    merged = []
+    fields = ("name", "actual_name", "unit", "quantity", "total", "spec")
+    for local, ocr in zip(local_items, ocr_items):
+        item = dict(ocr)
+        for field in fields:
+            if not str(item.get(field) or "").strip() and str(local.get(field) or "").strip():
+                item[field] = local[field]
+        merged.append(item)
+    return merged
+
+
+def _snapshot_items(items: list[dict]) -> list[dict]:
+    """Keep only user-facing item values in an OCR audit snapshot."""
+    fields = ("name", "actual_name", "unit", "quantity", "unit_price", "total", "spec")
+    return [
+        {field: str(item.get(field) or "") for field in fields}
+        for item in (items or [])
+    ]
+
+
+def _applied_change_snapshot(entry: dict, plan: dict, normalized: dict) -> dict:
+    """Capture what automatic application is about to change, before it is applied."""
+    fields = [
+        {
+            "field": row["field"],
+            "label": row.get("label") or FIELD_LABELS.get(row["field"], row["field"]),
+            "before": row.get("local", ""),
+            "after": row.get("ocr", ""),
+            "action": row["action"],
+        }
+        for row in plan.get("field_rows", [])
+        if row.get("action") in {"fill", "autofix"}
+    ]
+    items = None
+    if plan.get("items_action") == "replace":
+        items = {
+            "before": _snapshot_items(entry.get("items") or []),
+            "after": _snapshot_items(normalized.get("items") or []),
+        }
+    return {"fields": fields, "items": items} if fields or items else {}
 
 
 def plan_entry_update(
@@ -250,7 +327,9 @@ def plan_entry_update(
             "action": action,
         })
 
-    items_differ = not _items_same(entry.get("items") or [], normalized.get("items") or [])
+    items_differ = _items_have_useful_ocr_change(
+        entry.get("items") or [], normalized.get("items") or []
+    )
     if not items_differ:
         items_action = "same"
     elif not source_xml and closure_pass:
@@ -379,6 +458,7 @@ def run_ocr_for_entries(
     credentials: dict,
     components_dir: str | Path | None = None,
     include_xml: bool = False,
+    skip_existing: bool = False,
 ) -> dict:
     """对一批条目调用阿里云 OCR：识别 → 落库 → 按策略应用 → 返回逐条汇总。"""
     results: list[dict] = []
@@ -402,6 +482,16 @@ def run_ocr_for_entries(
         has_xml = any(a["type"] == TYPE_INVOICE_XML for a in attachments)
         if has_xml and not include_xml:
             skipped.append({"entry_id": entry_id, "reason": "已有 XML 权威数据，默认跳过"})
+            continue
+        existing = ocr_repo.latest(entry_id)
+        current_sha = str(pdf.get("sha256") or "")
+        if (
+            skip_existing
+            and existing
+            and current_sha
+            and str(existing.get("file_sha256") or "") == current_sha
+        ):
+            skipped.append({"entry_id": entry_id, "reason": "当前发票已有识别结果，已跳过"})
             continue
         tasks.append({"entry_id": entry_id, "file_path": str(Path(attachments_dir) / pdf["stored_path"])})
         prepared.append({"entry_id": entry_id, "attachment": pdf, "has_xml": has_xml, "title": entry.get("title", "")})
@@ -436,7 +526,13 @@ def run_ocr_for_entries(
             entry, normalized, human_modified,
             xml_authoritative=bool(task_info.get("has_xml")),
         )
-        applied = apply_plan(entries_repo, entry_id, plan, normalized)
+        applied_normalized = dict(normalized)
+        if plan.get("items_action") == "replace":
+            applied_normalized["items"] = _merge_ocr_items_without_dropping_local_values(
+                entry.get("items") or [], normalized.get("items") or []
+            )
+        applied_changes = _applied_change_snapshot(entry, plan, applied_normalized)
+        applied = apply_plan(entries_repo, entry_id, plan, applied_normalized)
         record = ocr_repo.record(
             entry_id,
             file_sha256=attachment.get("sha256") or "",
@@ -445,6 +541,7 @@ def run_ocr_for_entries(
             normalized=json.dumps(normalized, ensure_ascii=False),
             closure_pass=bool(normalized.get("closure_pass")),
             pending=plan["pending"],
+            applied_changes=applied_changes,
         )
         ocr_repo.mark_applied(record["id"], plan["pending"])
         results.append({
@@ -460,7 +557,12 @@ def run_ocr_for_entries(
     return {"called": len(tasks), "results": results, "skipped": skipped}
 
 
-def result_view(entries_repo: EntryRepo, ocr_repo: OcrRepo, entry_id: str) -> dict:
+def result_view(
+    entries_repo: EntryRepo,
+    ocr_repo: OcrRepo,
+    entry_id: str,
+    attachments_dir: str | Path | None = None,
+) -> dict:
     """详情页 OCR 区块的数据：最新结果 + 基于当前条目实时计算的差异与决策。"""
     entry = entries_repo.get(entry_id)
     if not entry:
@@ -473,6 +575,7 @@ def result_view(entries_repo: EntryRepo, ocr_repo: OcrRepo, entry_id: str) -> di
         "call_count": ocr_repo.count_calls(),
         "stale": False,
         "plan": None,
+        "applied_changes": {},
     }
     latest = ocr_repo.latest(entry_id)
     if not latest:
@@ -504,7 +607,77 @@ def result_view(entries_repo: EntryRepo, ocr_repo: OcrRepo, entry_id: str) -> di
     )
     view["ocr_items"] = normalized.get("items") or []
     view["normalized"] = normalized
+    applied_changes = latest.get("applied_changes_data") or {}
+    if not applied_changes:
+        applied_changes = _infer_legacy_applied_changes(
+            entries_repo, entry, latest, normalized, pdf, attachments_dir
+        )
+    view["applied_changes"] = applied_changes
     return view
+
+
+def _infer_legacy_applied_changes(
+    entries_repo: EntryRepo,
+    entry: dict,
+    latest: dict,
+    normalized: dict,
+    pdf: dict | None,
+    attachments_dir: str | Path | None,
+) -> dict:
+    """Recover useful detail for OCR rows created before change snapshots existed."""
+    field_rows = entries_repo.db.conn.execute(
+        """SELECT field, old_value, new_value
+             FROM field_history
+            WHERE entry_id = ? AND changed_at = ? AND field LIKE '[阿里云OCR]%'
+            ORDER BY id""",
+        (entry["id"], latest.get("created_at") or ""),
+    ).fetchall()
+    fields = []
+    for row in field_rows:
+        field = str(row["field"] or "").removeprefix("[阿里云OCR]")
+        fields.append({
+            "field": field,
+            "label": FIELD_LABELS.get(field, field),
+            "before": row["old_value"] or "",
+            "after": row["new_value"] or "",
+            "action": "autofix",
+        })
+
+    items = None
+    if (
+        attachments_dir
+        and pdf
+        and latest.get("closure_pass")
+        and not any(
+            a["type"] == TYPE_INVOICE_XML for a in (entry.get("attachments") or [])
+        )
+        and _items_same(entry.get("items") or [], normalized.get("items") or [])
+    ):
+        try:
+            from ..engine.parser import parse_pdf
+
+            parsed = parse_pdf(Path(attachments_dir) / pdf["stored_path"])
+            before = [
+                {
+                    "name": item.name,
+                    "actual_name": item.actual_name,
+                    "unit": item.unit,
+                    "quantity": str(item.quantity) if item.quantity is not None else "",
+                    "unit_price": str(item.unit_price) if item.unit_price is not None else "",
+                    "total": str(item.total),
+                    "spec": item.spec,
+                }
+                for item in parsed.items
+            ]
+            after = normalized.get("items") or []
+            if not _items_same(before, after):
+                items = {"before": _snapshot_items(before), "after": _snapshot_items(after)}
+        except Exception:  # noqa: BLE001 - legacy detail recovery must not break the detail page
+            items = None
+
+    if not fields and not items:
+        return {}
+    return {"fields": fields, "items": items, "inferred_from_legacy": True}
 
 
 def _xml_flag(entry: dict) -> bool | None:

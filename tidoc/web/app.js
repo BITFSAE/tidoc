@@ -5227,7 +5227,8 @@ async function openOcrDialog(ids) {
   const entries = preview.entries || [];
   const withPdf = entries.filter((it) => it.has_invoice_pdf);
   const xmlCount = withPdf.filter((it) => it.has_invoice_xml).length;
-  const existingCount = withPdf.filter((it) => !it.has_invoice_xml && it.existing_result).length;
+  const existingCount = withPdf.filter((it) => it.existing_current_result).length;
+  const canSkipExisting = ids.length > 1 && existingCount > 0;
   const noPdfCount = entries.length - withPdf.length;
 
   const body = el('div');
@@ -5236,8 +5237,9 @@ async function openOcrDialog(ids) {
       将识别 <b id="ocrCallCount">0</b> 张发票。${OCR_QUOTA_NOTE} <button class="link-btn" id="ocrQuotaLink">查看免费额度</button>
     </div>
     <div class="ocr-confirm-notes">
+      ${canSkipExisting ? `<label class="chk"><input type="checkbox" id="ocrSkipExisting" checked/> 跳过当前发票已有识别结果的 ${existingCount} 条（避免重复计费）</label>` : ''}
       ${xmlCount ? `<label class="chk"><input type="checkbox" id="ocrIncludeXml"/> 包含已有 XML 数据的 ${xmlCount} 条（结果仅作比对，同样计费）</label>` : ''}
-      ${existingCount ? `<div class="hint">其中 ${existingCount} 条已有识别结果，再次识别会重复计费，一般无需重试。</div>` : ''}
+      ${!canSkipExisting && existingCount ? `<div class="hint">已有识别结果，再次识别会重复计费。</div>` : ''}
       ${noPdfCount ? `<div class="hint">另有 ${noPdfCount} 条没有发票 PDF，自动跳过。</div>` : ''}
     </div>`;
 
@@ -5246,20 +5248,28 @@ async function openOcrDialog(ids) {
     Api.openExternalUrl(OCR_CONSOLE_URL).catch((e) => toast(e.message, 'err'));
   });
   const chk = body.querySelector('#ocrIncludeXml');
-  const renderCount = () => {
+  const skipChk = body.querySelector('#ocrSkipExisting');
+  const eligibleEntries = () => {
     const includeXml = !!(chk && chk.checked);
-    countEl.textContent = String(withPdf.filter((it) => includeXml || !it.has_invoice_xml).length);
+    const skipExisting = !!(skipChk && skipChk.checked);
+    return withPdf.filter((it) =>
+      (includeXml || !it.has_invoice_xml)
+      && (!skipExisting || !it.existing_current_result)
+    );
+  };
+  const renderCount = () => {
+    countEl.textContent = String(eligibleEntries().length);
   };
   if (chk) chk.onchange = renderCount;
+  if (skipChk) skipChk.onchange = renderCount;
   renderCount();
 
   const runBtn = mkBtn('开始识别', 'primary', async () => {
     runBtn.disabled = true;
     runBtn.textContent = '识别中…';
     const includeXml = !!(chk && chk.checked);
-    const targets = withPdf
-      .filter((it) => includeXml || !it.has_invoice_xml)
-      .map((it) => it.entry_id);
+    const skipExisting = !!(skipChk && skipChk.checked);
+    const targets = eligibleEntries().map((it) => it.entry_id);
     if (!targets.length) { toast('没有可识别的发票', 'err'); runBtn.disabled = false; runBtn.textContent = '开始识别'; return; }
 
     const progress = taskProgress(`正在识别 0/${targets.length}…`);
@@ -5268,7 +5278,9 @@ async function openOcrDialog(ids) {
     let done = 0;
     for (const entryId of targets) {
       try {
-        const r = await Api.runOcrRecognition([entryId], { include_xml: includeXml });
+        const r = await Api.runOcrRecognition(
+          [entryId], { include_xml: includeXml, skip_existing: skipExisting }
+        );
         const row = (r.results || [])[0];
         if (row) rows.push(row);
         else (r.skipped || []).forEach((s) => skipped.push(s));
@@ -5377,6 +5389,32 @@ function ocrItemsMiniTable(items) {
   </tr></thead><tbody>${rows || '<tr><td colspan="5" style="color:var(--ink-soft)">无明细</td></tr>'}</tbody></table>`;
 }
 
+function ocrAppliedChangesHtml(changes) {
+  const fields = changes?.fields || [];
+  const itemChange = changes?.items || null;
+  if (!fields.length && !itemChange) return '';
+  const fieldRows = fields.map((row) => {
+    const moneyField = row.field === 'total';
+    const before = row.before === '' ? '—' : (moneyField ? fmtMoney(row.before) : esc(row.before));
+    const after = row.after === '' ? '—' : (moneyField ? fmtMoney(row.after) : esc(row.after));
+    return `<tr><td>${esc(row.label || OCR_FIELD_LABEL[row.field] || row.field)}</td><td>${before}</td><td class="ocr-ocr-col">${after}</td></tr>`;
+  }).join('');
+  const fieldBlock = fieldRows ? `<table class="ocr-diff-table"><thead><tr>
+    <th>修正字段</th><th>修正前</th><th>修正后</th>
+  </tr></thead><tbody>${fieldRows}</tbody></table>` : '';
+  const itemsBlock = itemChange ? `<div class="ocr-compare">
+    <div><div class="ocr-compare-title">修正前明细</div>${ocrItemsMiniTable(itemChange.before)}</div>
+    <div><div class="ocr-compare-title">修正后明细</div>${ocrItemsMiniTable(itemChange.after)}</div>
+  </div>` : '';
+  const count = fields.length + (itemChange ? 1 : 0);
+  const legacyNote = changes.inferred_from_legacy
+    ? '<div class="hint">早期识别记录未直接保存修正前明细，以下修正前值由原发票重新读取。</div>' : '';
+  return `<details class="ocr-applied-log" open>
+    <summary>本次自动修正 ${count} 项</summary>
+    <div class="ocr-applied-log-body">${legacyNote}${fieldBlock}${itemsBlock}</div>
+  </details>`;
+}
+
 const OCR_ACTION_LABEL = {
   same: '一致', ocr_empty: '阿里云为空', fill: '可补齐', autofix: '可修复', pending: '有差异',
 };
@@ -5434,6 +5472,7 @@ async function loadOcrDetail(container, mm, entryId, currentItems) {
       <span class="sep">·</span><span>本机累计调用 ${view.call_count} 次</span>
     </div>
     ${view.stale ? '<div class="hint warn">发票文件在识别后被替换过，以下结果对应旧文件，建议重新识别。</div>' : ''}
+    ${ocrAppliedChangesHtml(view.applied_changes)}
     ${plan.pending?.length ? `<div class="hint">待确认：${plan.pending.map((f) => OCR_FIELD_LABEL[f] || f).map(esc).join('、')}。</div>` : ''}
     <table class="ocr-diff-table"><thead><tr>
       <th>字段</th><th>当前值</th><th>阿里云值</th><th>状态</th><th style="width:56px"></th>

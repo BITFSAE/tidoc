@@ -1613,6 +1613,20 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 .ocr-detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 12px; color: var(--ink-soft); }
 .ocr-detail-meta .sep { color: var(--ink-faint); }
 .ocr-detail-actions { display: flex; gap: 8px; margin-top: 2px; }
+.ocr-applied-log {
+  border: 1px solid var(--ocr-line-soft);
+  border-radius: 9px;
+  background: var(--ocr-panel);
+  overflow: hidden;
+}
+.ocr-applied-log > summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.ocr-applied-log-body { display: flex; flex-direction: column; gap: 10px; padding: 0 10px 10px; }
 
 .ocr-diff-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .ocr-diff-table th, .ocr-diff-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
@@ -1645,6 +1659,10 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 }
 .ocr-key-controls input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-ring); }
 .ocr-key-row { align-items: center; }
+
+@media (max-width: 760px) {
+  .ocr-compare { grid-template-columns: 1fr; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   ::view-transition-old(root), ::view-transition-new(root) { animation: none !important; }

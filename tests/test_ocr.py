@@ -220,6 +220,27 @@ def test_invoke_ocr_requires_available_component(tmp_path, monkeypatch):
         ocr_service.invoke_ocr([{"entry_id": "e1", "file_path": "x.pdf"}], {}, tmp_path)
 
 
+def test_windows_external_ocr_does_not_open_console(tmp_path, monkeypatch):
+    from tidoc.services import ocr as ocr_service
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        result_path = Path(cmd[cmd.index("--result") + 1])
+        result_path.write_text(
+            json.dumps({"ok": True, "data": {"results": []}}), "utf-8"
+        )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(ocr_service.sys, "platform", "win32")
+    monkeypatch.setattr(ocr_service.subprocess, "CREATE_NO_WINDOW", 0x1234, raising=False)
+    monkeypatch.setattr(ocr_service.subprocess, "run", fake_run)
+
+    assert ocr_service._invoke_ocr_external("tidoc-ocr.exe", [], {}) == []
+    assert seen["creationflags"] == 0x1234
+
+
 # ---------------------------------------------------------------- 差异策略
 def _entry(repos, source="pdf", **parsed_kwargs):
     from tidoc.engine.models import ParsedInvoice
@@ -424,6 +445,89 @@ def test_run_ocr_for_entries_end_to_end(repos, monkeypatch):
     saved = ocr.latest(entry["id"])
     assert json.loads(saved["raw_json"])["invoiceNumber"] == SAMPLE_DATA["invoiceNumber"]
     assert json.loads(saved["normalized"])["closure_pass"] is True
+    changes = saved["applied_changes_data"]
+    assert changes["fields"][0] == {
+        "field": "invoice_date",
+        "label": "发票日期",
+        "before": "",
+        "after": "2026-01-31",
+        "action": "fill",
+    }
+    assert changes["items"]["before"] == []
+    assert changes["items"]["after"][0]["spec"] == "V2.1"
+
+
+def test_run_ocr_can_skip_current_existing_result(repos, monkeypatch):
+    from tidoc.db import OcrRepo
+    from tidoc.services import ocr as ocr_service
+
+    entry = _entry(repos, source="pdf")
+    attachment = _attach_invoice_pdf(repos, entry["id"])
+    ocr = OcrRepo(repos["db"])
+    ocr.record(entry["id"], file_sha256=attachment["sha256"], normalized="{}")
+
+    def unexpected_invoke(*args, **kwargs):
+        raise AssertionError("已识别且文件未变化时不应再次调用")
+
+    monkeypatch.setattr(ocr_service, "invoke_ocr", unexpected_invoke)
+    result = ocr_service.run_ocr_for_entries(
+        repos["entries"], ocr, repos["root"].attachments_dir, [entry["id"]],
+        {"access_key_id": "id", "access_key_secret": "secret"},
+        skip_existing=True,
+    )
+    assert result["called"] == 0
+    assert result["skipped"] == [{
+        "entry_id": entry["id"], "reason": "当前发票已有识别结果，已跳过",
+    }]
+
+
+def test_auto_apply_keeps_local_item_value_when_ocr_cell_is_empty(repos, monkeypatch):
+    from tidoc.db import OcrRepo
+    from tidoc.engine.models import ParsedInvoice, ParsedItem
+    from tidoc.services import ocr as ocr_service
+
+    profile_id = repos["profiles"].create("张三", "李四")["id"]
+    parsed = ParsedInvoice(
+        invoice_no="24122000000012345679",
+        total=Decimal("12.00"),
+        source="pdf",
+        items=[ParsedItem(
+            name="*电子元件*模块", actual_name="模块", unit="个",
+            quantity=Decimal("1"), total=Decimal("12.00"), spec="",
+        )],
+    )
+    entry_id = repos["entries"].create(profile_id, parsed=parsed)
+    _attach_invoice_pdf(repos, entry_id)
+    ocr = OcrRepo(repos["db"])
+    normalized = {
+        "invoice_no": parsed.invoice_no,
+        "invoice_date": "",
+        "seller": "",
+        "buyer_name": "",
+        "buyer_tax_id": "",
+        "total": "12.00",
+        "closure_pass": True,
+        "items": [{
+            "name": "*电子元件*模块", "actual_name": "模块", "unit": "个",
+            "quantity": "", "total": "12.00", "spec": "ABC-01",
+        }],
+    }
+
+    monkeypatch.setattr(ocr_service, "invoke_ocr", lambda *args, **kwargs: [{
+        "entry_id": entry_id, "ok": True, "raw_data": {},
+        "normalized": normalized, "error": "",
+    }])
+    result = ocr_service.run_ocr_for_entries(
+        repos["entries"], ocr, repos["root"].attachments_dir, [entry_id],
+        {"access_key_id": "id", "access_key_secret": "secret"},
+    )
+
+    assert result["results"][0]["items_replaced"] is True
+    updated = repos["entries"].get(entry_id)["items"][0]
+    assert updated["quantity"] == "1"
+    assert updated["spec"] == "ABC-01"
+    after = ocr.latest(entry_id)["applied_changes_data"]["items"]["after"][0]
+    assert after["quantity"] == "1"
 
 
 def test_run_ocr_skips_xml_entries_without_flag(repos, monkeypatch):
@@ -505,6 +609,16 @@ def test_latest_ok_rows_and_mark_applied_skip_write(repos):
     assert conn.total_changes == before
     ocr.mark_applied(second["id"], ["seller"])
     assert conn.total_changes > before
+
+
+def test_imported_ocr_result_is_not_counted_as_local_call(repos):
+    from tidoc.db import OcrRepo
+
+    ocr = OcrRepo(repos["db"])
+    entry = _entry(repos)
+    ocr.record(entry["id"], normalized="{}", is_local_call=False)
+    assert ocr.latest(entry["id"])["is_local_call"] is False
+    assert ocr.count_calls() == 0
 
 
 def test_sync_ocr_states_recomputes_after_manual_correction(repos):
@@ -599,6 +713,9 @@ def test_api_run_ocr_guards_and_pending_flag(api, monkeypatch, ocr_component_rea
     res = api.run_ocr_recognition([entry_id])["data"]
     assert res["called"] == 1
     assert res["results"][0]["items_replaced"] is True
+    preview = api.ocr_preview([entry_id])["data"]["entries"][0]
+    assert preview["existing_result"] is True
+    assert preview["existing_current_result"] is True
 
     # 带差异的条目在列表里能被识别出来（卡片徽标数据源）
     entries = api.list_entries()["data"]

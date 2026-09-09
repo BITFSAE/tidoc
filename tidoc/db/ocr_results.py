@@ -41,18 +41,25 @@ class OcrRepo:
         status: str = "ok",
         error: str = "",
         pending: Iterable[str] = (),
+        applied_changes: dict | None = None,
+        is_local_call: bool = True,
     ) -> dict:
         """记录一次识别（成功或失败），并让同条目的旧行退出待确认状态。"""
         now = _now()
         pending_json = json.dumps(list(pending), ensure_ascii=False)
         cur = self.db.conn.execute(
             """INSERT INTO ocr_results(entry_id, provider, file_sha256, file_name,
-               raw_json, normalized, closure_pass, applied_at, pending, status, error, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+               raw_json, normalized, closure_pass, applied_at, pending, applied_changes,
+               is_local_call, status, error, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 entry_id, provider, file_sha256, file_name,
                 raw_json, normalized, 1 if closure_pass else 0,
-                "", pending_json if status == "ok" else "[]", status, error, now,
+                now if applied_changes else "",
+                pending_json if status == "ok" else "[]",
+                json.dumps(applied_changes or {}, ensure_ascii=False),
+                1 if is_local_call else 0,
+                status, error, now,
             ),
         )
         # 新结果成为唯一权威：旧成功行的待确认差异不再驱动徽标
@@ -111,7 +118,9 @@ class OcrRepo:
 
     def count_calls(self) -> int:
         """累计调用次数（含失败），供设置里对账计费。"""
-        row = self.db.conn.execute("SELECT COUNT(*) FROM ocr_results").fetchone()
+        row = self.db.conn.execute(
+            "SELECT COUNT(*) FROM ocr_results WHERE is_local_call = 1"
+        ).fetchone()
         return int(row[0]) if row else 0
 
     def mark_applied(self, result_id: int, pending: list[str]) -> None:
@@ -195,4 +204,11 @@ class OcrRepo:
             item["pending_list"] = json.loads(item.get("pending") or "[]")
         except (TypeError, ValueError, json.JSONDecodeError):
             item["pending_list"] = []
+        try:
+            item["applied_changes_data"] = json.loads(
+                item.get("applied_changes") or "{}"
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            item["applied_changes_data"] = {}
+        item["is_local_call"] = bool(item.get("is_local_call", 1))
         return item

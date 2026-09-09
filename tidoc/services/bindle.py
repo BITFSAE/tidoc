@@ -24,7 +24,7 @@ from ..db.entries import EntryRepo
 from .signing import MANIFEST_NAME, sign_bytes, verify
 from .summary import build_summary
 
-BINDLE_VERSION = 2
+BINDLE_VERSION = 3
 ENTRIES_NAME = "entries.json"
 SUMMARY_NAME = "summary.json"
 
@@ -81,6 +81,17 @@ def _serialize_entry(
         ],
         "attachments": attachments,
         "history": history,
+        "ocr_results": [
+            {
+                key: result.get(key)
+                for key in (
+                    "provider", "file_sha256", "file_name", "raw_json", "normalized",
+                    "closure_pass", "applied_at", "pending", "applied_changes",
+                    "status", "error", "created_at",
+                )
+            }
+            for result in entry.get("_ocr_results", [])
+        ],
     }
 
 
@@ -120,6 +131,12 @@ def export_bindle(
             prof = profile_lookup.get(entry.get("profile_id"), {})
             entry["_profile_name"] = prof.get("name", "")
             entry["_reviewer"] = prof.get("reviewer", "")
+            entry["_ocr_results"] = [
+                dict(row) for row in entries_repo.db.conn.execute(
+                    "SELECT * FROM ocr_results WHERE entry_id = ? ORDER BY id",
+                    (eid,),
+                ).fetchall()
+            ]
             if entry.get("profile_id"):
                 referenced_profile_ids.add(entry["profile_id"])
             referenced_profile_ids.update(
@@ -431,6 +448,29 @@ def import_bindle(
                            VALUES(?,?,?,?,?,?)""",
                         (new_id, h.get("field", ""), h.get("old_value", ""), h.get("new_value", ""),
                          history_profile_id, h.get("changed_at", now)),
+                    )
+                for result in e.get("ocr_results", []):
+                    conn.execute(
+                        """INSERT INTO ocr_results(
+                               entry_id, provider, file_sha256, file_name, raw_json,
+                               normalized, closure_pass, applied_at, pending,
+                               applied_changes, is_local_call, status, error, created_at
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?)""",
+                        (
+                            new_id,
+                            result.get("provider", "aliyun"),
+                            result.get("file_sha256", ""),
+                            result.get("file_name", ""),
+                            result.get("raw_json", ""),
+                            result.get("normalized", ""),
+                            int(bool(result.get("closure_pass"))),
+                            result.get("applied_at", ""),
+                            result.get("pending", "[]"),
+                            result.get("applied_changes", ""),
+                            result.get("status", "ok"),
+                            result.get("error", ""),
+                            result.get("created_at", now),
+                        ),
                     )
                 # 附件：从包里解出到新条目目录，重建记录
                 dest_dir = attachments_repo.data_root.entry_dir(new_id)

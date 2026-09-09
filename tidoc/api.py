@@ -1576,16 +1576,25 @@ class Api:
                                 "existing_result": False, "pending_count": 0})
                 continue
             attachments = entry.get("attachments") or []
-            has_pdf = any(a["type"] == TYPE_INVOICE_PDF for a in attachments)
+            pdf = next((a for a in attachments if a["type"] == TYPE_INVOICE_PDF), None)
+            has_pdf = pdf is not None
             has_xml = any(a["type"] == TYPE_INVOICE_XML for a in attachments)
             pending = self.ocr.pending_fields(entry_id)
+            existing = self.ocr.latest(entry_id)
+            existing_current = bool(
+                existing
+                and pdf
+                and pdf.get("sha256")
+                and existing.get("file_sha256") == pdf.get("sha256")
+            )
             preview.append({
                 "entry_id": entry_id,
                 "invoice_no": entry.get("invoice_no") or "",
                 "seller": entry.get("seller") or "",
                 "has_invoice_pdf": has_pdf,
                 "has_invoice_xml": has_xml,
-                "existing_result": self.ocr.latest(entry_id) is not None,
+                "existing_result": existing is not None,
+                "existing_current_result": existing_current,
                 "pending_count": len(pending),
             })
         return {"entries": preview}
@@ -1597,6 +1606,7 @@ class Api:
 
         options = options or {}
         include_xml = bool(options.get("include_xml"))
+        skip_existing = bool(options.get("skip_existing"))
         status = self._ocr_status_data()
         if not status.get("available"):
             missing = ", ".join(status.get("missing") or ["OCR 识别组件"])
@@ -1616,6 +1626,7 @@ class Api:
             credentials,
             self.data_root.components_dir,
             include_xml=include_xml,
+            skip_existing=skip_existing,
         )
         result["total_calls"] = self.ocr.count_calls()
         return result
@@ -1624,7 +1635,9 @@ class Api:
     def get_ocr_result(self, entry_id):
         """详情页 OCR 区块：最新结果 + 基于当前值的实时差异与决策。"""
         from .services.ocr import result_view
-        return result_view(self.entries, self.ocr, entry_id)
+        return result_view(
+            self.entries, self.ocr, entry_id, self.data_root.attachments_dir
+        )
 
     @_guard
     def apply_ocr_field(self, entry_id, field):

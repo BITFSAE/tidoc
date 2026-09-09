@@ -494,11 +494,11 @@ body {
 .app-title-text b { font-size: 16px; color: var(--ink); font-weight: 700; text-transform: lowercase; }
 .app-title-text small { font-size: 10px; color: var(--ink-faint); letter-spacing: .06em; text-transform: uppercase; }
 
-/* 品牌字标：SVG 内联、笔画走 currentColor，跟随应用主题换色 */
+/* 品牌字标：SVG 内联、笔画走 currentColor，跟随应用主题换色；viewBox 已裁掉字周留白 */
 .logo { color: #1B1F2A; }
 :root[data-theme="dark"] .logo { color: #FFFFFF; }
-.app-title-text .logo { display: block; height: 15px; width: 49px; }
-.settings-about-copy > b .logo { display: inline-block; height: 15px; width: 49px; vertical-align: -2px; margin-right: 2px; }
+.app-title-text .logo { display: block; height: 19px; width: auto; aspect-ratio: 501 / 141; }
+.settings-about-copy > b .logo { display: inline-block; height: 17px; width: auto; aspect-ratio: 501 / 141; vertical-align: -2px; margin-right: 2px; }
 
 .profile-switch { margin-left: auto; }
 .profile-switch.inline { margin-left: 0; }

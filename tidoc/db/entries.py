@@ -25,13 +25,14 @@ VALUE_SOURCE_MANUAL = "manual"
 # These versions describe recognition rules, not the Tidoc release. Keep them
 # unchanged for ordinary app releases and bump only the affected value when its
 # local recognition logic or result contract changes.
-LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-09-09"
+LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-09-09-2"
 LOCAL_PAYMENT_RECOGNITION_VERSION = "payment-local-2026-09-06"
 PAYMENT_CHECK_PREFIX = "[付款截图识别]"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
 LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "invoice_date")
 # 阿里云 OCR 采用值写入关键信息时的留痕前缀（区别于人工修正）
 OCR_HISTORY_LABEL = "[阿里云OCR]"
+LOCAL_RECOGNITION_HISTORY_LABEL = "[本地重新识别]"
 MANUAL_HISTORY_PREFIX = "[人工修正]"
 
 STATUS_DRAFT = "draft"
@@ -626,6 +627,33 @@ class EntryRepo:
         self._touch(entry_id)
         self.db.conn.commit()
         return self.get(entry_id)
+
+    def update_recognized_buyer_tax_id(self, entry_id: str, value: str) -> bool:
+        """Apply a corrected local parser result unless the user edited this field."""
+        if "buyer_tax_id" in self.human_modified_locked_fields(entry_id):
+            return False
+        row = self.db.conn.execute(
+            "SELECT buyer_tax_id FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("条目不存在。")
+        old_value = row["buyer_tax_id"] or ""
+        new_value = str(value or "")
+        if new_value == old_value:
+            return False
+        self.db.conn.execute(
+            "UPDATE entries SET buyer_tax_id = ? WHERE id = ?", (new_value, entry_id)
+        )
+        self._log_history(
+            entry_id,
+            f"{LOCAL_RECOGNITION_HISTORY_LABEL}buyer_tax_id",
+            old_value,
+            new_value,
+            "",
+        )
+        self._touch(entry_id)
+        self.db.conn.commit()
+        return True
 
     def human_modified_locked_fields(self, entry_id: str) -> set[str]:
         """被人工修正过的关键信息字段集合；OCR 不静默覆盖这些值。"""

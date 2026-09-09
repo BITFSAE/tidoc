@@ -265,6 +265,27 @@ def test_pdf_keeps_explicit_buyer_and_seller_roles_for_personal_invoice():
     assert inv.seller == "杭州洋橙电子商务有限公司"
 
 
+def test_pdf_layout_keeps_empty_buyer_tax_id_separate_from_seller(monkeypatch, tmp_path):
+    normal_text = """电子发票（普通发票） 发票号码：26952000001957382236
+开票日期：2026年05月13日
+名称： 名称：
+北京理工大学教育基金会 深圳维特智能科技有限公司
+91440300359289517R
+价税合计（小写） ¥855.00
+"""
+    layout_text = """购  名称：北京理工大学教育基金会      销  名称：深圳维特智能科技有限公司
+购  统一社会信用代码/纳税人识别号：    销  统一社会信用代码/纳税人识别号：91440300359289517R
+"""
+    monkeypatch.setattr(parser_module, "_pdf_text", lambda _path: normal_text)
+    monkeypatch.setattr(parser_module, "_pdf_layout_text", lambda _path: layout_text)
+
+    parsed = parse_pdf(tmp_path / "empty-buyer-tax-id.pdf")
+
+    assert parsed.buyer_name == "北京理工大学教育基金会"
+    assert parsed.buyer_tax_id == ""
+    assert parsed.seller == "深圳维特智能科技有限公司"
+
+
 def test_pdf_skips_download_label_before_detached_party_values():
     text = """电子发票（普通发票） 发票号码：
 开票日期：

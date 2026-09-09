@@ -185,9 +185,30 @@ def _extract_layout_parties(text: str) -> tuple[str, str, str, str] | None:
 
     if not buyer or not seller:
         return None
-    tax_ids = _collect_tax_ids(lines)
-    buyer_tax_id = tax_ids[0] if len(tax_ids) >= 1 else ""
-    seller_tax_id = tax_ids[1] if len(tax_ids) >= 2 else ""
+    buyer_tax_id = seller_tax_id = ""
+    tax_label = re.compile(
+        r"统一\s*社会\s*信用\s*代码\s*/\s*纳税人\s*识别号\s*[:：]"
+    )
+    roles_located = False
+    for line in lines:
+        labels = list(tax_label.finditer(line))
+        if len(labels) < 2:
+            continue
+        # Layout text preserves the left buyer and right seller columns.  Read
+        # each value from its own column so an empty buyer cell cannot consume
+        # the seller's tax id as the first global candidate.
+        values: list[str] = []
+        for index, label in enumerate(labels[:2]):
+            end = labels[index + 1].start() if index + 1 < len(labels) else len(line)
+            candidate = _TAX_ID_RE.search(line[label.end():end])
+            values.append(candidate.group(0) if candidate else "")
+        buyer_tax_id, seller_tax_id = values
+        roles_located = True
+        break
+    if not roles_located:
+        tax_ids = _collect_tax_ids(lines)
+        buyer_tax_id = tax_ids[0] if len(tax_ids) >= 1 else ""
+        seller_tax_id = tax_ids[1] if len(tax_ids) >= 2 else ""
     return seller, seller_tax_id, buyer, buyer_tax_id
 
 

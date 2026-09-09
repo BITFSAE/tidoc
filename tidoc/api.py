@@ -314,8 +314,15 @@ class Api:
                     raise ValueError("附件中的发票号码与当前条目不一致")
 
                 # 条目中已锁定或人工修正的发票总额仍是校验权威值；重新识别
-                # 只替换识别明细，不静默覆盖实付、备注或关键字段。
+                # 不静默覆盖实付、备注或人工修正过的关键字段。购买方税号可由
+                # 新版本地解析规则纠正，并由仓储层留痕。
                 parsed.total = d(entry.get("total"))
+                if "buyer_tax_id" in self.entries.human_modified_locked_fields(entry_id):
+                    parsed.buyer_tax_id = entry.get("buyer_tax_id") or ""
+                else:
+                    self.entries.update_recognized_buyer_tax_id(
+                        entry_id, parsed.buyer_tax_id
+                    )
                 check = check_invoice(parsed, expected_title=entry.get("title", ""))
                 self.entries.replace_recognized_items(
                     entry_id,

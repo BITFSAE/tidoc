@@ -147,6 +147,83 @@ def test_batch_reparse_replaces_items_and_preserves_user_fields(api, tmp_path, m
     assert entry["fields"]["actual_item_name"]["modified"] is True
 
 
+def test_batch_reparse_corrects_misassigned_buyer_tax_id(api, tmp_path, monkeypatch):
+    from tidoc.db import TYPE_INVOICE_PDF
+    from tidoc.engine.validator import TITLE_FOUNDATION
+
+    profile = api.profiles.create("张三", "李老师")
+    entry_id = api.entries.create(
+        profile["id"],
+        title=TITLE_FOUNDATION,
+        parsed=ParsedInvoice(
+            invoice_no="26952000001957382236",
+            seller="深圳维特智能科技有限公司",
+            buyer_name=TITLE_FOUNDATION,
+            buyer_tax_id="91440300359289517R",
+            total=Decimal("855.00"),
+            source="pdf",
+        ),
+    )
+    invoice_path = tmp_path / "invoice.pdf"
+    invoice_path.write_bytes(b"placeholder")
+    api.attachments.add(entry_id, invoice_path, TYPE_INVOICE_PDF)
+    reparsed = ParsedInvoice(
+        invoice_no="26952000001957382236",
+        seller="深圳维特智能科技有限公司",
+        buyer_name=TITLE_FOUNDATION,
+        buyer_tax_id="",
+        total=Decimal("855.00"),
+        source="pdf",
+    )
+    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args: reparsed)
+
+    response = api.reparse_entries([entry_id])
+
+    assert response["ok"] is True
+    entry = api.entries.get(entry_id)
+    assert entry["buyer_tax_id"] == ""
+    assert any(
+        history["field"] == "[本地重新识别]buyer_tax_id"
+        for history in entry["history"]
+    )
+
+
+def test_batch_reparse_preserves_manually_corrected_buyer_tax_id(api, tmp_path, monkeypatch):
+    from tidoc.db import TYPE_INVOICE_PDF
+    from tidoc.engine.validator import TITLE_FOUNDATION
+
+    profile = api.profiles.create("张三", "李老师")
+    entry_id = api.entries.create(
+        profile["id"],
+        title=TITLE_FOUNDATION,
+        parsed=ParsedInvoice(
+            invoice_no="123",
+            buyer_name=TITLE_FOUNDATION,
+            buyer_tax_id="wrong",
+            total=Decimal("84.00"),
+            source="pdf",
+        ),
+    )
+    api.entries.correct_locked_field(
+        entry_id, "buyer_tax_id", "manual-value", profile["id"]
+    )
+    invoice_path = tmp_path / "manual-invoice.pdf"
+    invoice_path.write_bytes(b"placeholder")
+    api.attachments.add(entry_id, invoice_path, TYPE_INVOICE_PDF)
+    reparsed = ParsedInvoice(
+        invoice_no="123",
+        buyer_name=TITLE_FOUNDATION,
+        buyer_tax_id="",
+        total=Decimal("84.00"),
+        source="pdf",
+    )
+    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args: reparsed)
+
+    api.reparse_entries([entry_id])
+
+    assert api.entries.get(entry_id)["buyer_tax_id"] == "manual-value"
+
+
 def test_correcting_buyer_tax_id_refreshes_recognition_warning(api):
     from tidoc.engine import check_invoice
 

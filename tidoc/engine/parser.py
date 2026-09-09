@@ -636,6 +636,23 @@ def _strip_overlaid_item_headers(line: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+_PDF_UNIT_SUFFIXES = (
+    "公斤", "千克", "平方米", "立方米",
+    "个", "件", "只", "台", "套", "张", "片", "盒", "包", "把", "次",
+    "支", "瓶", "卷", "米", "组", "枚", "块", "本", "辆", "条", "根",
+    "批", "箱", "桶", "对", "份",
+)
+
+
+def _normalize_pdf_unit(unit: str) -> str:
+    """Remove a trailing model letter that the layout text fused into a Chinese unit."""
+    value = str(unit or "").strip()
+    for suffix in _PDF_UNIT_SUFFIXES:
+        if value.endswith(suffix) and re.fullmatch(rf"[A-Za-z]+{re.escape(suffix)}", value):
+            return suffix
+    return value
+
+
 def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedItem]:
     """从 PDF 文本行里抽物品明细。
 
@@ -694,11 +711,25 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
         return True
 
     def make_item(name: str, unit: str, quantity, amount, tax):
+        actual_name = clean_item_name(name)
+        normalized_unit = _normalize_pdf_unit(unit)
+        if (
+            normalized_unit
+            and normalized_unit not in _PDF_UNIT_SUFFIXES
+            and actual_name.endswith(normalized_unit)
+        ):
+            # On rows without a unit, the loose tail matcher can capture the
+            # final words of the item name (for example ``价外费用``) as a unit.
+            normalized_unit = ""
         item = ParsedItem(
             name=name,
-            actual_name=clean_item_name(name),
-            unit=unit,
-            quantity=quantity if quantity is not None else Decimal("1"),
+            actual_name=actual_name,
+            unit=normalized_unit,
+            quantity=(
+                quantity
+                if quantity is not None
+                else Decimal("1") if normalized_unit else None
+            ),
             total=money(amount + tax),
         )
         return item
@@ -757,17 +788,21 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             allow_layout_suffix = False
             continue
         parsed = _parse_amount_tax_line(item_line)
-        if parsed and layout and (not parsed[0] or parsed[1] is None):
+        if parsed and (not parsed[0] or parsed[1] is None):
             # The generic folded-line regex can match the tail but lose the
-            # unit/quantity when layout extraction joins numeric columns.
+            # unit/quantity. Prefer the amount-closure parser when it can recover them.
             loose = _parse_loose_amount_tax_line(item_line)
             if loose:
                 unit, quantity, amount, tax = loose
-                raw_name = (
-                    item_line[:item_line.find(unit)].strip()
-                    if has_overlaid_headers and unit
-                    else layout_name_part(raw_line)
-                )
+                unit_marker = re.search(
+                    rf"\s+{re.escape(unit)}\s*(?=-?\d)", item_line
+                ) if unit else None
+                if has_overlaid_headers and unit_marker:
+                    raw_name = item_line[:unit_marker.start()].strip()
+                elif layout:
+                    raw_name = layout_name_part(raw_line)
+                else:
+                    raw_name = item_line[:unit_marker.start()].strip() if unit_marker else item_line[:parsed[4]].strip()
                 item = make_item(raw_name, unit, quantity, amount, tax)
                 items.append(item)
                 last = item
@@ -779,10 +814,14 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             if loose:
                 unit, quantity, amount, tax = loose
                 marker = re.search(r"\d+(?:\.\d+)?%[\u4e00-\u9fffA-Za-z]{1,4}\s+-?\d+\.\d{2}", item_line)
+                unit_marker = re.search(
+                    rf"\s+{re.escape(unit)}\s*(?=-?\d)", item_line
+                ) if unit else None
                 raw_name = (
                     item_line[:item_line.find(unit)].strip()
                     if has_overlaid_headers and unit
                     else layout_name_part(raw_line) if layout
+                    else item_line[:unit_marker.start()].strip() if unit_marker
                     else item_line[:marker.start()].strip() if marker
                     else item_line
                 )

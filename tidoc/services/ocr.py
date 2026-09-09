@@ -196,6 +196,24 @@ def _item_value_same(field: str, local, ocr) -> bool:
     )
 
 
+def _item_names_same(local: dict, ocr: dict) -> bool:
+    """Treat a model suffix in the name as equal to the same OCR specification."""
+    local_name = "".join(unicodedata.normalize(
+        "NFKC", str(local.get("actual_name") or local.get("name") or "")
+    ).split())
+    ocr_name = "".join(unicodedata.normalize(
+        "NFKC", str(ocr.get("actual_name") or ocr.get("name") or "")
+    ).split())
+    if local_name == ocr_name:
+        return True
+    local_spec = "".join(unicodedata.normalize("NFKC", str(local.get("spec") or "")).split())
+    ocr_spec = "".join(unicodedata.normalize("NFKC", str(ocr.get("spec") or "")).split())
+    return bool(
+        (ocr_spec and local_name == ocr_name + ocr_spec)
+        or (local_spec and ocr_name == local_name + local_spec)
+    )
+
+
 def _item_update_kind(local_items: list[dict], ocr_items: list[dict]) -> str:
     """Classify OCR items as same, safe blank filling, or a conflicting alternative."""
     if not local_items and not ocr_items:
@@ -210,8 +228,13 @@ def _item_update_kind(local_items: list[dict], ocr_items: list[dict]) -> str:
     has_conflict = False
     # Specification is intentionally excluded: it is not needed for reimbursement
     # and must not make an otherwise matching item look changed.
-    fields = ("name", "actual_name", "unit", "quantity", "total")
+    fields = ("unit", "quantity", "total")
     for local, ocr in zip(local_items, ocr_items):
+        if not _item_names_same(local, ocr):
+            if not str(local.get("actual_name") or local.get("name") or "").strip():
+                has_fill = True
+            else:
+                has_conflict = True
         for field in fields:
             local_value = str(local.get(field) or "").strip()
             ocr_value = str(ocr.get(field) or "").strip()

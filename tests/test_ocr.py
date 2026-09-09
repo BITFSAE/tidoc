@@ -613,6 +613,25 @@ def test_quantity_difference_is_pending_even_when_amount_closes(repos):
     assert "items" in plan["pending"]
 
 
+def test_model_suffix_in_local_name_matches_ocr_specification(repos):
+    from tidoc.engine.models import ParsedItem
+    from tidoc.services.ocr import plan_entry_update
+
+    entry = _entry(repos, source="pdf", items=[ParsedItem(
+        name="*配电控制设备*接线端子6.3", actual_name="接线端子6.3", unit="包",
+        quantity=Decimal("2"), total=Decimal("1130.00"),
+    )])
+    normalized = _normalized()
+    normalized["items"] = [{
+        "name": "*配电控制设备*接线端子", "actual_name": "接线端子", "unit": "包",
+        "quantity": "2", "total": "1130.00", "spec": "6.3",
+    }]
+
+    plan = plan_entry_update(entry, normalized)
+    assert plan["items_action"] == "same"
+    assert "items" not in plan["pending"]
+
+
 def test_run_ocr_skips_xml_entries_without_flag(repos, monkeypatch):
     from tidoc.db import OcrRepo
     from tidoc.services import ocr as ocr_service

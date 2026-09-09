@@ -142,7 +142,7 @@ def test_pdf_layout_removes_overlaid_headers_from_item_rows(monkeypatch, tmp_pat
             "*有色金属压延材*铝板加项目名称 规格型号 单 位 数 量 单 价 "
             "212.87金 额税率/征收率1% 税 额2.13\n"
             "工定制\n",
-            "铝板加工定制", "", Decimal("1"), Decimal("215.00"),
+            "铝板加工定制", "", None, Decimal("215.00"),
         ),
         (
             "发票号码：26922000000972420271\n开票日期：2026年08月19日\n"
@@ -329,6 +329,53 @@ def test_layout_joined_numbers_support_multi_digit_quantity_and_amount():
     assert len(items) == 1
     assert items[0].quantity == Decimal("12")
     assert items[0].total == Decimal("210.18")
+
+
+def test_pdf_prefers_closure_parser_when_folded_regex_loses_unit_and_quantity():
+    items = _parse_pdf_items([
+        "*配电控制设备*接线端子6.3 包 2 4.950495049505 9.90 1% 0.10",
+        "*金属制品*压线钳 SN-48B 把 134.653465346534734.65 1% 0.35",
+    ])
+
+    assert [(item.unit, item.quantity, item.total) for item in items] == [
+        ("包", Decimal("2"), Decimal("10.00")),
+        ("把", Decimal("1"), Decimal("35.00")),
+    ]
+    assert items[1].actual_name == "压线钳 SN-48B"
+
+
+def test_layout_removes_model_letter_fused_into_chinese_unit():
+    cases = [
+        ("*电子元件*电源模块       URB2405YMD-10W个 2 12.21 24.42 13% 3.17", "个", Decimal("2")),
+        ("*印制电路板*线路板       LV-PDM(Power_D片 5 50.984 254.92 13% 33.14", "片", Decimal("5")),
+        ("*有色金属合金*定制壳体   CUS_7556653A_K个 1 39.62 39.62 13% 5.15", "个", Decimal("1")),
+    ]
+
+    for line, unit, quantity in cases:
+        item = _parse_pdf_items([line], layout=True)[0]
+        assert item.unit == unit
+        assert item.quantity == quantity
+
+
+def test_layout_does_not_treat_item_name_as_missing_unit():
+    items = _parse_pdf_items([
+        "*其他电子设备*价外费用                                  13.4653465346535      3.47    1%               0.03",
+    ], layout=True)
+
+    assert items[0].actual_name == "价外费用"
+    assert items[0].unit == ""
+    assert items[0].quantity == Decimal("1")
+    assert items[0].total == Decimal("3.50")
+
+
+def test_layout_preserves_missing_unit_and_quantity():
+    items = _parse_pdf_items([
+        "*有色金属压延材*铝板加工定制                         212.87 1% 2.13",
+    ], layout=True)
+
+    assert items[0].unit == ""
+    assert items[0].quantity is None
+    assert items[0].total == Decimal("215.00")
 
 
 def test_layout_item_spec_continuation_does_not_extend_product_name():

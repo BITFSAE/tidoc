@@ -25,7 +25,7 @@ VALUE_SOURCE_MANUAL = "manual"
 # These versions describe recognition rules, not the Tidoc release. Keep them
 # unchanged for ordinary app releases and bump only the affected value when its
 # local recognition logic or result contract changes.
-LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-09-06"
+LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-09-09"
 LOCAL_PAYMENT_RECOGNITION_VERSION = "payment-local-2026-09-06"
 PAYMENT_CHECK_PREFIX = "[付款截图识别]"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）

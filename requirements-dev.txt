@@ -2,3 +2,4 @@
 -r requirements-ocr.txt
 pytest>=8.0     # Tests
 # pyinstaller   # Install only when building release packages
+# Pillow        # Install only when regenerating brand assets (scripts/generate_brand_assets.py)

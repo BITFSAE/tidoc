@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- 设计源文件：与 index.html 顶栏内联的 #appWordmark SVG 保持同步；代码不直接引用此文件。 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="84 21 501 141" fill="none">
   <title>TiDoc logo</title>
   <g fill="currentColor" shape-rendering="geometricPrecision">

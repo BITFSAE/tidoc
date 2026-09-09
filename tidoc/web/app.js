@@ -5494,6 +5494,7 @@ function ocrItemValueSame(field, left, right) {
   if (field === 'spec') return true;
   const a = String(left ?? '').trim();
   const b = String(right ?? '').trim();
+  if (!b) return true; // 另一侧没认出来的单元格不构成差异，不标黄
   if (field === 'quantity' || field === 'total') {
     const na = Number(a);
     const nb = Number(b);
@@ -5596,8 +5597,11 @@ async function loadOcrDetail(container, mm, entryId, currentItems) {
     </tr>`;
   }).join('');
 
+  const ocrHasNoItems = !(view.ocr_items || []).length && (currentItems || []).length > 0;
   const itemsBlock = !plan.items_differ
-    ? `<div class="hint ok-hint">明细与当前一致。</div>`
+    ? (ocrHasNoItems
+        ? '<div class="hint">阿里云未返回明细，已保留软件识别结果，无需处理。</div>'
+        : '<div class="hint ok-hint">明细与当前一致。</div>')
     : `
       <div class="ocr-compare">
         <div><div class="ocr-compare-title">当前明细</div>${ocrItemsMiniTable(currentItems, view.ocr_items)}</div>

@@ -217,6 +217,9 @@ def _value_same(field: str, local, ocr) -> bool:
 def _item_value_same(field: str, local, ocr) -> bool:
     local_value = str(local or "").strip()
     ocr_value = str(ocr or "").strip()
+    if field == "quantity":
+        # 数量按数值比较：2、2.0、2.00000000 是同一个数，不因小数位写法产生差异。
+        return d(local_value) == d(ocr_value)
     if field == "total":
         return money(d(local_value)) == money(d(ocr_value))
     return (
@@ -245,10 +248,10 @@ def _item_names_same(local: dict, ocr: dict) -> bool:
 
 def _item_update_kind(local_items: list[dict], ocr_items: list[dict]) -> str:
     """Classify OCR items as same, safe blank filling, or a conflicting alternative."""
-    if not local_items and not ocr_items:
-        return "same"
     if not ocr_items:
-        return "conflict"
+        # 云端整体未返回明细只是能力缺失，不构成对软件明细的否定，也没有
+        # 任何可人工采用的行：不进待确认，避免徽标挂死。
+        return "same"
     if not local_items:
         return "fill"
     if len(local_items) != len(ocr_items):
@@ -267,9 +270,13 @@ def _item_update_kind(local_items: list[dict], ocr_items: list[dict]) -> str:
         for field in fields:
             local_value = str(local.get(field) or "").strip()
             ocr_value = str(ocr.get(field) or "").strip()
+            if not ocr_value:
+                # 云端没认出来的单元格不构成差异：既不能采用，也不该逼用户
+                # 为了消徽标去采用整套明细而丢掉本地已有值。
+                continue
             if _item_value_same(field, local_value, ocr_value):
                 continue
-            if not local_value and ocr_value:
+            if not local_value:
                 has_fill = True
             else:
                 has_conflict = True
@@ -732,6 +739,8 @@ def _infer_legacy_applied_changes(
         attachments_dir
         and pdf
         and latest.get("closure_pass")
+        # 该分支只为恢复“明细曾被云端结果替换”的历史：云端必须有明细行。
+        and normalized.get("items")
         and not any(
             a["type"] == TYPE_INVOICE_XML for a in (entry.get("attachments") or [])
         )

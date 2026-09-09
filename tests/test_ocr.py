@@ -722,6 +722,66 @@ def test_spec_only_ocr_difference_does_not_change_items(repos, monkeypatch):
     assert ocr.latest(entry_id)["applied_changes_data"] == {}
 
 
+def test_ocr_without_items_keeps_local_items_and_badge_clearable(repos, monkeypatch):
+    """云端整体未返回明细不进待确认：没有可采用的行，徽标不能挂死。"""
+    from tidoc.db import OcrRepo
+    from tidoc.engine.models import ParsedInvoice, ParsedItem
+    from tidoc.services import ocr as ocr_service
+
+    profile_id = repos["profiles"].create("张三", "李四")["id"]
+    parsed = ParsedInvoice(
+        invoice_no="24122000000012345679", total=Decimal("12.00"), source="pdf",
+        items=[ParsedItem(
+            name="*电子元件*模块", actual_name="模块", unit="个",
+            quantity=Decimal("2"), total=Decimal("12.00"),
+        )],
+    )
+    entry_id = repos["entries"].create(profile_id, parsed=parsed)
+    _attach_invoice_pdf(repos, entry_id)
+    ocr = OcrRepo(repos["db"])
+    normalized = {
+        "invoice_no": parsed.invoice_no, "invoice_date": "", "seller": "",
+        "buyer_name": "", "buyer_tax_id": "", "total": "12.00",
+        "closure_pass": False, "items": [],
+    }
+    monkeypatch.setattr(ocr_service, "invoke_ocr", lambda *args, **kwargs: [{
+        "entry_id": entry_id, "ok": True, "raw_data": {},
+        "normalized": normalized, "error": "",
+    }])
+    result = ocr_service.run_ocr_for_entries(
+        repos["entries"], ocr, repos["root"].attachments_dir, [entry_id],
+        {"access_key_id": "id", "access_key_secret": "secret"},
+    )
+
+    assert result["results"][0]["items_action"] == "same"
+    assert result["results"][0]["pending"] == []
+    assert ocr.pending_fields(entry_id) == []
+    assert len(repos["entries"].get(entry_id)["items"]) == 1
+    listed = repos["entries"].list()
+    pending_ids, _ = ocr_service.sync_ocr_states(repos["entries"], ocr, listed)
+    assert pending_ids == set()
+
+
+def test_quantity_decimal_format_and_empty_cloud_cell_are_not_conflicts(repos):
+    from tidoc.engine.models import ParsedItem
+    from tidoc.services.ocr import plan_entry_update
+
+    entry = _entry(repos, source="pdf", items=[ParsedItem(
+        name="*电子元件*模块", actual_name="模块", unit="个",
+        quantity=Decimal("2"), total=Decimal("1130.00"),
+    )])
+    normalized = _normalized()
+    # 数量 2 与 2.00000000 是同一个数；云端没认出单位不构成对本地值的否定。
+    normalized["items"] = [{
+        "name": "*电子元件*模块", "actual_name": "模块", "unit": "",
+        "quantity": "2.00000000", "total": "1130.00", "spec": "",
+    }]
+
+    plan = plan_entry_update(entry, normalized)
+    assert plan["items_action"] == "same"
+    assert "items" not in plan["pending"]
+
+
 def test_ocr_leaves_aligned_item_blank_difference_pending(repos, monkeypatch):
     from tidoc.db import OcrRepo
     from tidoc.engine.models import ParsedInvoice, ParsedItem
@@ -1134,6 +1194,20 @@ def test_schema_v9_restores_automatically_overwritten_seller_but_keeps_manual_ed
     )
     repos["entries"].correct_locked_field(second["id"], "seller", "人工确认销售方")
 
+    # 补齐型改动（本地原本为空）：现行策略仍允许自动补齐销售方，撤回只会丢值。
+    third = _entry(repos)
+    repos["db"].conn.execute(
+        "UPDATE entries SET seller = '' WHERE id = ?", (third["id"],),
+    )
+    repos["db"].conn.commit()
+    repos["entries"].ocr_update_locked_field(third["id"], "seller", "补齐的销售方")
+    third_result = OcrRepo(repos["db"]).record(third["id"], normalized="{}")
+    repos["db"].conn.execute(
+        "UPDATE field_history SET changed_at = ? "
+        "WHERE entry_id = ? AND field = '[阿里云OCR]seller'",
+        (third_result["created_at"], third["id"]),
+    )
+
     db_path = repos["root"].db_path
     repos["db"].conn.execute(
         "UPDATE meta SET value = '8' WHERE key = 'schema_version'"
@@ -1145,6 +1219,7 @@ def test_schema_v9_restores_automatically_overwritten_seller_but_keeps_manual_ed
     entries = EntryRepo(upgraded)
     assert entries.get(first["id"])["seller"] == "某某科技有限公司"
     assert entries.get(second["id"])["seller"] == "人工确认销售方"
+    assert entries.get(third["id"])["seller"] == "补齐的销售方"
     rollback = upgraded.conn.execute(
         "SELECT old_value, new_value FROM field_history "
         "WHERE entry_id = ? AND field = '[阿里云OCR撤回]seller'",

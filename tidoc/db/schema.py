@@ -328,6 +328,10 @@ def init_db(conn: sqlite3.Connection) -> None:
                 or str(current_seller or "") != str(new_value or "")
             ):
                 continue
+            if not str(old_value or "").strip():
+                # 修正前为空说明这是补齐而不是覆盖：现行策略仍允许自动补齐
+                # 销售方，撤回成空只会丢掉正确值且不留任何待确认提醒。
+                continue
             conn.execute(
                 "UPDATE entries SET seller = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime') WHERE id = ?",
                 (old_value or "", entry_id),

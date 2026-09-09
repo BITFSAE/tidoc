@@ -38,8 +38,8 @@ tidoc/core/windows/tidoc-core-windows-v0.1.20.exe
 tidoc/core/macos/tidoc-core-macos-v0.1.20.dmg
 tidoc/print/windows/tidoc-print-windows-v0.1.20.exe
 tidoc/print/macos/tidoc-print-macos-v0.1.20.zip
-tidoc/ocr/windows/tidoc-ocr-windows-v0.2.0.exe
-tidoc/ocr/macos/tidoc-ocr-macos-v0.2.0.zip
+tidoc/ocr/windows/tidoc-ocr-windows-v0.2.1.exe
+tidoc/ocr/macos/tidoc-ocr-macos-v0.2.1.zip
 ```
 
 ## 客户端行为
@@ -50,7 +50,7 @@ tidoc/ocr/macos/tidoc-ocr-macos-v0.2.0.zip
 - 打印组件可直接下载安装到本机数据目录的 `components/print/<platform>/` 下；安装成功后自动清理同平台旧版本目录，只保留当前版本，个别目录删除失败时不影响安装结果。OCR 识别组件同构，安装到 `components/ocr/<platform>/`。
 - 核心与打印、OCR 组件使用独立版本。`scripts/set_version.py` 只写入核心版本；只有 `tidoc_print` 代码、`requirements-print.txt` 或核心与组件的 JSON 调用协议变化时，才在 `tidoc_print/__init__.py` 增加组件版本；`tidoc_ocr` 同理，版本在 `tidoc_ocr/__init__.py` 维护。普通核心发布即使重新构建组件包，也不会让客户端误报组件更新。
 - 客户端会同时检查各组件的版本标记、可执行文件和安装校验值；文件缺失或损坏时显示“需要修复”，最新版本也允许重新安装。
-- OCR 识别组件只负责执行阿里云识别调用（`ocr-api.cn-hangzhou.aliyuncs.com`），密钥由用户在设置内自填并仅存本机；组件自检（`--self-test`）不联网。0.2.0 起，多页 PDF 临时拆页逐页识别并合并，`pypdf` 随组件打包；核心会按实际页数提示并记录调用次数。识别结果（含原始 JSON 和自动补齐 / 历史修正快照）落库在 `ocr_results` 表，与更新通道无关。Windows 核心以不创建控制台窗口的方式启动组件，避免批量识别逐张闪出终端黑框。
+- OCR 识别组件只负责执行阿里云识别调用（`ocr-api.cn-hangzhou.aliyuncs.com`），密钥由用户在设置内自填并仅存本机；组件自检（`--self-test`）不联网。0.2.0 起，多页 PDF 临时拆页逐页识别并合并，`pypdf` 随组件打包；0.2.1 起，空名称负数折扣行会并回上一商品，重复两遍的完整商品名称会折叠。核心会按实际页数提示并记录调用次数。识别结果（含原始 JSON 和自动补齐 / 历史修正快照）落库在 `ocr_results` 表，与更新通道无关。Windows 核心以不创建控制台窗口的方式启动组件，避免批量识别逐张闪出终端黑框。
 - 下载 / 安装过程会在设置弹窗里显示进行中状态，组件安装完成后立即刷新状态。
 - 软件内始终提供 GitHub Releases 手动下载入口；更新服务不可用时仍可访问。
 - 高级数据维护可清理拖拽中转文件与旧更新包，但会保留业务数据、导出文件、组件和待安装更新包。

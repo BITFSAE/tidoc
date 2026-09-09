@@ -69,6 +69,46 @@ def test_normalize_merges_continuation_lines_without_quantity():
     assert out["item_sum"] == "1130.00"
 
 
+def test_normalize_merges_blank_name_discount_and_collapses_repeated_name():
+    out = normalize_invoice_data({
+        "invoiceNumber": "26957000000173793713",
+        "totalAmount": "45.76",
+        "invoiceDetails": [
+            {
+                "itemName": "*半导体*场效应管*半导体*场效应管",
+                "specification": "BSC028N06NS",
+                "unit": "个", "quantity": "6", "amount": "41.58", "tax": "5.40",
+            },
+            {
+                "itemName": "", "specification": "", "unit": "", "quantity": "",
+                "amount": "-1.08", "tax": "-0.14",
+            },
+        ],
+    })
+
+    assert out["closure_pass"] is True
+    assert out["item_sum"] == "45.76"
+    assert out["items"] == [{
+        "name": "*半导体*场效应管", "actual_name": "场效应管",
+        "unit": "个", "quantity": "6", "total": "45.76", "spec": "BSC028N06NS",
+    }]
+
+
+def test_normalize_does_not_attach_blank_positive_row_to_previous_item():
+    out = normalize_invoice_data({
+        "totalAmount": "11.00",
+        "invoiceDetails": [
+            {"itemName": "服务费", "quantity": "1", "amount": "10", "tax": "0"},
+            {"itemName": "", "amount": "1", "tax": "0"},
+        ],
+    })
+
+    assert len(out["items"]) == 1
+    assert out["items"][0]["total"] == "10.00"
+    assert out["item_sum"] == "10.00"
+    assert out["closure_pass"] is False
+
+
 def test_recognize_invoice_splits_and_merges_multi_page_pdf(tmp_path, monkeypatch):
     from pypdf import PdfReader, PdfWriter
     from tidoc_ocr import ocr as ocr_module
@@ -291,7 +331,7 @@ def test_invoke_ocr_requires_new_component_for_multi_page_pdf(monkeypatch):
         "available": True, "mode": "external", "path": "old-component",
         "version": "0.1.0", "missing": [],
     })
-    with pytest.raises(RuntimeError, match="0.2.0"):
+    with pytest.raises(RuntimeError, match="0.2.1"):
         ocr_service.invoke_ocr(
             [{"entry_id": "e1", "file_path": "invoice.pdf", "page_count": 2}],
             {"access_key_id": "id", "access_key_secret": "secret"},

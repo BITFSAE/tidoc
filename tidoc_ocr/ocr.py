@@ -95,6 +95,20 @@ def clean_item_name(raw: str) -> str:
     return re.sub(r"^\*[^*]+\*", "", str(raw or "").strip()).strip()
 
 
+def _collapse_repeated_item_name(raw: str) -> str:
+    """Collapse an exact doubled OCR item label emitted around a discount row."""
+    text = str(raw or "").strip()
+    midpoint = len(text) // 2
+    if (
+        text.startswith("*")
+        and midpoint
+        and len(text) % 2 == 0
+        and text[:midpoint] == text[midpoint:]
+    ):
+        return text[:midpoint]
+    return text
+
+
 def _normalize_date(raw: str) -> str:
     text = str(raw or "").strip()
     match = re.match(r"^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?$", text)
@@ -300,9 +314,9 @@ def normalize_invoice_data(data: dict) -> dict:
     for detail in data.get("invoiceDetails") or []:
         if not isinstance(detail, dict):
             continue
-        raw_name = _pick(detail, *_ITEM_CANDIDATES["name"])
-        if not raw_name:
-            continue
+        raw_name = _collapse_repeated_item_name(
+            _pick(detail, *_ITEM_CANDIDATES["name"])
+        )
         unit = _pick(detail, *_ITEM_CANDIDATES["unit"])
         quantity_text = _pick(detail, *_ITEM_CANDIDATES["quantity"])
         spec = _pick(detail, *_ITEM_CANDIDATES["spec"])
@@ -310,6 +324,23 @@ def normalize_invoice_data(data: dict) -> dict:
             _dec(_pick(detail, *_ITEM_CANDIDATES["amount"]))
             + _dec(_pick(detail, *_ITEM_CANDIDATES["tax"]))
         )
+
+        # 阿里云偶尔把折扣拆成紧随商品的空名称负数行。金额已经识别正确，
+        # 此时应并回上一件商品；不能因名称为空直接丢弃，否则明细合计偏大。
+        if (
+            not raw_name
+            and last is not None
+            and not quantity_text
+            and not unit
+            and not spec
+            and line_total < 0
+        ):
+            merged = _money(_dec(last["total"]) + line_total)
+            last["total"] = f"{merged:.2f}"
+            item_sum += line_total
+            continue
+        if not raw_name:
+            continue
 
         # 价外费用类续行：与上一行同名且无数量的行，金额并入上一行
         if last is not None and not quantity_text and raw_name == last.get("_raw_name"):

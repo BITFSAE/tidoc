@@ -23,7 +23,7 @@ from ..db.ocr_results import OcrRepo
 from ..engine.money import d, money
 from .updater import COMPONENT_OCR, installed_component_info, version_gt
 
-MULTIPAGE_COMPONENT_VERSION = "0.2.0"
+MULTIPAGE_COMPONENT_VERSION = "0.2.1"
 
 # 参与比对的发票字段（title 除外：抬头关系分区隔离，不参与 OCR 采用）
 COMPARED_FIELDS = ("invoice_no", "invoice_date", "seller", "total", "buyer_name", "buyer_tax_id")
@@ -120,7 +120,7 @@ def invoke_ocr(
             any(int(task.get("page_count") or 1) > 1 for task in tasks)
             and version_gt(MULTIPAGE_COMPONENT_VERSION, status.get("version") or "0.0.0")
         ):
-            raise RuntimeError("多页发票需要 OCR 识别组件 0.2.0 或更高版本，请先更新组件。")
+            raise RuntimeError("多页发票需要 OCR 识别组件 0.2.1 或更高版本，请先更新组件。")
         return _invoke_ocr_external(status["path"], tasks, credentials)
 
     import tidoc_ocr

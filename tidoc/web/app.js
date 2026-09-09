@@ -1299,6 +1299,9 @@ function renderEmptyState() {
 }
 
 function syncFilterControlStates() {
+  $('#filterKeyword')?.closest('.search')
+    ?.classList.toggle('is-filtered', !!$('#filterKeyword')?.value);
+
   ['filterTitle', 'filterProfile', 'filterTag'].forEach((id) => {
     const control = $('#' + id);
     control?.closest('.chip-select')?.classList.toggle('is-filtered', !!control.value);

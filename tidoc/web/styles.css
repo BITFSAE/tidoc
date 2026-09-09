@@ -551,6 +551,8 @@ body {
   background: var(--panel-raised); border: 1px solid var(--line); border-radius: 10px; outline: none;
   transition: .15s;
 }
+.search.is-filtered .search-ico { color: var(--primary); }
+.search.is-filtered input { background: var(--primary-soft); border-color: var(--primary-line); }
 .search input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-ring); }
 .search input::-webkit-search-cancel-button,
 .search input::-webkit-search-decoration { display: none; }

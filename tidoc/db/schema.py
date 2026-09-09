@@ -24,7 +24,8 @@ import sqlite3
 # v6：校正北京理工大学购买方税号，并刷新由旧税号规则产生的提醒；
 # v7：记录本地发票 / 付款截图识别规则版本与结果，避免同版重复识别。
 # v8：阿里云 OCR 记录保存当次自动修正快照，并区分本机调用与绑定包导入。
-SCHEMA_VERSION = 8
+# v9：云识别改为软件结果优先，并撤回历史上自动覆盖的销售方。
+SCHEMA_VERSION = 9
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -173,9 +174,9 @@ CREATE TABLE IF NOT EXISTS ocr_results (
     raw_json     TEXT DEFAULT '',     -- 阿里云返回的完整 data 原文
     normalized   TEXT DEFAULT '',     -- 解析后的字段 + 明细快照 JSON
     closure_pass INTEGER NOT NULL DEFAULT 0,  -- 明细含税合计与价税合计是否闭合
-    applied_at   TEXT DEFAULT '',     -- 自动补齐 / 修复发生的时间
+    applied_at   TEXT DEFAULT '',     -- 自动补齐或人工采用发生的时间
     pending      TEXT DEFAULT '',     -- 待人工确认的差异 JSON 列表（字段名 + "items"）
-    applied_changes TEXT DEFAULT '', -- 当次自动修正的修正前 / 修正后快照 JSON
+    applied_changes TEXT DEFAULT '', -- 当次自动补齐 / 历史修正的前后快照 JSON
     is_local_call INTEGER NOT NULL DEFAULT 1, -- 0 表示随绑定包导入，不计入本机调用次数
     status       TEXT NOT NULL DEFAULT 'ok',  -- ok / failed
     error        TEXT DEFAULT '',
@@ -295,6 +296,46 @@ def init_db(conn: sqlite3.Connection) -> None:
         if "is_local_call" not in ocr_columns:
             conn.execute(
                 "ALTER TABLE ocr_results ADD COLUMN is_local_call INTEGER NOT NULL DEFAULT 1"
+            )
+
+    if previous_version < 9:
+        # 销售方文字不再由云识别自动覆盖。只撤回当前值仍等于当次 OCR 新值的
+        # 最近一次改动；用户后来亲自改过的值保持不动。
+        rows = conn.execute(
+            """SELECT h.entry_id, h.field, h.old_value, h.new_value, e.seller,
+                      EXISTS(
+                          SELECT 1 FROM ocr_results o
+                           WHERE o.entry_id = h.entry_id
+                             AND o.status = 'ok'
+                             AND o.created_at = h.changed_at
+                      ) AS from_automatic_run
+                 FROM field_history h
+                 JOIN entries e ON e.id = h.entry_id
+                WHERE h.field IN ('[人工修正]seller', '[阿里云OCR]seller')
+                ORDER BY h.id DESC"""
+        ).fetchall()
+        handled: set[str] = set()
+        for entry_id, field, old_value, new_value, current_seller, from_automatic_run in rows:
+            if entry_id in handled:
+                continue
+            handled.add(entry_id)
+            # 最近一次销售方变动是用户操作时，不碰用户最终选择。
+            if (
+                field != "[阿里云OCR]seller"
+                or not from_automatic_run
+                or str(current_seller or "") != str(new_value or "")
+            ):
+                continue
+            conn.execute(
+                "UPDATE entries SET seller = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime') WHERE id = ?",
+                (old_value or "", entry_id),
+            )
+            conn.execute(
+                """INSERT INTO field_history(
+                       entry_id, field, old_value, new_value, profile_id, changed_at
+                   ) VALUES(?, '[阿里云OCR撤回]seller', ?, ?, '',
+                            strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))""",
+                (entry_id, new_value or "", old_value or ""),
             )
 
     # CREATE TABLE IF NOT EXISTS 不会给历史表补列，因此按真实列结构兜底迁移。

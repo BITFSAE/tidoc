@@ -786,7 +786,7 @@ def test_bindle_round_trip_preserves_ocr_result_and_badge_state(repos, tmp_path)
     )
     ocr = OcrRepo(repos["db"])
     normalized = json.dumps({
-        "invoice_no": "26952000001672381653",
+        "invoice_no": "26952000001672381654",
         "seller": "阿里云销售方",
         "total": "12.00",
         "items": [],
@@ -798,7 +798,7 @@ def test_bindle_round_trip_preserves_ocr_result_and_badge_state(repos, tmp_path)
         raw_json='{"invoiceNumber":"26952000001672381653"}',
         normalized=normalized,
         closure_pass=True,
-        pending=["seller"],
+        pending=["invoice_no"],
         applied_changes={"fields": [{
             "field": "invoice_date", "label": "发票日期", "before": "",
             "after": "2026-09-01", "action": "fill",
@@ -824,7 +824,7 @@ def test_bindle_round_trip_preserves_ocr_result_and_badge_state(repos, tmp_path)
     imported_id = result["entry_ids"][0]
     imported_ocr = OcrRepo(target_db)
     saved = imported_ocr.latest(imported_id)
-    assert saved["pending_list"] == ["seller"]
+    assert saved["pending_list"] == ["invoice_no"]
     assert saved["applied_changes_data"]["fields"][0]["after"] == "2026-09-01"
     assert saved["is_local_call"] is False
     assert imported_ocr.count_calls() == 0

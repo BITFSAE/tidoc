@@ -3,10 +3,9 @@
 OCR 组件（tidoc_ocr）是可选安装件，阿里云 SDK 不进核心。这里：
 - 探测组件是否可用（与打印组件同构的四态）。
 - 通过子进程 JSON IPC 调组件识别发票 PDF（源码模式下直接调用）。
-- 计算本地识别与阿里云结果的差异，并按「自动补齐 / 自动修复 / 待确认」
-  三档策略落库：XML 是权威数据只补空；PDF 文本来源在金额闭合校验通过时
-  允许自动修复；人工改过的值与高风险字段（发票号、总额、抬头相关）只进
-  待确认，绝不静默覆盖。
+- 计算本地识别与阿里云结果的差异。阿里云只补本地空缺；销售方与明细已有
+  值时保留软件识别结果，并把云端结果留在详情中供手动比对。发票号、总额、
+  抬头相关字段的冲突仍进入待确认，绝不静默覆盖。
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ import json
 import subprocess
 import sys
 import tempfile
-from decimal import Decimal
+import unicodedata
 from pathlib import Path
 
 from ..db.attachments import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
@@ -26,9 +25,6 @@ from .updater import COMPONENT_OCR, installed_component_info
 
 # 参与比对的发票字段（title 除外：抬头关系分区隔离，不参与 OCR 采用）
 COMPARED_FIELDS = ("invoice_no", "invoice_date", "seller", "total", "buyer_name", "buyer_tax_id")
-# PDF 文本来源 + 金额闭合 + 未被人工修正时，允许自动覆盖差异的字段
-AUTO_FIX_FIELDS = ("invoice_date", "seller")
-
 FIELD_LABELS = {
     "invoice_no": "发票号码",
     "invoice_date": "发票日期",
@@ -186,64 +182,71 @@ def _value_same(field: str, local, ocr) -> bool:
         if not local_text or not ocr_text:
             return False
         return money(d(local_text)) == money(d(ocr_text))
-    return local_text == ocr_text
+    return unicodedata.normalize("NFKC", local_text) == unicodedata.normalize("NFKC", ocr_text)
 
 
-def _item_tuple(item: dict) -> tuple:
-    quantity = str(item.get("quantity") or "").strip()
-    total = str(item.get("total") or "").strip()
-    # PDF 解析与阿里云经常只差空格/小数点尾零，不能当成不同明细。
-    # 规格逐字符去空白（如 FRC1206J205 TS 与 FRC1206J205TS 应当一致）。
-    spec = "".join(str(item.get("spec") or "").split())
+def _item_value_same(field: str, local, ocr) -> bool:
+    local_value = str(local or "").strip()
+    ocr_value = str(ocr or "").strip()
+    if field == "total":
+        return money(d(local_value)) == money(d(ocr_value))
     return (
-        "".join(str(item.get("actual_name") or item.get("name") or "").split()),
-        "".join(str(item.get("unit") or "").split()),
-        d(quantity) if quantity else None,
-        money(d(total)) if total else Decimal("0"),
-        spec,
+        "".join(unicodedata.normalize("NFKC", local_value).split())
+        == "".join(unicodedata.normalize("NFKC", ocr_value).split())
     )
 
 
-def _items_same(local_items: list[dict], ocr_items: list[dict]) -> bool:
-    if len(local_items or []) != len(ocr_items or []):
-        return False
-    return all(_item_tuple(a) == _item_tuple(b) for a, b in zip(local_items, ocr_items))
-
-
-def _items_have_useful_ocr_change(local_items: list[dict], ocr_items: list[dict]) -> bool:
-    """Return whether OCR adds or changes a value instead of merely omitting one."""
-    if len(local_items or []) != len(ocr_items or []):
-        return True
-    fields = ("name", "actual_name", "unit", "quantity", "total", "spec")
+def _item_update_kind(local_items: list[dict], ocr_items: list[dict]) -> str:
+    """Classify OCR items as same, safe blank filling, or a conflicting alternative."""
+    if not ocr_items:
+        return "same"
+    if not local_items:
+        return "fill"
+    if len(local_items) != len(ocr_items):
+        return "conflict"
+    has_fill = False
+    has_conflict = False
+    # Specification is intentionally excluded: it is not needed for reimbursement
+    # and must not make an otherwise matching item look changed.
+    fields = ("name", "actual_name", "unit", "quantity", "total")
     for local, ocr in zip(local_items, ocr_items):
         for field in fields:
+            local_value = str(local.get(field) or "").strip()
             ocr_value = str(ocr.get(field) or "").strip()
             if not ocr_value:
                 continue
-            if field == "total":
-                if money(d(local.get(field))) != money(d(ocr_value)):
-                    return True
-            elif field == "spec":
-                if "".join(str(local.get(field) or "").split()) != "".join(ocr_value.split()):
-                    return True
-            elif "".join(str(local.get(field) or "").split()) != "".join(ocr_value.split()):
-                return True
-    return False
+            if _item_value_same(field, local_value, ocr_value):
+                continue
+            if not local_value:
+                has_fill = True
+            else:
+                has_conflict = True
+    if has_conflict:
+        return "conflict"
+    return "fill" if has_fill else "same"
 
 
-def _merge_ocr_items_without_dropping_local_values(
+def _items_same(local_items: list[dict], ocr_items: list[dict]) -> bool:
+    """规格差异和 OCR 空值都不算有效差异。"""
+    return _item_update_kind(local_items, ocr_items) == "same"
+
+
+def _fill_local_item_blanks_from_ocr(
     local_items: list[dict], ocr_items: list[dict]
 ) -> list[dict]:
-    """Use OCR improvements while retaining populated local cells OCR left empty."""
-    if len(local_items or []) != len(ocr_items or []):
-        return [dict(item) for item in (ocr_items or [])]
+    """Fill missing reimbursement fields without applying OCR specifications/conflicts."""
+    if not local_items:
+        return [
+            {**dict(item), "spec": ""}
+            for item in (ocr_items or [])
+        ]
     merged = []
-    fields = ("name", "actual_name", "unit", "quantity", "total", "spec")
+    fields = ("name", "actual_name", "unit", "quantity", "total")
     for local, ocr in zip(local_items, ocr_items):
-        item = dict(ocr)
+        item = dict(local)
         for field in fields:
-            if not str(item.get(field) or "").strip() and str(local.get(field) or "").strip():
-                item[field] = local[field]
+            if not str(item.get(field) or "").strip() and str(ocr.get(field) or "").strip():
+                item[field] = ocr[field]
         merged.append(item)
     return merged
 
@@ -271,7 +274,7 @@ def _applied_change_snapshot(entry: dict, plan: dict, normalized: dict) -> dict:
         if row.get("action") in {"fill", "autofix"}
     ]
     items = None
-    if plan.get("items_action") == "replace":
+    if plan.get("items_action") in {"fill", "replace"}:
         items = {
             "before": _snapshot_items(entry.get("items") or []),
             "after": _snapshot_items(normalized.get("items") or []),
@@ -310,13 +313,8 @@ def plan_entry_update(
         elif not local:
             # 用户人工改过（即使改成了空值）也不能静默补回，避免覆盖修正意图。
             action = "pending" if field in human_modified else "fill"
-        elif (
-            field in AUTO_FIX_FIELDS
-            and not source_xml
-            and closure_pass
-            and field not in human_modified
-        ):
-            action = "autofix"
+        elif field == "seller":
+            action = "local_preferred"
         else:
             action = "pending"
         field_rows.append({
@@ -327,13 +325,16 @@ def plan_entry_update(
             "action": action,
         })
 
-    items_differ = _items_have_useful_ocr_change(
+    item_update_kind = _item_update_kind(
         entry.get("items") or [], normalized.get("items") or []
     )
-    if not items_differ:
+    items_differ = item_update_kind != "same"
+    if item_update_kind == "same":
         items_action = "same"
+    elif item_update_kind == "fill" and not source_xml and closure_pass:
+        items_action = "fill"
     elif not source_xml and closure_pass:
-        items_action = "replace"
+        items_action = "local_preferred"
     else:
         items_action = "pending"
 
@@ -407,7 +408,7 @@ def _entry_items_to_parsed(items: list[dict]):
 
 
 def apply_plan(entries_repo: EntryRepo, entry_id: str, plan: dict, normalized: dict) -> dict:
-    """执行自动补齐与自动修复；返回实际改动，供汇总展示。"""
+    """只补本地空缺；返回实际改动，供汇总展示。"""
     applied_fields = []
     for row in plan["field_rows"]:
         if row["action"] in ("fill", "autofix"):
@@ -415,8 +416,15 @@ def apply_plan(entries_repo: EntryRepo, entry_id: str, plan: dict, normalized: d
             applied_fields.append(row["field"])
 
     items_replaced = False
-    if plan["items_action"] == "replace":
-        _replace_items(entries_repo, entry_id, normalized)
+    if plan["items_action"] in {"fill", "replace"}:
+        item_values = normalized
+        if plan["items_action"] == "fill":
+            current = entries_repo.get(entry_id) or {}
+            item_values = dict(normalized)
+            item_values["items"] = _fill_local_item_blanks_from_ocr(
+                current.get("items") or [], normalized.get("items") or []
+            )
+        _replace_items(entries_repo, entry_id, item_values)
         items_replaced = True
 
     # 关键信息变化会改变校验结论（抬头、总额），不能只在 total 变化时刷新。
@@ -527,8 +535,8 @@ def run_ocr_for_entries(
             xml_authoritative=bool(task_info.get("has_xml")),
         )
         applied_normalized = dict(normalized)
-        if plan.get("items_action") == "replace":
-            applied_normalized["items"] = _merge_ocr_items_without_dropping_local_values(
+        if plan.get("items_action") == "fill":
+            applied_normalized["items"] = _fill_local_item_blanks_from_ocr(
                 entry.get("items") or [], normalized.get("items") or []
             )
         applied_changes = _applied_change_snapshot(entry, plan, applied_normalized)
@@ -550,6 +558,11 @@ def run_ocr_for_entries(
             "closure_pass": bool(normalized.get("closure_pass")),
             "applied_fields": applied["applied_fields"],
             "items_replaced": applied["items_replaced"],
+            "items_action": plan["items_action"],
+            "local_preferred_fields": [
+                row["field"] for row in plan["field_rows"]
+                if row["action"] == "local_preferred"
+            ],
             "pending": plan["pending"],
             "pending_count": len(plan["pending"]),
         })
@@ -612,8 +625,27 @@ def result_view(
         applied_changes = _infer_legacy_applied_changes(
             entries_repo, entry, latest, normalized, pdf, attachments_dir
         )
-    view["applied_changes"] = applied_changes
+    view["applied_changes"] = _sanitize_applied_changes(applied_changes)
     return view
+
+
+def _sanitize_applied_changes(changes: dict) -> dict:
+    """Hide punctuation-only fields and specification-only historical changes."""
+    if not changes:
+        return {}
+    fields = [
+        row for row in (changes.get("fields") or [])
+        if not _value_same(row.get("field", ""), row.get("before", ""), row.get("after", ""))
+    ]
+    items = changes.get("items")
+    if items and _items_same(items.get("before") or [], items.get("after") or []):
+        items = None
+    if not fields and not items:
+        return {}
+    clean = {"fields": fields, "items": items}
+    if changes.get("inferred_from_legacy"):
+        clean["inferred_from_legacy"] = True
+    return clean
 
 
 def _infer_legacy_applied_changes(
@@ -635,6 +667,8 @@ def _infer_legacy_applied_changes(
     fields = []
     for row in field_rows:
         field = str(row["field"] or "").removeprefix("[阿里云OCR]")
+        if _value_same(field, row["old_value"], row["new_value"]):
+            continue
         fields.append({
             "field": field,
             "label": FIELD_LABELS.get(field, field),

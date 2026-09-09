@@ -1636,6 +1636,7 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 .ocr-status.same { background: var(--paper-2); color: var(--ink-faint); }
 .ocr-status.ocr_empty { background: var(--paper-2); color: var(--ink-faint); }
 .ocr-status.fill, .ocr-status.autofix { background: var(--pass-soft); color: var(--pass); }
+.ocr-status.local_preferred { background: var(--paper-2); color: var(--ink-soft); }
 .ocr-status.pending { background: var(--warn-soft); color: var(--warn); }
 
 .ocr-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }

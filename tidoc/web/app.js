@@ -2805,7 +2805,7 @@ async function openSettings() {
         <div class="settings-row is-actionable" id="setOcrManage">
           <div class="settings-row-copy">
             <b>识别组件 ${ocrBadge}</b>
-            <span>识别发票明细的数量、规格等字段；按量计费</span>
+            <span>补齐本地遗漏并提供云端结果比对；按量计费</span>
           </div>
           <button class="btn small ghost">管理</button>
         </div>
@@ -3218,7 +3218,7 @@ const UPDATE_COMPONENTS = {
   },
   ocr: {
     name: 'OCR 识别组件',
-    description: '负责调用阿里云发票识别，补齐明细的数量、规格等字段；需要在设置的「阿里云 OCR」里填写密钥后使用；独立版本。',
+    description: '负责调用阿里云发票识别，补齐本地遗漏并提供结果比对；需要在设置的「阿里云 OCR」里填写密钥后使用；独立版本。',
     busy: '正在下载、校验并安装 OCR 识别组件…',
     install: () => Api.installOcrComponent(),
   },
@@ -5325,7 +5325,13 @@ function showOcrSummary(rows, skipped, total) {
     }
     const bits = [];
     if (r.applied_fields?.length) bits.push(`已补齐 ${r.applied_fields.map((f) => OCR_FIELD_LABEL[f] || f).join('、')}`);
-    if (r.items_replaced) bits.push('明细已按识别结果修复');
+    if (r.items_replaced) bits.push(
+      r.items_action === 'fill' ? '明细空缺已补齐' : '明细已按识别结果修复'
+    );
+    if (r.local_preferred_fields?.length) bits.push(
+      `已保留软件识别的 ${r.local_preferred_fields.map((f) => OCR_FIELD_LABEL[f] || f).join('、')}`
+    );
+    if (r.items_action === 'local_preferred') bits.push('明细已保留软件识别结果');
     if (r.pending_count) bits.push(`${r.pending_count} 项差异待确认`);
     if (!bits.length) bits.push('与当前数据一致');
     return `<button class="ocr-summary-row${r.pending_count ? ' warn' : ' ok'}" data-ocr-goto="${esc(r.entry_id)}">
@@ -5393,6 +5399,9 @@ function ocrAppliedChangesHtml(changes) {
   const fields = changes?.fields || [];
   const itemChange = changes?.items || null;
   if (!fields.length && !itemChange) return '';
+  const historicalCorrection = !!changes.inferred_from_legacy || fields.some((row) => row.action === 'autofix');
+  const beforeLabel = historicalCorrection ? '变动前' : '补齐前';
+  const afterLabel = historicalCorrection ? '变动后' : '补齐后';
   const fieldRows = fields.map((row) => {
     const moneyField = row.field === 'total';
     const before = row.before === '' ? '—' : (moneyField ? fmtMoney(row.before) : esc(row.before));
@@ -5400,23 +5409,24 @@ function ocrAppliedChangesHtml(changes) {
     return `<tr><td>${esc(row.label || OCR_FIELD_LABEL[row.field] || row.field)}</td><td>${before}</td><td class="ocr-ocr-col">${after}</td></tr>`;
   }).join('');
   const fieldBlock = fieldRows ? `<table class="ocr-diff-table"><thead><tr>
-    <th>修正字段</th><th>修正前</th><th>修正后</th>
+    <th>字段</th><th>${beforeLabel}</th><th>${afterLabel}</th>
   </tr></thead><tbody>${fieldRows}</tbody></table>` : '';
   const itemsBlock = itemChange ? `<div class="ocr-compare">
-    <div><div class="ocr-compare-title">修正前明细</div>${ocrItemsMiniTable(itemChange.before)}</div>
-    <div><div class="ocr-compare-title">修正后明细</div>${ocrItemsMiniTable(itemChange.after)}</div>
+    <div><div class="ocr-compare-title">${beforeLabel}明细</div>${ocrItemsMiniTable(itemChange.before)}</div>
+    <div><div class="ocr-compare-title">${afterLabel}明细</div>${ocrItemsMiniTable(itemChange.after)}</div>
   </div>` : '';
   const count = fields.length + (itemChange ? 1 : 0);
   const legacyNote = changes.inferred_from_legacy
-    ? '<div class="hint">早期识别记录未直接保存修正前明细，以下修正前值由原发票重新读取。</div>' : '';
+    ? '<div class="hint">早期识别记录未直接保存变动前明细，以下原值由原发票重新读取。</div>' : '';
   return `<details class="ocr-applied-log" open>
-    <summary>本次自动修正 ${count} 项</summary>
+    <summary>${historicalCorrection ? '历史自动改动' : '本次自动补齐'} ${count} 项</summary>
     <div class="ocr-applied-log-body">${legacyNote}${fieldBlock}${itemsBlock}</div>
   </details>`;
 }
 
 const OCR_ACTION_LABEL = {
-  same: '一致', ocr_empty: '阿里云为空', fill: '可补齐', autofix: '可修复', pending: '有差异',
+  same: '一致', ocr_empty: '阿里云为空', fill: '可补齐', autofix: '可修复',
+  local_preferred: '保留软件值', pending: '有差异',
 };
 
 async function loadOcrDetail(container, mm, entryId, currentItems) {
@@ -5444,7 +5454,7 @@ async function loadOcrDetail(container, mm, entryId, currentItems) {
     const isMoney = row.field === 'total';
     const local = row.local === '' ? '—' : (isMoney ? fmtMoney(row.local) : esc(row.local));
     const ocr = row.ocr === '' ? '—' : (isMoney ? fmtMoney(row.ocr) : esc(row.ocr));
-    const adoptable = ['fill', 'autofix', 'pending'].includes(row.action);
+    const adoptable = ['fill', 'autofix', 'local_preferred', 'pending'].includes(row.action);
     return `<tr>
       <td>${esc(row.label)}</td>
       <td>${local}</td>
@@ -5461,6 +5471,7 @@ async function loadOcrDetail(container, mm, entryId, currentItems) {
         <div><div class="ocr-compare-title">当前明细</div>${ocrItemsMiniTable(currentItems)}</div>
         <div><div class="ocr-compare-title">阿里云明细</div>${ocrItemsMiniTable(view.ocr_items)}</div>
       </div>
+      ${plan.items_action === 'local_preferred' ? '<div class="hint">软件已有明细优先保留；阿里云结果仅供比对，需要时可手动采用。</div>' : ''}
       ${plan.closure_pass ? '' : '<div class="hint warn">阿里云明细未通过金额闭合校验，采用前请逐行核对。</div>'}
       <div class="ocr-detail-actions"><button class="btn small" id="deOcrAdoptItems">采用阿里云明细</button></div>`;
 

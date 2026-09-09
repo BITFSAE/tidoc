@@ -62,6 +62,7 @@ def main() -> int:
         results = []
         for task in payload.get("tasks") or []:
             entry_id = str(task.get("entry_id") or "")
+            expected_calls = max(1, int(task.get("page_count") or 1))
             try:
                 raw = recognize_invoice(
                     task.get("file_path") or "",
@@ -69,19 +70,23 @@ def main() -> int:
                     access_key_secret,
                     endpoint,
                 )
+                normalized = normalize_invoice_data(raw)
                 results.append({
                     "entry_id": entry_id,
                     "ok": True,
                     "raw_data": raw,
-                    "normalized": normalize_invoice_data(raw),
+                    "normalized": normalized,
+                    "api_calls": int(normalized.get("page_count") or expected_calls),
                     "error": "",
                 })
             except Exception as exc:  # noqa: BLE001 — 单张失败不阻断批次
+                api_calls = getattr(exc, "api_calls", None)
                 results.append({
                     "entry_id": entry_id,
                     "ok": False,
                     "raw_data": None,
                     "normalized": None,
+                    "api_calls": expected_calls if api_calls is None else int(api_calls),
                     "error": str(exc),
                 })
         _write_result(result_path, {"ok": True, "data": {"results": results}})

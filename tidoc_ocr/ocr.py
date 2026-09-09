@@ -6,13 +6,15 @@
   等字段名，同时保留多候选键兜底；
 - 返回原始 data 与规范化结果两层，原始 JSON 由核心落库防止重复计费。
 
-接口：ocr-api 2021-07-07 RecognizeInvoice（文件流 ≤10MB，PDF 默认识别第 1 页）。
+接口：ocr-api 2021-07-07 RecognizeInvoice（文件流 ≤10MB）。多页 PDF 会先拆成
+单页逐页识别，再按原页序合并发票字段与明细。
 """
 
 from __future__ import annotations
 
 import json
 import re
+import tempfile
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
@@ -50,6 +52,10 @@ _ITEM_CANDIDATES = {
 
 class OcrError(RuntimeError):
     """OCR 调用失败，message 面向操作者（含计费/密钥类提示）。"""
+
+    def __init__(self, message: str, *, api_calls: int | None = None):
+        super().__init__(message)
+        self.api_calls = api_calls
 
 
 def _pick(mapping, *keys) -> str:
@@ -127,9 +133,10 @@ def recognize_invoice(
     access_key_secret: str,
     endpoint: str = DEFAULT_ENDPOINT,
 ) -> dict:
-    """调用阿里云 RecognizeInvoice，返回响应内层 data dict（原始识别结果）。
+    """调用阿里云 RecognizeInvoice，返回合并后的响应内层 data dict。
 
-    只做调用与基础校验，不解析字段；密钥错误/未开通服务时给出可操作提示。
+    多页 PDF 拆成单页调用，避免接口默认只识别第一页。任一页失败时整张发票
+    失败，不保存残缺明细；密钥错误/未开通服务时给出可操作提示。
     """
     if not access_key_id or not access_key_secret:
         raise OcrError("未配置阿里云 AccessKey，请先在设置的「阿里云 OCR」中填写。")
@@ -137,6 +144,56 @@ def recognize_invoice(
     file_path = Path(path)
     if not file_path.is_file():
         raise OcrError(f"发票文件不存在：{file_path.name}")
+
+    if file_path.suffix.lower() != ".pdf":
+        data = _recognize_invoice_file(
+            file_path, access_key_id, access_key_secret, endpoint
+        )
+        data["_tidoc_page_count"] = 1
+        return data
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+
+        reader = PdfReader(str(file_path))
+        page_count = len(reader.pages)
+    except Exception as exc:  # noqa: BLE001 — 加密或损坏 PDF 统一给操作者明确提示
+        raise OcrError(f"无法读取发票 PDF 页数：{exc}") from exc
+    if page_count <= 1:
+        data = _recognize_invoice_file(
+            file_path, access_key_id, access_key_secret, endpoint
+        )
+        data["_tidoc_page_count"] = 1
+        return data
+
+    page_results: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="tidoc-ocr-pages-") as tmp:
+        for index, page in enumerate(reader.pages, 1):
+            page_path = Path(tmp) / f"page-{index:04d}.pdf"
+            writer = PdfWriter()
+            writer.add_page(page)
+            with page_path.open("wb") as stream:
+                writer.write(stream)
+            try:
+                page_results.append(_recognize_invoice_file(
+                    page_path, access_key_id, access_key_secret, endpoint
+                ))
+            except Exception as exc:  # noqa: BLE001 — 标明失败页，整张不返回半份数据
+                failed_calls = getattr(exc, "api_calls", None)
+                calls = index if failed_calls is None else index - 1 + int(failed_calls)
+                raise OcrError(
+                    f"第 {index}/{page_count} 页识别失败：{exc}", api_calls=calls
+                ) from exc
+    return _merge_page_data(page_results)
+
+
+def _recognize_invoice_file(
+    file_path: Path,
+    access_key_id: str,
+    access_key_secret: str,
+    endpoint: str,
+) -> dict:
+    """Send one image or one-page PDF to Aliyun and return its data payload."""
 
     try:
         from alibabacloud_darabonba_stream.client import Client as StreamClient
@@ -158,18 +215,41 @@ def recognize_invoice(
         runtime = util_models.RuntimeOptions(read_timeout=_TIMEOUT_MS, connect_timeout=10_000)
         response = client.recognize_invoice_with_options(request, runtime)
     except Exception as exc:  # noqa: BLE001 — SDK 抛 Tea 系异常，统一转可读提示
-        raise OcrError(_friendly_error(exc)) from exc
+        raise OcrError(_friendly_error(exc), api_calls=1) from exc
 
     if response.status_code != 200:
-        raise OcrError(f"阿里云 OCR 返回状态码 {response.status_code}")
+        raise OcrError(f"阿里云 OCR 返回状态码 {response.status_code}", api_calls=1)
     try:
         payload = json.loads(response.body.data)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise OcrError("阿里云 OCR 返回内容无法解析。") from exc
+        raise OcrError("阿里云 OCR 返回内容无法解析。", api_calls=1) from exc
     data = payload.get("data") or {}
     if not data:
-        raise OcrError("阿里云 OCR 未返回发票数据，请确认文件是清晰的发票 PDF 或图片。")
+        raise OcrError(
+            "阿里云 OCR 未返回发票数据，请确认文件是清晰的发票 PDF 或图片。",
+            api_calls=1,
+        )
     return data
+
+
+def _merge_page_data(page_results: list[dict]) -> dict:
+    """Merge page payloads while keeping invoice details in source page order."""
+    merged: dict = {}
+    details: list[dict] = []
+    for page in page_results:
+        if not isinstance(page, dict):
+            continue
+        page_details = page.get("invoiceDetails") or []
+        if isinstance(page_details, list):
+            details.extend(item for item in page_details if isinstance(item, dict))
+        for key, value in page.items():
+            if key in {"invoiceDetails", "_tidoc_page_count"}:
+                continue
+            if key not in merged or merged[key] in (None, "", [], {}):
+                merged[key] = value
+    merged["invoiceDetails"] = details
+    merged["_tidoc_page_count"] = len(page_results)
+    return merged
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -266,5 +346,6 @@ def normalize_invoice_data(data: dict) -> dict:
         "total": fields["total"],
         "item_sum": f"{item_sum:.2f}",
         "closure_pass": closure_pass,
+        "page_count": max(1, int(data.get("_tidoc_page_count") or 1)),
         "items": items,
     }

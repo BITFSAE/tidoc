@@ -880,6 +880,7 @@ def test_bindle_round_trip_preserves_ocr_result_and_badge_state(repos, tmp_path)
             "field": "invoice_date", "label": "发票日期", "before": "",
             "after": "2026-09-01", "action": "fill",
         }], "items": None},
+        api_calls=2,
     )
     package = export_bindle(
         repos["entries"], repos["attachments"], [entry_id],
@@ -904,6 +905,7 @@ def test_bindle_round_trip_preserves_ocr_result_and_badge_state(repos, tmp_path)
     assert saved["pending_list"] == ["invoice_no"]
     assert saved["applied_changes_data"]["fields"][0]["after"] == "2026-09-01"
     assert saved["is_local_call"] is False
+    assert saved["api_calls"] == 2
     assert imported_ocr.count_calls() == 0
     from tidoc.services.ocr import sync_ocr_states
     pending, recognized = sync_ocr_states(

@@ -69,6 +69,80 @@ def test_normalize_merges_continuation_lines_without_quantity():
     assert out["item_sum"] == "1130.00"
 
 
+def test_recognize_invoice_splits_and_merges_multi_page_pdf(tmp_path, monkeypatch):
+    from pypdf import PdfReader, PdfWriter
+    from tidoc_ocr import ocr as ocr_module
+
+    pdf = tmp_path / "two-pages.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.add_blank_page(width=200, height=200)
+    with pdf.open("wb") as stream:
+        writer.write(stream)
+
+    page_payloads = [
+        {
+            "invoiceNumber": "26957000000173793713",
+            "totalAmount": "9.90",
+            "invoiceDetails": [{
+                "itemName": "*电子元件*贴片电容", "unit": "个", "quantity": "1",
+                "amount": "10.00", "tax": "1.00",
+            }],
+        },
+        {
+            "invoiceNumber": "26957000000173793713",
+            "totalAmount": "9.90",
+            "invoiceDetails": [{
+                "itemName": "*电子元件*贴片电容", "amount": "-1.00", "tax": "-0.10",
+            }],
+        },
+    ]
+    calls = []
+
+    def fake_recognize(path, *_args):
+        assert len(PdfReader(str(path)).pages) == 1
+        calls.append(Path(path).name)
+        return page_payloads[len(calls) - 1]
+
+    monkeypatch.setattr(ocr_module, "_recognize_invoice_file", fake_recognize)
+
+    raw = ocr_module.recognize_invoice(pdf, "id", "secret")
+    normalized = normalize_invoice_data(raw)
+
+    assert calls == ["page-0001.pdf", "page-0002.pdf"]
+    assert raw["_tidoc_page_count"] == 2
+    assert len(raw["invoiceDetails"]) == 2
+    assert normalized["page_count"] == 2
+    assert normalized["closure_pass"] is True
+    assert normalized["items"][0]["total"] == "9.90"
+
+
+def test_multi_page_failure_does_not_return_partial_invoice(tmp_path, monkeypatch):
+    from pypdf import PdfWriter
+    from tidoc_ocr import ocr as ocr_module
+
+    pdf = tmp_path / "two-pages.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.add_blank_page(width=200, height=200)
+    with pdf.open("wb") as stream:
+        writer.write(stream)
+    calls = 0
+
+    def fake_recognize(*_args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ocr_module.OcrError("模拟失败", api_calls=1)
+        return {"invoiceDetails": [{"itemName": "第一页明细"}]}
+
+    monkeypatch.setattr(ocr_module, "_recognize_invoice_file", fake_recognize)
+
+    with pytest.raises(ocr_module.OcrError, match="第 2/2 页") as raised:
+        ocr_module.recognize_invoice(pdf, "id", "secret")
+    assert raised.value.api_calls == 2
+
+
 def test_normalize_flags_broken_closure():
     data = json.loads(json.dumps(SAMPLE_DATA))
     data["totalAmount"] = "999.00"
@@ -208,6 +282,20 @@ def test_invoke_ocr_external_mode(tmp_path, monkeypatch):
     assert len(results) == 1
     assert results[0]["ok"] is True
     assert results[0]["normalized"]["invoice_no"] == "24122000000012345678"
+
+
+def test_invoke_ocr_requires_new_component_for_multi_page_pdf(monkeypatch):
+    from tidoc.services import ocr as ocr_service
+
+    monkeypatch.setattr(ocr_service, "component_status", lambda _path=None: {
+        "available": True, "mode": "external", "path": "old-component",
+        "version": "0.1.0", "missing": [],
+    })
+    with pytest.raises(RuntimeError, match="0.2.0"):
+        ocr_service.invoke_ocr(
+            [{"entry_id": "e1", "file_path": "invoice.pdf", "page_count": 2}],
+            {"access_key_id": "id", "access_key_secret": "secret"},
+        )
 
 
 def test_invoke_ocr_requires_available_component(tmp_path, monkeypatch):
@@ -402,10 +490,10 @@ def test_ocr_repo_records_and_pending_lifecycle(repos):
     assert ocr.get(first["id"])["applied_at"]  # 全部处理完时记录应用时间
 
     # 新结果覆盖待确认状态；失败行不计入 pending
-    ocr.record(entry["id"], status="failed", error="网络错误")
+    ocr.record(entry["id"], status="failed", error="网络错误", api_calls=2)
     assert ocr.latest(entry["id"]) is not None
     assert ocr.latest_failed(entry["id"])["error"] == "网络错误"
-    assert ocr.count_calls() == 2
+    assert ocr.count_calls() == 3
 
 
 def test_apply_ocr_field_and_items_from_saved_result(repos):
@@ -501,6 +589,48 @@ def test_run_ocr_can_skip_current_existing_result(repos, monkeypatch):
     assert result["skipped"] == [{
         "entry_id": entry["id"], "reason": "当前发票已有识别结果，已跳过",
     }]
+
+
+def test_run_ocr_retries_old_first_page_result_for_multi_page_pdf(repos, monkeypatch):
+    from pypdf import PdfWriter
+    from tidoc.db import OcrRepo
+    from tidoc.services import ocr as ocr_service
+
+    entry = _entry(repos, source="pdf")
+    src = repos["root"].root / "src" / "two-pages.pdf"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.add_blank_page(width=200, height=200)
+    with src.open("wb") as stream:
+        writer.write(stream)
+    attachment = repos["attachments"].add(entry["id"], src, "invoice_pdf")
+    ocr = OcrRepo(repos["db"])
+    ocr.record(
+        entry["id"], file_sha256=attachment["sha256"], normalized="{}", api_calls=1
+    )
+
+    normalized = _normalized()
+    normalized["page_count"] = 2
+
+    def fake_invoke(tasks, *_args, **_kwargs):
+        assert tasks[0]["page_count"] == 2
+        return [{
+            "entry_id": entry["id"], "ok": True, "raw_data": SAMPLE_DATA,
+            "normalized": normalized, "api_calls": 2, "error": "",
+        }]
+
+    monkeypatch.setattr(ocr_service, "invoke_ocr", fake_invoke)
+    result = ocr_service.run_ocr_for_entries(
+        repos["entries"], ocr, repos["root"].attachments_dir, [entry["id"]],
+        {"access_key_id": "id", "access_key_secret": "secret"},
+        skip_existing=True,
+    )
+
+    assert result["called"] == 2
+    assert result["skipped"] == []
+    assert ocr.latest(entry["id"])["api_calls"] == 2
+    assert ocr.count_calls() == 3
 
 
 def test_spec_only_ocr_difference_does_not_change_items(repos, monkeypatch):
@@ -781,6 +911,19 @@ def test_api_ocr_status_credentials_and_preview(api, monkeypatch):
     preview = api.ocr_preview([entry])["data"]["entries"][0]
     assert preview["has_invoice_pdf"] is False  # 尚无 PDF，预检要提示
 
+    from pypdf import PdfWriter
+
+    src = Path(api.data_root.root) / "src" / "two-pages.pdf"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.add_blank_page(width=200, height=200)
+    with src.open("wb") as stream:
+        writer.write(stream)
+    api.attachments.add(entry, src, "invoice_pdf")
+    preview = api.ocr_preview([entry])["data"]["entries"][0]
+    assert preview["page_count"] == 2
+
     api.clear_ocr_credentials()
     assert api.ocr_component_status()["data"]["credentials_configured"] is False
 
@@ -885,6 +1028,12 @@ def test_latest_schema_keeps_ocr_results_table(repos):
         )
     }
     assert "ocr_results" in tables
+    columns = {
+        row["name"] for row in repos["db"].conn.execute(
+            "PRAGMA table_info(ocr_results)"
+        ).fetchall()
+    }
+    assert "api_calls" in columns
     # 条目删除时 OCR 结果级联清理
     from tidoc.db import OcrRepo
 
@@ -893,6 +1042,34 @@ def test_latest_schema_keeps_ocr_results_table(repos):
     ocr.record(entry["id"])
     repos["entries"].delete(entry["id"])
     assert ocr.latest(entry["id"]) is None
+
+
+def test_v9_schema_adds_ocr_api_call_count(tmp_path):
+    import sqlite3
+    from tidoc.db import Database, OcrRepo
+
+    db_path = tmp_path / "v9.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO meta(key, value) VALUES('schema_version', '9');
+        CREATE TABLE ocr_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id TEXT NOT NULL,
+            is_local_call INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO ocr_results(entry_id, is_local_call) VALUES('legacy', 1);
+    """)
+    conn.close()
+
+    migrated = Database(db_path)
+    columns = {
+        row["name"] for row in migrated.conn.execute(
+            "PRAGMA table_info(ocr_results)"
+        ).fetchall()
+    }
+    assert "api_calls" in columns
+    assert OcrRepo(migrated).count_calls() == 1
 
 
 def test_schema_v9_restores_automatically_overwritten_seller_but_keeps_manual_edit(repos):

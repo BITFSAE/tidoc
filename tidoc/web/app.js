@@ -5254,7 +5254,7 @@ async function openOcrDialog(ids) {
   const body = el('div');
   body.innerHTML = `
     <div class="ocr-confirm-copy">
-      将识别 <b id="ocrCallCount">0</b> 张发票。${OCR_QUOTA_NOTE} <button class="link-btn" id="ocrQuotaLink">查看免费额度</button>
+      将识别 <b id="ocrInvoiceCount">0</b> 张发票，共调用 <b id="ocrCallCount">0</b> 次。${OCR_QUOTA_NOTE} <button class="link-btn" id="ocrQuotaLink">查看免费额度</button>
     </div>
     <div class="ocr-confirm-notes">
       ${canSkipExisting ? `<label class="chk"><input type="checkbox" id="ocrSkipExisting" checked/> 跳过当前发票已有识别结果的 ${existingCount} 条（避免重复计费）</label>` : ''}
@@ -5264,6 +5264,7 @@ async function openOcrDialog(ids) {
     </div>`;
 
   const countEl = body.querySelector('#ocrCallCount');
+  const invoiceCountEl = body.querySelector('#ocrInvoiceCount');
   body.querySelector('#ocrQuotaLink')?.addEventListener('click', () => {
     Api.openExternalUrl(OCR_CONSOLE_URL).catch((e) => toast(e.message, 'err'));
   });
@@ -5278,7 +5279,9 @@ async function openOcrDialog(ids) {
     );
   };
   const renderCount = () => {
-    countEl.textContent = String(eligibleEntries().length);
+    const eligible = eligibleEntries();
+    invoiceCountEl.textContent = String(eligible.length);
+    countEl.textContent = String(eligible.reduce((sum, item) => sum + Math.max(1, Number(item.page_count) || 1), 0));
   };
   if (chk) chk.onchange = renderCount;
   if (skipChk) skipChk.onchange = renderCount;
@@ -5296,11 +5299,13 @@ async function openOcrDialog(ids) {
     const rows = [];
     const skipped = [];
     let done = 0;
+    let apiCalls = 0;
     for (const entryId of targets) {
       try {
         const r = await Api.runOcrRecognition(
           [entryId], { include_xml: includeXml, skip_existing: skipExisting }
         );
+        apiCalls += Number(r.called || 0);
         const row = (r.results || [])[0];
         if (row) rows.push(row);
         else (r.skipped || []).forEach((s) => skipped.push(s));
@@ -5315,7 +5320,7 @@ async function openOcrDialog(ids) {
     State.selected.clear();
     await refreshEntries();
     refreshOcrStatus();
-    showOcrSummary(rows, skipped, targets.length);
+    showOcrSummary(rows, skipped, apiCalls);
   });
 
   const m = modal({
@@ -5365,7 +5370,7 @@ function showOcrSummary(rows, skipped, total) {
     </div>`).join('');
   const m = modal({
     title: '阿里云识别完成',
-    subhead: `调用 ${total} 次 · 成功 ${okCount}${pendingCount ? ` · 待确认 ${pendingCount}` : ''}${failedCount ? ` · 失败 ${failedCount}` : ''}`,
+    subhead: `调用 ${total} 次 · 发票成功 ${okCount}${pendingCount ? ` · 待确认 ${pendingCount}` : ''}${failedCount ? ` · 失败 ${failedCount}` : ''}`,
     wide: true,
     body: `<div class="ocr-summary-list">${rowHtml || '<div class="hint">没有识别结果。</div>'}</div>${skippedHtml ? `<div class="ocr-summary-list muted-list">${skippedHtml}</div>` : ''}`,
     footer: [mkBtn('完成', 'primary', () => m.close())],
@@ -5379,7 +5384,13 @@ async function runOcrFromDetail(mm, entryId) {
   const entry = State.entries.find((it) => it.id === entryId);
   const xmlNote = entry?.attachment_types?.invoice_xml
     ? '该条目已有 XML 权威数据，本次结果仅作比对。' : '';
-  if (!confirm(`将调用阿里云识别这张发票（按量计费）。${xmlNote}继续？`)) return;
+  let pageCount = 1;
+  try {
+    const preview = await Api.ocrPreview([entryId]);
+    pageCount = Math.max(1, Number(preview.entries?.[0]?.page_count) || 1);
+  } catch (_) { /* 识别调用会返回实际错误 */ }
+  const pageNote = pageCount > 1 ? `这张发票共 ${pageCount} 页，将调用 ${pageCount} 次。` : '将调用 1 次。';
+  if (!confirm(`${pageNote}${xmlNote}按量计费，继续？`)) return;
   const progress = taskProgress('正在调用阿里云识别…');
   try {
     const r = await Api.runOcrRecognition([entryId], { include_xml: true });
@@ -5520,9 +5531,11 @@ async function loadOcrDetail(container, mm, entryId, currentItems) {
       <span>识别于 ${esc(latest.created_at)}</span>
       ${latest.file_name ? `<span class="sep">·</span><span data-tooltip-overflow="${esc(latest.file_name)}">${esc(latest.file_name)}</span>` : ''}
       <span class="sep">·</span><span>金额闭合 ${closure}</span>
+      ${Number(latest.api_calls || 1) > 1 ? `<span class="sep">·</span><span>本次调用 ${Number(latest.api_calls)} 次</span>` : ''}
       <span class="sep">·</span><span>本机累计调用 ${view.call_count} 次</span>
     </div>
     ${view.stale ? '<div class="hint warn">发票文件在识别后被替换过，以下结果对应旧文件，建议重新识别。</div>' : ''}
+    ${view.page_coverage_stale ? `<div class="hint warn">这份发票共 ${Number(view.page_count)} 页，当前结果只识别了 ${Number(latest.api_calls || 1)} 页，请重新识别以补齐全部页面。</div>` : ''}
     ${ocrAppliedChangesHtml(view.applied_changes)}
     ${plan.pending?.length ? `<div class="hint">待确认：${plan.pending.map((f) => OCR_FIELD_LABEL[f] || f).map(esc).join('、')}。</div>` : ''}
     <table class="ocr-diff-table ocr-field-table">

@@ -21,7 +21,9 @@ from ..db.attachments import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
 from ..db.entries import EntryRepo
 from ..db.ocr_results import OcrRepo
 from ..engine.money import d, money
-from .updater import COMPONENT_OCR, installed_component_info
+from .updater import COMPONENT_OCR, installed_component_info, version_gt
+
+MULTIPAGE_COMPONENT_VERSION = "0.2.0"
 
 # 参与比对的发票字段（title 除外：抬头关系分区隔离，不参与 OCR 采用）
 COMPARED_FIELDS = ("invoice_no", "invoice_date", "seller", "total", "buyer_name", "buyer_tax_id")
@@ -34,6 +36,19 @@ FIELD_LABELS = {
     "buyer_tax_id": "购买方税号",
     "items": "物品明细",
 }
+
+
+def pdf_page_count(path: str | Path) -> int:
+    """Return the billable page count used by the OCR component preview."""
+    file_path = Path(path)
+    if file_path.suffix.lower() != ".pdf":
+        return 1
+    try:
+        from pypdf import PdfReader
+
+        return max(1, len(PdfReader(str(file_path)).pages))
+    except Exception:  # noqa: BLE001 — actual recognition will report unreadable PDFs
+        return 1
 
 
 def component_status(components_dir: str | Path | None = None) -> dict:
@@ -101,31 +116,41 @@ def invoke_ocr(
             f"OCR 识别组件未安装或缺少依赖：{', '.join(status['missing'])}。"
         )
     if status.get("mode") == "external":
+        if (
+            any(int(task.get("page_count") or 1) > 1 for task in tasks)
+            and version_gt(MULTIPAGE_COMPONENT_VERSION, status.get("version") or "0.0.0")
+        ):
+            raise RuntimeError("多页发票需要 OCR 识别组件 0.2.0 或更高版本，请先更新组件。")
         return _invoke_ocr_external(status["path"], tasks, credentials)
 
     import tidoc_ocr
 
     results = []
     for task in tasks:
+        expected_calls = max(1, int(task.get("page_count") or 1))
         try:
             raw = tidoc_ocr.recognize_invoice(
                 task["file_path"],
                 credentials.get("access_key_id", ""),
                 credentials.get("access_key_secret", ""),
             )
+            normalized = tidoc_ocr.normalize_invoice_data(raw)
             results.append({
                 "entry_id": task["entry_id"],
                 "ok": True,
                 "raw_data": raw,
-                "normalized": tidoc_ocr.normalize_invoice_data(raw),
+                "normalized": normalized,
+                "api_calls": int(normalized.get("page_count") or expected_calls),
                 "error": "",
             })
         except Exception as exc:  # noqa: BLE001 — 单张失败不阻断批次
+            api_calls = getattr(exc, "api_calls", None)
             results.append({
                 "entry_id": task["entry_id"],
                 "ok": False,
                 "raw_data": None,
                 "normalized": None,
+                "api_calls": expected_calls if api_calls is None else int(api_calls),
                 "error": str(exc),
             })
     return results
@@ -155,8 +180,12 @@ def _invoke_ocr_external(executable: str, tasks: list[dict], credentials: dict) 
             # terminal window so a batch does not flash one black window per invoice.
             run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         try:
+            timeout_seconds = max(
+                300,
+                sum(max(1, int(task.get("page_count") or 1)) for task in tasks) * 45,
+            )
             proc = subprocess.run(
-                cmd, text=True, capture_output=True, check=False, timeout=300,
+                cmd, text=True, capture_output=True, check=False, timeout=timeout_seconds,
                 **run_options,
             )
         except subprocess.TimeoutExpired as exc:
@@ -477,6 +506,8 @@ def run_ocr_for_entries(
         if has_xml and not include_xml:
             skipped.append({"entry_id": entry_id, "reason": "已有 XML 权威数据，默认跳过"})
             continue
+        file_path = Path(attachments_dir) / pdf["stored_path"]
+        page_count = pdf_page_count(file_path)
         existing = ocr_repo.latest(entry_id)
         current_sha = str(pdf.get("sha256") or "")
         if (
@@ -484,11 +515,22 @@ def run_ocr_for_entries(
             and existing
             and current_sha
             and str(existing.get("file_sha256") or "") == current_sha
+            and int(existing.get("api_calls") or 1) >= page_count
         ):
             skipped.append({"entry_id": entry_id, "reason": "当前发票已有识别结果，已跳过"})
             continue
-        tasks.append({"entry_id": entry_id, "file_path": str(Path(attachments_dir) / pdf["stored_path"])})
-        prepared.append({"entry_id": entry_id, "attachment": pdf, "has_xml": has_xml, "title": entry.get("title", "")})
+        tasks.append({
+            "entry_id": entry_id,
+            "file_path": str(file_path),
+            "page_count": page_count,
+        })
+        prepared.append({
+            "entry_id": entry_id,
+            "attachment": pdf,
+            "has_xml": has_xml,
+            "title": entry.get("title", ""),
+            "page_count": page_count,
+        })
 
     if not tasks:
         return {"called": 0, "results": results, "skipped": skipped}
@@ -497,6 +539,9 @@ def run_ocr_for_entries(
     for task_info, outcome in zip(prepared, outcomes):
         entry_id = task_info["entry_id"]
         attachment = task_info["attachment"]
+        api_calls = max(1, int(
+            outcome.get("api_calls") or task_info.get("page_count") or 1
+        ))
         if not outcome.get("ok"):
             ocr_repo.record(
                 entry_id,
@@ -504,6 +549,7 @@ def run_ocr_for_entries(
                 file_name=attachment.get("original_name") or "",
                 status="failed",
                 error=str(outcome.get("error") or "识别失败"),
+                api_calls=api_calls,
             )
             results.append({
                 "entry_id": entry_id,
@@ -531,12 +577,15 @@ def run_ocr_for_entries(
             closure_pass=bool(normalized.get("closure_pass")),
             pending=plan["pending"],
             applied_changes=applied_changes,
+            api_calls=api_calls,
         )
         ocr_repo.mark_applied(record["id"], plan["pending"])
         results.append({
             "entry_id": entry_id,
             "ok": True,
             "closure_pass": bool(normalized.get("closure_pass")),
+            "page_count": max(1, int(normalized.get("page_count") or 1)),
+            "api_calls": api_calls,
             "applied_fields": applied["applied_fields"],
             "items_replaced": applied["items_replaced"],
             "items_action": plan["items_action"],
@@ -548,7 +597,17 @@ def run_ocr_for_entries(
             "pending_count": len(plan["pending"]),
         })
 
-    return {"called": len(tasks), "results": results, "skipped": skipped}
+    called = 0
+    for index, task in enumerate(tasks):
+        if index >= len(outcomes) or outcomes[index].get("api_calls") is None:
+            called += max(1, int(task.get("page_count") or 1))
+        else:
+            called += max(0, int(outcomes[index]["api_calls"]))
+    return {
+        "called": called,
+        "results": results,
+        "skipped": skipped,
+    }
 
 
 def result_view(
@@ -568,6 +627,8 @@ def result_view(
         "history_count": len(history),
         "call_count": ocr_repo.count_calls(),
         "stale": False,
+        "page_count": 0,
+        "page_coverage_stale": False,
         "plan": None,
         "applied_changes": {},
     }
@@ -592,6 +653,14 @@ def result_view(
     )
     current_sha = (pdf or {}).get("sha256") or ""
     view["stale"] = ocr_repo.result_is_stale(entry_id, current_sha)
+    if pdf:
+        pdf_path = Path(attachments_dir) / pdf["stored_path"] if attachments_dir else None
+        view["page_count"] = (
+            pdf_page_count(pdf_path) if pdf_path else max(1, int(normalized.get("page_count") or 1))
+        )
+        view["page_coverage_stale"] = (
+            int(latest.get("api_calls") or 1) < view["page_count"]
+        )
     human_modified = entries_repo.human_modified_locked_fields(entry_id)
     view["latest"] = latest
     view["plan"] = plan_entry_update(

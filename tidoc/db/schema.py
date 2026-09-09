@@ -25,7 +25,8 @@ import sqlite3
 # v7：记录本地发票 / 付款截图识别规则版本与结果，避免同版重复识别。
 # v8：阿里云 OCR 记录保存当次自动修正快照，并区分本机调用与绑定包导入。
 # v9：云识别改为软件结果优先，并撤回历史上自动覆盖的销售方。
-SCHEMA_VERSION = 9
+# v10：OCR 结果记录实际 API 调用页数，多页 PDF 不再按一张误计。
+SCHEMA_VERSION = 10
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -178,6 +179,7 @@ CREATE TABLE IF NOT EXISTS ocr_results (
     pending      TEXT DEFAULT '',     -- 待人工确认的差异 JSON 列表（字段名 + "items"）
     applied_changes TEXT DEFAULT '', -- 当次自动补齐 / 历史修正的前后快照 JSON
     is_local_call INTEGER NOT NULL DEFAULT 1, -- 0 表示随绑定包导入，不计入本机调用次数
+    api_calls    INTEGER NOT NULL DEFAULT 1, -- 本次实际识别页数；单页发票为 1
     status       TEXT NOT NULL DEFAULT 'ok',  -- ok / failed
     error        TEXT DEFAULT '',
     created_at   TEXT NOT NULL,
@@ -336,6 +338,15 @@ def init_db(conn: sqlite3.Connection) -> None:
                    ) VALUES(?, '[阿里云OCR撤回]seller', ?, ?, '',
                             strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))""",
                 (entry_id, new_value or "", old_value or ""),
+            )
+
+    if previous_version < 10:
+        ocr_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(ocr_results)").fetchall()
+        }
+        if "api_calls" not in ocr_columns:
+            conn.execute(
+                "ALTER TABLE ocr_results ADD COLUMN api_calls INTEGER NOT NULL DEFAULT 1"
             )
 
     # CREATE TABLE IF NOT EXISTS 不会给历史表补列，因此按真实列结构兜底迁移。

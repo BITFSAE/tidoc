@@ -43,6 +43,7 @@ class OcrRepo:
         pending: Iterable[str] = (),
         applied_changes: dict | None = None,
         is_local_call: bool = True,
+        api_calls: int = 1,
     ) -> dict:
         """记录一次识别（成功或失败），并让同条目的旧行退出待确认状态。"""
         now = _now()
@@ -50,8 +51,8 @@ class OcrRepo:
         cur = self.db.conn.execute(
             """INSERT INTO ocr_results(entry_id, provider, file_sha256, file_name,
                raw_json, normalized, closure_pass, applied_at, pending, applied_changes,
-               is_local_call, status, error, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               is_local_call, api_calls, status, error, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 entry_id, provider, file_sha256, file_name,
                 raw_json, normalized, 1 if closure_pass else 0,
@@ -59,6 +60,7 @@ class OcrRepo:
                 pending_json if status == "ok" else "[]",
                 json.dumps(applied_changes or {}, ensure_ascii=False),
                 1 if is_local_call else 0,
+                max(1, int(api_calls or 1)),
                 status, error, now,
             ),
         )
@@ -119,7 +121,7 @@ class OcrRepo:
     def count_calls(self) -> int:
         """累计调用次数（含失败），供设置里对账计费。"""
         row = self.db.conn.execute(
-            "SELECT COUNT(*) FROM ocr_results WHERE is_local_call = 1"
+            "SELECT COALESCE(SUM(api_calls), 0) FROM ocr_results WHERE is_local_call = 1"
         ).fetchone()
         return int(row[0]) if row else 0
 
@@ -211,4 +213,5 @@ class OcrRepo:
         except (TypeError, ValueError, json.JSONDecodeError):
             item["applied_changes_data"] = {}
         item["is_local_call"] = bool(item.get("is_local_call", 1))
+        item["api_calls"] = max(1, int(item.get("api_calls") or 1))
         return item

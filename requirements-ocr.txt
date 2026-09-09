@@ -5,3 +5,4 @@ alibabacloud-credentials>=0.3.2
 alibabacloud-tea-openapi>=0.3.8
 alibabacloud-tea-util>=0.3.13
 alibabacloud-darabonba-stream>=0.0.2
+pypdf>=5.0.0

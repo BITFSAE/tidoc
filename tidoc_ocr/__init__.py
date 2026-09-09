@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
-# 组件版本独立于核心，从 0.1.0 起步。
-__version__ = "0.1.0"
+# 组件版本独立于核心；0.2.0 起支持多页发票逐页识别并合并。
+__version__ = "0.2.0"
 
 # 组件所需的重依赖模块名（import 名与包名不同）
 _REQUIRED = (
@@ -19,6 +19,7 @@ _REQUIRED = (
     "alibabacloud_tea_openapi",
     "alibabacloud_tea_util",
     "alibabacloud_darabonba_stream",
+    "pypdf",
 )
 
 

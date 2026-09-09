@@ -1571,6 +1571,7 @@ class Api:
     def ocr_preview(self, entry_ids):
         """批量识别前的预检：哪些会调用、哪些跳过及原因（不联网、不计费）。"""
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
+        from .services.ocr import pdf_page_count
         preview = []
         seen = set()
         for entry_id in entry_ids or []:
@@ -1585,6 +1586,10 @@ class Api:
             attachments = entry.get("attachments") or []
             pdf = next((a for a in attachments if a["type"] == TYPE_INVOICE_PDF), None)
             has_pdf = pdf is not None
+            page_count = (
+                pdf_page_count(self.data_root.attachments_dir / pdf["stored_path"])
+                if pdf else 0
+            )
             has_xml = any(a["type"] == TYPE_INVOICE_XML for a in attachments)
             pending = self.ocr.pending_fields(entry_id)
             existing = self.ocr.latest(entry_id)
@@ -1593,12 +1598,14 @@ class Api:
                 and pdf
                 and pdf.get("sha256")
                 and existing.get("file_sha256") == pdf.get("sha256")
+                and int(existing.get("api_calls") or 1) >= page_count
             )
             preview.append({
                 "entry_id": entry_id,
                 "invoice_no": entry.get("invoice_no") or "",
                 "seller": entry.get("seller") or "",
                 "has_invoice_pdf": has_pdf,
+                "page_count": page_count,
                 "has_invoice_xml": has_xml,
                 "existing_result": existing is not None,
                 "existing_current_result": existing_current,

@@ -87,7 +87,7 @@ def _serialize_entry(
                 for key in (
                     "provider", "file_sha256", "file_name", "raw_json", "normalized",
                     "closure_pass", "applied_at", "pending", "applied_changes",
-                    "status", "error", "created_at",
+                    "api_calls", "status", "error", "created_at",
                 )
             }
             for result in entry.get("_ocr_results", [])
@@ -454,8 +454,8 @@ def import_bindle(
                         """INSERT INTO ocr_results(
                                entry_id, provider, file_sha256, file_name, raw_json,
                                normalized, closure_pass, applied_at, pending,
-                               applied_changes, is_local_call, status, error, created_at
-                           ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?)""",
+                               applied_changes, is_local_call, api_calls, status, error, created_at
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)""",
                         (
                             new_id,
                             result.get("provider", "aliyun"),
@@ -467,6 +467,7 @@ def import_bindle(
                             result.get("applied_at", ""),
                             result.get("pending", "[]"),
                             result.get("applied_changes", ""),
+                            max(1, int(result.get("api_calls") or 1)),
                             result.get("status", "ok"),
                             result.get("error", ""),
                             result.get("created_at", now),

@@ -53,7 +53,7 @@ def test_frontend_theme_modes_are_early_persistent_and_quiet():
 
     assert html.index("tidoc.themeMode") < html.index("styles.css")
     assert "prefers-color-scheme: dark" in html
-    assert "data-theme-mode" in source
+    assert 'id="setThemeMode"' in source
     assert "跟随系统" in source
     assert "外观主题已保存" in source
     assert "Api.setAppPreference(THEME_KEY, nextMode)" in source

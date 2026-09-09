@@ -2670,21 +2670,6 @@ async function openSettings() {
         </div>
       </div>
 
-      <!-- 抬头与税号 -->
-      <div class="settings-block">
-        <div class="settings-block-title">抬头与税号</div>
-        <div class="settings-row">
-          <div class="settings-row-copy">
-            <b>报账抬头</b>
-            <span>发票识别与校验按这些抬头、税号进行，可添加其他学校或单位</span>
-          </div>
-        </div>
-        <div id="setTitleProfiles" class="settings-titleprofile-list"></div>
-        <div class="settings-row-actions">
-          <button class="btn small ghost" id="setTpAdd">添加抬头</button>
-        </div>
-      </div>
-
       <!-- 偏好 -->
       <div class="settings-block">
         <div class="settings-block-title">偏好</div>
@@ -2709,18 +2694,15 @@ async function openSettings() {
             <option value="compact">精简</option>
           </select>
         </div>
-        <div class="settings-row settings-theme-row">
+        <div class="settings-row">
           <div class="settings-row-copy">
             <b>外观主题</b>
             <span>跟随系统时会随电脑的浅色、深色外观切换</span>
           </div>
-          <div class="segmented compact theme-segmented" role="group" aria-label="外观主题">
-            ${[
-              ['system', '跟随系统'],
-              ['light', '浅色'],
-              ['dark', '深色'],
-            ].map(([value, label]) => `<button type="button" class="seg theme-mode-btn${themeMode === value ? ' active' : ''}" data-theme-mode="${value}" aria-pressed="${themeMode === value ? 'true' : 'false'}">${label}</button>`).join('')}
-          </div>
+          <select id="setThemeMode" class="settings-select">
+            ${[['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']].map(([value, label]) =>
+              `<option value="${value}"${themeMode === value ? ' selected' : ''}>${label}</option>`).join('')}
+          </select>
         </div>
         <div class="settings-row">
           <div class="settings-row-copy">
@@ -2755,6 +2737,16 @@ async function openSettings() {
       <!-- 扩展 -->
       <details class="settings-block">
         <summary class="settings-block-title">扩展</summary>
+        <div class="settings-requirements-head">
+          <div class="settings-row-copy">
+            <b>抬头与税号</b>
+            <span>发票识别与校验按这些抬头、税号进行，可添加其他学校或单位</span>
+          </div>
+        </div>
+        <div id="setTitleProfiles" class="settings-titleprofile-list"></div>
+        <div class="settings-row-actions">
+          <button class="btn small ghost" id="setTpAdd">添加抬头</button>
+        </div>
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>新建默认抬头</b>
@@ -2932,34 +2924,25 @@ async function openSettings() {
     $('#entryList').dataset.density = State.density;
     toast('已保存', 'ok');
   };
-  const themeButtons = [...body.querySelectorAll('[data-theme-mode]')];
-  const syncThemeButtons = (mode) => {
-    themeButtons.forEach((button) => {
-      const active = button.dataset.themeMode === mode;
-      button.classList.toggle('active', active);
-      button.setAttribute('aria-pressed', active ? 'true' : 'false');
-    });
+  const themeSelect = body.querySelector('#setThemeMode');
+  themeSelect.value = themeMode;
+  themeSelect.onchange = async () => {
+    const nextMode = normalizeThemeMode(themeSelect.value);
+    if (nextMode === State.themeMode) return;
+    const previousMode = State.themeMode;
+    themeSelect.disabled = true;
+    await animateThemeChange(nextMode, themeSelect, { persist: true });
+    try {
+      await Api.setAppPreference(THEME_KEY, nextMode);
+      toast('外观主题已保存', 'ok');
+    } catch (e) {
+      applyTheme(previousMode, { persist: true });
+      themeSelect.value = previousMode;
+      toast(e.message, 'err');
+    } finally {
+      themeSelect.disabled = false;
+    }
   };
-  themeButtons.forEach((button) => {
-    button.onclick = async () => {
-      const nextMode = normalizeThemeMode(button.dataset.themeMode);
-      if (nextMode === State.themeMode) return;
-      const previousMode = State.themeMode;
-      themeButtons.forEach((item) => { item.disabled = true; });
-      await animateThemeChange(nextMode, button, { persist: true });
-      syncThemeButtons(nextMode);
-      try {
-        await Api.setAppPreference(THEME_KEY, nextMode);
-        toast('外观主题已保存', 'ok');
-      } catch (e) {
-        applyTheme(previousMode, { persist: true });
-        syncThemeButtons(previousMode);
-        toast(e.message, 'err');
-      } finally {
-        themeButtons.forEach((item) => { item.disabled = false; });
-      }
-    };
-  });
   body.querySelector('#setDefaultEntryTitle').onchange = async (ev) => {
     const value = ev.target.value;
     ev.target.disabled = true;

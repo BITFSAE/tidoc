@@ -198,8 +198,10 @@ def _item_value_same(field: str, local, ocr) -> bool:
 
 def _item_update_kind(local_items: list[dict], ocr_items: list[dict]) -> str:
     """Classify OCR items as same, safe blank filling, or a conflicting alternative."""
-    if not ocr_items:
+    if not local_items and not ocr_items:
         return "same"
+    if not ocr_items:
+        return "conflict"
     if not local_items:
         return "fill"
     if len(local_items) != len(ocr_items):
@@ -213,11 +215,9 @@ def _item_update_kind(local_items: list[dict], ocr_items: list[dict]) -> str:
         for field in fields:
             local_value = str(local.get(field) or "").strip()
             ocr_value = str(ocr.get(field) or "").strip()
-            if not ocr_value:
-                continue
             if _item_value_same(field, local_value, ocr_value):
                 continue
-            if not local_value:
+            if not local_value and ocr_value:
                 has_fill = True
             else:
                 has_conflict = True
@@ -229,26 +229,6 @@ def _item_update_kind(local_items: list[dict], ocr_items: list[dict]) -> str:
 def _items_same(local_items: list[dict], ocr_items: list[dict]) -> bool:
     """规格差异和 OCR 空值都不算有效差异。"""
     return _item_update_kind(local_items, ocr_items) == "same"
-
-
-def _fill_local_item_blanks_from_ocr(
-    local_items: list[dict], ocr_items: list[dict]
-) -> list[dict]:
-    """Fill missing reimbursement fields without applying OCR specifications/conflicts."""
-    if not local_items:
-        return [
-            {**dict(item), "spec": ""}
-            for item in (ocr_items or [])
-        ]
-    merged = []
-    fields = ("name", "actual_name", "unit", "quantity", "total")
-    for local, ocr in zip(local_items, ocr_items):
-        item = dict(local)
-        for field in fields:
-            if not str(item.get(field) or "").strip() and str(ocr.get(field) or "").strip():
-                item[field] = ocr[field]
-        merged.append(item)
-    return merged
 
 
 def _snapshot_items(items: list[dict]) -> list[dict]:
@@ -274,7 +254,7 @@ def _applied_change_snapshot(entry: dict, plan: dict, normalized: dict) -> dict:
         if row.get("action") in {"fill", "autofix"}
     ]
     items = None
-    if plan.get("items_action") in {"fill", "replace"}:
+    if plan.get("items_action") == "replace":
         items = {
             "before": _snapshot_items(entry.get("items") or []),
             "after": _snapshot_items(normalized.get("items") or []),
@@ -329,14 +309,7 @@ def plan_entry_update(
         entry.get("items") or [], normalized.get("items") or []
     )
     items_differ = item_update_kind != "same"
-    if item_update_kind == "same":
-        items_action = "same"
-    elif item_update_kind == "fill" and not source_xml and closure_pass:
-        items_action = "fill"
-    elif not source_xml and closure_pass:
-        items_action = "local_preferred"
-    else:
-        items_action = "pending"
+    items_action = "same" if item_update_kind == "same" else "pending"
 
     pending = [row["field"] for row in field_rows if row["action"] == "pending"]
     if items_action == "pending":
@@ -416,16 +389,6 @@ def apply_plan(entries_repo: EntryRepo, entry_id: str, plan: dict, normalized: d
             applied_fields.append(row["field"])
 
     items_replaced = False
-    if plan["items_action"] in {"fill", "replace"}:
-        item_values = normalized
-        if plan["items_action"] == "fill":
-            current = entries_repo.get(entry_id) or {}
-            item_values = dict(normalized)
-            item_values["items"] = _fill_local_item_blanks_from_ocr(
-                current.get("items") or [], normalized.get("items") or []
-            )
-        _replace_items(entries_repo, entry_id, item_values)
-        items_replaced = True
 
     # 关键信息变化会改变校验结论（抬头、总额），不能只在 total 变化时刷新。
     if applied_fields or items_replaced:
@@ -534,13 +497,8 @@ def run_ocr_for_entries(
             entry, normalized, human_modified,
             xml_authoritative=bool(task_info.get("has_xml")),
         )
-        applied_normalized = dict(normalized)
-        if plan.get("items_action") == "fill":
-            applied_normalized["items"] = _fill_local_item_blanks_from_ocr(
-                entry.get("items") or [], normalized.get("items") or []
-            )
-        applied_changes = _applied_change_snapshot(entry, plan, applied_normalized)
-        applied = apply_plan(entries_repo, entry_id, plan, applied_normalized)
+        applied_changes = _applied_change_snapshot(entry, plan, normalized)
+        applied = apply_plan(entries_repo, entry_id, plan, normalized)
         record = ocr_repo.record(
             entry_id,
             file_sha256=attachment.get("sha256") or "",

@@ -211,7 +211,11 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert ".att-group.has .attach-item" in css
     assert ".archive-confirm-note" in css
     assert "reparseBtn?.classList.remove('hidden')" in source
-    assert "Api.rerecognizeMaterials(ids, kinds)" in source
+    assert "Api.rerecognizeMaterials([ids[index]], kinds)" in source
+    assert "正在识别 ${index + 1}/${ids.length} 条" in source
+    assert "State.materialRequirements.physical_image || atts.some" in source
+    assert "entryModifiedTooltip(e)" in source
+    assert "select:not([multiple])" in css
     assert "Api.recognitionPreview(ids)" in source
     assert "reparseEntries:" in (web / "api.js").read_text("utf-8")
     assert "rerecognizeMaterials:" in (web / "api.js").read_text("utf-8")

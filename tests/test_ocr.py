@@ -259,7 +259,7 @@ def _entry(repos, source="pdf", **parsed_kwargs):
     return repos["entries"].get(entry_id)
 
 
-def test_plan_pdf_source_only_fills_missing_values(repos):
+def test_plan_pdf_source_fills_fields_but_leaves_items_pending(repos):
     from tidoc.services.ocr import apply_plan, plan_entry_update
 
     entry = _entry(repos, source="pdf")  # 无明细、无日期
@@ -271,20 +271,18 @@ def test_plan_pdf_source_only_fills_missing_values(repos):
     assert actions["seller"] == "same"
     assert actions["total"] == "same"
     assert actions["buyer_name"] == "same"
-    assert plan["items_action"] == "fill"
+    assert plan["items_action"] == "pending"
 
     applied = apply_plan(repos["entries"], entry["id"], plan, normalized)
     assert applied["applied_fields"] == ["invoice_date", "buyer_tax_id"]
-    assert applied["items_replaced"] is True
+    assert applied["items_replaced"] is False
 
     updated = repos["entries"].get(entry["id"])
     assert updated["invoice_date"] == "2026-01-31"
-    assert len(updated["items"]) == 1
-    assert updated["items"][0]["quantity"] == "2"
-    assert updated["items"][0]["spec"] == ""          # 规格不参与云识别补齐
-    # 采用后差异消失
+    assert updated["items"] == []
+    # 发票字段补齐后，明细差异仍等待用户确认。
     recheck = plan_entry_update(updated, normalized, set())
-    assert recheck["items_action"] == "same"
+    assert recheck["items_action"] == "pending"
     assert all(row["action"] == "same" for row in recheck["field_rows"] if row["ocr"])
 
 
@@ -463,7 +461,8 @@ def test_run_ocr_for_entries_end_to_end(repos, monkeypatch):
     assert result["called"] == 1
     row = result["results"][0]
     assert row["ok"] is True
-    assert row["items_replaced"] is True
+    assert row["items_replaced"] is False
+    assert row["pending"] == ["items"]
     assert "invoice_date" in row["applied_fields"]
     # 原始响应与解析快照都已落库
     saved = ocr.latest(entry["id"])
@@ -477,8 +476,7 @@ def test_run_ocr_for_entries_end_to_end(repos, monkeypatch):
         "after": "2026-01-31",
         "action": "fill",
     }
-    assert changes["items"]["before"] == []
-    assert changes["items"]["after"][0]["spec"] == ""
+    assert changes["items"] is None
 
 
 def test_run_ocr_can_skip_current_existing_result(repos, monkeypatch):
@@ -533,7 +531,7 @@ def test_spec_only_ocr_difference_does_not_change_items(repos, monkeypatch):
         "closure_pass": True,
         "items": [{
             "name": "*电子元件*模块", "actual_name": "模块", "unit": "个",
-            "quantity": "", "total": "12.00", "spec": "ABC-01",
+            "quantity": "1", "total": "12.00", "spec": "ABC-01",
         }],
     }
 
@@ -554,7 +552,7 @@ def test_spec_only_ocr_difference_does_not_change_items(repos, monkeypatch):
     assert ocr.latest(entry_id)["applied_changes_data"] == {}
 
 
-def test_ocr_fills_aligned_item_blanks_without_overwriting_values(repos, monkeypatch):
+def test_ocr_leaves_aligned_item_blank_difference_pending(repos, monkeypatch):
     from tidoc.db import OcrRepo
     from tidoc.engine.models import ParsedInvoice, ParsedItem
     from tidoc.services import ocr as ocr_service
@@ -576,7 +574,7 @@ def test_ocr_fills_aligned_item_blanks_without_overwriting_values(repos, monkeyp
         "closure_pass": True,
         "items": [{
             "name": "*电子元件*模块", "actual_name": "模块", "unit": "个",
-            "quantity": "", "total": "12.00", "spec": "云端型号",
+            "quantity": "1", "total": "12.00", "spec": "云端型号",
         }],
     }
     monkeypatch.setattr(ocr_service, "invoke_ocr", lambda *args, **kwargs: [{
@@ -588,11 +586,31 @@ def test_ocr_fills_aligned_item_blanks_without_overwriting_values(repos, monkeyp
         {"access_key_id": "id", "access_key_secret": "secret"},
     )
 
-    assert result["results"][0]["items_action"] == "fill"
+    assert result["results"][0]["items_action"] == "pending"
     updated = repos["entries"].get(entry_id)["items"][0]
-    assert updated["unit"] == "个"
+    assert updated["unit"] == ""
     assert updated["quantity"] == "1"
     assert updated["spec"] == "本地型号"
+
+
+def test_quantity_difference_is_pending_even_when_amount_closes(repos):
+    from tidoc.engine.models import ParsedItem
+    from tidoc.services.ocr import plan_entry_update
+
+    entry = _entry(repos, source="pdf", items=[ParsedItem(
+        name="*电子元件*模块", actual_name="模块", unit="个",
+        quantity=Decimal("1"), total=Decimal("1130.00"),
+    )])
+    normalized = _normalized()
+    normalized["items"] = [{
+        "name": "*电子元件*模块", "actual_name": "模块", "unit": "个",
+        "quantity": "2", "total": "1130.00", "spec": "不参与比对",
+    }]
+
+    plan = plan_entry_update(entry, normalized)
+    assert plan["closure_pass"] is True
+    assert plan["items_action"] == "pending"
+    assert "items" in plan["pending"]
 
 
 def test_run_ocr_skips_xml_entries_without_flag(repos, monkeypatch):
@@ -694,6 +712,7 @@ def test_sync_ocr_states_recomputes_after_manual_correction(repos):
     ocr = OcrRepo(repos["db"])
     entry = _entry(repos, source="pdf")
     normalized = _normalized()  # seller 与本地一致
+    normalized["items"] = []
     ocr.record(entry["id"], normalized=json.dumps(normalized, ensure_ascii=False),
                closure_pass=True)
 
@@ -777,7 +796,8 @@ def test_api_run_ocr_guards_and_pending_flag(api, monkeypatch, ocr_component_rea
     monkeypatch.setattr(ocr_service, "invoke_ocr", fake_invoke)
     res = api.run_ocr_recognition([entry_id])["data"]
     assert res["called"] == 1
-    assert res["results"][0]["items_replaced"] is True
+    assert res["results"][0]["items_replaced"] is False
+    assert res["results"][0]["pending"] == ["items"]
     preview = api.ocr_preview([entry_id])["data"]["entries"][0]
     assert preview["existing_result"] is True
     assert preview["existing_current_result"] is True
@@ -785,8 +805,8 @@ def test_api_run_ocr_guards_and_pending_flag(api, monkeypatch, ocr_component_rea
     # 带差异的条目在列表里能被识别出来（卡片徽标数据源）
     entries = api.list_entries()["data"]
     target = next(e for e in entries if e["id"] == entry_id)
-    assert target["ocr_pending"] is False  # 全部自动处理完，无待确认
-    assert len(api.get_entry(entry_id)["data"]["items"]) == 1
+    assert target["ocr_pending"] is True
+    assert api.get_entry(entry_id)["data"]["items"] == []
 
 
 def test_api_run_ocr_pending_drives_entry_flag(api, monkeypatch, ocr_component_ready):

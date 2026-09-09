@@ -945,7 +945,7 @@ function entryCard(e) {
   const paidCur = fields.paid_amount ? fields.paid_amount.current : '';
   const paidDiff = entryHasPaidDifference(e);
   const modified = paidDiff
-    ? `<span class="badge modified">${iconPencil(11)}已修改</span>` : '';
+    ? `<span class="badge modified" data-tooltip="${esc(entryModifiedTooltip(e))}">${iconPencil(11)}已修改</span>` : '';
   const ocrBadge = e.ocr_pending
     ? `<button class="badge ocr badge-action" data-card-ocr="1" title="阿里云识别存在待确认差异，点击查看">OCR</button>` : '';
   const recognizedBadge = (e.ocr_recognized && !e.ocr_pending)
@@ -1183,6 +1183,25 @@ function sameMoney(a, b) {
 function entryHasPaidDifference(entry) {
   const paid = entry?.fields?.paid_amount?.current;
   return !!String(paid ?? '').trim() && !sameMoney(paid, entry?.total);
+}
+
+function entryModifiedTooltip(entry) {
+  const fields = entry?.fields || {};
+  const changes = [];
+  const paid = fields.paid_amount;
+  if (entryHasPaidDifference(entry)) {
+    changes.push(`实付金额：${fmtMoney(paid?.origin || entry?.total)} → ${fmtMoney(paid?.current)}`);
+  }
+  const describeText = (key, label) => {
+    const row = fields[key];
+    if (!row?.modified) return;
+    const before = String(row.origin || '空');
+    const after = String(row.current || '空');
+    changes.push(before === after ? `${label}曾修改，当前为“${after}”` : `${label}：“${before}”→“${after}”`);
+  };
+  describeText('actual_item_name', '实际物资名称');
+  describeText('notes', '条目备注');
+  return changes.length ? `已修改：${changes.join('\n')}` : '实付金额与发票金额不一致';
 }
 
 // 按报账人 / 抬头分组渲染，每组头显示条数、合计、齐备率，可整组选中
@@ -3852,7 +3871,8 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const attachSection = [
     attGroup('发票', ['invoice_pdf', 'invoice_xml'], '上传发票 PDF 或 XML，用于识别发票信息。', 'invoice'),
     attGroup('付款截图', ['payment_screenshot'], '上传付款截图，作为实付凭证。', 'payment_screenshot'),
-    attGroup('实物图', ['physical_image'], '上传实物照片，作为物资凭证。', 'physical_image'),
+    (State.materialRequirements.physical_image || atts.some((a) => a.type === 'physical_image')
+      ? attGroup('实物图', ['physical_image'], '上传实物照片，作为物资凭证。', 'physical_image') : ''),
     attGroup('查验单', ['inspection_pdf'], '上传发票查验单 PDF。', 'inspection_pdf'),
     (atts.some((a) => a.type === 'other')
       ? attGroup('其他', ['other'], '') : ''),
@@ -5325,13 +5345,10 @@ function showOcrSummary(rows, skipped, total) {
     }
     const bits = [];
     if (r.applied_fields?.length) bits.push(`已补齐 ${r.applied_fields.map((f) => OCR_FIELD_LABEL[f] || f).join('、')}`);
-    if (r.items_replaced) bits.push(
-      r.items_action === 'fill' ? '明细空缺已补齐' : '明细已按识别结果修复'
-    );
+    if (r.items_replaced) bits.push('明细已按识别结果修复');
     if (r.local_preferred_fields?.length) bits.push(
       `已保留软件识别的 ${r.local_preferred_fields.map((f) => OCR_FIELD_LABEL[f] || f).join('、')}`
     );
-    if (r.items_action === 'local_preferred') bits.push('明细已保留软件识别结果');
     if (r.pending_count) bits.push(`${r.pending_count} 项差异待确认`);
     if (!bits.length) bits.push('与当前数据一致');
     return `<button class="ocr-summary-row${r.pending_count ? ' warn' : ' ok'}" data-ocr-goto="${esc(r.entry_id)}">
@@ -5381,18 +5398,42 @@ async function runOcrFromDetail(mm, entryId) {
   }
 }
 
-function ocrItemsMiniTable(items) {
-  const rows = (items || []).map((it) => `
+function ocrItemValueSame(field, left, right) {
+  if (field === 'spec') return true;
+  const a = String(left ?? '').trim();
+  const b = String(right ?? '').trim();
+  if (field === 'quantity' || field === 'total') {
+    const na = Number(a);
+    const nb = Number(b);
+    if (a !== '' && b !== '' && Number.isFinite(na) && Number.isFinite(nb)) return Math.abs(na - nb) < 0.000001;
+  }
+  return a.normalize('NFKC').replace(/\s/g, '') === b.normalize('NFKC').replace(/\s/g, '');
+}
+
+function ocrItemCell(value, field, other) {
+  const different = other !== undefined && !ocrItemValueSame(field, value, other);
+  const shown = field === 'total' ? fmtMoney(value) : esc(value || '—');
+  return `<td class="${field === 'quantity' || field === 'total' ? 'num ' : ''}${different ? 'ocr-cell-diff' : ''}"${different ? ' title="与另一侧识别结果不同"' : ''}>${shown}</td>`;
+}
+
+function ocrItemsMiniTable(items, compareItems) {
+  const comparing = Array.isArray(compareItems);
+  const rows = (items || []).map((it, index) => {
+    const other = comparing ? (compareItems[index] || {}) : null;
+    return `
     <tr>
-      <td>${esc(it.actual_name || it.name || '—')}</td>
-      <td>${esc(it.spec || '—')}</td>
-      <td>${esc(it.unit || '—')}</td>
-      <td class="num">${esc(it.quantity || '—')}</td>
-      <td class="num">${fmtMoney(it.total)}</td>
-    </tr>`).join('');
-  return `<table class="ocr-items-table"><thead><tr>
+      ${ocrItemCell(it.actual_name || it.name, 'name', comparing ? (other.actual_name || other.name || '') : undefined)}
+      ${ocrItemCell(it.spec, 'spec', comparing ? (other.spec ?? '') : undefined)}
+      ${ocrItemCell(it.unit, 'unit', comparing ? (other.unit ?? '') : undefined)}
+      ${ocrItemCell(it.quantity, 'quantity', comparing ? (other.quantity ?? '') : undefined)}
+      ${ocrItemCell(it.total, 'total', comparing ? (other.total ?? '') : undefined)}
+    </tr>`;
+  }).join('');
+  return `<div class="ocr-items-scroll"><table class="ocr-items-table">
+    <colgroup><col class="ocr-item-name"><col class="ocr-item-spec"><col class="ocr-item-unit"><col class="ocr-item-qty"><col class="ocr-item-money"></colgroup>
+    <thead><tr>
     <th>名称</th><th>规格</th><th>单位</th><th style="text-align:right">数量</th><th style="text-align:right">金额</th>
-  </tr></thead><tbody>${rows || '<tr><td colspan="5" style="color:var(--ink-soft)">无明细</td></tr>'}</tbody></table>`;
+  </tr></thead><tbody>${rows || '<tr><td colspan="5" style="color:var(--ink-soft)">无明细</td></tr>'}</tbody></table></div>`;
 }
 
 function ocrAppliedChangesHtml(changes) {
@@ -5455,12 +5496,11 @@ async function loadOcrDetail(container, mm, entryId, currentItems) {
     const local = row.local === '' ? '—' : (isMoney ? fmtMoney(row.local) : esc(row.local));
     const ocr = row.ocr === '' ? '—' : (isMoney ? fmtMoney(row.ocr) : esc(row.ocr));
     const adoptable = ['fill', 'autofix', 'local_preferred', 'pending'].includes(row.action);
-    return `<tr>
+    return `<tr class="ocr-field-row ${row.action}">
       <td>${esc(row.label)}</td>
-      <td>${local}</td>
+      <td class="ocr-field-value">${local}</td>
       <td class="ocr-ocr-col">${ocr}</td>
-      <td><span class="ocr-status ${row.action}">${OCR_ACTION_LABEL[row.action] || row.action}</span></td>
-      <td>${adoptable ? `<button class="btn small ghost" data-adopt-field="${esc(row.field)}" ${row.ocr === '' ? 'disabled' : ''}>采用</button>` : ''}</td>
+      <td><div class="ocr-field-decision"><span class="ocr-status ${row.action}">${OCR_ACTION_LABEL[row.action] || row.action}</span>${adoptable ? `<button class="btn small ghost" data-adopt-field="${esc(row.field)}" ${row.ocr === '' ? 'disabled' : ''}>采用</button>` : ''}</div></td>
     </tr>`;
   }).join('');
 
@@ -5468,10 +5508,10 @@ async function loadOcrDetail(container, mm, entryId, currentItems) {
     ? `<div class="hint ok-hint">明细与当前一致。</div>`
     : `
       <div class="ocr-compare">
-        <div><div class="ocr-compare-title">当前明细</div>${ocrItemsMiniTable(currentItems)}</div>
-        <div><div class="ocr-compare-title">阿里云明细</div>${ocrItemsMiniTable(view.ocr_items)}</div>
+        <div><div class="ocr-compare-title">当前明细</div>${ocrItemsMiniTable(currentItems, view.ocr_items)}</div>
+        <div><div class="ocr-compare-title">阿里云明细</div>${ocrItemsMiniTable(view.ocr_items, currentItems)}</div>
       </div>
-      ${plan.items_action === 'local_preferred' ? '<div class="hint">软件已有明细优先保留；阿里云结果仅供比对，需要时可手动采用。</div>' : ''}
+      ${plan.items_action === 'pending' ? '<div class="hint warn">明细存在差异，已保留软件识别结果，请核对后决定是否采用阿里云明细。</div>' : ''}
       ${plan.closure_pass ? '' : '<div class="hint warn">阿里云明细未通过金额闭合校验，采用前请逐行核对。</div>'}
       <div class="ocr-detail-actions"><button class="btn small" id="deOcrAdoptItems">采用阿里云明细</button></div>`;
 
@@ -5485,8 +5525,10 @@ async function loadOcrDetail(container, mm, entryId, currentItems) {
     ${view.stale ? '<div class="hint warn">发票文件在识别后被替换过，以下结果对应旧文件，建议重新识别。</div>' : ''}
     ${ocrAppliedChangesHtml(view.applied_changes)}
     ${plan.pending?.length ? `<div class="hint">待确认：${plan.pending.map((f) => OCR_FIELD_LABEL[f] || f).map(esc).join('、')}。</div>` : ''}
-    <table class="ocr-diff-table"><thead><tr>
-      <th>字段</th><th>当前值</th><th>阿里云值</th><th>状态</th><th style="width:56px"></th>
+    <table class="ocr-diff-table ocr-field-table">
+      <colgroup><col class="ocr-field-name"><col class="ocr-field-current"><col class="ocr-field-cloud"><col class="ocr-field-action"></colgroup>
+      <thead><tr>
+      <th>字段</th><th>当前值</th><th>阿里云值</th><th>处理</th>
     </tr></thead><tbody>${fieldRows}</tbody></table>
     ${itemsBlock}
     <div class="ocr-detail-actions"><button class="btn small ghost" id="deOcrRerun">重新识别</button></div>`;
@@ -5562,9 +5604,35 @@ async function batchReparse() {
     if (!kinds.length) { toast('请选择要重新识别的材料', 'err'); return; }
     runBtn.disabled = true;
     runBtn.textContent = '识别中…';
-    const progress = taskProgress('正在按当前规则重新识别…');
+    const kindLabel = kinds.map((kind) => kind === 'invoice' ? '发票' : '付款截图').join('、');
+    const progress = taskProgress(`正在识别 0/${ids.length} 条 · ${kindLabel}`);
     try {
-      const result = await Api.rerecognizeMaterials(ids, kinds);
+      const result = {
+        invoice: kinds.includes('invoice') ? {
+          processed: 0, resolved: 0, remaining: 0, failed: [], results: [], skipped_current: 0,
+        } : null,
+        payment: kinds.includes('payment') ? {
+          processed: 0, recognized: 0, unrecognized: 0, failed: 0, skipped_current: 0,
+        } : null,
+      };
+      for (let index = 0; index < ids.length; index++) {
+        progress.update(`正在识别 ${index + 1}/${ids.length} 条 · ${kindLabel}`);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const part = await Api.rerecognizeMaterials([ids[index]], kinds);
+        if (result.invoice && part.invoice) {
+          ['processed', 'resolved', 'remaining', 'skipped_current'].forEach((key) => {
+            result.invoice[key] += Number(part.invoice[key] || 0);
+          });
+          result.invoice.failed.push(...(part.invoice.failed || []));
+          result.invoice.results.push(...(part.invoice.results || []));
+        }
+        if (result.payment && part.payment) {
+          ['processed', 'recognized', 'unrecognized', 'failed', 'skipped_current'].forEach((key) => {
+            result.payment[key] += Number(part.payment[key] || 0);
+          });
+        }
+        progress.update(`已完成 ${index + 1}/${ids.length} 条 · ${kindLabel}`);
+      }
       m.close();
       State.selected.clear();
       await refreshEntries();

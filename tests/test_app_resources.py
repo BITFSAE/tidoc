@@ -78,10 +78,10 @@ def test_native_window_background_matches_theme_preference(monkeypatch):
             assert key == "tidoc.themeMode"
             return self.mode or default
 
-    assert app._initial_window_background(StubApi("dark")) == "#12161c"
+    assert app._initial_window_background(StubApi("dark")) == "#131418"
     assert app._initial_window_background(StubApi("light")) == "#f4f1ea"
     monkeypatch.setattr(app, "_system_uses_dark_mode", lambda: True)
-    assert app._initial_window_background(StubApi("system")) == "#12161c"
+    assert app._initial_window_background(StubApi("system")) == "#131418"
 
 
 def test_normal_startup_filters_known_native_and_pdf_noise():

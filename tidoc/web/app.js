@@ -2894,7 +2894,7 @@ async function openSettings() {
       <div class="settings-block about">
         <img src="assets/tidoc-logo-128.png" alt="" id="setRepoLogo" title="打开 GitHub 仓库" />
         <div class="settings-about-copy">
-          <b>${esc(appInfo.name)} <small>v${esc(appInfo.version)}</small></b>
+          <b>${document.getElementById('appWordmark')?.outerHTML || esc(appInfo.name)}<small>v${esc(appInfo.version)}</small></b>
           <div class="settings-credit"><button class="link-btn" id="setBitfsae">BITFSAE</button><span>出品</span></div>
           <div class="settings-about-actions">
             <button class="link-btn with-icon" id="setRepo">${wrapSvg(I.github, 14)}<span>GitHub</span></button>
@@ -3960,9 +3960,10 @@ async function openEntryDetail(entryId, currentDetail = null) {
 
   const completenessLine = (detail) => {
     const state = detail.completeness || { ready: false, missing: [] };
+    // 缺哪些材料由「报账材料」分组逐项标注，这里只在齐全时给一句确认，避免重复。
     return state.ready
       ? `<p class="hint ok-hint" style="margin-top:10px">材料齐全、实付已填、校验通过。</p>`
-      : (state.missing?.length ? `<p class="hint" style="margin-top:10px">待补：${state.missing.map(esc).join('、')}。</p>` : '');
+      : '';
   };
   const compLine = completenessLine(e);
 

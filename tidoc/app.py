@@ -25,7 +25,7 @@ _STDERR_SUPPRESS_PATTERNS = (
 )
 _THEME_PREFERENCE_KEY = "tidoc.themeMode"
 _LIGHT_WINDOW_BACKGROUND = "#f4f1ea"
-_DARK_WINDOW_BACKGROUND = "#12161c"
+_DARK_WINDOW_BACKGROUND = "#131418"
 
 
 def _install_native_stderr_filter() -> None:

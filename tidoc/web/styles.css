@@ -227,6 +227,9 @@ body {
 :root.theme-transition .drag-guide,
 :root.theme-transition input,
 :root.theme-transition select,
+:root.theme-transition .select-trigger,
+:root.theme-transition .select-menu,
+:root.theme-transition .select-menu-option,
 :root.theme-transition button,
 :root.theme-transition .badge,
 :root.theme-transition .title-chip,
@@ -582,6 +585,8 @@ body {
 .preset-btn.active { background: var(--panel-raised); color: var(--primary); box-shadow: var(--shadow-sm); }
 .chip-select, .chip-toggle {
   display: inline-flex; align-items: center; gap: 6px;
+  /* 不参与压缩：工具条变窄时应换行或横向滚动，不能把「最近更新」压成「最…」 */
+  flex: 0 0 auto;
   background: var(--panel-raised); border: 1px solid var(--line); border-radius: 10px;
   min-height: 36px; padding: 6px 9px; font-size: 12px; cursor: pointer; transition: .15s; color: var(--ink-soft);
 }
@@ -930,6 +935,83 @@ select:not([multiple]):hover { border-color: var(--primary-line); }
 }
 .chip-select::after, .chip-toggle.sort-chip::after { display: none; }
 input[type="date"] { color: var(--ink-soft); }
+
+/* ------------------------------------------------ 自绘下拉（原生 select 的替身外观）
+   原生 select 仍在 DOM 里提供数据与 API，这里只画触发器与浮层列表。
+   浮层与右键菜单同族：--panel-raised 底 + --shadow-lg，风格跟应用其他浮层一致。 */
+.select-field { position: relative; display: inline-block; min-width: 0; }
+/* 包装盒不生成行内盒，原生控件仍在文档里但不可见；具体 display 由脚本按原生控件的
+   display 写入内联样式，行内 / 块级 / 网格三种上下文都能保持拆包前的排布。 */
+.select-field > select {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+  opacity: 0; visibility: hidden; pointer-events: none;
+}
+/* 块级上下文里触发器撑满包装盒；行内上下文收缩到内容宽度（display 由脚本按原生控件写入） */
+.select-field.is-block > .select-trigger { width: 100%; }
+.select-trigger {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 8px;
+  box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0;
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+  background: var(--panel-raised); color: var(--ink); font-family: inherit; font-size: 13px;
+  line-height: 1.35; text-align: left; cursor: pointer; transition: .15s;
+}
+.select-trigger:hover:not(:disabled) { border-color: var(--primary-line); }
+.select-trigger:focus-visible { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-ring); }
+.select-trigger:disabled { cursor: default; opacity: .6; }
+.select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-chevron { flex: 0 0 auto; color: var(--ink-faint); transition: .15s; }
+/* 展开只做轻微提示，不旋转箭头：箭头上下翻转在工具条里很吵 */
+.select-trigger[aria-expanded="true"] { border-color: var(--primary); }
+.select-trigger[aria-expanded="true"] .select-chevron { color: var(--primary); }
+
+/* 工具条 chip：外壳与激活态由 .chip-select 负责，触发器只留图标与文字。
+   触发器收缩到内容宽度，箭头才会紧贴文字，不会被 space-between 推到整块最右边。 */
+.chip-select .select-trigger, .chip-toggle .select-trigger {
+  width: auto; flex: 0 1 auto; gap: 3px; border: 0; border-radius: 0;
+  padding: 0; background: transparent; font-size: 12px; font-weight: 500;
+}
+.chip-select .select-trigger:hover:not(:disabled), .chip-toggle .select-trigger:hover:not(:disabled) { border: 0; }
+.chip-select .select-trigger:focus-visible, .chip-toggle .select-trigger:focus-visible { box-shadow: none; }
+.chip-select .select-value, .chip-toggle .select-value { max-width: 124px; }
+.chip-select.is-filtered .select-trigger, .chip-toggle.is-filtered .select-trigger { color: var(--univ-ink); font-weight: 600; }
+.chip-toggle.sort-chip .select-trigger { padding-right: 2px; }
+.chip-select .select-chevron, .chip-toggle .select-chevron { margin-left: -3px; }
+
+/* 高级筛选面板的下拉沿用原有盒子尺寸 */
+.adv-field .select-trigger { min-width: 116px; height: 34px; padding: 0 12px; }
+/* 设置行：和原生 .settings-select 同一尺寸（34px + 1px 边框） */
+.settings-row .select-trigger { height: 36px; padding: 6px 12px; }
+/* 详情头部报账人：原生是 7px 内边距，触发器沿用以免整块变高 */
+.detail-profile-select { padding: 7px 10px; }
+.adv-field.is-filtered .select-trigger {
+  background: var(--primary-soft); border-color: var(--primary-line); color: var(--univ-ink); font-weight: 600;
+}
+.adv-field.is-filtered .select-trigger:focus-visible { border-color: var(--primary-line); box-shadow: none; }
+
+/* 浮层列表 */
+.select-menu {
+  position: fixed; z-index: 300; min-width: 112px; max-height: 320px; overflow-y: auto; overscroll-behavior: contain;
+  padding: 5px; background: var(--panel-raised); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow-lg); animation: selectMenuIn .12s ease;
+}
+.select-menu[hidden] { display: none; }
+@keyframes selectMenuIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.select-menu.drop-up { animation-name: selectMenuInUp; }
+@keyframes selectMenuInUp { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.select-menu-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 9px; border-radius: 7px; font-size: 13px; color: var(--ink); cursor: pointer;
+}
+.select-menu-option.is-active { background: var(--primary-soft); }
+/* 当前项用 --univ-ink 而不是 --primary：浅色底上 --primary 对比度只有约 4.9:1，
+   加粗后仍偏淡；--univ-ink 是同一色系里为文字准备的更深的那个。 */
+.select-menu-option.is-selected { color: var(--univ-ink); font-weight: 600; }
+.select-menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-menu-check { flex: 0 0 14px; display: grid; place-items: center; color: var(--primary); }
+.select-menu-check svg { display: block; }
+@media (prefers-reduced-motion: reduce) {
+  .select-menu, .select-menu.drop-up { animation: none; }
+}
 .btn {
   border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink);
   padding: 8px 14px; border-radius: 9px; cursor: pointer; transition: .15s; font-weight: 500;

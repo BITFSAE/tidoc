@@ -111,6 +111,9 @@ const BINDLE_INCLUDE_NOTES_KEY = 'tidoc.bindle.includeNotes';
 const BINDLE_INCLUDE_TAGS_KEY = 'tidoc.bindle.includeTags';
 const VERIFICATION_WATCH_DIR_KEY = 'tidoc.invoiceVerification.watchDirectory';
 const AUTO_UPDATE_KEY = 'tidoc.update.autoCheck';
+const PendingLaunchFiles = [];
+let launchFileCheckRunning = false;
+let launchFileCheckAgain = false;
 const OPERATOR_PREF_KEYS = {
   name: 'tidoc.operator.name',
   student_id: 'tidoc.operator.student_id',
@@ -303,14 +306,44 @@ async function init() {
   await refreshEntries();
   await refreshTagOptions();
   showSearchHintIfEmpty();
-  try {
-    const launch = await Api.takeLaunchFile();
-    if (launch?.path) await importBindleFlow(launch.path);
-  } catch (e) { toast(e.message, 'err'); }
+  await handleSecondaryLaunch();
   if (startupUpdate?.upgraded) setTimeout(() => { openReleaseHighlights('updated', startupUpdate); }, 450);
   else await maybeShowFirstUseGuide();
   setTimeout(() => { maybeAutoCheckUpdates(); }, 1200);
 }
+
+async function handleSecondaryLaunch() {
+  if (launchFileCheckRunning) {
+    launchFileCheckAgain = true;
+    return;
+  }
+  launchFileCheckRunning = true;
+  try {
+    let launch = await Api.takeLaunchFile();
+    while (launch?.path) {
+      if (!PendingLaunchFiles.includes(launch.path)) PendingLaunchFiles.push(launch.path);
+      launch = await Api.takeLaunchFile();
+    }
+    if (!PendingLaunchFiles.length) return;
+    if ($('#modalRoot').lastChild) {
+      toast('已收到绑定包，关闭当前弹窗后将打开导入预览', 'ok');
+      return;
+    }
+    const path = PendingLaunchFiles.shift();
+    await importBindleFlow(path);
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    launchFileCheckRunning = false;
+    if (launchFileCheckAgain) {
+      launchFileCheckAgain = false;
+      setTimeout(() => handleSecondaryLaunch(), 0);
+    }
+  }
+}
+
+// 单实例监听线程在第二次启动时调用；路径先入后端队列，界面空闲后再打开预览。
+window.handleSecondaryLaunch = handleSecondaryLaunch;
 
 function refreshOcrStatus() {
   Api.ocrComponentStatus()
@@ -1534,19 +1567,76 @@ function openBatchMenu(x, y, b) {
   item('编辑批次', () => renameBatchFlow(b));
   item('批次备注', () => batchNoteFlow(b));
   item(b.archived ? '恢复到在办' : '归档批次', () => archiveBatchFlow(b));
-  item('删除批次', async () => {
-    if (!confirm(`删除批次「${b.name}」？条目本身不会被删除。`)) return;
-    const wasFocused = State.batchFilter === b.id;
-    await Api.deleteBatch(b.id);
-    await loadBatches();
-    if (wasFocused) focusBatch(b.archived && hasArchivedBatches() ? ARCHIVED_BATCH_ID : '');
-    else await refreshEntries();
-    toast('批次已删除', 'ok');
-  }, true);
+  item('删除批次', () => deleteBatchFlow(b), true);
   menu.style.left = Math.min(x, window.innerWidth - 190) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - 200) + 'px';
   document.body.appendChild(menu);
   setTimeout(() => document.addEventListener('click', closeEntryMenu, { once: true }), 0);
+}
+
+async function deleteBatchFlow(batchSummary) {
+  let batch;
+  try {
+    batch = await Api.getBatch(batchSummary.id);
+  } catch (e) {
+    toast(e.message, 'err');
+    return;
+  }
+  if (!batch) {
+    toast('批次不存在或已经删除', 'err');
+    await loadBatches();
+    return;
+  }
+  const count = Number(batch.count || batch.entry_ids?.length || 0);
+  const body = el('div', 'batch-delete-confirm');
+  body.innerHTML = `
+    <div class="archive-confirm-summary">
+      <b>${esc(batch.name)}</b><span>${count} 条</span>
+    </div>
+    <div class="batch-delete-choices" role="radiogroup" aria-label="删除范围">
+      <label class="batch-delete-choice is-selected">
+        <input type="radio" name="batchDeleteScope" value="batch" checked/>
+        <span><b>仅删除批次</b><small>保留条目和材料</small></span>
+      </label>
+      <label class="batch-delete-choice${count ? '' : ' disabled'}">
+        <input type="radio" name="batchDeleteScope" value="entries"${count ? '' : ' disabled'}/>
+        <span><b>同时删除条目</b><small>${count ? `永久删除 ${count} 条及附件（含其他批次中的记录）` : '没有条目'}</small></span>
+      </label>
+    </div>`;
+  const deleteBtn = mkBtn('删除批次', 'danger', async () => {
+    const deleteEntries = body.querySelector('[name="batchDeleteScope"]:checked')?.value === 'entries';
+    deleteBtn.disabled = true;
+    try {
+      const wasFocused = State.batchFilter === batch.id;
+      const result = await Api.deleteBatch(batch.id, deleteEntries);
+      m.close();
+      State.selected.clear();
+      await loadBatches();
+      if (wasFocused) focusBatch(batch.archived && hasArchivedBatches() ? ARCHIVED_BATCH_ID : '');
+      else await refreshEntries();
+      const message = deleteEntries
+        ? `批次及 ${result.deleted_entries || 0} 条条目已删除`
+        : '批次已删除，条目已保留';
+      toast(result.cleanup_warning || message, result.cleanup_warning ? 'err' : 'ok');
+    } catch (e) {
+      deleteBtn.disabled = false;
+      toast(e.message, 'err');
+    }
+  });
+  const m = modal({
+    title: '删除批次',
+    body,
+    footer: [mkBtn('取消', 'ghost', () => m.close()), deleteBtn],
+  });
+  const radios = [...body.querySelectorAll('[name="batchDeleteScope"]')];
+  const syncScope = () => {
+    const deleteEntries = radios.some((radio) => radio.checked && radio.value === 'entries');
+    body.querySelectorAll('.batch-delete-choice').forEach((choice) => {
+      choice.classList.toggle('is-selected', !!choice.querySelector('input:checked'));
+    });
+    deleteBtn.textContent = deleteEntries ? `删除批次和 ${count} 条条目` : '删除批次';
+  };
+  radios.forEach((radio) => { radio.onchange = syncScope; });
 }
 
 async function archiveBatchFlow(batch) {
@@ -2495,6 +2585,7 @@ function modal({ title, subhead, titleChip, body, footer, wide, onClose }) {
     closed = true;
     if (onClose) onClose();
     mask.remove();
+    if (!$('#modalRoot').lastChild) setTimeout(() => handleSecondaryLaunch(), 0);
   };
   mask._closeModal = close;
   closeBtn.onclick = close;
@@ -5018,6 +5109,8 @@ async function openBindleImportPreview(path, insp, options = {}) {
   const existingBatchOptions = activeBatches.map((batch) =>
     `<option value="${esc(batch.id)}">${esc(batch.name)} · ${batch.stats?.count || 0} 条</option>`
   ).join('');
+  const defaultBatchMode = activeBatches.length ? 'existing' : 'new';
+  const suggestedBatchName = baseName(path).replace(/\.tidoc$/i, '').trim();
   body.innerHTML = `
     <div class="bindle-import-bar">
       <strong data-tooltip-overflow="${esc(baseName(path))}">${esc(baseName(path))}</strong>
@@ -5044,12 +5137,12 @@ async function openBindleImportPreview(path, insp, options = {}) {
         <div class="form-row bindle-batch-option">
           <label>报账批次</label>
           <div class="bindle-segments" role="radiogroup" aria-label="报账批次">
-            <label><input type="radio" name="bindleBatchMode" value="none" checked/><span>不加入</span></label>
-            <label class="${activeBatches.length ? '' : 'disabled'}"><input type="radio" name="bindleBatchMode" value="existing" ${activeBatches.length ? '' : 'disabled'}/><span>已有批次</span></label>
-            <label><input type="radio" name="bindleBatchMode" value="new"/><span>新建批次</span></label>
+            <label><input type="radio" name="bindleBatchMode" value="none"/><span>不加入</span></label>
+            <label class="${activeBatches.length ? '' : 'disabled'}"><input type="radio" name="bindleBatchMode" value="existing" ${activeBatches.length ? 'checked' : 'disabled'}/><span>已有批次</span></label>
+            <label><input type="radio" name="bindleBatchMode" value="new" ${defaultBatchMode === 'new' ? 'checked' : ''}/><span>新建批次</span></label>
           </div>
-          <select id="bindleBatchSelect" class="hidden" aria-label="选择已有批次">${existingBatchOptions}</select>
-          <input id="bindleNewBatch" class="hidden" aria-label="新批次名称" placeholder="输入批次名称"/>
+          <select id="bindleBatchSelect" class="${defaultBatchMode === 'existing' ? '' : 'hidden'}" aria-label="选择已有批次">${existingBatchOptions}</select>
+          <input id="bindleNewBatch" class="${defaultBatchMode === 'new' ? '' : 'hidden'}" aria-label="新批次名称" placeholder="输入批次名称" value="${esc(suggestedBatchName)}"/>
         </div>
         <div class="form-row">
           <label for="bindleTagInput">统一标签 <span class="optional">可选</span></label>
@@ -5074,6 +5167,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
     input.onchange = () => {
       batchSelect.classList.toggle('hidden', input.value !== 'existing');
       newBatch.classList.toggle('hidden', input.value !== 'new');
+      if (input.checked && input.value === 'existing') enhanceNativeSelects(batchSelect);
       if (input.checked && input.value === 'new') newBatch.focus();
     };
   });
@@ -5120,6 +5214,10 @@ async function openBindleImportPreview(path, insp, options = {}) {
         const batchName = batchMode === 'new' ? newBatch.value.trim() : '';
         if (batchMode === 'existing' && !batchId) { toast('请选择报账批次', 'err'); return; }
         if (batchMode === 'new' && !batchName) { toast('请填写新批次名称', 'err'); return; }
+        if (batchMode === 'none' && entries.length) {
+          const confirmed = await confirmBindleWithoutBatch(entries.length);
+          if (!confirmed) return;
+        }
         const options = {
           profile_overrides: profileOverrides,
           tags: tag ? [tag] : [],
@@ -5140,6 +5238,35 @@ async function openBindleImportPreview(path, insp, options = {}) {
         finally { progress.close(); }
       }),
     ],
+  });
+}
+
+function confirmBindleWithoutBatch(count) {
+  return new Promise((resolve) => {
+    let decided = false;
+    let confirmModal;
+    const finish = (value) => {
+      if (decided) return;
+      decided = true;
+      confirmModal.close();
+      resolve(value);
+    };
+    const body = el('div', 'archive-confirm');
+    body.innerHTML = `
+      <div class="archive-confirm-summary"><b>${count} 条将留在「未进批次」</b></div>`;
+    confirmModal = modal({
+      title: '确认不加入批次',
+      body,
+      onClose: () => {
+        if (decided) return;
+        decided = true;
+        resolve(false);
+      },
+      footer: [
+        mkBtn('返回选择批次', 'ghost', () => finish(false)),
+        mkBtn('仍然不加入', 'primary', () => finish(true)),
+      ],
+    });
   });
 }
 

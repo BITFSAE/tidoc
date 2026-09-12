@@ -65,4 +65,4 @@ tidoc/ocr/macos/tidoc-ocr-macos-v0.2.1.zip
 - Release 说明和客户端 What’s changed 都从 `CHANGELOG.md` 最新一节生成，避免三处手工维护后内容不一致。
 - Windows 核心改为 Inno Setup 的按用户安装器；安装到用户目录，不要求管理员权限，并提供开始菜单、可选桌面快捷方式和卸载入口。
 - 平台图标集中在 `icon/`：`source/icon-master.png` 是完整方形母版；Windows 使用 `windows/icon-rounded.png` 和多尺寸 `windows/icon.ico`，透明圆角由素材提供；macOS 使用不手工裁圆角的 `macos/icon-1024.png` 和 `macos/icon.icns`，交给系统裁切。`scripts/generate_brand_assets.py` 可从方形源图重建这些文件及 Web 用 PNG。
-- Windows 安装器把 `.tidoc` 扩展名注册为「Tidoc 绑定包」（按用户写入 `Software\Classes`）：资源管理器使用安装目录中的 `tidoc-file.ico`，双击调用 `tidoc.exe "<文件>"` 进入导入预览；安装器本身与应用可执行文件也使用同一套圆角 ICO，卸载时自动删除关联键。macOS 构建会把 `tidoc-file.icns` 放进应用资源、注册 `com.bitfsae.tidoc.bindle` 文档类型，并在修改后重新签名应用包。
+- Windows 安装器把 `.tidoc` 扩展名注册为「Tidoc 绑定包」（按用户写入 `Software\Classes`）：资源管理器使用安装目录中的 `tidoc-file.ico`，双击调用 `tidoc.exe "<文件>"` 进入导入预览；Tidoc 已运行时，第二个进程只把路径转交给已有窗口并退出。安装器本身与应用可执行文件也使用同一套圆角 ICO，卸载时自动删除关联键。macOS 构建启用文档启动参数接收，把 `tidoc-file.icns` 放进应用资源、注册 `com.bitfsae.tidoc.bindle` 文档类型，并在修改后重新签名应用包。单实例锁使用系统运行目录，不放在可迁移的数据根内，避免迁移数据时失效。

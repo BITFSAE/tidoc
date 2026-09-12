@@ -16,6 +16,7 @@ from pathlib import Path
 import webview
 
 from .api import Api
+from .single_instance import SingleInstance
 
 WEB_DIR = Path(__file__).parent / "web"
 _STDERR_SUPPRESS_PATTERNS = (
@@ -152,27 +153,85 @@ def _launch_bindle_path() -> str:
     return ""
 
 
+def _activate_main_window(window) -> None:
+    """Restore a minimized main window and bring it to the foreground."""
+    try:
+        if sys.platform == "darwin":
+            # Cocoa's deminiaturize is harmless when the window is not minimized.
+            window.restore()
+        elif sys.platform == "win32":
+            state = str(getattr(getattr(window, "native", None), "WindowState", ""))
+            if state.lower().endswith("minimized"):
+                window.restore()
+        window.show()
+    except Exception:  # noqa: BLE001 - activation is best-effort across native backends
+        try:
+            window.show()
+        except Exception:
+            pass
+
+
+def _serve_instance_requests(instance, api, window, stop_event) -> None:
+    """Forward secondary launches to the first window until it closes."""
+    while not stop_event.is_set():
+        for request in instance.pop_requests():
+            launch_file = str(request.get("launch_file") or "")
+            path = Path(launch_file) if launch_file else None
+            if path and path.suffix.lower() == ".tidoc" and path.is_file():
+                api.queue_launch_file(str(path))
+            _activate_main_window(window)
+            try:
+                window.evaluate_js(
+                    "window.handleSecondaryLaunch && window.handleSecondaryLaunch();"
+                )
+            except Exception:
+                # The launch path remains queued; startup or the next activation will consume it.
+                pass
+        stop_event.wait(0.2)
+
+
 def main() -> None:
     if "--self-test" in sys.argv:
         self_test()
         return
-    _install_native_stderr_filter()
-    from .db.paths import resolve_data_root
-    api = Api(resolve_data_root(), launch_file=_launch_bindle_path())
-    index = web_dir() / "index.html"
-    _configure_webview_settings()
-    window = webview.create_window(
-        "tidoc",
-        url=web_app_url(index),
-        js_api=api,
-        width=1160,
-        height=780,
-        min_size=(920, 640),
-        background_color=_initial_window_background(api),
-    )
-    api.bind_window(window)
-    debug = "--debug" in sys.argv
-    webview.start(debug=debug)
+    launch_file = _launch_bindle_path()
+    instance = SingleInstance()
+    if not instance.acquire():
+        try:
+            instance.send_activation(launch_file)
+        except OSError:
+            pass
+        return
+    stop_event = threading.Event()
+    try:
+        _install_native_stderr_filter()
+        from .db.paths import resolve_data_root
+
+        api = Api(resolve_data_root(), launch_file=launch_file)
+        index = web_dir() / "index.html"
+        _configure_webview_settings()
+        window = webview.create_window(
+            "tidoc",
+            url=web_app_url(index),
+            js_api=api,
+            width=1160,
+            height=780,
+            min_size=(920, 640),
+            background_color=_initial_window_background(api),
+        )
+        api.bind_window(window)
+        window.events.closed += stop_event.set
+        threading.Thread(
+            target=_serve_instance_requests,
+            args=(instance, api, window, stop_event),
+            daemon=True,
+            name="tidoc-instance-listener",
+        ).start()
+        debug = "--debug" in sys.argv
+        webview.start(debug=debug)
+    finally:
+        stop_event.set()
+        instance.release()
 
 
 if __name__ == "__main__":

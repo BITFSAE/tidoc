@@ -245,6 +245,11 @@ def test_bindle_preview_is_compact_and_keeps_legacy_profile_mapping():
     assert "legacyProfiles" in preview
     assert "entry.profile_name || fallback?.name" in preview
     assert 'name="bindleBatchMode"' in preview
+    assert "defaultBatchMode = activeBatches.length ? 'existing' : 'new'" in preview
+    assert "suggestedBatchName" in preview
+    assert "confirmBindleWithoutBatch(entries.length)" in preview
+    assert "条将留在「未进批次」" in preview
+    assert "仍然不加入" in preview
     assert 'class="bindle-entry-head"' in preview
     assert "已读取 ${esc(baseName(path))}" not in preview
     assert "给全部导入条目添加标签" not in preview
@@ -409,6 +414,17 @@ def test_inline_selects_use_the_self_drawn_menu_component():
     assert "function enhanceNativeSelects(" in source
     assert "syncSelectDisplays" not in source   # 组件自己同步，调用方不再手工刷
     assert "enhanceNativeSelects(bodyEl)" in source
+    # 绑定包批次下拉创建时是 display:none；切到“已有批次”后必须补做增强，
+    # 否则它会成为全应用唯一重新露出的原生 select。
+    assert "input.checked && input.value === 'existing'" in source
+    assert "enhanceNativeSelects(batchSelect)" in source
+
+    # 删除批次必须让用户明确选择是否连同条目和附件一起删除，默认保留条目。
+    assert "function deleteBatchFlow(" in source
+    assert 'value="batch" checked' in source
+    assert 'value="entries"' in source
+    assert "同时删除条目" in source
+    assert "Api.deleteBatch(batch.id, deleteEntries)" in source
 
     assert ".select-field { position: relative" in styles
     assert ".select-trigger" in styles

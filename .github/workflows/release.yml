@@ -158,6 +158,7 @@ jobs:
           --paths "."
           --collect-submodules tidoc
           --icon "icon/macos/icon.icns"
+          --argv-emulation
           --osx-bundle-identifier "com.bitfsae.tidoc"
           --add-data "tidoc/web:tidoc/web"
           scripts/tidoc_app_entry.py

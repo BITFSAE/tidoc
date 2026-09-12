@@ -72,10 +72,11 @@ class BatchRepo:
     def set_archived(self, batch_id: str, archived: bool = True) -> dict:
         return self.update(batch_id, archived=archived)
 
-    def delete(self, batch_id: str) -> None:
+    def delete(self, batch_id: str, *, commit: bool = True) -> None:
         # batch_entries 由外键 ON DELETE CASCADE 清理（数据库已开 foreign_keys=ON）。
         self.db.conn.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
-        self.db.conn.commit()
+        if commit:
+            self.db.conn.commit()
 
     # ------------------------------------------------------------------ 装入 / 移出条目
     def add_entries(self, batch_id: str, entry_ids: list[str]) -> int:

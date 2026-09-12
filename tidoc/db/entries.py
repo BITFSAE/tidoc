@@ -1174,10 +1174,11 @@ class EntryRepo:
         self.db.conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
         self.db.conn.commit()
 
-    def delete_many(self, entry_ids: list[str]) -> int:
+    def delete_many(self, entry_ids: list[str], *, commit: bool = True) -> int:
         if not entry_ids:
             return 0
         placeholders = ",".join("?" * len(entry_ids))
         cur = self.db.conn.execute(f"DELETE FROM entries WHERE id IN ({placeholders})", entry_ids)
-        self.db.conn.commit()
+        if commit:
+            self.db.conn.commit()
         return cur.rowcount

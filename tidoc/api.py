@@ -112,7 +112,7 @@ class Api:
         self.ocr = OcrRepo(self.db)
         self._window = None
         self._verification_sessions: dict[str, dict] = {}
-        self._launch_file = launch_file
+        self._launch_files = [launch_file] if launch_file else []
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
         self._apply_title_profiles()
         self._sync_entry_statuses()
@@ -125,7 +125,7 @@ class Api:
         等文件系统方法）全部当成 JS API 暴露：既有安全隐患，又让注入体积暴涨、
         拖慢桥就绪，导致前端首个调用报「后端方法不存在」。
         """
-        internal = {"bind_window"}
+        internal = {"bind_window", "queue_launch_file"}
         return [
             name for name in vars(type(self))
             if not name.startswith("_")
@@ -135,6 +135,15 @@ class Api:
 
     def bind_window(self, window) -> None:
         self._window = window
+
+    def queue_launch_file(self, path: str) -> None:
+        """Queue a .tidoc path handed off by a secondary application launch."""
+        value = str(path or "")
+        if not value:
+            return
+        with self._api_lock:
+            if value not in self._launch_files:
+                self._launch_files.append(value)
 
     def _preference_value(self, key: str, default: str = "") -> str:
         row = self.db.conn.execute(
@@ -250,9 +259,8 @@ class Api:
 
     @_guard
     def take_launch_file(self):
-        """返回双击 .tidoc 文件启动时携带的路径；只消费一次。"""
-        path = self._launch_file
-        self._launch_file = ""
+        """返回启动或后续双击 .tidoc 时携带的下一个路径。"""
+        path = self._launch_files.pop(0) if self._launch_files else ""
         return {"path": path or ""}
 
     @_guard
@@ -809,9 +817,21 @@ class Api:
         return self.batches.set_archived(batch_id, archived)
 
     @_guard
-    def delete_batch(self, batch_id):
-        self.batches.delete(batch_id)
-        return {"deleted": batch_id}
+    def delete_batch(self, batch_id, delete_entries=False):
+        batch = self.batches.get(batch_id)
+        if not batch:
+            raise ValueError("批次不存在。")
+        if not delete_entries:
+            self.batches.delete(batch_id)
+            return {"deleted": batch_id, "deleted_entries": 0, "cleanup_warning": ""}
+        deleted, cleanup_warning = self._delete_entries_with_files(
+            batch.get("entry_ids") or [], delete_batch_id=batch_id
+        )
+        return {
+            "deleted": batch_id,
+            "deleted_entries": deleted,
+            "cleanup_warning": cleanup_warning,
+        }
 
     @_guard
     def add_entries_to_batch(self, batch_id, entry_ids):
@@ -2024,10 +2044,14 @@ class Api:
             errors.append(f"附件未删除：{exc}")
         return "；".join(errors)
 
-    def _delete_entries_with_files(self, entry_ids) -> tuple[int, str]:
-        """先暂存附件目录，再删记录；数据库删除失败时可把附件原位恢复。"""
+    def _delete_entries_with_files(
+        self, entry_ids, *, delete_batch_id: str = ""
+    ) -> tuple[int, str]:
+        """先暂存附件，再原子删除条目和可选批次；失败时恢复附件。"""
         ids = list(dict.fromkeys(str(value) for value in (entry_ids or []) if value))
         if not ids:
+            if delete_batch_id:
+                self.batches.delete(delete_batch_id)
             return 0, ""
         placeholders = ",".join("?" * len(ids))
         rows = self.db.conn.execute(
@@ -2035,6 +2059,8 @@ class Api:
         ).fetchall()
         existing_ids = [row["id"] for row in rows]
         if not existing_ids:
+            if delete_batch_id:
+                self.batches.delete(delete_batch_id)
             return 0, ""
 
         moved: list[tuple[Path, Path]] = []
@@ -2055,7 +2081,12 @@ class Api:
             raise
 
         try:
-            deleted = self.entries.delete_many(existing_ids)
+            if delete_batch_id:
+                deleted = self.entries.delete_many(existing_ids, commit=False)
+                self.batches.delete(delete_batch_id, commit=False)
+                self.db.conn.commit()
+            else:
+                deleted = self.entries.delete_many(existing_ids)
         except Exception:
             self.db.conn.rollback()
             restore_errors = []

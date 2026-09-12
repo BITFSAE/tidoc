@@ -48,6 +48,18 @@ def test_take_launch_file_is_consumed_once():
     assert api.take_launch_file()["data"]["path"] == ""
 
 
+def test_secondary_launch_files_are_queued_without_duplicates():
+    api = Api(tempfile.mkdtemp())
+
+    api.queue_launch_file("C:/下载/一.tidoc")
+    api.queue_launch_file("C:/下载/一.tidoc")
+    api.queue_launch_file("C:/下载/二.tidoc")
+
+    assert api.take_launch_file()["data"]["path"] == "C:/下载/一.tidoc"
+    assert api.take_launch_file()["data"]["path"] == "C:/下载/二.tidoc"
+    assert api.take_launch_file()["data"]["path"] == ""
+
+
 def test_launch_bindle_path_picked_from_argv(monkeypatch, tmp_path):
     from tidoc.app import _launch_bindle_path
 

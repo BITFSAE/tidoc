@@ -327,6 +327,67 @@ def test_batch_delete_removes_all_attachment_directories(api, tmp_path):
     assert all(not path.exists() for path in entry_dirs)
 
 
+def test_delete_batch_can_keep_entries_or_remove_entries_and_files(api, tmp_path):
+    profile = api.create_profile("张三", "李老师")["data"]
+    kept = api.create_entry(profile["id"])["data"]
+    removed = api.create_entry(profile["id"])["data"]
+    payment = tmp_path / "付款截图.png"
+    payment.write_bytes(b"payment")
+    api.add_attachment(
+        removed["id"], str(payment), "payment_screenshot",
+        options={"skip_payment_ocr": True},
+    )
+    removed_dir = api.data_root.attachments_dir / removed["id"]
+
+    keep_batch = api.create_batch("保留条目", entry_ids=[kept["id"]])["data"]
+    delete_batch = api.create_batch("删除条目", entry_ids=[removed["id"]])["data"]
+    shared_batch = api.create_batch("其他批次", entry_ids=[removed["id"]])["data"]
+
+    kept_result = api.delete_batch(keep_batch["id"], False)["data"]
+    removed_result = api.delete_batch(delete_batch["id"], True)["data"]
+
+    assert kept_result == {
+        "deleted": keep_batch["id"], "deleted_entries": 0, "cleanup_warning": "",
+    }
+    assert api.entries.get(kept["id"]) is not None
+    assert removed_result == {
+        "deleted": delete_batch["id"], "deleted_entries": 1, "cleanup_warning": "",
+    }
+    assert api.entries.get(removed["id"]) is None
+    assert not removed_dir.exists()
+    assert api.batches.get(shared_batch["id"])["count"] == 0
+
+
+def test_delete_batch_with_entries_rolls_back_database_and_files(api, tmp_path, monkeypatch):
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry = api.create_entry(profile["id"])["data"]
+    payment = tmp_path / "付款截图.png"
+    payment.write_bytes(b"payment")
+    api.add_attachment(
+        entry["id"], str(payment), "payment_screenshot",
+        options={"skip_payment_ocr": True},
+    )
+    batch = api.create_batch("待删除", entry_ids=[entry["id"]])["data"]
+    entry_dir = api.data_root.attachments_dir / entry["id"]
+    stored_files = list(entry_dir.iterdir())
+    original_delete = api.batches.delete
+
+    def fail_batch_delete(batch_id, *, commit=True):
+        if not commit:
+            raise OSError("批次删除失败")
+        return original_delete(batch_id, commit=commit)
+
+    monkeypatch.setattr(api.batches, "delete", fail_batch_delete)
+
+    result = api.delete_batch(batch["id"], True)
+
+    assert result == {"ok": False, "error": "批次删除失败"}
+    assert api.batches.get(batch["id"])["entry_ids"] == [entry["id"]]
+    assert api.entries.get(entry["id"]) is not None
+    assert entry_dir.is_dir()
+    assert list(entry_dir.iterdir()) == stored_files
+
+
 def test_entry_delete_restores_attachment_directory_when_database_delete_fails(
     api, tmp_path, monkeypatch
 ):

@@ -92,7 +92,7 @@ const Api = (() => {
     createBatch: (name, note, entryIds) => call('create_batch', name, note || '', entryIds || []),
     updateBatch: (id, fields) => call('update_batch', id, fields || {}),
     archiveBatch: (id, archived) => call('archive_batch', id, archived !== false),
-    deleteBatch: (id) => call('delete_batch', id),
+    deleteBatch: (id, deleteEntries) => call('delete_batch', id, !!deleteEntries),
     addEntriesToBatch: (id, entryIds) => call('add_entries_to_batch', id, entryIds || []),
     removeEntriesFromBatch: (id, entryIds) => call('remove_entries_from_batch', id, entryIds || []),
     moveEntriesBetweenBatches: (sourceId, targetId, entryIds) => call('move_entries_between_batches', sourceId, targetId, entryIds || []),

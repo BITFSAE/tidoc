@@ -353,7 +353,23 @@ body {
 }
 .archive-confirm-note b { color: var(--ink); font-size: 11px; font-weight: 650; }
 .archive-confirm-note span { white-space: pre-wrap; word-break: break-word; }
-
+.batch-delete-confirm { display: flex; flex-direction: column; gap: 12px; }
+.batch-delete-choices { display: grid; gap: 8px; }
+.batch-delete-choice {
+  display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--panel-raised); cursor: pointer;
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.batch-delete-choice:hover { border-color: var(--primary); }
+.batch-delete-choice.is-selected {
+  border-color: var(--primary); background: var(--primary-soft); box-shadow: 0 0 0 1px var(--primary-line);
+}
+.batch-delete-choice input { flex: 0 0 auto; margin-top: 2px; accent-color: var(--primary); }
+.batch-delete-choice span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.batch-delete-choice b { font-size: 13px; color: var(--ink); }
+.batch-delete-choice small { color: var(--ink-soft); font-size: 11.5px; line-height: 1.5; }
+.batch-delete-choice.disabled { opacity: .55; cursor: default; }
+.batch-delete-choice.disabled:hover { border-color: var(--line); }
 /* 分组头 */
 .group-head {
   display: flex; align-items: center; gap: 12px; padding: 11px 14px;

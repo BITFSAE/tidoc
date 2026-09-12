@@ -1740,13 +1740,13 @@ async function deleteBatchFlow(batchSummary) {
   const count = Number(batch.count || batch.entry_ids?.length || 0);
   const body = el('div', 'batch-delete-confirm');
   body.innerHTML = `
-    <div class="archive-confirm-summary">
-      <b>${esc(batch.name)}</b><span>${count} 条</span>
+    <div class="batch-delete-copy">
+      <b>${esc(batch.name)}</b>
+      <p>${count ? `${count} 个条目会移到「未进批次」，条目及其附件会保留。` : '这个批次中没有条目。'}</p>
     </div>
-    ${count ? '<p class="batch-delete-preserve">条目会回到「未进批次」。</p>' : ''}
     ${count ? `<label class="batch-delete-option">
       <input type="checkbox" name="batchDeleteEntries"/>
-      <span><b>同时永久删除 ${count} 条条目和全部附件</b><small>此操作不可恢复</small></span>
+      <span><b>同时永久删除条目</b><small>将删除 ${count} 个条目及其全部附件，此操作不可恢复。</small></span>
     </label>` : ''}`;
   const deleteBtn = mkBtn('删除批次', 'danger', async () => {
     const deleteEntries = !!body.querySelector('[name="batchDeleteEntries"]:checked');
@@ -1760,7 +1760,7 @@ async function deleteBatchFlow(batchSummary) {
       if (wasFocused) focusBatch(batch.archived && hasArchivedBatches() ? ARCHIVED_BATCH_ID : '');
       else await refreshEntries();
       const message = deleteEntries
-        ? `批次及 ${result.deleted_entries || 0} 条条目已删除`
+        ? `批次及 ${result.deleted_entries || 0} 个条目已删除`
         : '批次已删除，条目已保留';
       toast(result.cleanup_warning || message, result.cleanup_warning ? 'err' : 'ok');
     } catch (e) {
@@ -1770,6 +1770,7 @@ async function deleteBatchFlow(batchSummary) {
   });
   const m = modal({
     title: '删除批次',
+    compact: true,
     body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), deleteBtn],
   });
@@ -1777,7 +1778,7 @@ async function deleteBatchFlow(batchSummary) {
   const syncScope = () => {
     const deleteEntries = !!deleteEntriesToggle?.checked;
     deleteEntriesToggle?.closest('.batch-delete-option')?.classList.toggle('is-selected', deleteEntries);
-    deleteBtn.textContent = deleteEntries ? `删除批次和 ${count} 条条目` : '删除批次';
+    deleteBtn.textContent = deleteEntries ? '永久删除批次和条目' : '删除批次';
   };
   if (deleteEntriesToggle) deleteEntriesToggle.onchange = syncScope;
 }
@@ -1806,6 +1807,7 @@ async function archiveBatchFlow(batch) {
     </div>`;
   const m = modal({
     title: '确认归档批次',
+    compact: true,
     body,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
@@ -2684,14 +2686,16 @@ function clearAllFilters() {
 }
 
 // ------------------------------------------------------------------ 通用弹层
-function modal({ title, subhead, titleChip, body, footer, wide, onClose }) {
+function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose }) {
   const mask = el('div', 'modal-mask');
-  const box = el('div', 'modal' + (wide ? ' wide' : ''));
+  const box = el('div', 'modal' + (wide ? ' wide' : compact ? ' compact' : ''));
   const head = el('div', 'modal-head');
   const titleRow = el('div', 'modal-title-row');
   if (titleChip) titleRow.appendChild(el('span', 'title-chip lg ' + titleChip.cls, esc(titleChip.text)));
-  titleRow.appendChild(el('h2', null, esc(title)));
-  if (subhead) titleRow.appendChild(el('div', 'modal-subhead', esc(subhead)));
+  const titleCopy = el('div', 'modal-title-copy');
+  titleCopy.appendChild(el('h2', null, esc(title)));
+  if (subhead) titleCopy.appendChild(el('div', 'modal-subhead', esc(subhead)));
+  titleRow.appendChild(titleCopy);
   head.appendChild(titleRow);
   const closeBtn = el('button', 'modal-close', CLOSE_ICON);
   head.appendChild(closeBtn);
@@ -5511,6 +5515,7 @@ function confirmBindleWithoutBatch(count) {
       <div class="archive-confirm-summary"><b>${count} 条将留在「未进批次」</b></div>`;
     confirmModal = modal({
       title: '确认不加入批次',
+      compact: true,
       body,
       onClose: () => {
         if (decided) return;

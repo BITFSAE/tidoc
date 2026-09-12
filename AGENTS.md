@@ -3,6 +3,7 @@ DO NOT send optional commentary
 Repository workflow:
 - For the current project stage, routine changes may be made and committed directly on `main`; do not create a feature branch unless the user explicitly asks for one.
 - A commit does not authorize pushing, tagging, building a release, or publishing a new version. Perform those actions only when the user explicitly requests them.
+- Do not use Playwright or other browser automation for UI review or verification in this repository. Do not create one-off preview/mock pages or inject synthetic UI solely to inspect a component; review the real application surface when available, otherwise rely on source-level checks, tests, and user-provided screenshots.
 
 Tidoc product/design guidance learned from this project:
 - Treat Tidoc as an operator tool for repeated reimbursement work. The primary path is invoice import -> material completion -> review/filter -> batch/export/print, so new UI should reduce movement along that path rather than add separate "feature pages".

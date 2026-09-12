@@ -436,9 +436,15 @@ def test_inline_selects_use_the_self_drawn_menu_component():
     # 删除批次默认保留条目；永久删除范围通过默认不勾选的危险复选框开启。
     assert "function deleteBatchFlow(" in source
     assert 'type="checkbox" name="batchDeleteEntries"' in source
-    assert "条目会回到「未进批次」" in source
-    assert "同时永久删除 ${count} 条条目和全部附件" in source
+    assert "条目及其附件会保留" in source
+    assert "同时永久删除条目" in source
     assert "Api.deleteBatch(batch.id, deleteEntries)" in source
+    assert ".batch-delete-option {" in styles
+    assert "grid-template-columns: 18px minmax(0, 1fr); align-items: center" in styles
+    assert "clip-path: polygon(" in styles
+    assert "translate(-50%, -50%) scale(1)" in styles
+    assert ".modal.compact" in styles
+    assert "const titleCopy = el('div', 'modal-title-copy')" in source
     assert "batch-destination-list" in source
     assert "await Api.setEntriesBatch(ids, targetId)" in source
     assert "batch-membership-actions" not in source

@@ -8,7 +8,9 @@ def test_build_manifest_script(tmp_path):
     release = tmp_path / "release"
     release.mkdir()
     (release / "tidoc-core-windows-v0.3.0.exe").write_bytes(b"core-win")
+    (release / "tidoc-core-windows-v0.3.0-update.zip").write_bytes(b"core-win-update")
     (release / "tidoc-core-macos-v0.3.0.dmg").write_bytes(b"core-mac")
+    (release / "tidoc-core-macos-v0.3.0-update.zip").write_bytes(b"core-mac-update")
     (release / "tidoc-print-windows-v0.3.0.exe").write_bytes(b"print-win")
 
     script = Path(__file__).resolve().parents[1] / "scripts" / "build_manifest.py"
@@ -21,8 +23,10 @@ def test_build_manifest_script(tmp_path):
     assert manifest["components"]["core"]["latest"] == "0.3.0"
     assert "windows" in manifest["components"]["core"]["platforms"]
     assert "macos" in manifest["components"]["core"]["platforms"]
+    assert manifest["components"]["core"]["platforms"]["windows"]["auto_update"]["root_name"] == "tidoc"
+    assert manifest["components"]["core"]["platforms"]["macos"]["auto_update"]["root_name"] == "tidoc.app"
     assert manifest["components"]["print"]["platforms"]["windows"]["key"].startswith("tidoc/print/windows/")
-    assert (release / "upload_plan.tsv").read_text("utf-8").count("\n") == 3
+    assert (release / "upload_plan.tsv").read_text("utf-8").count("\n") == 5
 
 
 def test_build_manifest_keeps_print_version_independent_from_core(tmp_path):

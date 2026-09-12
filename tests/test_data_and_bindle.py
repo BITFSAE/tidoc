@@ -763,6 +763,17 @@ def test_bindle_round_trip_and_tamper(repos, sample_xmls, tmp_path):
     assert len(duplicate["skipped"]) == 2
     assert "跳过 2 条重复发票" in duplicate["message"]
 
+    # 确认完整性异常时，无新增内容的重复条目仍应保持本机状态不变。
+    unchanged_tampered = import_bindle(
+        target_entries,
+        target_attachments,
+        tampered,
+        target_profile["id"],
+        allow_tampered=True,
+    )
+    assert unchanged_tampered["updated"] == 0
+    assert all(entry["check_status"] != "blocked" for entry in target_entries.list())
+
     # 用户确认导入完整性异常的包后，条目必须实际标记为严重问题
     suspicious_root = DataRoot(tmp_path / "suspicious")
     suspicious_db = Database(suspicious_root.db_path)
@@ -849,7 +860,7 @@ def test_bindle_restores_claimants_and_respects_optional_notes_and_tags(repos, t
 
     with zipfile.ZipFile(package) as archive:
         payload = json.loads(archive.read("entries.json"))
-    assert payload["bindle_version"] == 3
+    assert payload["bindle_version"] == 4
 
 
 def test_bindle_round_trip_preserves_ocr_result_and_badge_state(repos, tmp_path):
@@ -992,3 +1003,105 @@ def test_bindle_import_can_leave_entries_out_of_batches(repos, tmp_path):
     assert target_db.conn.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0
     assert target_db.conn.execute("SELECT COUNT(*) FROM batch_entries").fetchone()[0] == 0
     assert target_entries.get(result["entry_ids"][0])["batches"] == []
+
+
+def test_bindle_import_selects_claimant_and_safely_complements_existing_entry(repos, tmp_path):
+    first = repos["profiles"].create("张三", "李老师")
+    second = repos["profiles"].create("王五", "赵老师")
+    first_entry = repos["entries"].create(
+        first["id"], parsed=ParsedInvoice(invoice_no="A100", total=Decimal("88.00"))
+    )
+    second_entry = repos["entries"].create(
+        second["id"], parsed=ParsedInvoice(invoice_no="B200", total=Decimal("66.00"))
+    )
+    repos["entries"].update_field(first_entry, "notes", "负责人补充", first["id"])
+    repos["entries"].set_meta(first_entry, tags=["已报销"])
+    inspection = tmp_path / "查验单.pdf"
+    inspection.write_bytes(b"inspection-material")
+    repos["attachments"].add(first_entry, inspection, "inspection_pdf")
+    package = export_bindle(
+        repos["entries"], repos["attachments"], [first_entry, second_entry],
+        tmp_path / "总负责人更新.tidoc", {first["id"]: first, second["id"]: second},
+    )
+
+    target_root = DataRoot(tmp_path / "selected-target")
+    target_db = Database(target_root.db_path)
+    target_profiles = ProfileRepo(target_db)
+    target_first = target_profiles.create("张三", "李老师")
+    target_entries = EntryRepo(target_db)
+    target_attachments = AttachmentRepo(target_db, target_root)
+    existing_id = target_entries.create(
+        target_first["id"], parsed=ParsedInvoice(invoice_no="A100", total=Decimal("88.00"))
+    )
+    target_entries.update_field(existing_id, "notes", "本人备注", target_first["id"])
+    target_entries.set_meta(existing_id, tags=["未报销"])
+
+    preview = inspect_bindle(package, target_entries)
+    preview_first = next(entry for entry in preview["entries"] if entry["invoice_no"] == "A100")
+    assert preview_first["import_action"] == "merge"
+    assert set(preview_first["merge_preview"]["labels"]) == {
+        "材料 1", "备注", "标签 1", "修改记录 1",
+    }
+
+    result = import_bindle(
+        target_entries,
+        target_attachments,
+        package,
+        target_first["id"],
+        options={"selected_profile_ids": [first["id"]]},
+    )
+
+    assert result["imported"] == 0
+    assert result["updated"] == 1
+    assert result["updated_entry_ids"] == [existing_id]
+    assert target_entries.list()[0]["invoice_no"] == "A100"
+    merged = target_entries.get(existing_id)
+    assert merged["fields"]["notes"]["current"] == "本人备注\n负责人补充"
+    assert merged["tags"] == ["已报销"]
+    assert [att["type"] for att in merged["attachments"]] == ["inspection_pdf"]
+
+    again = import_bindle(
+        target_entries,
+        target_attachments,
+        package,
+        target_first["id"],
+        options={"selected_profile_ids": [first["id"]]},
+    )
+    assert again["updated"] == 0
+    assert len(again["skipped"]) == 1
+
+
+def test_bindle_merge_fills_invoice_number_when_file_hash_matches(repos, tmp_path):
+    profile = repos["profiles"].create("张三", "李老师")
+    source_id = repos["entries"].create(
+        profile["id"], parsed=ParsedInvoice(invoice_no="A100", total=Decimal("88.00"))
+    )
+    invoice = tmp_path / "invoice.pdf"
+    invoice.write_bytes(b"same-invoice")
+    repos["attachments"].add(source_id, invoice, "invoice_pdf")
+    package = export_bindle(
+        repos["entries"], repos["attachments"], [source_id],
+        tmp_path / "补发票号.tidoc", {profile["id"]: profile},
+    )
+
+    target_root = DataRoot(tmp_path / "invoice-number-target")
+    target_db = Database(target_root.db_path)
+    target_profiles = ProfileRepo(target_db)
+    target_profile = target_profiles.create("张三", "李老师")
+    target_entries = EntryRepo(target_db)
+    target_attachments = AttachmentRepo(target_db, target_root)
+    existing_id = target_entries.create(
+        target_profile["id"], parsed=ParsedInvoice(total=Decimal("88.00"))
+    )
+    target_attachments.add(existing_id, invoice, "invoice_pdf")
+
+    preview = inspect_bindle(package, target_entries)
+    assert preview["entries"][0]["import_action"] == "merge"
+    assert "invoice_no" in preview["entries"][0]["merge_preview"]["base_fields"]
+
+    result = import_bindle(
+        target_entries, target_attachments, package, target_profile["id"]
+    )
+
+    assert result["updated_entry_ids"] == [existing_id]
+    assert target_entries.get(existing_id)["invoice_no"] == "A100"

@@ -32,6 +32,16 @@ def test_web_app_url_and_assets_are_versioned(tmp_path):
     assert f"app.js?v={__version__}" in source
 
 
+def test_update_health_path_requires_absolute_path(tmp_path):
+    absolute = tmp_path / "health.json"
+    assert app._update_health_path_from_argv(
+        ["--update-health-file", str(absolute)]
+    ) == absolute.resolve()
+    assert app._update_health_path_from_argv(
+        ["--update-health-file", "relative.json"]
+    ) is None
+
+
 def test_webview_settings_allow_tax_site_certificate_fallback():
     import webview
 
@@ -247,7 +257,9 @@ def test_bindle_preview_is_compact_and_keeps_legacy_profile_mapping():
     assert 'name="bindleBatchMode"' in preview
     assert "defaultBatchMode = activeBatches.length ? 'existing' : 'new'" in preview
     assert "suggestedBatchName" in preview
-    assert "confirmBindleWithoutBatch(entries.length)" in preview
+    assert "confirmBindleWithoutBatch(selectedCount)" in preview
+    assert "selected_profile_ids" in preview
+    assert "data-bind-profile-enabled" in preview
     assert "条将留在「未进批次」" in preview
     assert "仍然不加入" in preview
     assert 'class="bindle-entry-head"' in preview

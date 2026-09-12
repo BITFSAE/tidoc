@@ -40,6 +40,8 @@ const State = {
   verificationTrashSource: false,
   activeDetailEntryId: null,
   updateStatus: null,
+  coreUpdateRuntime: null,
+  showCreatedAt: false,
   ocrStatus: null,      // 阿里云 OCR：组件安装 + 密钥配置状态（本地检查，不联网）
 };
 
@@ -111,6 +113,7 @@ const BINDLE_INCLUDE_NOTES_KEY = 'tidoc.bindle.includeNotes';
 const BINDLE_INCLUDE_TAGS_KEY = 'tidoc.bindle.includeTags';
 const VERIFICATION_WATCH_DIR_KEY = 'tidoc.invoiceVerification.watchDirectory';
 const AUTO_UPDATE_KEY = 'tidoc.update.autoCheck';
+const SHOW_CREATED_AT_KEY = 'tidoc.cards.showCreatedAt';
 const PendingLaunchFiles = [];
 let launchFileCheckRunning = false;
 let launchFileCheckAgain = false;
@@ -259,6 +262,13 @@ function dateShort(s) {
   if (!s) return '无日期';
   return s.length > 10 ? s.slice(0, 10) : s;
 }
+function fmtCreatedMinute(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 16).replace('T', ' ');
+  const pad = (part) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
 
 function filenameTimestamp(date = new Date()) {
   const pad = (value) => String(value).padStart(2, '0');
@@ -307,7 +317,8 @@ async function init() {
   await refreshTagOptions();
   showSearchHintIfEmpty();
   await handleSecondaryLaunch();
-  if (startupUpdate?.upgraded) setTimeout(() => { openReleaseHighlights('updated', startupUpdate); }, 450);
+  try { await Api.markFrontendReady(); } catch (e) {}
+  if (startupUpdate?.upgraded) toast(`已更新至 v${startupUpdate.current_version}`, 'ok');
   else await maybeShowFirstUseGuide();
   setTimeout(() => { maybeAutoCheckUpdates(); }, 1200);
 }
@@ -446,10 +457,8 @@ async function maybeAutoCheckUpdates(showCurrent = false) {
     }
     setUpdateNotice(status);
     const available = (status.updates || []).filter((item) => item.available);
-    if ((status.checked || showCurrent) && available.length) {
-      const core = available.find((item) => item.component === 'core');
-      if (core) await maybeShowAvailableUpdate(core);
-      else toast('发现可用组件更新', 'ok');
+    if ((status.checked || showCurrent) && available.length && showCurrent) {
+      toast(available.some((item) => item.component === 'core') ? '发现新版本' : '发现可用组件更新', 'ok');
     } else if (status.checked && showCurrent) {
       toast('已是最新版本', 'ok');
     }
@@ -525,10 +534,91 @@ function openReleaseHighlights(mode, data) {
 function setUpdateNotice(status) {
   State.updateStatus = status;
   const available = (status?.updates || []).filter((item) => item.available);
+  const core = available.find((item) => item.component === 'core');
+  const componentUpdates = available.filter((item) => item.component !== 'core');
   const btn = $('#settingsBtn');
+  if (btn) {
+    btn.classList.toggle('has-update', componentUpdates.length > 0);
+    btn.title = componentUpdates.length ? `设置 · ${componentUpdates.length} 项组件更新` : '设置';
+  }
+  refreshCoreUpdateRuntime(core).catch(() => {});
+}
+
+let coreUpdatePollTimer = null;
+
+function renderCoreUpdateAction(core = null) {
+  const btn = $('#updateActionBtn');
   if (!btn) return;
-  btn.classList.toggle('has-update', available.length > 0);
-  btn.title = available.length ? `设置 · ${available.length} 项可更新` : '设置';
+  const runtime = State.coreUpdateRuntime || {};
+  const state = runtime.state || '';
+  const candidate = core || (State.updateStatus?.updates || []).find(
+    (item) => item.component === 'core' && item.available
+  );
+  const visible = !!candidate || ['downloading', 'ready', 'failed', 'installing'].includes(state);
+  btn.classList.toggle('hidden', !visible);
+  btn.classList.toggle('downloading', state === 'downloading');
+  btn.classList.toggle('ready', state === 'ready');
+  btn.classList.toggle('failed', state === 'failed');
+  btn.classList.toggle('installing', state === 'installing');
+  const pct = btn.querySelector('[data-update-percent]');
+  if (pct) pct.textContent = `${Math.round((Number(runtime.progress) || 0) * 100)}%`;
+  const version = runtime.version || candidate?.latest_version || '';
+  const labels = {
+    downloading: `正在下载 v${version}`,
+    ready: `重启并更新到 v${version}`,
+    failed: '下载失败，点击重试',
+    installing: '正在退出并更新',
+  };
+  const label = labels[state] || `下载 v${version} 更新`;
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+}
+
+async function refreshCoreUpdateRuntime(core = null) {
+  try { State.coreUpdateRuntime = await Api.coreUpdateStatus(); } catch (e) {}
+  renderCoreUpdateAction(core);
+  const state = State.coreUpdateRuntime?.state;
+  if (state === 'downloading') startCoreUpdatePolling();
+}
+
+function startCoreUpdatePolling() {
+  if (coreUpdatePollTimer) return;
+  coreUpdatePollTimer = setInterval(async () => {
+    try {
+      State.coreUpdateRuntime = await Api.coreUpdateStatus();
+      renderCoreUpdateAction();
+      if (State.coreUpdateRuntime?.state !== 'downloading') {
+        clearInterval(coreUpdatePollTimer);
+        coreUpdatePollTimer = null;
+        if (State.coreUpdateRuntime?.state === 'ready') toast('更新已下载，可以重启更新', 'ok');
+        if (State.coreUpdateRuntime?.state === 'failed') toast(State.coreUpdateRuntime.error || '更新下载失败', 'err');
+      }
+    } catch (e) {}
+  }, 500);
+}
+
+async function handleTopbarUpdateAction() {
+  const runtime = State.coreUpdateRuntime || {};
+  if (runtime.state === 'downloading' || runtime.state === 'installing') return;
+  if (runtime.state === 'ready') {
+    try {
+      State.coreUpdateRuntime = await Api.installCoreUpdate();
+      renderCoreUpdateAction();
+    } catch (e) { toast(e.message, 'err'); }
+    return;
+  }
+  const core = (State.updateStatus?.updates || []).find(
+    (item) => item.component === 'core' && item.available
+  );
+  if (!core?.asset?.auto_update || runtime.install_supported === false) {
+    openUpdateDialog();
+    return;
+  }
+  try {
+    State.coreUpdateRuntime = await Api.startCoreUpdateDownload();
+    renderCoreUpdateAction(core);
+    startCoreUpdatePolling();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 async function loadWorkflowPreferences() {
@@ -538,7 +628,7 @@ async function loadWorkflowPreferences() {
   const localDefaultEntryTitle = localStorage.getItem(DEFAULT_ENTRY_TITLE_KEY) || '';
   State.multiClaimantMode = local === '1';
   try {
-    const [multiMode, paymentOcr, defaultPaidToInvoice, defaultEntryTitle, themeMode, materialRequirements, verification, titleProfiles] = await Promise.all([
+    const [multiMode, paymentOcr, defaultPaidToInvoice, defaultEntryTitle, themeMode, materialRequirements, verification, titleProfiles, showCreatedAt] = await Promise.all([
       Api.appPreference(MULTI_CLAIMANT_KEY, local || ''),
       Api.appPreference(PAYMENT_OCR_KEY, '1'),
       Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, '1'),
@@ -547,6 +637,7 @@ async function loadWorkflowPreferences() {
       Api.materialRequirements(),
       Api.invoiceVerificationPreferences(),
       Api.titleProfiles(),
+      Api.appPreference(SHOW_CREATED_AT_KEY, '0'),
     ]);
     State.titleProfiles = Array.isArray(titleProfiles?.profiles) && titleProfiles.profiles.length
       ? titleProfiles.profiles
@@ -555,6 +646,7 @@ async function loadWorkflowPreferences() {
     State.paymentOcrEnabled = paymentOcr !== '0';
     State.defaultPaidToInvoice = defaultPaidToInvoice !== '0';
     State.defaultEntryTitle = defaultEntryTitle || localDefaultEntryTitle || '';
+    State.showCreatedAt = showCreatedAt === '1';
     applyTheme(themeMode, { persist: true });
     State.materialRequirements = {
       ...DEFAULT_MATERIAL_REQUIREMENTS,
@@ -1041,6 +1133,7 @@ function entryCard(e) {
     </div>
     <div class="entry-line3">
       <span>${esc(dateShort(e.invoice_date))}</span>
+      ${State.showCreatedAt && e.created_at ? `<span class="entry-created">创建 ${esc(fmtCreatedMinute(e.created_at))}</span>` : ''}
       ${notesPreview}
     </div>`);
   const tags = Array.isArray(e.tags) ? e.tags : [];
@@ -2479,6 +2572,7 @@ function bindEvents() {
   $('#newEntryBtn').onclick = openNewEntry;
   $('#batchImportBtn').onclick = openBatchImport;
   $('#settingsBtn').onclick = openSettings;
+  $('#updateActionBtn').onclick = handleTopbarUpdateAction;
   $('#themeToggle').onclick = toggleTheme;
   $('#appTitle').onclick = () => Api.openExternalUrl('https://github.com/totok22/tidoc').catch((e) => toast(e.message, 'err'));
   $('#appTitle').onkeydown = (e) => {
@@ -2697,7 +2791,7 @@ function editProfileFlow(p, onDone) {
 async function openSettings() {
   let paths, printStatus, appInfo, operatorPrefs, multiMode, paymentOcrMode;
   let defaultPaidMode, defaultEntryTitleMode, materialRequirementsMode, bindleNotesMode, bindleTagsMode;
-  let autoUpdateMode, maintenance, verificationPrefs, ocrStatus;
+  let autoUpdateMode, maintenance, verificationPrefs, ocrStatus, showCreatedAtMode;
   const themeMode = State.themeMode;
   try {
     paths = await Api.dataRoot();
@@ -2718,8 +2812,9 @@ async function openSettings() {
       Api.materialRequirements(),
       Api.appPreference(BINDLE_INCLUDE_NOTES_KEY, '1'),
       Api.appPreference(BINDLE_INCLUDE_TAGS_KEY, '1'),
-      Api.appPreference(AUTO_UPDATE_KEY, '0'),
+      Api.appPreference(AUTO_UPDATE_KEY, '1'),
       Api.invoiceVerificationPreferences(),
+      Api.appPreference(SHOW_CREATED_AT_KEY, '0'),
     ]);
     operatorPrefs = {
       name: prefValues[0],
@@ -2737,6 +2832,7 @@ async function openSettings() {
     bindleTagsMode = prefValues[11] !== '0';
     autoUpdateMode = prefValues[12] === '1';
     verificationPrefs = prefValues[13];
+    showCreatedAtMode = prefValues[14] === '1';
     State.defaultEntryTitle = defaultEntryTitleMode;
     State.materialRequirements = materialRequirementsMode;
   } catch (e) { toast(e.message, 'err'); return; }
@@ -2821,6 +2917,13 @@ async function openSettings() {
             <span>开启后，新建或批量导入条目时自动填写；关闭后留空待确认</span>
           </div>
           <label class="switch-line"><input type="checkbox" id="setDefaultPaidInvoice" ${defaultPaidMode ? 'checked' : ''}/><span>${defaultPaidMode ? '已开启' : '已关闭'}</span></label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>卡片显示创建时间</b>
+            <span>精确到分钟</span>
+          </div>
+          <label class="switch-line"><input type="checkbox" id="setShowCreatedAt" ${showCreatedAtMode ? 'checked' : ''}/><span>${showCreatedAtMode ? '已开启' : '已关闭'}</span></label>
         </div>
         <div class="settings-row">
           <div class="settings-row-copy">
@@ -3193,6 +3296,23 @@ async function openSettings() {
       ev.target.disabled = false;
     }
   };
+  body.querySelector('#setShowCreatedAt').onchange = async (ev) => {
+    const enabled = ev.target.checked;
+    const label = ev.target.nextElementSibling;
+    ev.target.disabled = true;
+    try {
+      await Api.setAppPreference(SHOW_CREATED_AT_KEY, enabled ? '1' : '0');
+      State.showCreatedAt = enabled;
+      label.textContent = enabled ? '已开启' : '已关闭';
+      renderEntries();
+      toast('已保存', 'ok');
+    } catch (e) {
+      ev.target.checked = !enabled;
+      toast(e.message, 'err');
+    } finally {
+      ev.target.disabled = false;
+    }
+  };
   const bindlePreferenceHandler = (key, enabledText, disabledText) => async (ev) => {
     const enabled = ev.target.checked;
     const label = ev.target.nextElementSibling;
@@ -3453,6 +3573,7 @@ async function openUpdateDialog() {
   const render = async (message = '') => {
     const status = await Api.checkUpdates();
     setUpdateNotice(status);
+    try { State.coreUpdateRuntime = await Api.coreUpdateStatus(); } catch (e) {}
     const availableItems = (status.updates || []).filter((item) => item.available);
     const coreUpdate = availableItems.find((item) => item.component === 'core');
     const checkedAt = fmtCheckTime(status.checked_at);
@@ -3486,6 +3607,15 @@ async function openUpdateDialog() {
         }
       } else if (!available) {
         action = '';
+      } else if (u.component === 'core' && State.coreUpdateRuntime?.state === 'ready') {
+        state = '<span class="update-badge pending">已下载</span>';
+        action = '<button class="btn small" data-restart-core>重启更新</button>';
+      } else if (u.component === 'core' && State.coreUpdateRuntime?.state === 'downloading') {
+        const pct = Math.round((Number(State.coreUpdateRuntime.progress) || 0) * 100);
+        state = `<span class="update-badge available">${pct}%</span>`;
+        action = '<button class="btn small" disabled>下载中</button>';
+      } else if (u.component === 'core' && u.asset?.auto_update && State.coreUpdateRuntime?.install_supported) {
+        action = '<button class="btn small" data-download-core>下载更新</button>';
       } else if (u.downloaded) {
         state = '<span class="update-badge pending">已下载</span>';
         action = '<button class="btn small" data-open-core>打开更新包</button>';
@@ -3530,6 +3660,27 @@ async function openUpdateDialog() {
     body.querySelector('[data-open-release]').onclick = openReleases;
     const coreBtn = body.querySelector('[data-download-core]');
     if (coreBtn) coreBtn.onclick = async () => {
+      const core = (status.updates || []).find((item) => item.component === 'core');
+      if (core?.asset?.auto_update && State.coreUpdateRuntime?.install_supported) {
+        try {
+          State.coreUpdateRuntime = await Api.startCoreUpdateDownload();
+          renderCoreUpdateAction(core);
+          const op = body.querySelector('#updateOperation');
+          while (State.coreUpdateRuntime?.state === 'downloading') {
+            const pct = Math.round((Number(State.coreUpdateRuntime.progress) || 0) * 100);
+            if (op) op.innerHTML = `<div class="update-progress determinate"><span style="width:${pct}%"></span></div><div class="hint">正在下载并校验 · ${pct}%</div>`;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            State.coreUpdateRuntime = await Api.coreUpdateStatus();
+            renderCoreUpdateAction(core);
+          }
+          if (State.coreUpdateRuntime?.state === 'failed') throw new Error(State.coreUpdateRuntime.error || '更新下载失败');
+          await render('更新已下载，可以重启更新');
+        } catch (e) {
+          toast(e.message, 'err');
+          await render().catch((err) => renderError(err.message));
+        }
+        return;
+      }
       setBusy('正在下载并校验更新包，完成后会自动打开…');
       let ok = false;
       try {
@@ -3539,6 +3690,19 @@ async function openUpdateDialog() {
         ok = true;
       } catch (e) { toast(e.message, 'err'); }
       finally { if (!ok) await render().catch((e) => renderError(e.message)); }
+    };
+    const restartCoreBtn = body.querySelector('[data-restart-core]');
+    if (restartCoreBtn) restartCoreBtn.onclick = async () => {
+      restartCoreBtn.disabled = true;
+      restartCoreBtn.textContent = '正在退出…';
+      try {
+        State.coreUpdateRuntime = await Api.installCoreUpdate();
+        renderCoreUpdateAction();
+      } catch (e) {
+        restartCoreBtn.disabled = false;
+        restartCoreBtn.textContent = '重启更新';
+        toast(e.message, 'err');
+      }
     };
     const openCoreBtn = body.querySelector('[data-open-core]');
     if (openCoreBtn) openCoreBtn.onclick = async () => {
@@ -5087,22 +5251,36 @@ async function openBindleImportPreview(path, insp, options = {}) {
     const key = entry.profile_id || '__fallback__';
     counts.set(key, (counts.get(key) || 0) + 1);
   });
+  const currentIdentity = State.profileById[State.currentProfileId];
+  const matchingProfiles = packageProfiles.filter((profile) => (
+    currentIdentity
+    && profile.name === currentIdentity.name
+    && profile.reviewer === currentIdentity.reviewer
+  ));
+  const initiallySelected = new Set(
+    (matchingProfiles.length ? matchingProfiles : packageProfiles).map((profile) => profile.sourceId)
+  );
   const activeBatches = (batches || []).filter((batch) => !batch.archived);
   const attachmentCount = entries.reduce((sum, entry) => sum + (entry.attachments || []).length, 0);
   const body = el('div', 'bindle-import');
   const profileRows = packageProfiles.map((profile) => `
-    <div class="bindle-profile-row" data-bind-profile="${esc(profile.sourceId)}">
+    <div class="bindle-profile-row${initiallySelected.has(profile.sourceId) ? '' : ' off'}" data-bind-profile="${esc(profile.sourceId)}">
+      <input type="checkbox" data-bind-profile-enabled aria-label="导入 ${esc(profile.name || '该报账人')}" ${initiallySelected.has(profile.sourceId) ? 'checked' : ''}/>
       <input data-bind-profile-name aria-label="报账人" value="${esc(profile.name || '')}" placeholder="填写报账人"/>
       <input data-bind-profile-reviewer aria-label="审核人" value="${esc(profile.reviewer || '')}" placeholder="填写审核人"/>
       <span>${counts.get(profile.sourceId) || 0} 条</span>
     </div>`).join('');
   const entryRows = entries.slice(0, 100).map((entry) => {
     const profile = packageProfiles.find((item) => item.sourceId === (entry.profile_id || '__fallback__'));
-    return `<div class="bindle-entry-row" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}">
+    const action = entry.import_action === 'merge'
+      ? `补充${entry.merge_preview?.labels?.length ? ' · ' + entry.merge_preview.labels.join('、') : ''}`
+      : entry.import_action === 'unchanged' ? '无变化' : '新增';
+    return `<div class="bindle-entry-row${initiallySelected.has(entry.profile_id || '__fallback__') ? '' : ' off'}" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}">
       <span class="mono">${esc(entry.invoice_no || '无发票号')}</span>
       <span class="bindle-entry-seller" data-tooltip-overflow="${esc(entry.seller || '')}">${esc(entry.seller || '未识别销售方')}</span>
       <span>${fmtMoney(entry.total)}</span>
       <span class="bindle-entry-owner">${esc(profile?.name || entry.profile_name || '未填写')} · ${esc(profile?.reviewer || entry.reviewer || '未填写')}</span>
+      <span class="bindle-entry-action ${esc(entry.import_action || 'new')}">${esc(action)}</span>
     </div>`;
   }).join('');
   const existingTagOptions = (tags || []).map((tag) => `<option value="${esc(tag)}"></option>`).join('');
@@ -5125,9 +5303,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
       <label><input type="checkbox" id="bindleAllowTampered"/> 我确认继续，导入后标记为严重问题</label>
     </div>`}
     <section class="bindle-import-section">
-      <h3>身份对应</h3>
+      <div class="bindle-section-head"><h3>选择报账人</h3><label><input type="checkbox" id="bindleSelectAll" ${initiallySelected.size === packageProfiles.length ? 'checked' : ''}/> 全选</label></div>
       <div class="bindle-profile-list">
-        <div class="bindle-profile-labels"><span>报账人</span><span>审核人</span><span>条目</span></div>
+        <div class="bindle-profile-labels"><span></span><span>报账人</span><span>审核人</span><span>条目</span></div>
         ${profileRows}
       </div>
     </section>
@@ -5154,7 +5332,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
     <section class="bindle-import-section">
       <h3>条目</h3>
       <div class="bindle-entry-list">
-        ${entryRows ? '<div class="bindle-entry-head"><span>发票号</span><span>销售方</span><span>金额</span><span>归属</span></div>' + entryRows : '<div class="bindle-empty">包内没有条目</div>'}
+        ${entryRows ? '<div class="bindle-entry-head"><span>发票号</span><span>销售方</span><span>金额</span><span>归属</span><span>处理</span></div>' + entryRows : '<div class="bindle-empty">包内没有条目</div>'}
       </div>
       ${entries.length > 100 ? '<div class="bindle-list-note">显示前 100 条，不影响导入</div>' : ''}
     </section>`;
@@ -5172,6 +5350,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
     };
   });
   body.querySelectorAll('[data-bind-profile]').forEach((row) => {
+    const enabledInput = row.querySelector('[data-bind-profile-enabled]');
     const nameInput = row.querySelector('[data-bind-profile-name]');
     const reviewerInput = row.querySelector('[data-bind-profile-reviewer]');
     const syncOwner = () => {
@@ -5183,7 +5362,44 @@ async function openBindleImportPreview(path, insp, options = {}) {
     };
     nameInput.oninput = syncOwner;
     reviewerInput.oninput = syncOwner;
+    enabledInput.onchange = () => syncBindleSelection();
   });
+
+  const selectedSourceIds = () => new Set(
+    [...body.querySelectorAll('[data-bind-profile-enabled]:checked')]
+      .map((input) => input.closest('[data-bind-profile]').dataset.bindProfile)
+  );
+  const selectedEntryCount = () => {
+    const selected = selectedSourceIds();
+    return entries.filter((entry) => selected.has(entry.profile_id || '__fallback__')).length;
+  };
+  let importButton;
+  const syncBindleSelection = () => {
+    const selected = selectedSourceIds();
+    body.querySelectorAll('[data-bind-profile]').forEach((row) => {
+      const enabled = selected.has(row.dataset.bindProfile);
+      row.classList.toggle('off', !enabled);
+      row.querySelector('[data-bind-profile-name]').disabled = !enabled;
+      row.querySelector('[data-bind-profile-reviewer]').disabled = !enabled;
+    });
+    body.querySelectorAll('[data-bind-entry-profile]').forEach((row) => {
+      row.classList.toggle('off', !selected.has(row.dataset.bindEntryProfile));
+    });
+    const all = body.querySelector('#bindleSelectAll');
+    all.checked = selected.size === packageProfiles.length;
+    all.indeterminate = selected.size > 0 && selected.size < packageProfiles.length;
+    if (importButton) {
+      const count = selectedEntryCount();
+      importButton.textContent = count ? `导入 ${count} 条` : '请选择报账人';
+      importButton.disabled = !count;
+    }
+  };
+  body.querySelector('#bindleSelectAll').onchange = (ev) => {
+    body.querySelectorAll('[data-bind-profile-enabled]').forEach((input) => {
+      input.checked = ev.target.checked;
+    });
+    syncBindleSelection();
+  };
 
   let m;
   m = modal({
@@ -5193,7 +5409,10 @@ async function openBindleImportPreview(path, insp, options = {}) {
     onClose: options.onClose,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
-      mkBtn(entries.length ? `导入 ${entries.length} 条` : '确认导入', 'primary', async () => {
+      (importButton = mkBtn('确认导入', 'primary', async () => {
+        const selected = selectedSourceIds();
+        const selectedCount = selectedEntryCount();
+        if (!selectedCount) { toast('请选择要导入的报账人', 'err'); return; }
         const tampered = body.querySelector('#bindleAllowTampered');
         if (tampered && !tampered.checked) {
           toast('请确认完整性异常后再导入', 'err');
@@ -5202,6 +5421,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
         const profileOverrides = {};
         let invalidProfile = false;
         body.querySelectorAll('[data-bind-profile]').forEach((row) => {
+          if (!selected.has(row.dataset.bindProfile)) return;
           const name = row.querySelector('[data-bind-profile-name]').value.trim();
           const reviewer = row.querySelector('[data-bind-profile-reviewer]').value.trim();
           if (!name || !reviewer) invalidProfile = true;
@@ -5214,8 +5434,8 @@ async function openBindleImportPreview(path, insp, options = {}) {
         const batchName = batchMode === 'new' ? newBatch.value.trim() : '';
         if (batchMode === 'existing' && !batchId) { toast('请选择报账批次', 'err'); return; }
         if (batchMode === 'new' && !batchName) { toast('请填写新批次名称', 'err'); return; }
-        if (batchMode === 'none' && entries.length) {
-          const confirmed = await confirmBindleWithoutBatch(entries.length);
+        if (batchMode === 'none' && selectedCount) {
+          const confirmed = await confirmBindleWithoutBatch(selectedCount);
           if (!confirmed) return;
         }
         const options = {
@@ -5223,6 +5443,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
           tags: tag ? [tag] : [],
           batch_id: batchId,
           batch_name: batchName,
+          selected_profile_ids: [...selected],
         };
         const progress = taskProgress('正在导入条目和附件…');
         try {
@@ -5233,12 +5454,13 @@ async function openBindleImportPreview(path, insp, options = {}) {
           await loadBatches();
           await refreshEntries();
           await refreshTagOptions();
-          toast(r.message + `（${r.imported} 条）`, r.tampered && r.tampered.length ? 'err' : 'ok');
+          toast(r.message, r.tampered && r.tampered.length ? 'err' : 'ok');
         } catch (e) { toast(e.message, 'err'); }
         finally { progress.close(); }
-      }),
+      })),
     ],
   });
+  syncBindleSelection();
 }
 
 function confirmBindleWithoutBatch(count) {

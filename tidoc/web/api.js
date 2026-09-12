@@ -58,6 +58,7 @@ const Api = (() => {
     setInvoiceVerificationPreferences: (options) => call('set_invoice_verification_preferences', options || {}),
     appInfo: () => call('app_info'),
     startupUpdateState: () => call('startup_update_state'),
+    markFrontendReady: () => call('mark_frontend_ready'),
 
     parseFiles: (xml, pdf) => call('parse_files', xml, pdf),
     reparseEntries: (ids) => call('reparse_entries', ids || []),
@@ -127,6 +128,9 @@ const Api = (() => {
     applyOcrItems: (id) => call('apply_ocr_items', id),
     checkUpdates: () => call('check_updates'),
     autoCheckUpdates: () => call('auto_check_updates'),
+    coreUpdateStatus: () => call('core_update_status'),
+    startCoreUpdateDownload: () => call('start_core_update_download'),
+    installCoreUpdate: () => call('install_core_update'),
     downloadCoreUpdate: () => call('download_core_update'),
     openDownloadedCoreUpdate: () => call('open_downloaded_core_update'),
     installPrintComponent: () => call('install_print_component'),

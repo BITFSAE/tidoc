@@ -3,7 +3,9 @@
 
 Expected release file names:
 - tidoc-core-windows-v0.1.20.exe
+- tidoc-core-windows-v0.1.20-update.zip
 - tidoc-core-macos-v0.1.20.dmg
+- tidoc-core-macos-v0.1.20-update.zip
 - tidoc-print-windows-v0.1.19.exe
 - tidoc-print-macos-v0.1.19.zip
 """
@@ -88,7 +90,7 @@ def main() -> int:
                 f"Component {component} has inconsistent artifact versions: "
                 f"{comp['latest']} and {info['version']}."
             )
-        comp["platforms"][platform] = {
+        asset = {
             "filename": path.name,
             "url": url,
             "key": key,
@@ -97,6 +99,15 @@ def main() -> int:
             "format": _format_for(path),
             "executable_name": EXECUTABLES.get((component, platform), ""),
         }
+        if component == "core" and path.name.endswith("-update.zip"):
+            asset["root_name"] = "tidoc.app" if platform == "macos" else "tidoc"
+            platform_block = comp["platforms"].setdefault(platform, {})
+            platform_block["auto_update"] = asset
+        else:
+            existing_auto = (comp["platforms"].get(platform) or {}).get("auto_update")
+            comp["platforms"][platform] = asset
+            if existing_auto:
+                comp["platforms"][platform]["auto_update"] = existing_auto
         upload_rows.append((path, key))
 
     if "core" not in components:

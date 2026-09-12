@@ -1,16 +1,21 @@
+import hashlib
 import json
 import ssl
 import urllib.error
+import zipfile
 from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 from tidoc.services.updater import (
+    CoreUpdateManager,
+    WINDOWS_INSTALLER_SCRIPT,
     _prune_old_component_versions,
     check_updates,
     download_update,
     downloaded_core_update_info,
+    extract_core_update_archive,
     install_print_component,
     installed_component_info,
     installed_component_version,
@@ -27,6 +32,85 @@ def test_version_compare():
     assert version_gt("0.1.1", "0.1.0")
     assert version_gt("0.2.0", "0.1.9")
     assert not version_gt("0.1.0", "0.1.0")
+
+
+def test_extract_silent_windows_update_requires_one_safe_root(tmp_path):
+    archive = tmp_path / "update.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("tidoc/tidoc.exe", b"new-core")
+        zf.writestr("tidoc/_internal/runtime.bin", b"runtime")
+
+    staged = extract_core_update_archive(
+        archive, tmp_path / "stage", root_name="tidoc", plat="windows"
+    )
+
+    assert (staged / "tidoc.exe").read_bytes() == b"new-core"
+    assert "--update-health-file" in WINDOWS_INSTALLER_SCRIPT
+    assert "Move-Item -LiteralPath $StagedDir -Destination $AppDir" in WINDOWS_INSTALLER_SCRIPT
+
+
+def test_extract_silent_update_rejects_path_traversal(tmp_path):
+    archive = tmp_path / "bad.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("tidoc/tidoc.exe", b"new-core")
+        zf.writestr("tidoc/../outside.txt", b"bad")
+
+    with pytest.raises(ValueError, match="不安全路径"):
+        extract_core_update_archive(
+            archive, tmp_path / "stage", root_name="tidoc", plat="windows"
+        )
+
+
+def test_extract_macos_update_accepts_ditto_metadata(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    archive = tmp_path / "update.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("tidoc.app/Contents/MacOS/tidoc", b"new-core")
+        zf.writestr("__MACOSX/tidoc.app/Contents/MacOS/._tidoc", b"metadata")
+    real_exists = Path.exists
+    monkeypatch.setattr(
+        updater.Path,
+        "exists",
+        lambda candidate: False
+        if candidate == Path("/usr/bin/ditto")
+        else real_exists(candidate),
+    )
+
+    staged = extract_core_update_archive(
+        archive, tmp_path / "stage", root_name="tidoc.app", plat="macos"
+    )
+
+    assert (staged / "Contents" / "MacOS" / "tidoc").read_bytes() == b"new-core"
+
+
+def test_core_update_manager_downloads_verifies_and_stages(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    archive = tmp_path / "tidoc-core-windows-v9.9.9-update.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("tidoc/tidoc.exe", b"new-core")
+    asset = {
+        "version": "9.9.9",
+        "auto_update": {
+            "url": archive.as_uri(),
+            "filename": archive.name,
+            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            "size": archive.stat().st_size,
+            "root_name": "tidoc",
+        },
+    }
+    monkeypatch.setattr(updater, "current_platform", lambda: "windows")
+    monkeypatch.setattr(updater, "silent_core_update_supported", lambda _asset=None: True)
+    manager = CoreUpdateManager(tmp_path / "updates")
+
+    manager._download_worker(asset["auto_update"], asset["version"])
+    status = manager.status()
+
+    assert status["state"] == "ready"
+    assert status["progress"] == 1.0
+    assert (Path(status["stage_dir"]) / "tidoc.exe").read_bytes() == b"new-core"
+    assert downloaded_core_update_info(tmp_path / "updates", "windows")["version"] == "9.9.9"
 
 
 def test_check_updates_from_file_manifest(tmp_path):

@@ -46,6 +46,7 @@ DEFAULT_ENTRY_TITLE_PREF_KEY = "tidoc.defaultEntryTitle"
 TITLE_PROFILES_PREF_KEY = "tidoc.titleProfiles"
 BINDLE_INCLUDE_NOTES_PREF_KEY = "tidoc.bindle.includeNotes"
 BINDLE_INCLUDE_TAGS_PREF_KEY = "tidoc.bindle.includeTags"
+SHOW_CREATED_AT_PREF_KEY = "tidoc.cards.showCreatedAt"
 INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY = (
     "tidoc.invoiceVerification.watchDirectory"
 )
@@ -101,7 +102,12 @@ def _guard(func):
 
 
 class Api:
-    def __init__(self, data_root: str | Path | None = None, launch_file: str = ""):
+    def __init__(
+        self,
+        data_root: str | Path | None = None,
+        launch_file: str = "",
+        update_health_path: str | Path | None = None,
+    ):
         self._api_lock = threading.RLock()
         self.data_root = DataRoot(data_root, manage_pointer=True)
         self.db = Database(self.data_root.db_path)
@@ -111,11 +117,14 @@ class Api:
         self.batches = BatchRepo(self.db)
         self.ocr = OcrRepo(self.db)
         self._window = None
+        self._update_health_path = Path(update_health_path) if update_health_path else None
         self._verification_sessions: dict[str, dict] = {}
         self._launch_files = [launch_file] if launch_file else []
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
         self._apply_title_profiles()
         self._sync_entry_statuses()
+        from .services.updater import CoreUpdateManager
+        self._core_updater = CoreUpdateManager(self.data_root.updates_dir)
 
     def __dir__(self):
         """只向 pywebview 暴露本类定义的公开方法。
@@ -320,6 +329,21 @@ class Api:
             "repository": repository,
             "releases": f"{repository}/releases/latest",
         }
+
+    @_guard
+    def mark_frontend_ready(self):
+        """Signal a replacement helper only after the main interface is usable."""
+        if self._update_health_path is None:
+            return {"required": False}
+        target = self._update_health_path.resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pending = target.with_name(f".{target.name}-{os.getpid()}.tmp")
+        pending.write_text(
+            json.dumps({"pid": os.getpid(), "version": __version__}, ensure_ascii=False),
+            "utf-8",
+        )
+        os.replace(pending, target)
+        return {"required": True}
 
     # ------------------------------------------------------------ 录入 / 识别
     @_guard
@@ -1572,13 +1596,13 @@ class Api:
     def inspect_bindle(self, path):
         from .services.bindle import inspect_bindle
 
-        return inspect_bindle(path)
+        return inspect_bindle(path, self.entries)
 
     @_guard
     def import_bindle(self, path, profile_id, allow_tampered=False, options=None):
         from .services.bindle import import_bindle
 
-        return import_bindle(
+        result = import_bindle(
             self.entries,
             self.attachments,
             path,
@@ -1586,6 +1610,9 @@ class Api:
             allow_tampered,
             options,
         )
+        if result.get("imported") or result.get("updated"):
+            self._sync_entry_statuses()
+        return result
 
     # ------------------------------------------------------------ 打印导出组件（可选）
     @_guard
@@ -1755,9 +1782,37 @@ class Api:
         return self._record_update_check(status)
 
     @_guard
+    def core_update_status(self):
+        return self._core_updater.status()
+
+    @_guard
+    def start_core_update_download(self):
+        from .services.updater import COMPONENT_CORE, get_platform_asset, load_manifest
+
+        asset = get_platform_asset(load_manifest(), COMPONENT_CORE)
+        return self._core_updater.start(asset)
+
+    @_guard
+    def install_core_update(self):
+        result = self._core_updater.install()
+
+        def close_window():
+            try:
+                if self._window is not None:
+                    self._window.destroy()
+            except Exception:
+                pass
+
+        timer = threading.Timer(1.2, close_window)
+        timer.name = "tidoc-update-exit"
+        timer.daemon = True
+        timer.start()
+        return result
+
+    @_guard
     def auto_check_updates(self):
         """按用户偏好执行低频启动检查；只检查，不下载或安装。"""
-        if self._preference_value(AUTO_UPDATE_PREF_KEY, "0") != "1":
+        if self._preference_value(AUTO_UPDATE_PREF_KEY, "1") != "1":
             return {"checked": False, "reason": "disabled", "updates": []}
 
         now = int(time.time())
@@ -1800,6 +1855,12 @@ class Api:
                 raw_notes = (item.get("asset") or {}).get("notes") or []
                 notes = raw_notes if isinstance(raw_notes, list) else [str(raw_notes)]
                 break
+            # A cached result belongs to the old binary. Normalize it immediately
+            # so the settings indicator cannot remain orange after a real upgrade.
+            self._set_preference_value(
+                UPDATE_LAST_RESULT_KEY,
+                json.dumps(self._normalize_cached_update_result(cached), ensure_ascii=False),
+            )
         return {
             "upgraded": upgraded,
             "first_launch": not previous,
@@ -1943,6 +2004,8 @@ class Api:
         self.attachments = AttachmentRepo(self.db, self.data_root)
         self.batches = BatchRepo(self.db)
         self.ocr = OcrRepo(self.db)
+        from .services.updater import CoreUpdateManager
+        self._core_updater = CoreUpdateManager(self.data_root.updates_dir)
         self._sync_entry_statuses()
 
     def _sync_entry_statuses(self) -> None:
@@ -2141,7 +2204,32 @@ class Api:
             result = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
             return {"updates": []}
-        return result if isinstance(result, dict) else {"updates": []}
+        if not isinstance(result, dict):
+            return {"updates": []}
+        return self._normalize_cached_update_result(result)
+
+    @staticmethod
+    def _normalize_cached_update_result(result: dict) -> dict:
+        """Re-evaluate cached core availability against the running version."""
+        from .services.updater import version_gt
+
+        normalized = dict(result)
+        updates = []
+        for raw_item in result.get("updates") or []:
+            item = dict(raw_item)
+            if item.get("component") == "core":
+                latest = str(item.get("latest_version") or "")
+                available = bool(latest and version_gt(latest, __version__))
+                item["available"] = available
+                if not available:
+                    item.update({
+                        "current_version": __version__, "downloaded": False,
+                        "downloaded_path": "", "state": "current",
+                    })
+            updates.append(item)
+        normalized["updates"] = updates
+        normalized["current_core_version"] = __version__
+        return normalized
 
     def _cache_cleanup_candidates(self) -> list[Path]:
         """只返回可重建的临时文件，保留待安装核心包和所有业务数据。"""
@@ -2150,6 +2238,9 @@ class Api:
         pending = downloaded_core_update_info(self.data_root.updates_dir)
         pending_path = Path(pending.get("file_path") or "") if pending else None
         pending_resolved = pending_path.resolve() if pending_path and pending_path.exists() else None
+        stage_value = str(pending.get("stage_dir") or "") if pending else ""
+        stage_path = Path(stage_value) if stage_value else None
+        stage_resolved = stage_path.resolve() if stage_path and stage_path.exists() else None
         files: list[Path] = []
         for path in self.data_root.dropped_dir.rglob("*"):
             if path.is_file():
@@ -2158,6 +2249,8 @@ class Api:
             if not path.is_file() or path.name == "current.json":
                 continue
             if pending_resolved and path.resolve() == pending_resolved:
+                continue
+            if stage_resolved and _is_inside(stage_resolved, path):
                 continue
             files.append(path)
         return files

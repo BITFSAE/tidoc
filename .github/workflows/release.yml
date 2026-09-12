@@ -79,6 +79,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path release | Out-Null
           $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
           & $iscc "/DMyAppVersion=$env:VERSION" "/DSourceDir=$PWD\dist\tidoc" "/DOutputDir=$PWD\release" "packaging\windows\tidoc.iss"
+          Compress-Archive -Path "dist\tidoc" -DestinationPath "release\tidoc-core-windows-v$env:VERSION-update.zip" -CompressionLevel Optimal
 
       - name: Install print dependencies
         run: pip install -r requirements-print.txt
@@ -210,6 +211,8 @@ jobs:
           hdiutil create -volname "Tidoc" \
             -srcfolder "dmg-root" \
             -ov -format ULMO "release/tidoc-core-macos-v${VERSION}.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "dist/tidoc.app" \
+            "release/tidoc-core-macos-v${VERSION}-update.zip"
 
       - name: Install print dependencies
         run: pip install -r requirements-print.txt
@@ -351,7 +354,9 @@ jobs:
           notes="release/release_notes.md"
           assets=(
             "release/tidoc-core-macos-v${VERSION}.dmg"
+            "release/tidoc-core-macos-v${VERSION}-update.zip"
             "release/tidoc-core-windows-v${VERSION}.exe"
+            "release/tidoc-core-windows-v${VERSION}-update.zip"
             "release/manifest.json"
           )
           for component_asset in \

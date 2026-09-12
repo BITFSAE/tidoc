@@ -153,6 +153,16 @@ def _launch_bindle_path() -> str:
     return ""
 
 
+def _update_health_path_from_argv(argv: list[str] | None = None) -> Path | None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    try:
+        value = args[args.index("--update-health-file") + 1]
+    except (ValueError, IndexError):
+        return None
+    path = Path(value)
+    return path.resolve() if path.is_absolute() else None
+
+
 def _activate_main_window(window) -> None:
     """Restore a minimized main window and bring it to the foreground."""
     try:
@@ -207,7 +217,11 @@ def main() -> None:
         _install_native_stderr_filter()
         from .db.paths import resolve_data_root
 
-        api = Api(resolve_data_root(), launch_file=launch_file)
+        api = Api(
+            resolve_data_root(),
+            launch_file=launch_file,
+            update_health_path=_update_health_path_from_argv(),
+        )
         index = web_dir() / "index.html"
         _configure_webview_settings()
         window = webview.create_window(

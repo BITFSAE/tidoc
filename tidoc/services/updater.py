@@ -15,11 +15,14 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 from tidoc import __version__ as CORE_VERSION
@@ -31,6 +34,138 @@ COMPONENT_OCR = "ocr"
 COMPONENT_CORE = "core"
 # 更新对话框逐行展示的可选组件（核心不在其中，单独渲染）
 INSTALLABLE_COMPONENTS = (COMPONENT_PRINT, COMPONENT_OCR)
+CORE_APP_NAMES = {"windows": "tidoc.exe", "macos": "tidoc.app"}
+
+
+WINDOWS_INSTALLER_SCRIPT = r'''
+param(
+    [Parameter(Mandatory=$true)][string]$AppDir,
+    [Parameter(Mandatory=$true)][string]$StagedDir,
+    [Parameter(Mandatory=$true)][string]$WorkDir,
+    [Parameter(Mandatory=$true)][string]$ExpectedVersion,
+    [Parameter(Mandatory=$true)][string]$HealthFile,
+    [int]$OldPid = 0
+)
+$ErrorActionPreference = "Stop"
+function Start-Tidoc([string]$Directory, [bool]$WithHealth) {
+    $target = Join-Path $Directory "tidoc.exe"
+    if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw "tidoc.exe missing" }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $target
+    $psi.WorkingDirectory = $Directory
+    $psi.UseShellExecute = $true
+    if ($WithHealth) { $psi.Arguments = "--update-health-file `"$HealthFile`"" }
+    return [System.Diagnostics.Process]::Start($psi)
+}
+function Move-OldTidoc([string]$Source, [string]$DestinationLeaf) {
+    $attempt = 0
+    while ($attempt -lt 30) {
+        try {
+            Rename-Item -LiteralPath $Source -NewName $DestinationLeaf -ErrorAction Stop
+            return
+        } catch {
+            $attempt += 1
+            if ($attempt -ge 30) { throw }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+if ($OldPid -gt 0) {
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Date) -lt $deadline -and (Get-Process -Id $OldPid -ErrorAction SilentlyContinue)) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) {
+        Stop-Process -Id $OldPid -Force -ErrorAction SilentlyContinue
+        try { Wait-Process -Id $OldPid -Timeout 10 -ErrorAction SilentlyContinue } catch {}
+    }
+}
+$backup = "$AppDir.old-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
+$movedOld = $false
+$new = $null
+try {
+    Move-OldTidoc $AppDir (Split-Path $backup -Leaf)
+    $movedOld = $true
+    Move-Item -LiteralPath $StagedDir -Destination $AppDir
+    foreach ($unins in @("unins000.exe", "unins000.dat")) {
+        $src = Join-Path $backup $unins
+        if (Test-Path -LiteralPath $src -PathType Leaf) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $AppDir $unins) -Force
+        }
+    }
+    Remove-Item -LiteralPath $HealthFile -Force -ErrorAction SilentlyContinue
+    $new = Start-Tidoc $AppDir $true
+    $deadline = (Get-Date).AddSeconds(45)
+    $healthy = $false
+    while ((Get-Date) -lt $deadline) {
+        $new.Refresh()
+        if ($new.HasExited) { break }
+        if (Test-Path -LiteralPath $HealthFile -PathType Leaf) {
+            try {
+                $health = Get-Content -LiteralPath $HealthFile -Raw | ConvertFrom-Json
+                if ([int]$health.pid -eq $new.Id -and [string]$health.version -eq $ExpectedVersion) {
+                    $healthy = $true
+                    break
+                }
+            } catch { break }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not $healthy) { throw "new Tidoc did not report healthy" }
+    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    exit 0
+} catch {
+    if ($new -and -not $new.HasExited) { Stop-Process -Id $new.Id -Force -ErrorAction SilentlyContinue }
+    if ($movedOld -and (Test-Path -LiteralPath $backup)) {
+        Remove-Item -LiteralPath $AppDir -Recurse -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $backup -Destination $AppDir
+        try { Start-Tidoc $AppDir $false | Out-Null } catch {}
+    } elseif (Test-Path -LiteralPath $AppDir) {
+        try { Start-Tidoc $AppDir $false | Out-Null } catch {}
+    }
+    exit 23
+}
+'''
+
+
+MACOS_INSTALLER_SCRIPT = r'''#!/bin/sh
+set -eu
+APP_DIR="$1"
+STAGED_DIR="$2"
+WORK_DIR="$3"
+EXPECTED_VERSION="$4"
+HEALTH_FILE="$5"
+OLD_PID="$6"
+BACKUP_DIR="${APP_DIR}.old-$(date -u +%Y%m%d%H%M%S)"
+i=0
+while kill -0 "$OLD_PID" 2>/dev/null && [ "$i" -lt 80 ]; do sleep 0.25; i=$((i + 1)); done
+if kill -0 "$OLD_PID" 2>/dev/null; then kill -9 "$OLD_PID" 2>/dev/null || true; fi
+mv "$APP_DIR" "$BACKUP_DIR"
+rollback() {
+  if [ -n "${NEW_PID:-}" ]; then kill -9 "$NEW_PID" 2>/dev/null || true; fi
+  rm -rf "$APP_DIR"
+  mv "$BACKUP_DIR" "$APP_DIR"
+  open -n "$APP_DIR" || true
+}
+trap rollback EXIT HUP INT TERM
+mv "$STAGED_DIR" "$APP_DIR"
+rm -f "$HEALTH_FILE"
+"$APP_DIR/Contents/MacOS/tidoc" --update-health-file "$HEALTH_FILE" >/dev/null 2>&1 &
+NEW_PID=$!
+i=0
+while [ "$i" -lt 180 ]; do
+  if ! kill -0 "$NEW_PID" 2>/dev/null; then exit 23; fi
+  if [ -f "$HEALTH_FILE" ] && grep -Fq "\"version\": \"$EXPECTED_VERSION\"" "$HEALTH_FILE"; then
+    trap - EXIT HUP INT TERM
+    rm -rf "$BACKUP_DIR" "$WORK_DIR"
+    exit 0
+  fi
+  sleep 0.25
+  i=$((i + 1))
+done
+exit 23
+'''
 
 
 @dataclass(frozen=True)
@@ -217,8 +352,9 @@ def downloaded_core_update_info(updates_dir: str | Path, plat: str | None = None
         info = json.loads(marker.read_text("utf-8"))
     except Exception:
         return {}
-    file_path = Path(info.get("file_path") or "")
-    if not file_path.exists():
+    file_value = str(info.get("file_path") or "")
+    file_path = Path(file_value) if file_value else None
+    if file_path is None or not file_path.is_file():
         return {}
     info["file_path"] = str(file_path)
     return info
@@ -360,6 +496,288 @@ def launch_core_update_package(path: str | Path) -> None:
         os.startfile(str(p))  # type: ignore[attr-defined]
     else:
         subprocess.Popen(["xdg-open", str(p)])
+
+
+def silent_core_update_supported(asset: dict[str, Any] | None = None) -> bool:
+    """Whether this build can replace itself without showing an installer."""
+    if not getattr(sys, "frozen", False) or current_platform() not in {"windows", "macos"}:
+        return False
+    if asset is not None and not isinstance(asset.get("auto_update"), dict):
+        return False
+    if current_platform() == "macos":
+        try:
+            if not os.access(installed_app_dir().parent, os.W_OK):
+                return False
+        except RuntimeError:
+            return False
+    return True
+
+
+def installed_app_dir() -> Path:
+    executable = Path(sys.executable).resolve()
+    if sys.platform == "darwin":
+        for parent in executable.parents:
+            if parent.suffix.lower() == ".app":
+                return parent
+        raise RuntimeError("无法定位 Tidoc 应用包。")
+    return executable.parent
+
+
+def _safe_archive_member(
+    member: zipfile.ZipInfo,
+    root_name: str,
+    *,
+    allow_macos_metadata: bool = False,
+) -> None:
+    raw = member.filename.replace("\\", "/")
+    if raw.startswith("/") or "//" in raw:
+        raise ValueError(f"更新包包含不安全路径：{member.filename}")
+    parts = PurePosixPath(raw.rstrip("/")).parts
+    if not parts or any(part in {"", ".."} for part in parts):
+        raise ValueError(f"更新包包含不安全路径：{member.filename}")
+    # ditto --sequesterRsrc stores macOS extended attributes under __MACOSX.
+    # Accept only metadata tied to the one expected application root.
+    expected_root = parts[0] == root_name
+    expected_macos_metadata = (
+        allow_macos_metadata
+        and parts[0] == "__MACOSX"
+        and (len(parts) == 1 or parts[1] in {root_name, f"._{root_name}"})
+    )
+    if not expected_root and not expected_macos_metadata:
+        raise ValueError(f"更新包包含不安全路径：{member.filename}")
+
+
+def extract_core_update_archive(
+    archive_path: str | Path,
+    destination: str | Path,
+    *,
+    root_name: str,
+    plat: str | None = None,
+) -> Path:
+    """Validate and extract a one-root core update archive."""
+    plat = plat or current_platform()
+    archive_path = Path(archive_path)
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            _safe_archive_member(
+                member,
+                root_name,
+                allow_macos_metadata=plat == "macos",
+            )
+        if plat == "macos" and Path("/usr/bin/ditto").exists():
+            proc = subprocess.run(
+                ["/usr/bin/ditto", "-x", "-k", str(archive_path), str(destination)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode:
+                raise RuntimeError(proc.stderr.strip() or "无法解压更新包。")
+        else:
+            archive.extractall(destination)
+    staged = destination / root_name
+    required = staged / CORE_APP_NAMES.get(plat, "")
+    if plat == "macos":
+        required = staged / "Contents" / "MacOS" / "tidoc"
+    if not required.is_file():
+        raise ValueError(f"更新包缺少 {required.name}。")
+    if plat != "windows":
+        required.chmod(required.stat().st_mode | 0o755)
+    return staged
+
+
+def launch_silent_core_update(
+    stage_dir: str | Path,
+    work_dir: str | Path,
+    expected_version: str,
+    *,
+    app_dir: str | Path | None = None,
+    current_pid: int | None = None,
+) -> Path:
+    """Hand a verified staged app to a detached platform helper."""
+    if not silent_core_update_supported():
+        raise RuntimeError("当前运行方式不支持静默更新，请使用安装包更新。")
+    app = Path(app_dir).resolve() if app_dir else installed_app_dir()
+    stage = Path(stage_dir).resolve()
+    work = Path(work_dir).resolve()
+    if not app.is_absolute() or not stage.is_absolute() or not work.is_absolute():
+        raise ValueError("更新路径必须是绝对路径。")
+    expected_name = "tidoc.exe" if current_platform() == "windows" else "tidoc"
+    expected_path = stage / expected_name
+    if current_platform() == "macos":
+        expected_path = stage / "Contents" / "MacOS" / expected_name
+    if not expected_path.is_file():
+        raise FileNotFoundError("已下载的更新目录不完整，请重新下载。")
+
+    health_file = work / "update-health.json"
+    if current_platform() == "windows":
+        script = work / "install-helper.ps1"
+        script.write_text(WINDOWS_INSTALLER_SCRIPT, "utf-8")
+        powershell = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        command = [
+            str(powershell), "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+            "-ExecutionPolicy", "Bypass", "-File", str(script),
+            "-AppDir", str(app), "-StagedDir", str(stage), "-WorkDir", str(work),
+            "-ExpectedVersion", expected_version, "-HealthFile", str(health_file),
+            "-OldPid", str(current_pid or os.getpid()),
+        ]
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True, cwd=str(work.parent),
+            creationflags=flags,
+        )
+    else:
+        script = work / "install-helper.sh"
+        script.write_text(MACOS_INSTALLER_SCRIPT, "utf-8")
+        script.chmod(0o700)
+        subprocess.Popen(
+            [str(script), str(app), str(stage), str(work), expected_version,
+             str(health_file), str(current_pid or os.getpid())],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, cwd=str(work.parent), start_new_session=True,
+        )
+    return script
+
+
+class CoreUpdateManager:
+    """Background download, verification and staging for a clean restart update."""
+
+    def __init__(self, updates_dir: str | Path):
+        self.updates_dir = Path(updates_dir)
+        self._lock = threading.RLock()
+        self._thread: threading.Thread | None = None
+        self._state: dict[str, Any] = {
+            "state": "idle", "version": "", "progress": 0.0,
+            "downloaded_bytes": 0, "total_bytes": 0, "speed_bps": 0.0,
+            "stage": "", "stage_dir": "", "file_path": "", "error": "",
+            "install_supported": silent_core_update_supported(),
+        }
+        self._restore_ready_state()
+
+    def _restore_ready_state(self) -> None:
+        info = downloaded_core_update_info(self.updates_dir)
+        version = str(info.get("version") or "")
+        stage_value = str(info.get("stage_dir") or "")
+        stage = Path(stage_value) if stage_value else None
+        if version and not version_gt(version, CORE_VERSION):
+            try:
+                _core_update_marker(self.updates_dir).unlink()
+            except OSError:
+                pass
+            return
+        if version and stage and stage.is_dir() and info.get("package_kind") == "silent":
+            self._state.update({
+                "state": "ready", "version": version, "progress": 1.0,
+                "downloaded_bytes": int(info.get("size") or 0),
+                "total_bytes": int(info.get("size") or 0),
+                "stage": "ready", "stage_dir": str(stage),
+                "file_path": str(info.get("file_path") or ""),
+            })
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._state)
+
+    def start(self, asset: dict[str, Any]) -> dict[str, Any]:
+        auto_asset = asset.get("auto_update") or {}
+        version = str(asset.get("version") or auto_asset.get("version") or "")
+        if not isinstance(auto_asset, dict) or not auto_asset.get("url"):
+            raise RuntimeError("此版本没有适用于本机的一键更新包。")
+        if not silent_core_update_supported(asset):
+            raise RuntimeError("当前运行方式不支持一键更新，请使用安装包更新。")
+        if not version_gt(version, CORE_VERSION):
+            raise RuntimeError("当前已是最新版本。")
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return self.status()
+            if self._state.get("state") == "ready" and self._state.get("version") == version:
+                return self.status()
+            self._state.update({
+                "state": "downloading", "version": version, "progress": 0.0,
+                "downloaded_bytes": 0, "total_bytes": int(auto_asset.get("size") or 0),
+                "speed_bps": 0.0, "stage": "download", "stage_dir": "",
+                "file_path": "", "error": "", "install_supported": True,
+            })
+            self._thread = threading.Thread(
+                target=self._download_worker,
+                args=(dict(auto_asset), version),
+                name="tidoc-core-update-download",
+                daemon=True,
+            )
+            self._thread.start()
+        return self.status()
+
+    def _set(self, **changes: Any) -> None:
+        with self._lock:
+            self._state.update(changes)
+
+    def _download_worker(self, asset: dict[str, Any], version: str) -> None:
+        try:
+            root = self.updates_dir / COMPONENT_CORE / current_platform() / version
+            if root.exists():
+                shutil.rmtree(root)
+            root.mkdir(parents=True, exist_ok=True)
+            filename = str(asset.get("filename") or "tidoc-update.zip")
+            archive = root / filename
+            partial = archive.with_suffix(archive.suffix + ".part")
+
+            def on_progress(done: int, total: int, elapsed: float) -> None:
+                expected_total = total or int(asset.get("size") or 0)
+                self._set(
+                    progress=min(1.0, done / expected_total) if expected_total else 0.0,
+                    downloaded_bytes=done,
+                    total_bytes=expected_total,
+                    speed_bps=done / elapsed,
+                )
+
+            _download_url(str(asset.get("url") or ""), partial, 180, on_progress)
+            expected = str(asset.get("sha256") or "").lower()
+            self._set(stage="verify")
+            actual = sha256_file(partial).lower()
+            if not expected or actual != expected:
+                raise RuntimeError("更新包完整性校验失败。")
+            partial.replace(archive)
+            self._set(stage="extract")
+            extract_root = root / "staged"
+            staged = extract_core_update_archive(
+                archive, extract_root,
+                root_name=str(asset.get("root_name") or ("tidoc.app" if current_platform() == "macos" else "tidoc")),
+            )
+            info = {
+                "component": COMPONENT_CORE, "version": version,
+                "platform": current_platform(), "file_path": str(archive),
+                "stage_dir": str(staged), "package_kind": "silent",
+                "sha256": actual, "size": archive.stat().st_size,
+            }
+            marker = _core_update_marker(self.updates_dir)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(json.dumps(info, ensure_ascii=False, indent=2), "utf-8")
+            self._set(
+                state="ready", progress=1.0, downloaded_bytes=info["size"],
+                total_bytes=info["size"], speed_bps=0.0, stage="ready",
+                stage_dir=str(staged), file_path=str(archive), error="",
+            )
+        except Exception as exc:
+            self._set(state="failed", progress=0.0, stage="", error=str(exc))
+        finally:
+            with self._lock:
+                self._thread = None
+
+    def install(self) -> dict[str, Any]:
+        with self._lock:
+            state = dict(self._state)
+        if state.get("state") != "ready":
+            raise RuntimeError("更新包尚未准备好。")
+        stage = Path(str(state.get("stage_dir") or ""))
+        launch_silent_core_update(
+            stage, stage.parents[1], str(state.get("version") or ""),
+            current_pid=os.getpid(),
+        )
+        self._set(state="installing", stage="install")
+        return self.status()
 
 
 def install_print_component(
@@ -515,14 +933,26 @@ def _read_url(url: str, timeout: int) -> bytes:
         raise
 
 
-def _download_url(url: str, out_path: Path, timeout: int) -> None:
+def _download_url(url: str, out_path: Path, timeout: int, progress=None) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp, out_path.open("wb") as out:
-            shutil.copyfileobj(resp, out, length=1024 * 1024)
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            started = time.monotonic()
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total, max(time.monotonic() - started, 0.001))
     except urllib.error.URLError as exc:
         if _is_certificate_error(exc):
             _download_url_with_system_trust(url, out_path, timeout, exc)
+            if progress:
+                progress(out_path.stat().st_size, out_path.stat().st_size, 1.0)
             return
         raise
 

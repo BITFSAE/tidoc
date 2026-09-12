@@ -161,16 +161,15 @@ jobs:
           --add-data "tidoc/web:tidoc/web"
           scripts/tidoc_app_entry.py
 
-      - name: Strip symbols and re-sign macOS app
+      - name: Strip bundled libraries and re-sign macOS app
         run: |
           APP="dist/tidoc.app"
           find "$APP" -type f \( -name '*.so' -o -name '*.dylib' -o -name 'Python' \) \
             -exec xcrun strip -x {} +
-          MAIN="$APP/Contents/MacOS/tidoc"
-          if [ -f "$MAIN" ]; then
-            xcrun strip -x "$MAIN"
-          fi
           codesign --force --deep --sign - "$APP"
+
+      - name: Smoke-test macOS core app
+        run: dist/tidoc.app/Contents/MacOS/tidoc --self-test
 
       - name: Create DMG
         run: |

@@ -80,6 +80,13 @@ def web_app_url(index: Path | None = None) -> str:
     return page.as_uri()
 
 
+def self_test() -> None:
+    """Verify that the packaged core and its frontend resources are loadable."""
+    index = web_dir() / "index.html"
+    if not index.is_file():
+        raise RuntimeError(f"missing frontend entrypoint: {index}")
+
+
 def _configure_webview_settings() -> None:
     """在任何原生 WebView 创建前配置查验所需的全局行为。"""
     # WebView2 只会在控件初始化时根据此设置注册证书错误处理器。tidoc 的主
@@ -146,6 +153,9 @@ def _launch_bindle_path() -> str:
 
 
 def main() -> None:
+    if "--self-test" in sys.argv:
+        self_test()
+        return
     _install_native_stderr_filter()
     from .db.paths import resolve_data_root
     api = Api(resolve_data_root(), launch_file=_launch_bindle_path())

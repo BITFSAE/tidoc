@@ -60,8 +60,8 @@ tidoc/ocr/macos/tidoc-ocr-macos-v0.2.1.zip
 ## 发布自动化
 
 - 推送 `v*.*.*` tag 后，GitHub Actions 自动测试、构建 macOS DMG 与 Windows 安装器、生成更新清单、上传 COS，并发布带安装包的 GitHub Release。
-- Windows / macOS 打印组件与 OCR 组件打包后必须执行 `--self-test`，确认组件代码与重依赖能从最终成品加载；自检失败会中止发布。
-- macOS 核心包构建后剥离实际存在的 Mach-O 符号（`*.so` / `*.dylib` / 名为 `Python` 的解释器，以及主可执行文件），再以 ad-hoc 签名重签；没有匹配文件时跳过，不中断发布。DMG 使用 ULMO（LZMA）压缩。打印组件在 PyInstaller 收集阶段剥离符号，由 `--self-test` 兜底校验。
+- Windows / macOS 打印组件、OCR 组件以及 macOS 核心应用打包后必须执行 `--self-test`，确认最终成品中的代码、资源与重依赖可加载；自检失败会中止发布。
+- macOS 核心包构建后只剥离实际存在的依赖库 Mach-O 符号（`*.so` / `*.dylib` / 名为 `Python` 的解释器），保留主可执行文件末尾的 PyInstaller 内嵌归档，再以 ad-hoc 签名重签；没有匹配文件时跳过，不中断发布。DMG 使用 ULMO（LZMA）压缩。打印组件在 PyInstaller 收集阶段剥离符号，由 `--self-test` 兜底校验。
 - Release 说明和客户端 What’s changed 都从 `CHANGELOG.md` 最新一节生成，避免三处手工维护后内容不一致。
 - Windows 核心改为 Inno Setup 的按用户安装器；安装到用户目录，不要求管理员权限，并提供开始菜单、可选桌面快捷方式和卸载入口。
 - Windows 安装器把 `.tidoc` 扩展名注册为「Tidoc 绑定包」（按用户写入 `Software\Classes`）：资源管理器显示应用内嵌 logo 图标，双击调用 `tidoc.exe "<文件>"` 进入导入预览；卸载时自动删除关联键。Windows 构建的应用图标来自 `tidoc/web/assets/tidoc-logo.ico`（多尺寸 16–256），macOS 使用同目录的 `tidoc-logo.icns`；两者由 `scripts/generate_brand_assets.py` 从同一张方形源图生成。

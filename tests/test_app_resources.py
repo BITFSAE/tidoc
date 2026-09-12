@@ -167,12 +167,14 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "scopeChip('', '在办'" in source
     assert 'class="batch-folder-track"' in source
     assert 'class="batch-scope"' in source
+    assert "requested === State.batchFilter" in source
+    assert "inArchivedShelf() ? ARCHIVED_BATCH_ID : ''" in source
     assert "archiveBatchFlow" in source
     assert "确认归档批次" in source
     assert 'id="selectAllBtn"' in html
     assert "toggleSelectAllVisible" in source
-    assert "装入批次后可点击批次右侧 ⋯ 归档" in source
-    assert "装入批次后可将批次归档" in source
+    assert "批次可通过右侧 ⋯ 归档" in source
+    assert "通过菜单归档批次" in source
     assert "点击批次右侧“⋯”可编辑批次、填写批次备注、归档" in source
     assert "batchNoteFlow" in source
     assert "batch-folder-note" in source
@@ -431,12 +433,15 @@ def test_inline_selects_use_the_self_drawn_menu_component():
     assert "input.checked && input.value === 'existing'" in source
     assert "enhanceNativeSelects(batchSelect)" in source
 
-    # 删除批次必须让用户明确选择是否连同条目和附件一起删除，默认保留条目。
+    # 删除批次默认保留条目；永久删除范围通过默认不勾选的危险复选框开启。
     assert "function deleteBatchFlow(" in source
-    assert 'value="batch" checked' in source
-    assert 'value="entries"' in source
-    assert "同时删除条目" in source
+    assert 'type="checkbox" name="batchDeleteEntries"' in source
+    assert "条目会回到「未进批次」" in source
+    assert "同时永久删除 ${count} 条条目和全部附件" in source
     assert "Api.deleteBatch(batch.id, deleteEntries)" in source
+    assert "batch-destination-list" in source
+    assert "await Api.setEntriesBatch(ids, targetId)" in source
+    assert "batch-membership-actions" not in source
 
     assert ".select-field { position: relative" in styles
     assert ".select-trigger" in styles

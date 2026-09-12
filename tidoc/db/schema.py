@@ -7,7 +7,7 @@
 - items         物品明细（识别得到，默认只读）
 - attachments   附件
 - batches       报账批次（运营组工作单元，可命名、可留存的条目集合）
-- batch_entries 批次↔条目关联（多对多），带批次级催办备注
+- batch_entries 批次↔条目归属（一个条目至多一个批次），带批次级催办备注
 
 关键信息（发票号码、总额、抬头、税号）作为 entries 的列，软件内默认只读；
 可改字段（实付金额、实际物资名称、备注等）走 entry_fields 以便留痕。
@@ -26,7 +26,8 @@ import sqlite3
 # v8：阿里云 OCR 记录保存当次自动修正快照，并区分本机调用与绑定包导入。
 # v9：云识别改为软件结果优先，并撤回历史上自动覆盖的销售方。
 # v10：OCR 结果记录实际 API 调用页数，多页 PDF 不再按一张误计。
-SCHEMA_VERSION = 10
+# v11：报账批次改为单一归属，历史重复归属保留最后一次装入的批次。
+SCHEMA_VERSION = 11
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -139,17 +140,17 @@ CREATE TABLE IF NOT EXISTS attachments (
 CREATE INDEX IF NOT EXISTS idx_attachments_entry ON attachments(entry_id);
 
 -- 报账批次：运营组把「这次要交的一批」自由圈选、命名、留存的集合（第 8.5、9 节）。
--- 一个批次可跨报账人、跨抬头装入任意条目；一个条目也可同时属于多个批次。
+-- 一个批次可跨报账人、跨抬头装入任意条目；一个条目至多属于一个批次。
 CREATE TABLE IF NOT EXISTS batches (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     note        TEXT DEFAULT '',            -- 批次说明
-    archived    INTEGER NOT NULL DEFAULT 0, -- 归档后批次不占主列表；只属于已归档批次的条目退出在办
+    archived    INTEGER NOT NULL DEFAULT 0, -- 归档后批次不占主列表；其条目退出在办
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
 
--- 批次↔条目多对多。note 是「批次级」催办备注（如「张三缺查验单」），
+-- 批次↔条目单一归属。note 是「批次级」催办备注（如「张三缺查验单」），
 -- 与条目自身的记账备注（entry_fields.notes）分离，不互相污染。
 CREATE TABLE IF NOT EXISTS batch_entries (
     batch_id    TEXT NOT NULL,
@@ -162,7 +163,7 @@ CREATE TABLE IF NOT EXISTS batch_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_batch_entries_batch ON batch_entries(batch_id);
-CREATE INDEX IF NOT EXISTS idx_batch_entries_entry ON batch_entries(entry_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_entries_entry ON batch_entries(entry_id);
 
 -- 阿里云 OCR 识别结果（第 10 节）：原始响应永久落库，重复识别追加不覆盖，
 -- 既是对账依据（按量计费）也避免同一发票再次计费后丢失历史。
@@ -352,6 +353,29 @@ def init_db(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE ocr_results ADD COLUMN api_calls INTEGER NOT NULL DEFAULT 1"
             )
+
+    if previous_version < 11:
+        # 旧版允许同一条目同时装入多个批次。升级后保留最后一次装入的归属；
+        # added_at 相同时以最后写入的关联为准，再建立数据库级唯一约束。
+        conn.execute(
+            """DELETE FROM batch_entries
+                 WHERE rowid IN (
+                       SELECT rowid
+                         FROM (
+                               SELECT rowid,
+                                      ROW_NUMBER() OVER (
+                                          PARTITION BY entry_id
+                                          ORDER BY added_at DESC, rowid DESC
+                                      ) AS position
+                                 FROM batch_entries
+                              ) ranked
+                        WHERE position > 1
+                 )"""
+        )
+        conn.execute("DROP INDEX IF EXISTS idx_batch_entries_entry")
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_batch_entries_entry ON batch_entries(entry_id)"
+        )
 
     # CREATE TABLE IF NOT EXISTS 不会给历史表补列，因此按真实列结构兜底迁移。
     entry_field_columns = {

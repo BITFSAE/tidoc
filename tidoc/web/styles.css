@@ -354,22 +354,33 @@ body {
 .archive-confirm-note b { color: var(--ink); font-size: 11px; font-weight: 650; }
 .archive-confirm-note span { white-space: pre-wrap; word-break: break-word; }
 .batch-delete-confirm { display: flex; flex-direction: column; gap: 12px; }
-.batch-delete-choices { display: grid; gap: 8px; }
-.batch-delete-choice {
-  display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px;
-  border: 1px solid var(--line); border-radius: 9px; background: var(--panel-raised); cursor: pointer;
+.batch-delete-preserve { margin: -2px 2px 0; color: var(--ink-soft); font-size: 12.5px; }
+.batch-delete-option {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 10px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--panel-raised); cursor: pointer;
   transition: border-color .15s, background .15s, box-shadow .15s;
 }
-.batch-delete-choice:hover { border-color: var(--primary); }
-.batch-delete-choice.is-selected {
-  border-color: var(--primary); background: var(--primary-soft); box-shadow: 0 0 0 1px var(--primary-line);
+.batch-delete-option:hover { border-color: var(--blocked-line); }
+.batch-delete-option.is-selected {
+  border-color: var(--blocked-line); background: var(--blocked-soft); box-shadow: 0 0 0 1px var(--blocked-line);
 }
-.batch-delete-choice input { flex: 0 0 auto; margin-top: 2px; accent-color: var(--primary); }
-.batch-delete-choice span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.batch-delete-choice b { font-size: 13px; color: var(--ink); }
-.batch-delete-choice small { color: var(--ink-soft); font-size: 11.5px; line-height: 1.5; }
-.batch-delete-choice.disabled { opacity: .55; cursor: default; }
-.batch-delete-choice.disabled:hover { border-color: var(--line); }
+.batch-delete-option input {
+  appearance: none; -webkit-appearance: none; width: 18px; height: 18px; margin: 0;
+  display: grid; place-items: center; border: 1.5px solid var(--line-hover); border-radius: 5px;
+  background: var(--panel-raised); cursor: pointer;
+}
+.batch-delete-option input::after {
+  content: ''; width: 8px; height: 4px; margin-top: -2px;
+  border: solid var(--ink-on-color); border-width: 0 0 2px 2px;
+  transform: rotate(-45deg) scale(0); transition: transform .12s ease;
+}
+.batch-delete-option input:checked { border-color: var(--blocked); background: var(--blocked); }
+.batch-delete-option input:checked::after { transform: rotate(-45deg) scale(1); }
+.batch-delete-option input:focus-visible { outline: 2px solid var(--primary-ring-strong); outline-offset: 2px; }
+.batch-delete-option span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.batch-delete-option b { font-size: 12.5px; color: var(--ink); }
+.batch-delete-option small { color: var(--blocked); font-size: 11px; line-height: 1.45; }
 /* 分组头 */
 .group-head {
   display: flex; align-items: center; gap: 12px; padding: 11px 14px;
@@ -404,13 +415,6 @@ body {
   transition: border-color .12s, background .12s, color .12s;
 }
 .badge-action:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
-.entry-batch-current {
-  display: flex; align-items: baseline; gap: 10px; padding: 10px 2px 12px;
-  color: var(--ink-soft); font-size: 12px;
-}
-.entry-batch-current span { flex: 0 0 auto; color: var(--ink-faint); }
-.entry-batch-current b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-weight: 600; }
-
 /* topbar 动作分区 */
 .topbar-actions { display: inline-flex; align-items: center; gap: 8px; }
 .topbar-divider { width: 1px; height: 22px; background: var(--line); margin: 0 2px; }
@@ -421,24 +425,33 @@ body {
 .group-btn { border: none; background: transparent; padding: 4px 10px; font-size: 12px; border-radius: 7px; cursor: pointer; color: var(--ink-soft); }
 .group-btn.active { background: var(--panel-raised); color: var(--ink); box-shadow: var(--shadow-sm); }
 
-/* 加入批次 / 打标签选择器 */
-.batch-pick-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-.batch-pick {
-  display: flex; align-items: center; justify-content: space-between; padding: 11px 14px;
-  border: 1px solid var(--line); border-radius: 10px; background: var(--panel-raised); cursor: pointer;
-  font-size: 13px; transition: all .12s;
+/* 批次归属：整行作为目标选择，避免同一行堆叠“装入 / 移出 / 移动”动作。 */
+.batch-destination-list { display: grid; gap: 7px; }
+.batch-destination {
+  width: 100%; min-height: 54px; display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 22px; align-items: center; gap: 10px;
+  padding: 9px 11px 9px 13px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel-raised); color: var(--ink); text-align: left; cursor: pointer;
+  transition: border-color .14s, background-color .14s, box-shadow .14s;
 }
-.batch-pick:hover { border-color: var(--primary); background: var(--primary-soft); }
-.batch-pick:disabled { cursor: default; opacity: .55; background: var(--paper-2); border-color: var(--line); }
-.batch-pick span { font-size: 11.5px; color: var(--ink-faint); }
-.batch-membership-list { display: flex; flex-direction: column; }
-.batch-membership-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 44px; border-bottom: 1px solid var(--line-soft); }
-.batch-membership-row.current { background: linear-gradient(90deg, var(--primary-soft), transparent 70%); }
-.batch-membership-name { min-width: 0; display: flex; align-items: baseline; gap: 8px; padding-left: 2px; }
-.batch-membership-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.batch-membership-name span { flex: 0 0 auto; color: var(--ink-faint); font-size: 11px; }
-.batch-membership-actions { display: flex; gap: 5px; }
-.btn.danger-text { color: var(--blocked); }
+.batch-destination:hover { border-color: var(--primary-line); background: var(--primary-hover); }
+.batch-destination:focus-visible { outline: 2px solid var(--primary-ring-strong); outline-offset: 2px; }
+.batch-destination.current { border-color: var(--primary-line-soft); }
+.batch-destination.is-selected {
+  border-color: var(--primary); background: var(--primary-soft); box-shadow: 0 0 0 1px var(--primary-line);
+}
+.batch-destination-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.batch-destination-copy b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.batch-destination-copy small { color: var(--ink-soft); font-size: 11px; font-weight: 400; }
+.batch-destination-state { color: var(--primary); font-size: 11px; white-space: nowrap; }
+.batch-destination-check {
+  width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%;
+  color: var(--primary-ink); background: var(--primary); opacity: 0; transform: scale(.82);
+  transition: opacity .12s, transform .12s;
+}
+.batch-destination-check svg { display: block; }
+.batch-destination.is-selected .batch-destination-check { opacity: 1; transform: scale(1); }
+.modal-foot .push-left { margin-right: auto; }
 .tag-toolbar { margin-bottom: 12px; }
 .tag-cloud { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
 .tag-pick { cursor: pointer; }

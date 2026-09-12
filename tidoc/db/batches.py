@@ -1,11 +1,11 @@
 """报账批次（Batch）仓库。设计文档第 8.5、9 节 —— 运营组的核心工作单元。
 
 批次是「一次要交的这批材料」的可命名、可留存集合：
-- 跨报账人、跨抬头自由圈选任意条目；一个条目也可同时属于多个批次。
+- 跨报账人、跨抬头自由圈选任意条目；一个条目至多属于一个批次。
 - 每个条目在批次内可带「批次级催办备注」（如「张三缺查验单」），与条目自身
   的记账备注（entry_fields.notes）分离，不互相污染。
 - 批次可归档（已提交后归档），不再占用主界面的活跃列表。
-- 只属于已归档批次的条目退出「在办」，可从「已归档」查看或恢复。
+- 已归档批次的条目退出「在办」，可从「已归档」查看或恢复。
 
 批次自身不持有材料，只引用条目 id；删批次不动条目，删条目由外键级联清理关联。
 """
@@ -40,9 +40,12 @@ class BatchRepo:
             "INSERT INTO batches(id, name, note, archived, created_at, updated_at) VALUES(?,?,?,0,?,?)",
             (batch_id, name.strip(), note or "", now, now),
         )
-        for eid in (entry_ids or []):
-            self._link(batch_id, eid, now)
-        self.db.conn.commit()
+        try:
+            self._set_entries_batch(entry_ids or [], batch_id, now)
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            raise
         return self.get(batch_id)
 
     def update(self, batch_id: str, **fields) -> dict:
@@ -78,21 +81,24 @@ class BatchRepo:
         if commit:
             self.db.conn.commit()
 
-    # ------------------------------------------------------------------ 装入 / 移出条目
+    # ------------------------------------------------------------------ 归入 / 移出条目
     def add_entries(self, batch_id: str, entry_ids: list[str]) -> int:
+        """把条目归入目标批次；已有归属时直接移动。"""
         if not self._exists(batch_id):
             raise ValueError("批次不存在。")
-        now = _now()
-        added = 0
-        for eid in (entry_ids or []):
-            added += self._link(batch_id, eid, now)
-        self._touch(batch_id)
-        self.db.conn.commit()
-        return added
+        try:
+            changed = self._set_entries_batch(entry_ids or [], batch_id, _now())
+            self.db.conn.commit()
+            return changed
+        except Exception:
+            self.db.conn.rollback()
+            raise
 
     def remove_entries(self, batch_id: str, entry_ids: list[str]) -> int:
         if not entry_ids:
             return 0
+        if not self._exists(batch_id):
+            raise ValueError("批次不存在。")
         placeholders = ",".join("?" * len(entry_ids))
         cur = self.db.conn.execute(
             f"DELETE FROM batch_entries WHERE batch_id = ? AND entry_id IN ({placeholders})",
@@ -111,18 +117,34 @@ class BatchRepo:
         ids = list(dict.fromkeys(entry_ids or []))
         if not ids:
             return {"added": 0, "removed": 0}
-        now = _now()
-        try:
-            added = sum(self._link(target_batch_id, entry_id, now) for entry_id in ids)
-            placeholders = ",".join("?" * len(ids))
-            cur = self.db.conn.execute(
-                f"DELETE FROM batch_entries WHERE batch_id = ? AND entry_id IN ({placeholders})",
+        placeholders = ",".join("?" * len(ids))
+        source_ids = [
+            row["entry_id"]
+            for row in self.db.conn.execute(
+                f"SELECT entry_id FROM batch_entries WHERE batch_id = ? AND entry_id IN ({placeholders})",
                 [source_batch_id, *ids],
-            )
-            self._touch(source_batch_id)
-            self._touch(target_batch_id)
+            ).fetchall()
+        ]
+        if not source_ids:
+            return {"added": 0, "removed": 0}
+        try:
+            moved = self._set_entries_batch(source_ids, target_batch_id, _now())
             self.db.conn.commit()
-            return {"added": added, "removed": cur.rowcount}
+            return {"added": moved, "removed": moved}
+        except Exception:
+            self.db.conn.rollback()
+            raise
+
+    def set_entries_batch(
+        self, entry_ids: list[str], target_batch_id: str | None = None
+    ) -> dict:
+        """批量设置唯一批次归属；target_batch_id 为空时移到“未进批次”。"""
+        if target_batch_id and not self._exists(target_batch_id):
+            raise ValueError("批次不存在。")
+        try:
+            changed = self._set_entries_batch(entry_ids or [], target_batch_id, _now())
+            self.db.conn.commit()
+            return {"changed": changed, "batch_id": target_batch_id or ""}
         except Exception:
             self.db.conn.rollback()
             raise
@@ -135,34 +157,42 @@ class BatchRepo:
             raise ValueError("条目不存在。")
         if target_batch_id and not self._exists(target_batch_id):
             raise ValueError("批次不存在。")
-        old_rows = self.db.conn.execute(
+        old_row = self.db.conn.execute(
             "SELECT batch_id FROM batch_entries WHERE entry_id = ?", (entry_id,)
-        ).fetchall()
-        old_ids = [row["batch_id"] for row in old_rows]
-        self.db.conn.execute("DELETE FROM batch_entries WHERE entry_id = ?", (entry_id,))
-        now = _now()
-        added = 0
-        if target_batch_id:
-            added = self._link(target_batch_id, entry_id, now)
-        for batch_id in set(old_ids) | ({target_batch_id} if target_batch_id else set()):
-            self._touch(batch_id)
-        self.db.conn.commit()
-        return {"added": added, "removed": len(old_ids), "batch_id": target_batch_id or ""}
+        ).fetchone()
+        old_batch_id = old_row["batch_id"] if old_row else ""
+        try:
+            changed = self._set_entries_batch([entry_id], target_batch_id, _now())
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            raise
+        return {
+            "added": int(bool(changed and target_batch_id)),
+            "removed": int(bool(changed and old_batch_id)),
+            "batch_id": target_batch_id or "",
+        }
 
     def set_entry_note(self, batch_id: str, entry_id: str, note: str) -> dict:
-        """设置某条目在该批次内的催办备注。条目若不在批次内则先装入。"""
+        """设置某条目在该批次内的催办备注。条目若不在批次内则先移入。"""
+        if not self._exists(batch_id):
+            raise ValueError("批次不存在。")
         row = self.db.conn.execute(
             "SELECT 1 FROM batch_entries WHERE batch_id = ? AND entry_id = ?",
             (batch_id, entry_id),
         ).fetchone()
-        if row is None:
-            self._link(batch_id, entry_id, _now())
-        self.db.conn.execute(
-            "UPDATE batch_entries SET note = ? WHERE batch_id = ? AND entry_id = ?",
-            (note or "", batch_id, entry_id),
-        )
-        self._touch(batch_id)
-        self.db.conn.commit()
+        try:
+            if row is None:
+                self._set_entries_batch([entry_id], batch_id, _now())
+            self.db.conn.execute(
+                "UPDATE batch_entries SET note = ? WHERE batch_id = ? AND entry_id = ?",
+                (note or "", batch_id, entry_id),
+            )
+            self._touch(batch_id)
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            raise
         return self.get(batch_id)
 
     def _link(self, batch_id: str, entry_id: str, now: str) -> int:
@@ -171,6 +201,36 @@ class BatchRepo:
             (batch_id, entry_id, now),
         )
         return cur.rowcount
+
+    def _set_entries_batch(
+        self, entry_ids: list[str], target_batch_id: str | None, now: str
+    ) -> int:
+        """在当前事务中设置唯一归属，并刷新受影响批次的更新时间。"""
+        changed = 0
+        touched: set[str] = set()
+        for entry_id in list(dict.fromkeys(entry_ids or [])):
+            if not self.db.conn.execute(
+                "SELECT 1 FROM entries WHERE id = ?", (entry_id,)
+            ).fetchone():
+                raise ValueError("条目不存在。")
+            old_row = self.db.conn.execute(
+                "SELECT batch_id FROM batch_entries WHERE entry_id = ?", (entry_id,)
+            ).fetchone()
+            old_batch_id = old_row["batch_id"] if old_row else ""
+            if old_batch_id == (target_batch_id or ""):
+                continue
+            if old_batch_id:
+                self.db.conn.execute(
+                    "DELETE FROM batch_entries WHERE entry_id = ?", (entry_id,)
+                )
+                touched.add(old_batch_id)
+            if target_batch_id:
+                self._link(target_batch_id, entry_id, now)
+                touched.add(target_batch_id)
+            changed += 1
+        for batch_id in touched:
+            self._touch(batch_id)
+        return changed
 
     # ------------------------------------------------------------------ 读取
     def get(self, batch_id: str) -> dict | None:

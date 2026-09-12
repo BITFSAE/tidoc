@@ -956,11 +956,23 @@ def import_bindle(
                 batch_created = True
             if affected_ids and target_batch_id:
                 for imported_id in affected_ids:
+                    previous_rows = conn.execute(
+                        "SELECT batch_id FROM batch_entries WHERE entry_id = ?",
+                        (imported_id,),
+                    ).fetchall()
+                    conn.execute(
+                        "DELETE FROM batch_entries WHERE entry_id = ?", (imported_id,)
+                    )
                     conn.execute(
                         """INSERT OR IGNORE INTO batch_entries(batch_id, entry_id, note, added_at)
                            VALUES(?,?,?,?)""",
                         (target_batch_id, imported_id, "", now),
                     )
+                    for previous in previous_rows:
+                        conn.execute(
+                            "UPDATE batches SET updated_at = ? WHERE id = ?",
+                            (now, previous["batch_id"]),
+                        )
                 conn.execute(
                     "UPDATE batches SET updated_at = ? WHERE id = ?",
                     (now, target_batch_id),
@@ -1017,7 +1029,7 @@ def import_bindle(
     if import_tags and affected_ids:
         message_parts.append(f"已给所选 {len(affected_ids)} 条添加标签")
     if target_batch_id and affected_ids:
-        message_parts.append("已装入新建批次" if batch_created else "已装入所选批次")
+        message_parts.append("已移到新建批次" if batch_created else "已移到所选批次")
     message = "；".join(message_parts) + "。"
 
     return {

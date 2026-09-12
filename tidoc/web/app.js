@@ -284,6 +284,7 @@ const I = {
   xml: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="m9 12-2 2 2 2M13 12l2 2-2 2" stroke-width="1.5"/></svg>',
   image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.4"/><path d="m4 17 5-4 4 3 3-2 4 4"/></svg>',
   inspect: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="m20 20-3.5-3.5M8 11h6"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg>',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>',
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   github: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-1.05-.01-1.9-2.78.62-3.37-1.21-3.37-1.21-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .08 1.53 1.06 1.53 1.06.9 1.57 2.35 1.12 2.92.85.09-.66.35-1.12.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.3 9.3 0 0 1 12 6.95a9.3 9.3 0 0 1 2.5.35c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.59.69.49A10.24 10.24 0 0 0 22 12.23C22 6.58 17.52 2 12 2Z"/></svg>',
@@ -297,6 +298,7 @@ function iconPdf() { return I.pdf; }
 function iconXml() { return I.xml; }
 function iconImage() { return I.image; }
 function iconInspect() { return I.inspect; }
+function iconCheck(s) { return wrapSvg(I.check, s); }
 function wrapSvg(svg, s) {
   return svg.replace('<svg ', `<svg width="${s}" height="${s}" `);
 }
@@ -319,11 +321,11 @@ async function init() {
   await handleSecondaryLaunch();
   try { await Api.markFrontendReady(); } catch (e) {}
   if (startupUpdate?.upgraded) {
-    toast(`已从 v${startupUpdate.previous_version} 更新至 v${startupUpdate.current_version}`, 'ok');
+    showCompletedUpdateWhenFree(startupUpdate);
   } else {
     await maybeShowFirstUseGuide();
   }
-  setTimeout(() => { maybeAutoCheckUpdates(); }, 1200);
+  setTimeout(() => { maybeAutoCheckUpdates(); }, 250);
 }
 
 async function handleSecondaryLaunch() {
@@ -451,14 +453,34 @@ function setupFastTooltips() {
   window.addEventListener('blur', hide);
 }
 
+let autoUpdateCheckTimer = null;
+
+function scheduleAutoUpdateCheck(status) {
+  if (autoUpdateCheckTimer) clearTimeout(autoUpdateCheckTimer);
+  autoUpdateCheckTimer = null;
+  if (status?.reason === 'disabled') return;
+  const now = Math.floor(Date.now() / 1000);
+  const next = Number(status?.next_check_at || 0);
+  const delay = next
+    ? Math.max(60 * 1000, (next - now) * 1000)
+    : 60 * 60 * 1000;
+  autoUpdateCheckTimer = setTimeout(() => { maybeAutoCheckUpdates(); }, delay);
+}
+
 async function maybeAutoCheckUpdates(showCurrent = false) {
   try {
     const status = await Api.autoCheckUpdates();
     if (status.reason === 'disabled') {
       setUpdateNotice(null);
+      scheduleAutoUpdateCheck(status);
       return;
     }
     setUpdateNotice(status);
+    scheduleAutoUpdateCheck(status);
+    if (status.reason === 'error') {
+      if (showCurrent) toast(status.error || '暂时无法检查更新', 'err');
+      return;
+    }
     const available = (status.updates || []).filter((item) => item.available);
     if ((status.checked || showCurrent) && available.length && showCurrent) {
       toast(available.some((item) => item.component === 'core') ? '发现新版本' : '发现可用组件更新', 'ok');
@@ -467,6 +489,8 @@ async function maybeAutoCheckUpdates(showCurrent = false) {
     }
   } catch (e) {
     if (showCurrent) toast(e.message, 'err');
+    if (autoUpdateCheckTimer) clearTimeout(autoUpdateCheckTimer);
+    autoUpdateCheckTimer = setTimeout(() => { maybeAutoCheckUpdates(); }, 10 * 60 * 1000);
   }
 }
 
@@ -488,6 +512,17 @@ async function maybeShowAvailableUpdate(core) {
     });
   };
   showWhenFree();
+}
+
+function showCompletedUpdateWhenFree(data) {
+  const show = () => {
+    if ($('#modalRoot').lastChild) {
+      setTimeout(show, 600);
+      return;
+    }
+    openReleaseHighlights('completed', data);
+  };
+  show();
 }
 
 function openReleaseHighlights(mode, data) {
@@ -544,6 +579,7 @@ function setUpdateNotice(status) {
     btn.classList.toggle('has-update', componentUpdates.length > 0);
     btn.title = componentUpdates.length ? `设置 · ${componentUpdates.length} 项组件更新` : '设置';
   }
+  renderCoreUpdateAction(core);
   refreshCoreUpdateRuntime(core).catch(() => {});
 }
 
@@ -618,10 +654,23 @@ async function handleTopbarUpdateAction() {
     return;
   }
   try {
+    State.coreUpdateRuntime = {
+      ...runtime,
+      state: 'downloading',
+      version: core.latest_version || '',
+      progress: 0,
+      stage: 'starting',
+      error: '',
+    };
+    renderCoreUpdateAction(core);
     State.coreUpdateRuntime = await Api.startCoreUpdateDownload();
     renderCoreUpdateAction(core);
     startCoreUpdatePolling();
-  } catch (e) { toast(e.message, 'err'); }
+  } catch (e) {
+    State.coreUpdateRuntime = { ...State.coreUpdateRuntime, state: 'failed', error: e.message };
+    renderCoreUpdateAction(core);
+    toast(e.message, 'err');
+  }
 }
 
 async function loadWorkflowPreferences() {
@@ -849,7 +898,7 @@ function currentFilters() {
   if (inUnbatchedView()) f.unbatched = true;
   else if (inArchivedView()) f.archived_only = true;
   else if (State.batchFilter) {
-    // 聚焦具体批次时查看该批次完整成员；全局“已归档”才限定为只属于已归档批次的条目。
+    // 聚焦具体批次时查看该批次完整成员；全局“已归档”展示所有已归档批次的条目。
     f.batch_id = State.batchFilter;
   } else f.active_only = true;
   return f;
@@ -1410,7 +1459,7 @@ function renderEmptyState() {
     } else {
       illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17h34v24H7z"/><path d="M5 11h38v6H5zM18 25h12"/></svg>`;
       $('#emptyTitle').textContent = '还没有归档条目';
-      $('#emptySub').textContent = '批次归档后，只属于已归档批次的条目会放在这里。';
+      $('#emptySub').textContent = '批次归档后，其中的条目会放在这里。';
       $('#emptyNew').textContent = '返回在办';
       $('#emptyNew').onclick = () => focusBatch('');
     }
@@ -1587,14 +1636,14 @@ function renderBatchFolders() {
   wrap.classList.remove('hidden');
 
   const scopeChip = (id, label, active) =>
-    `<button type="button" class="batch-scope-btn${active ? ' active' : ''}" data-folder="${id}" role="tab" aria-selected="${active ? 'true' : 'false'}" title="${id === ARCHIVED_BATCH_ID ? '装入批次后可点击批次右侧 ⋯ 归档' : '查看在办条目'}">` +
+    `<button type="button" class="batch-scope-btn${active ? ' active' : ''}" data-folder="${id}" role="tab" aria-selected="${active ? 'true' : 'false'}" title="${id === ARCHIVED_BATCH_ID ? '批次可通过右侧 ⋯ 归档' : '查看在办条目'}">` +
       `<span>${label}</span></button>`;
   const folderChip = (batch) => {
     const st = batch.stats || {};
     const meta = batch.archived
       ? ''
       : `${st.count || 0} 条${st.incomplete ? ` · <span class="miss">缺 ${st.incomplete}</span>` : ' · 齐'}`;
-    const hint = batch.archived ? '恢复到在办' : '装入批次后可将批次归档';
+    const hint = batch.archived ? '恢复到在办' : '通过菜单归档批次';
     return `<span class="batch-folder${batch.archived ? ' archived' : ''}${State.batchFilter === batch.id ? ' active' : ''}" data-folder="${esc(batch.id)}">
       <button type="button" class="folder-open"><span data-tooltip-overflow="${esc(batch.name)}">${esc(batch.name)}</span>${meta ? `<small>${meta}</small>` : ''}</button>
       ${batch.note ? `<span class="batch-folder-note" data-tooltip="批次备注：${esc(batch.note)}">${iconNote(11)}</span>` : ''}
@@ -1640,7 +1689,12 @@ function renderBatchFolders() {
 }
 
 function focusBatch(batchId) {
-  State.batchFilter = batchId || '';
+  const requested = batchId || '';
+  if (requested && requested === State.batchFilter) {
+    State.batchFilter = inArchivedShelf() ? ARCHIVED_BATCH_ID : '';
+  } else {
+    State.batchFilter = requested;
+  }
   State.currentBatch = null;
   State.selected.clear();
   renderBatchFolders();
@@ -1689,18 +1743,13 @@ async function deleteBatchFlow(batchSummary) {
     <div class="archive-confirm-summary">
       <b>${esc(batch.name)}</b><span>${count} 条</span>
     </div>
-    <div class="batch-delete-choices" role="radiogroup" aria-label="删除范围">
-      <label class="batch-delete-choice is-selected">
-        <input type="radio" name="batchDeleteScope" value="batch" checked/>
-        <span><b>仅删除批次</b><small>保留条目和材料</small></span>
-      </label>
-      <label class="batch-delete-choice${count ? '' : ' disabled'}">
-        <input type="radio" name="batchDeleteScope" value="entries"${count ? '' : ' disabled'}/>
-        <span><b>同时删除条目</b><small>${count ? `永久删除 ${count} 条及附件（含其他批次中的记录）` : '没有条目'}</small></span>
-      </label>
-    </div>`;
+    ${count ? '<p class="batch-delete-preserve">条目会回到「未进批次」。</p>' : ''}
+    ${count ? `<label class="batch-delete-option">
+      <input type="checkbox" name="batchDeleteEntries"/>
+      <span><b>同时永久删除 ${count} 条条目和全部附件</b><small>此操作不可恢复</small></span>
+    </label>` : ''}`;
   const deleteBtn = mkBtn('删除批次', 'danger', async () => {
-    const deleteEntries = body.querySelector('[name="batchDeleteScope"]:checked')?.value === 'entries';
+    const deleteEntries = !!body.querySelector('[name="batchDeleteEntries"]:checked');
     deleteBtn.disabled = true;
     try {
       const wasFocused = State.batchFilter === batch.id;
@@ -1724,15 +1773,13 @@ async function deleteBatchFlow(batchSummary) {
     body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), deleteBtn],
   });
-  const radios = [...body.querySelectorAll('[name="batchDeleteScope"]')];
+  const deleteEntriesToggle = body.querySelector('[name="batchDeleteEntries"]');
   const syncScope = () => {
-    const deleteEntries = radios.some((radio) => radio.checked && radio.value === 'entries');
-    body.querySelectorAll('.batch-delete-choice').forEach((choice) => {
-      choice.classList.toggle('is-selected', !!choice.querySelector('input:checked'));
-    });
+    const deleteEntries = !!deleteEntriesToggle?.checked;
+    deleteEntriesToggle?.closest('.batch-delete-option')?.classList.toggle('is-selected', deleteEntries);
     deleteBtn.textContent = deleteEntries ? `删除批次和 ${count} 条条目` : '删除批次';
   };
-  radios.forEach((radio) => { radio.onchange = syncScope; });
+  if (deleteEntriesToggle) deleteEntriesToggle.onchange = syncScope;
 }
 
 async function archiveBatchFlow(batch) {
@@ -1840,7 +1887,17 @@ async function newBatchFlow(presetIds) {
   setTimeout(() => body.querySelector('#bName')?.focus(), 20);
 }
 
-// 调整选中条目的批次归属：加入、移出当前批次，或从当前批次移动到另一批次。
+function batchDestinationOption(id, name, meta, currentCount, total) {
+  const current = currentCount === total;
+  const partial = currentCount > 0 && !current;
+  return `<button type="button" class="batch-destination${current ? ' current is-selected' : ''}" data-batch-destination="${esc(id)}" role="radio" aria-checked="${current ? 'true' : 'false'}">
+    <span class="batch-destination-copy"><b>${esc(name)}</b><small>${esc(meta)}</small></span>
+    <span class="batch-destination-state">${current ? '当前' : partial ? `${currentCount}/${total} 条在这里` : ''}</span>
+    <span class="batch-destination-check" aria-hidden="true">${iconCheck(14)}</span>
+  </button>`;
+}
+
+// 调整所选条目的唯一批次归属：移动到一个批次，或移到“未进批次”。
 async function addSelectionToBatch(idsArg) {
   const fromSelection = !Array.isArray(idsArg);
   const ids = fromSelection ? [...State.selected] : idsArg;
@@ -1850,102 +1907,74 @@ async function addSelectionToBatch(idsArg) {
   try { memberships = await Promise.all(ids.map((id) => Api.batchesOfEntry(id))); }
   catch (e) { toast(e.message, 'err'); return; }
   const memberCounts = new Map();
-  memberships.forEach((rows) => rows.forEach((batch) => {
-    memberCounts.set(batch.id, (memberCounts.get(batch.id) || 0) + 1);
-  }));
+  let unbatchedCount = 0;
+  memberships.forEach((rows) => {
+    const batch = rows[0];
+    if (batch) memberCounts.set(batch.id, (memberCounts.get(batch.id) || 0) + 1);
+    else unbatchedCount += 1;
+  });
   const body = el('div');
-  const current = actualBatchId() && State.batches.find((b) => b.id === actualBatchId());
-  const rows = State.batches.filter((batch) => !batch.archived).map((batch) => {
-    const count = memberCounts.get(batch.id) || 0;
-    const toggleLabel = count === ids.length ? '移出' : count ? '补齐' : '装入';
-    const state = count === ids.length ? '已装入' : count ? `${count}/${ids.length} 条` : `${batch.stats?.count || 0} 条`;
-    return `<div class="batch-membership-row${batch.id === State.batchFilter ? ' current' : ''}">
-      <div class="batch-membership-name"><b>${esc(batch.name)}</b><span>${state}</span></div>
-      <div class="batch-membership-actions">
-        <button class="btn small ghost${count === ids.length ? ' danger-text' : ''}" data-toggle-batch="${esc(batch.id)}" data-member-count="${count}">${toggleLabel}</button>
-        ${current && batch.id !== current.id ? `<button class="btn small ghost" data-move-batch="${esc(batch.id)}">移动</button>` : ''}
-      </div>
-    </div>`;
-  }).join('');
-  body.innerHTML = `<div class="batch-membership-list">${rows || '<div class="hint">还没有批次。</div>'}</div>`;
-  const footer = [mkBtn('关闭', 'ghost', () => m.close()), mkBtn('新建批次', 'primary', () => { m.close(); newBatchFlow(ids); })];
+  const moving = memberships.some((rows) => rows.length);
+  const activeBatches = State.batches.filter((batch) => !batch.archived);
+  const rows = [
+    batchDestinationOption('', '未进批次', '不放入任何批次', unbatchedCount, ids.length),
+    ...activeBatches.map((batch) => batchDestinationOption(
+      batch.id,
+      batch.name,
+      `${batch.stats?.count || 0} 条${batch.stats?.incomplete ? ` · 缺 ${batch.stats.incomplete}` : ''}`,
+      memberCounts.get(batch.id) || 0,
+      ids.length,
+    )),
+  ].join('');
+  body.innerHTML = `<div class="batch-destination-list" role="radiogroup" aria-label="目标批次">${rows}</div>`;
+  const createBtn = mkBtn('新建批次', 'ghost', () => { m.close(); newBatchFlow(ids); });
+  createBtn.classList.add('push-left');
+  const applyBtn = mkBtn(moving ? '移动' : '加入', 'primary', async () => {
+    const selected = body.querySelector('[data-batch-destination].is-selected');
+    if (!selected) return;
+    const targetId = selected.dataset.batchDestination || '';
+    const target = activeBatches.find((batch) => batch.id === targetId);
+    applyBtn.disabled = true;
+    try {
+      const sourceView = actualBatchId();
+      await Api.setEntriesBatch(ids, targetId);
+      m.close();
+      if (fromSelection) State.selected.clear();
+      await loadBatches();
+      if (sourceView && sourceView !== targetId) focusBatch(targetId || UNBATCHED_BATCH_ID);
+      else await refreshEntries();
+      const verb = moving ? '移动' : '加入';
+      toast(target ? `已${verb} ${ids.length} 条到「${target.name}」` : `已移动 ${ids.length} 条到“未进批次”`, 'ok');
+    } catch (e) {
+      applyBtn.disabled = false;
+      toast(e.message, 'err');
+    }
+  });
+  applyBtn.disabled = true;
   const m = modal({
-    title: `批次 · ${ids.length} 条`, body, footer,
+    title: `${moving ? '移动到批次' : '加入批次'} · ${ids.length} 条`,
+    body,
+    footer: [createBtn, mkBtn('取消', 'ghost', () => m.close()), applyBtn],
   });
-  body.querySelectorAll('[data-toggle-batch]').forEach((btn) => {
+  body.querySelectorAll('[data-batch-destination]').forEach((btn) => {
     btn.onclick = async () => {
-      try {
-        const batchId = btn.dataset.toggleBatch;
-        const allInside = Number(btn.dataset.memberCount) === ids.length;
-        const r = allInside
-          ? await Api.removeEntriesFromBatch(batchId, ids)
-          : await Api.addEntriesToBatch(batchId, ids);
-        m.close(); if (fromSelection) State.selected.clear(); await loadBatches();
-        await refreshEntries();
-        toast(allInside ? `已移出 ${r.removed} 条` : `已装入 ${r.added} 条`, 'ok');
-      } catch (e) { toast(e.message, 'err'); }
-    };
-  });
-  body.querySelectorAll('[data-move-batch]').forEach((btn) => {
-    btn.onclick = async () => {
-      try {
-        const targetId = btn.dataset.moveBatch;
-        await Api.moveEntriesBetweenBatches(current.id, targetId, ids);
-        m.close(); if (fromSelection) State.selected.clear(); await loadBatches(); focusBatch(targetId);
-        toast(`已移动 ${ids.length} 条`, 'ok');
-      } catch (e) { toast(e.message, 'err'); }
+      body.querySelectorAll('[data-batch-destination]').forEach((option) => {
+        const selected = option === btn;
+        option.classList.toggle('is-selected', selected);
+        option.setAttribute('aria-checked', selected ? 'true' : 'false');
+      });
+      const targetId = btn.dataset.batchDestination || '';
+      const unchanged = targetId
+        ? (memberCounts.get(targetId) || 0) === ids.length
+        : unbatchedCount === ids.length;
+      applyBtn.disabled = unchanged;
+      applyBtn.textContent = moving ? '确认移动' : '确认加入';
     };
   });
 }
 
 async function openEntryBatchFlow(entry) {
-  try {
-    await loadBatches();
-    const memberships = await Api.batchesOfEntry(entry.id);
-    const currentIds = new Set(memberships.map((batch) => batch.id));
-    const body = el('div');
-    const activeBatches = State.batches.filter((batch) => !batch.archived);
-    const rows = activeBatches.map((batch) => {
-      const current = currentIds.has(batch.id);
-      return `<div class="batch-membership-row${current ? ' current' : ''}">
-        <div class="batch-membership-name"><b>${esc(batch.name)}</b><span>${current ? '当前批次' : `${batch.stats?.count || 0} 条`}</span></div>
-        <button class="btn small ghost" data-entry-batch="${esc(batch.id)}">${current && memberships.length === 1 ? '当前' : '改为此批次'}</button>
-      </div>`;
-    }).join('');
-    const currentLabel = memberships.length
-      ? memberships.map((batch) => `${esc(batch.name)}${batch.archived ? ' · 已归档' : ''}`).join('、')
-      : '不在任何批次';
-    body.innerHTML = `
-      <div class="entry-batch-current"><span>当前归属</span><b>${currentLabel}</b></div>
-      <div class="batch-membership-list">${rows || '<div class="hint">还没有可用批次。</div>'}</div>`;
-    const m = modal({
-      title: '编辑批次归属',
-      body,
-      footer: [
-        ...(memberships.length ? [mkBtn('不进任何批次', 'ghost', async () => {
-          try {
-            await Api.setEntryBatch(entry.id, '');
-            m.close(); await loadBatches(); await refreshEntries();
-            toast('已移出所有批次', 'ok');
-          } catch (err) { toast(err.message, 'err'); }
-        })] : []),
-        mkBtn('新建批次', 'primary', () => { m.close(); newBatchFlow([entry.id]); }),
-        mkBtn('关闭', 'ghost', () => m.close()),
-      ],
-    });
-    body.querySelectorAll('[data-entry-batch]').forEach((button) => {
-      button.onclick = async () => {
-        if (button.textContent.trim() === '当前') return;
-        try {
-          await Api.setEntryBatch(entry.id, button.dataset.entryBatch);
-          m.close(); await loadBatches(); await refreshEntries();
-          toast('批次归属已更新', 'ok');
-        } catch (err) { toast(err.message, 'err'); }
-      };
-    });
-  } catch (err) {
-    toast(err.message, 'err');
-  }
+  await addSelectionToBatch([entry.id]);
 }
 
 // 批量打标签
@@ -3414,6 +3443,7 @@ async function openSettings() {
         maybeAutoCheckUpdates(true);
       } else {
         setUpdateNotice(null);
+        scheduleAutoUpdateCheck({ reason: 'disabled' });
         toast('已关闭自动检查', 'ok');
       }
     } catch (e) {
@@ -3759,7 +3789,7 @@ function usageGuideStepsMarkup() {
   return `<div><b>1 · 导入发票</b><span>拖入或粘贴发票 PDF/XML；多张用“导入发票”。</span></div>
     <div><b>2 · 补齐材料</b><span>在卡片或详情添加付款截图、实物图和查验单；右键可打开已有文件。</span></div>
     <div><b>3 · 核对条目</b><span>从“待补材料”或“识别提醒”进入详情，确认实付、明细和备注。</span></div>
-    <div><b>4 · 组织批次</b><span>勾选条目后装入批次；点击批次右侧“⋯”可编辑批次、填写批次备注、归档，已归档批次可从“已归档”查看并恢复。</span></div>
+    <div><b>4 · 组织批次</b><span>勾选条目后移动到批次；点击批次右侧“⋯”可编辑批次、填写批次备注、归档，已归档批次可从“已归档”查看并恢复。</span></div>
     <div><b>5 · 导出打印</b><span>选中条目后导出绑定包、汇总或打印材料。</span></div>
     <div><b>6 · 后续查找</b><span>用抬头、报账人、状态、日期、金额或关键词筛选。</span></div>`;
 }

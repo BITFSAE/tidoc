@@ -98,6 +98,7 @@ const Api = (() => {
     removeEntriesFromBatch: (id, entryIds) => call('remove_entries_from_batch', id, entryIds || []),
     moveEntriesBetweenBatches: (sourceId, targetId, entryIds) => call('move_entries_between_batches', sourceId, targetId, entryIds || []),
     setEntryBatch: (entryId, batchId) => call('set_entry_batch', entryId, batchId || ''),
+    setEntriesBatch: (entryIds, batchId) => call('set_entries_batch', entryIds || [], batchId || ''),
     setBatchEntryNote: (id, entryId, note) => call('set_batch_entry_note', id, entryId, note || ''),
     batchesOfEntry: (entryId) => call('batches_of_entry', entryId),
 

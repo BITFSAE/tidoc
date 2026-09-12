@@ -56,7 +56,9 @@ INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY = (
 UPDATE_LAST_CHECK_KEY = "tidoc.update.lastCheck"
 UPDATE_LAST_RESULT_KEY = "tidoc.update.lastResult"
 APP_LAST_SEEN_VERSION_KEY = "tidoc.update.lastSeenVersion"
-AUTO_UPDATE_INTERVAL_SECONDS = 24 * 60 * 60
+# 启动检查仍受用户开关控制；一小时内复用缓存，避免每次启动都联网，
+# 同时避免发布新版本后最长一天都看不到更新入口。
+AUTO_UPDATE_INTERVAL_SECONDS = 60 * 60
 MAX_DROPPED_FILE_BYTES = 100 * 1024 * 1024
 MAX_DROPPED_TOTAL_BYTES = 500 * 1024 * 1024
 
@@ -872,6 +874,10 @@ class Api:
     @_guard
     def set_entry_batch(self, entry_id, batch_id=""):
         return self.batches.set_entry_batch(entry_id, batch_id or None)
+
+    @_guard
+    def set_entries_batch(self, entry_ids, batch_id=""):
+        return self.batches.set_entries_batch(entry_ids or [], batch_id or None)
 
     @_guard
     def set_batch_entry_note(self, batch_id, entry_id, note):
@@ -1789,7 +1795,17 @@ class Api:
     def start_core_update_download(self):
         from .services.updater import COMPONENT_CORE, get_platform_asset, load_manifest
 
-        asset = get_platform_asset(load_manifest(), COMPONENT_CORE)
+        # 自动检查已经把完整资源信息写入缓存。优先复用它，点击下载后便可
+        # 立即启动后台任务，不再先同步请求一次 manifest。
+        asset = next((
+            item.get("asset")
+            for item in (self._cached_update_result().get("updates") or [])
+            if item.get("component") == COMPONENT_CORE
+            and item.get("available")
+            and (item.get("asset") or {}).get("auto_update")
+        ), None)
+        if not asset:
+            asset = get_platform_asset(load_manifest(), COMPONENT_CORE)
         return self._core_updater.start(asset)
 
     @_guard
@@ -1831,9 +1847,28 @@ class Api:
             }
 
         from .services.updater import check_updates
-        status = check_updates(self.data_root.components_dir, updates_dir=self.data_root.updates_dir)
+        try:
+            status = check_updates(
+                self.data_root.components_dir,
+                updates_dir=self.data_root.updates_dir,
+            )
+        except Exception as exc:
+            # 启动检查失败时仍恢复上次发现的更新入口，并尽快重试；自动检查
+            # 不应因为一次临时网络错误把已有更新提示一并藏掉。
+            return {
+                **self._cached_update_result(),
+                "checked": False,
+                "reason": "error",
+                "error": str(exc),
+                "checked_at": last_check,
+                "next_check_at": now + 10 * 60,
+            }
         status = self._record_update_check(status, now)
-        status.update({"checked": True, "reason": "due"})
+        status.update({
+            "checked": True,
+            "reason": "due",
+            "next_check_at": now + AUTO_UPDATE_INTERVAL_SECONDS,
+        })
         return status
 
     @_guard

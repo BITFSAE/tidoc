@@ -2,7 +2,12 @@ import json
 from pathlib import Path
 
 from tidoc import __version__
-from tidoc.api import APP_LAST_SEEN_VERSION_KEY, AUTO_UPDATE_PREF_KEY, Api
+from tidoc.api import (
+    APP_LAST_SEEN_VERSION_KEY,
+    AUTO_UPDATE_INTERVAL_SECONDS,
+    AUTO_UPDATE_PREF_KEY,
+    Api,
+)
 from tidoc.services.updater import current_platform, sha256_file
 
 
@@ -27,6 +32,8 @@ def test_auto_update_check_is_enabled_by_default_can_be_disabled_and_is_throttle
     assert first["checked"] is True
     assert second["reason"] == "recent"
     assert len(calls) == 1
+
+    assert AUTO_UPDATE_INTERVAL_SECONDS == 60 * 60
 
     unwrap(api.set_app_preference(AUTO_UPDATE_PREF_KEY, "0"))
     disabled = unwrap(api.auto_check_updates())
@@ -54,6 +61,28 @@ def test_cached_core_update_is_normalized_against_running_version(tmp_path):
     assert cached["updates"][0]["available"] is False
     assert cached["updates"][0]["state"] == "current"
     assert cached["updates"][0]["downloaded"] is False
+
+
+def test_auto_check_failure_keeps_cached_update_and_retries_soon(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    api = Api(tmp_path)
+    api._record_update_check({
+        "updates": [{
+            "component": "core",
+            "latest_version": "9.9.9",
+            "available": True,
+            "asset": {"version": "9.9.9"},
+        }]
+    }, checked_at=1)
+    monkeypatch.setattr(updater, "check_updates", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("网络暂不可用")))
+
+    status = unwrap(api.auto_check_updates())
+
+    assert status["reason"] == "error"
+    assert status["error"] == "网络暂不可用"
+    assert status["updates"][0]["available"] is True
+    assert status["next_check_at"] > status["checked_at"]
 
 
 def test_startup_update_state_only_announces_real_upgrade(tmp_path):
@@ -155,7 +184,37 @@ def test_frontend_upgrade_confirmation_shows_version_transition():
         Path(__file__).resolve().parents[1] / "tidoc" / "web" / "app.js"
     ).read_text("utf-8")
 
-    assert (
-        "已从 v${startupUpdate.previous_version} 更新至 "
-        "v${startupUpdate.current_version}"
-    ) in source
+    assert "showCompletedUpdateWhenFree(startupUpdate)" in source
+    assert "openReleaseHighlights('completed', data)" in source
+    assert "setTimeout(() => { maybeAutoCheckUpdates(); }, 250)" in source
+    assert "function scheduleAutoUpdateCheck(status)" in source
+    assert "next_check_at" in source
+    assert "state: 'downloading'" in source
+    assert "progress: 0" in source
+
+
+def test_core_download_reuses_cached_asset(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    api = Api(tmp_path)
+    asset = {
+        "component": "core",
+        "version": "9.9.9",
+        "auto_update": {"url": "https://example.com/update.zip"},
+    }
+    api._record_update_check({
+        "updates": [{
+            "component": "core",
+            "latest_version": "9.9.9",
+            "available": True,
+            "asset": asset,
+        }]
+    })
+    captured = []
+    monkeypatch.setattr(api._core_updater, "start", lambda value: captured.append(value) or {"state": "downloading"})
+    monkeypatch.setattr(updater, "load_manifest", lambda: (_ for _ in ()).throw(AssertionError("不应重新读取清单")))
+
+    result = unwrap(api.start_core_update_download())
+
+    assert result["state"] == "downloading"
+    assert captured == [asset]

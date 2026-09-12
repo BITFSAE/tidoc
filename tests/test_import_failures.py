@@ -341,7 +341,6 @@ def test_delete_batch_can_keep_entries_or_remove_entries_and_files(api, tmp_path
 
     keep_batch = api.create_batch("保留条目", entry_ids=[kept["id"]])["data"]
     delete_batch = api.create_batch("删除条目", entry_ids=[removed["id"]])["data"]
-    shared_batch = api.create_batch("其他批次", entry_ids=[removed["id"]])["data"]
 
     kept_result = api.delete_batch(keep_batch["id"], False)["data"]
     removed_result = api.delete_batch(delete_batch["id"], True)["data"]
@@ -355,7 +354,6 @@ def test_delete_batch_can_keep_entries_or_remove_entries_and_files(api, tmp_path
     }
     assert api.entries.get(removed["id"]) is None
     assert not removed_dir.exists()
-    assert api.batches.get(shared_batch["id"])["count"] == 0
 
 
 def test_delete_batch_with_entries_rolls_back_database_and_files(api, tmp_path, monkeypatch):

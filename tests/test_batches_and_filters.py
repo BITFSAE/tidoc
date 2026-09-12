@@ -48,12 +48,22 @@ def test_batch_remove_and_delete_keeps_entries(repos, sample_xmls):
 def test_batch_move_entries(repos, sample_xmls):
     _, ids = _make_entries(repos, sample_xmls, 2)
     source = repos["batches"].create("原批次", entry_ids=ids)
-    target = repos["batches"].create("新批次", entry_ids=[ids[0]])
+    target = repos["batches"].create("新批次")
 
     result = repos["batches"].move_entries(source["id"], target["id"], ids)
-    assert result == {"added": 1, "removed": 2}
+    assert result == {"added": 2, "removed": 2}
     assert repos["batches"].get(source["id"])["entry_ids"] == []
     assert set(repos["batches"].get(target["id"])["entry_ids"]) == set(ids)
+
+
+def test_add_entries_moves_existing_membership(repos, sample_xmls):
+    _, ids = _make_entries(repos, sample_xmls, 1)
+    source = repos["batches"].create("原批次", entry_ids=ids)
+    target = repos["batches"].create("新批次")
+
+    assert repos["batches"].add_entries(target["id"], ids) == 1
+    assert repos["batches"].get(source["id"])["entry_ids"] == []
+    assert repos["batches"].get(target["id"])["entry_ids"] == ids
 
 
 def test_set_single_entry_batch_can_replace_or_clear(repos, sample_xmls):
@@ -142,7 +152,7 @@ def test_focused_archived_batch_shows_full_membership(repos, sample_xmls):
     repos["batches"].set_archived(archived["id"], True)
 
     focused = {entry["id"] for entry in repos["entries"].list(batch_id=archived["id"])}
-    assert focused == {ids[0], ids[1]}
+    assert focused == {ids[0]}
     assert {entry["id"] for entry in repos["entries"].list(archived_only=True)} == {ids[0]}
 
 
@@ -151,13 +161,25 @@ def test_batches_of_entry(repos, sample_xmls):
     b1 = repos["batches"].create("批一", entry_ids=ids)
     b2 = repos["batches"].create("批二", entry_ids=ids)
     names = {x["name"] for x in repos["batches"].batches_of_entry(ids[0])}
-    assert names == {"批一", "批二"}
-    assert {x["name"] for x in repos["entries"].get(ids[0])["batches"]} == {
-        "批一", "批二",
-    }
-    assert {x["name"] for x in repos["entries"].list()[0]["batches"]} == {
-        "批一", "批二",
-    }
+    assert names == {"批二"}
+    assert repos["batches"].get(b1["id"])["entry_ids"] == []
+    assert {x["name"] for x in repos["entries"].get(ids[0])["batches"]} == {"批二"}
+    assert {x["name"] for x in repos["entries"].list()[0]["batches"]} == {"批二"}
+
+
+def test_set_entries_batch_can_move_mixed_selection_or_clear(repos, sample_xmls):
+    _, ids = _make_entries(repos, sample_xmls, 3)
+    first = repos["batches"].create("第一批", entry_ids=ids[:1])
+    second = repos["batches"].create("第二批", entry_ids=ids[1:2])
+
+    moved = repos["batches"].set_entries_batch(ids, second["id"])
+    assert moved == {"changed": 2, "batch_id": second["id"]}
+    assert repos["batches"].get(first["id"])["entry_ids"] == []
+    assert set(repos["batches"].get(second["id"])["entry_ids"]) == set(ids)
+
+    cleared = repos["batches"].set_entries_batch(ids)
+    assert cleared == {"changed": 3, "batch_id": ""}
+    assert repos["batches"].get(second["id"])["entry_ids"] == []
 
 
 # ------------------------------------------------------------------ 标签
@@ -410,6 +432,54 @@ def test_v6_db_adds_local_recognition_cache_columns(tmp_path):
     assert migrated.conn.execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()["value"] == str(SCHEMA_VERSION)
+
+
+def test_v10_migration_keeps_latest_batch_membership_and_adds_unique_index(tmp_path):
+    db_path = tmp_path / "v10.sqlite"
+    db = Database(db_path)
+    db.conn.execute("DROP INDEX idx_batch_entries_entry")
+    db.conn.execute(
+        "CREATE INDEX idx_batch_entries_entry ON batch_entries(entry_id)"
+    )
+    db.conn.execute("UPDATE meta SET value = '10' WHERE key = 'schema_version'")
+    db.conn.execute(
+        "INSERT INTO profiles(id, name, reviewer, is_default, created_at) "
+        "VALUES('p1', '张三', '李老师', 1, '')"
+    )
+    db.conn.execute(
+        """INSERT INTO entries(
+               id, profile_id, title, status, check_status, created_at, updated_at
+           ) VALUES('e1', 'p1', '', 'draft', 'warning', '', '')"""
+    )
+    db.conn.executemany(
+        """INSERT INTO batches(id, name, archived, created_at, updated_at)
+           VALUES(?,?,0,'','')""",
+        [("old", "原批次"), ("latest", "最后批次")],
+    )
+    db.conn.executemany(
+        """INSERT INTO batch_entries(batch_id, entry_id, note, added_at)
+           VALUES(?, 'e1', '', ?)""",
+        [("old", "2026-01-01T10:00:00"), ("latest", "2026-01-02T10:00:00")],
+    )
+    db.conn.commit()
+    db.close()
+
+    migrated = Database(db_path)
+    rows = migrated.conn.execute(
+        "SELECT batch_id FROM batch_entries WHERE entry_id = 'e1'"
+    ).fetchall()
+    indexes = {
+        row["name"]: bool(row["unique"])
+        for row in migrated.conn.execute("PRAGMA index_list(batch_entries)").fetchall()
+    }
+
+    assert [row["batch_id"] for row in rows] == ["latest"]
+    assert indexes["idx_batch_entries_entry"] is True
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated.conn.execute(
+            "INSERT INTO batch_entries(batch_id, entry_id, note, added_at) "
+            "VALUES('old', 'e1', '', '')"
+        )
 
 
 def test_v2_migration_downgrades_only_item_recognition_mismatch(tmp_path):

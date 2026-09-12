@@ -318,8 +318,11 @@ async function init() {
   showSearchHintIfEmpty();
   await handleSecondaryLaunch();
   try { await Api.markFrontendReady(); } catch (e) {}
-  if (startupUpdate?.upgraded) toast(`已更新至 v${startupUpdate.current_version}`, 'ok');
-  else await maybeShowFirstUseGuide();
+  if (startupUpdate?.upgraded) {
+    toast(`已从 v${startupUpdate.previous_version} 更新至 v${startupUpdate.current_version}`, 'ok');
+  } else {
+    await maybeShowFirstUseGuide();
+  }
   setTimeout(() => { maybeAutoCheckUpdates(); }, 1200);
 }
 

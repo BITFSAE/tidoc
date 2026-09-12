@@ -148,3 +148,14 @@ def test_frontend_health_marker_is_written_atomically(tmp_path):
     assert payload["version"] == __version__
     assert payload["pid"] > 0
     assert not list(health.parent.glob(".health.json-*.tmp"))
+
+
+def test_frontend_upgrade_confirmation_shows_version_transition():
+    source = (
+        Path(__file__).resolve().parents[1] / "tidoc" / "web" / "app.js"
+    ).read_text("utf-8")
+
+    assert (
+        "已从 v${startupUpdate.previous_version} 更新至 "
+        "v${startupUpdate.current_version}"
+    ) in source

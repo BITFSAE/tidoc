@@ -64,4 +64,5 @@ tidoc/ocr/macos/tidoc-ocr-macos-v0.2.1.zip
 - macOS 核心包构建后只剥离实际存在的依赖库 Mach-O 符号（`*.so` / `*.dylib` / 名为 `Python` 的解释器），保留主可执行文件末尾的 PyInstaller 内嵌归档，再以 ad-hoc 签名重签；没有匹配文件时跳过，不中断发布。DMG 使用 ULMO（LZMA）压缩。打印组件在 PyInstaller 收集阶段剥离符号，由 `--self-test` 兜底校验。
 - Release 说明和客户端 What’s changed 都从 `CHANGELOG.md` 最新一节生成，避免三处手工维护后内容不一致。
 - Windows 核心改为 Inno Setup 的按用户安装器；安装到用户目录，不要求管理员权限，并提供开始菜单、可选桌面快捷方式和卸载入口。
-- Windows 安装器把 `.tidoc` 扩展名注册为「Tidoc 绑定包」（按用户写入 `Software\Classes`）：资源管理器显示应用内嵌 logo 图标，双击调用 `tidoc.exe "<文件>"` 进入导入预览；卸载时自动删除关联键。Windows 构建的应用图标来自 `tidoc/web/assets/tidoc-logo.ico`（多尺寸 16–256），macOS 使用同目录的 `tidoc-logo.icns`；两者由 `scripts/generate_brand_assets.py` 从同一张方形源图生成。
+- 平台图标集中在 `icon/`：`source/icon-master.png` 是完整方形母版；Windows 使用 `windows/icon-rounded.png` 和多尺寸 `windows/icon.ico`，透明圆角由素材提供；macOS 使用不手工裁圆角的 `macos/icon-1024.png` 和 `macos/icon.icns`，交给系统裁切。`scripts/generate_brand_assets.py` 可从方形源图重建这些文件及 Web 用 PNG。
+- Windows 安装器把 `.tidoc` 扩展名注册为「Tidoc 绑定包」（按用户写入 `Software\Classes`）：资源管理器使用安装目录中的 `tidoc-file.ico`，双击调用 `tidoc.exe "<文件>"` 进入导入预览；安装器本身与应用可执行文件也使用同一套圆角 ICO，卸载时自动删除关联键。macOS 构建会把 `tidoc-file.icns` 放进应用资源、注册 `com.bitfsae.tidoc.bindle` 文档类型，并在修改后重新签名应用包。

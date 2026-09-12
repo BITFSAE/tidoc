@@ -69,7 +69,7 @@ jobs:
           --name tidoc
           --paths "."
           --collect-submodules tidoc
-          --icon "tidoc/web/assets/tidoc-logo.ico"
+          --icon "icon/windows/icon.ico"
           --add-data "tidoc/web;tidoc/web"
           scripts/tidoc_app_entry.py
 
@@ -157,9 +157,37 @@ jobs:
           --name "tidoc"
           --paths "."
           --collect-submodules tidoc
-          --icon "tidoc/web/assets/tidoc-logo.icns"
+          --icon "icon/macos/icon.icns"
+          --osx-bundle-identifier "com.bitfsae.tidoc"
           --add-data "tidoc/web:tidoc/web"
           scripts/tidoc_app_entry.py
+
+      - name: Register .tidoc document icon
+        run: |
+          APP="dist/tidoc.app"
+          PLIST="$APP/Contents/Info.plist"
+          cp "icon/macos/icon.icns" "$APP/Contents/Resources/tidoc-file.icns"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0 dict" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeName string 'Tidoc 绑定包'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Editor" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSHandlerRank string Owner" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeIconFile string tidoc-file.icns" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string com.bitfsae.tidoc.bindle" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 string tidoc" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0 dict" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeIdentifier string com.bitfsae.tidoc.bindle" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeDescription string 'Tidoc 绑定包'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeIconFile string tidoc-file.icns" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.data" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification dict" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string tidoc" "$PLIST"
+          plutil -lint "$PLIST"
 
       - name: Strip bundled libraries and re-sign macOS app
         run: |

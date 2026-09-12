@@ -28,6 +28,7 @@ def test_web_app_url_and_assets_are_versioned(tmp_path):
     assert app.web_app_url(index) == index.as_uri()
     assert f"styles.css?v={__version__}" in source
     assert f"api.js?v={__version__}" in source
+    assert f"select.js?v={__version__}" in source
     assert f"app.js?v={__version__}" in source
 
 
@@ -341,3 +342,78 @@ def test_single_payment_amount_mismatch_requires_confirmation():
     assert "与截图金额不一致，请确认" in prompt
     assert "保持当前 ${fmtMoney(currentPaid)}" in prompt
     assert "按截图 ${fmtMoney(sum)}" in prompt
+
+
+def test_inline_selects_use_the_self_drawn_menu_component():
+    """原生 select 的弹出列表由系统绘制、样式不可控，行内下拉改用自绘组件。
+
+    这里守住四件事：组件脚本被引入且版本化；原生 select 留在 DOM 里当数据源
+    （调用点的 .value / .disabled / innerHTML 才能继续用）；触发器显示文字的
+    两条同步路径（原型访问器 + MutationObserver）都在；包装盒与颜色不再由
+    脚本内联复制（那两类都实测踩过坑）。
+    """
+    web = app.web_dir()
+    html = (web / "index.html").read_text("utf-8")
+    source = (web / "app.js").read_text("utf-8")
+    component = (web / "select.js").read_text("utf-8")
+    styles = (web / "styles.css").read_text("utf-8")
+
+    assert '<script src="select.js?v=' in html
+    assert html.index("select.js?v=") < html.index("app.js?v=")
+    assert "window.TidocSelect" in component
+    assert "enhanceSelects" in component
+    # 触发器文字的两条同步路径：直接赋 select.value 走原型访问器，
+    # 改 option 的 selected 属性由 MutationObserver 兜底
+    assert "HTMLSelectElement.prototype, 'value'" in component
+    assert "attributeFilter: ['class', 'disabled', 'hidden', 'selected', 'value']" in component
+    # 组件自己负责这些同步，调用方不需要（也不该）手工刷显示
+    assert "syncSelectDisplays" not in source
+    assert "syncSelectDisplays" not in component
+    # 原生 select 必须留在 DOM 里当数据源，不能删掉重建
+    assert "field.appendChild(select)" in component
+    assert "dispatchEvent(new Event('change', { bubbles: true }))" in component
+    # 只跳过 display:none 藏起来的下拉，其余（行内 / 块级 / 弹窗 / 网格）都接管
+    assert "if (display === 'none') return null;" in component
+    # 包装盒的 display 跟随原生控件；宽度一律不写（写了会被 flex-grow 拉满，
+    # 或在行内上下文塌成内容宽度——这两条都实测踩过）
+    assert "field.style.display = 'block'" in component
+    assert "field.style.display = 'inline-block'" in component
+    assert "field.style.width" not in component
+    assert ".select-field.is-block > .select-trigger" in styles
+    # 颜色只能来自 CSS 语义变量：内联颜色会变成一次性快照，主题切换或深浅色启动
+    # 顺序一旦对不上就会留下过期底色（曾把高级筛选的下拉画成深色块）
+    assert "trigger.style.color =" not in component
+    assert "trigger.style.background =" not in component
+    assert "trigger.style.borderColor =" not in component
+    assert "styles.backgroundColor" not in component
+    assert "isTransparent" not in component
+    # 包装盒只承载盒子：它拿到了 select 的上下文类，必须显式清掉边框/底色/内边距，
+    # 否则包装盒自己会变成一个大号控件盒，和触发器叠成两层边框
+    assert "function resetFieldPaint(field)" in component
+    assert "field.style.border = '0'" in component
+    assert "field.style.background = 'none'" in component
+    assert "resetFieldPaint(record.field)" in component
+    # 不能拿隐藏后（absolute）的原生控件当尺寸参考，否则下拉会自我放大
+    assert "field.style.minWidth" not in component
+    assert "trigger.style.height" not in component      # 高度由上下文样式表决定
+    assert "trigger.style.padding" not in component     # 内边距同理，不复制
+    assert "insideChipOf" not in component              # 重构后残留的死代码已清掉
+    assert "is-borderless" not in component             # 没有任何 select 需要它，已删除
+    assert ".select-menu-option.is-selected" in styles
+    assert "color: var(--univ-ink); font-weight: 600" in styles  # 选中项对比度
+    assert ".settings-row .select-trigger" in styles
+    assert "aria-haspopup" in component and 'setAttribute(\'role\', \'listbox\')' in component
+    assert "aria-activedescendant" in component
+    assert "prefix" in component  # 首字母跳转不能丢
+
+    assert "function enhanceNativeSelects(" in source
+    assert "syncSelectDisplays" not in source   # 组件自己同步，调用方不再手工刷
+    assert "enhanceNativeSelects(bodyEl)" in source
+
+    assert ".select-field { position: relative" in styles
+    assert ".select-trigger" in styles
+    assert ".select-menu-option.is-selected" in styles
+    assert ".select-menu-option.is-active" in styles
+    assert ":root.theme-transition .select-trigger" in styles
+    assert ":root.theme-transition .select-menu" in styles
+    assert "@media (prefers-reduced-motion: reduce)" in styles

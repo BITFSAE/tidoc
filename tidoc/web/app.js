@@ -293,6 +293,7 @@ async function init() {
   setupFastTooltips();
   applyPreferences();
   bindEvents();
+  enhanceNativeSelects();
   let startupUpdate = null;
   try { startupUpdate = await Api.startupUpdateState(); } catch (e) {}
   refreshOcrStatus();
@@ -326,6 +327,13 @@ function applyOcrUiVisibility() {
 
 function ocrReady() {
   return !!(State.ocrStatus?.available && State.ocrStatus?.credentials_configured);
+}
+
+// 原生 select 的弹出列表由系统绘制、样式不可控，这里换成应用自绘的下拉
+// （组件见 select.js）。行内 chip、表单行、弹窗和网格单元格里的下拉都会接管，
+// display:none 藏起来的保持原生。
+function enhanceNativeSelects(root) {
+  return window.TidocSelect?.enhanceSelects(root) || [];
 }
 
 function setupFastTooltips() {
@@ -2491,6 +2499,8 @@ function modal({ title, subhead, titleChip, body, footer, wide, onClose }) {
   mask._closeModal = close;
   closeBtn.onclick = close;
   mask.onclick = (e) => { if (e.target === mask) close(); };
+  // 弹窗里的下拉是 innerHTML 直接生成的，创建后统一接入自绘组件
+  enhanceNativeSelects(bodyEl);
   return { mask, body: bodyEl, close, foot };
 }
 

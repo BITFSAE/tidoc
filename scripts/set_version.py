@@ -24,7 +24,7 @@ def main() -> int:
     index = Path("tidoc/web/index.html")
     text = index.read_text("utf-8")
     text = re.sub(
-        r'((?:styles\.css|api\.js|app\.js)\?v=)[^"\']+',
+        r'((?:styles\.css|api\.js|select\.js|app\.js)\?v=)[^"\']+',
         rf'\g<1>{args.version}',
         text,
     )

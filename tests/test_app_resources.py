@@ -284,6 +284,41 @@ def test_drag_and_paste_route_tidoc_to_bindle_preview():
     assert source.count("await openInboundBindle(infos, paths, progress)") == 3
 
 
+def test_detail_paste_refreshes_current_entry_and_import_can_choose_batch_and_profile():
+    source = (app.web_dir() / "app.js").read_text("utf-8")
+    styles = (app.web_dir() / "styles.css").read_text("utf-8")
+
+    clipboard = source.split(
+        "function setupClipboardUpload", 1
+    )[1].split("function showDragOverlay", 1)[0]
+    preview = source.split(
+        "function openBatchImportPreview", 1
+    )[1].split("function batchGroupSummary", 1)[0]
+    modal_source = source.split(
+        "function modal(", 1
+    )[1].split("function mkBtn", 1)[0]
+
+    assert "activeDetailModal" in source
+    assert "addMaterialInfosToEntry(activeEntryId, infos)" in clipboard
+    assert "reopenEntryDetail(detailModal, activeEntryId, { affectsStatus: true })" in clipboard
+    assert "已添加 ${infos.length} 份材料到当前条目" in clipboard
+    assert "拖拽或粘贴材料到当前条目" in source
+
+    assert 'id="biBatchSelect"' in preview
+    assert "NEW_IMPORT_BATCH" in preview
+    assert "Api.createBatch(newImportBatchName.trim(), '', ids)" in preview
+    assert "Api.setEntriesBatch(ids, selectedImportBatchId)" in preview
+    assert "actualBatchId()" in preview
+
+    assert "function openQuickProfileCreate" in source
+    assert "setupInlineProfileCreation(bodyEl)" in modal_source
+    assert 'data-profile-target="[data-claimant-select]"' in source
+    assert 'data-profile-target="#batchProfileSelect"' in source
+    assert 'data-profile-target="#deProfile"' in source
+    assert ".profile-picker-row" in styles
+    assert ".import-assignment-grid" in styles
+
+
 def test_export_names_include_local_time_and_settings_show_export_storage():
     source = (app.web_dir() / "app.js").read_text("utf-8")
     styles = (app.web_dir() / "styles.css").read_text("utf-8")

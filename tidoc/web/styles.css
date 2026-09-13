@@ -1652,6 +1652,13 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .claimant-row { margin: 12px 0 2px; }
 .claimant-row select,
 .detail-profile-select { width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); font-size: 13px; }
+.profile-picker-row { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+.profile-picker-row > select,
+.profile-picker-row > .select-field { flex: 1 1 auto; min-width: 0; }
+.profile-picker-row .profile-create-btn { flex: 0 0 auto; white-space: nowrap; }
+.profile-picker-row.compact .profile-create-btn { padding-inline: 9px; }
+.import-assignment-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.import-assignment-grid .claimant-row { min-width: 0; }
 
 .history-list { font-size: 12px; color: var(--ink-soft); display: flex; flex-direction: column; gap: 0; border-radius: 9px; border: 1px solid var(--line-soft); overflow: hidden; }
 .history-list .hitem { padding: 8px 12px; border-bottom: 1px solid var(--line-soft); display: flex; gap: 10px; align-items: baseline; }
@@ -1734,6 +1741,7 @@ body.dragging-files .entry-card.card-dragging {
 
 @media (max-width: 760px) {
   .summary-strip, .batch-import-summary, .import-choice-grid { grid-template-columns: 1fr 1fr; }
+  .import-assignment-grid { grid-template-columns: 1fr; gap: 0; }
   .ocr-compare { grid-template-columns: 1fr; }
   .ocr-key-controls { justify-content: flex-start; }
   .bindle-import-bar { align-items: flex-start; flex-direction: column; gap: 6px; }

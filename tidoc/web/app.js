@@ -39,6 +39,7 @@ const State = {
   verificationWatchDirectory: '',
   verificationTrashSource: false,
   activeDetailEntryId: null,
+  activeDetailModal: null,
   updateStatus: null,
   coreUpdateRuntime: null,
   showCreatedAt: false,
@@ -840,13 +841,63 @@ function selectedClaimantId(root) {
   return root.querySelector('[data-claimant-select]')?.value || State.currentProfileId || State.profiles[0]?.id || '';
 }
 
-function claimantConfirmHtml() {
-  if (!State.multiClaimantMode || State.profiles.length <= 1) return '';
+function claimantConfirmHtml(selectedId = '') {
   return `
     <div class="form-row claimant-row">
       <label>报账人</label>
-      <select data-claimant-select>${profileOptionsHtml(State.profiles[0]?.id)}</select>
+      <div class="profile-picker-row">
+        <select data-claimant-select>${profileOptionsHtml(selectedId || State.currentProfileId)}</select>
+        <button type="button" class="btn small ghost profile-create-btn" data-create-profile data-profile-target="[data-claimant-select]">新建报账人</button>
+      </div>
     </div>`;
+}
+
+function setupInlineProfileCreation(root) {
+  root.querySelectorAll('[data-create-profile]').forEach((button) => {
+    button.onclick = () => {
+      const select = root.querySelector(button.dataset.profileTarget || '');
+      if (!select) return;
+      openQuickProfileCreate((profile) => {
+        select.innerHTML = profileOptionsHtml(profile.id);
+        select.value = profile.id;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        select.focus();
+      });
+    };
+  });
+}
+
+function openQuickProfileCreate(onCreated) {
+  const body = el('div');
+  body.innerHTML = `
+    <div class="form-grid">
+      <div class="form-row"><label for="quickProfileName">姓名 *</label><input id="quickProfileName" autocomplete="off"/></div>
+      <div class="form-row"><label for="quickProfileReviewer">审核人 *</label><input id="quickProfileReviewer" autocomplete="off"/></div>
+    </div>`;
+  let m;
+  const createBtn = mkBtn('创建并选中', 'primary', async () => {
+    const name = body.querySelector('#quickProfileName').value.trim();
+    const reviewer = body.querySelector('#quickProfileReviewer').value.trim();
+    if (!name || !reviewer) { toast('姓名与审核人必填', 'err'); return; }
+    createBtn.disabled = true;
+    try {
+      const profile = await Api.createProfile(name, reviewer, State.profiles.length === 0, {});
+      await loadProfiles();
+      m.close();
+      onCreated(profile);
+      toast(`已新建报账人「${profile.name}」`, 'ok');
+    } catch (e) {
+      createBtn.disabled = false;
+      toast(e.message, 'err');
+    }
+  });
+  m = modal({
+    title: '新建报账人',
+    compact: true,
+    body,
+    footer: [mkBtn('取消', 'ghost', () => m.close()), createBtn],
+  });
+  setTimeout(() => body.querySelector('#quickProfileName')?.focus(), 20);
 }
 
 // ------------------------------------------------------------------ 筛选
@@ -2049,7 +2100,10 @@ async function changeSelectionProfile(idsArg, selectedProfileId = '') {
   body.innerHTML = `
     <div class="form-row">
       <label>改为报账人</label>
-      <select id="batchProfileSelect">${profileOptionsHtml(selectedProfileId)}</select>
+      <div class="profile-picker-row">
+        <select id="batchProfileSelect">${profileOptionsHtml(selectedProfileId)}</select>
+        <button type="button" class="btn small ghost profile-create-btn" data-create-profile data-profile-target="#batchProfileSelect">新建报账人</button>
+      </div>
     </div>`;
   const m = modal({
     title: `修改报账人 · ${ids.length} 条`,
@@ -2722,6 +2776,7 @@ function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose
   mask.onclick = (e) => { if (e.target === mask) close(); };
   // 弹窗里的下拉是 innerHTML 直接生成的，创建后统一接入自绘组件
   enhanceNativeSelects(bodyEl);
+  setupInlineProfileCreation(bodyEl);
   return { mask, body: bodyEl, close, foot };
 }
 
@@ -4006,6 +4061,12 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
   const ungrouped = scan.ungrouped || [];
   const ignored = scan.ignored || [];
   const pendingMaterialInfos = options.pendingMaterialInfos || [];
+  const activeBatches = State.batches.filter((batch) => !batch.archived);
+  const currentBatchId = actualBatchId();
+  let selectedImportProfileId = State.currentProfileId || State.profiles[0]?.id || '';
+  let selectedImportBatchId = activeBatches.some((batch) => batch.id === currentBatchId) ? currentBatchId : '';
+  let newImportBatchName = '';
+  const NEW_IMPORT_BATCH = '__new_batch__';
 
   const body = el('div');
   const render = () => {
@@ -4070,11 +4131,33 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         <div><span>跳过</span><b>${ignored.length + ungrouped.length}</b></div>
       </div>
       <div class="hint" style="margin-top:12px">从 <b>${esc(sourceLabel)}</b> 扫描到 <b>${scan.total_files}</b> 个候选文件。每个发票 PDF 创建一条；XML 只在能匹配到 PDF 时一起带入。</div>
-      ${claimantConfirmHtml()}
+      <div class="import-assignment-grid">
+        ${claimantConfirmHtml(selectedImportProfileId)}
+        <div class="form-row claimant-row">
+          <label for="biBatchSelect">报账批次</label>
+          <select id="biBatchSelect">
+            <option value=""${selectedImportBatchId ? '' : ' selected'}>未进批次</option>
+            ${activeBatches.map((batch) => `<option value="${esc(batch.id)}"${batch.id === selectedImportBatchId ? ' selected' : ''}>${esc(batch.name)} · ${batch.stats?.count || 0} 条</option>`).join('')}
+            <option value="${NEW_IMPORT_BATCH}"${selectedImportBatchId === NEW_IMPORT_BATCH ? ' selected' : ''}>＋ 新建批次…</option>
+          </select>
+          <input id="biNewBatchName" class="${selectedImportBatchId === NEW_IMPORT_BATCH ? '' : 'hidden'}" value="${esc(newImportBatchName)}" placeholder="输入新批次名称" aria-label="新批次名称"/>
+        </div>
+      </div>
       <div class="bi-groups" style="margin-top:14px">${groupRows}</div>
       ${pendingRows}
       ${ungroupedRows}
       ${ignoredRows}`;
+
+    const claimantSelect = body.querySelector('[data-claimant-select]');
+    if (claimantSelect) claimantSelect.onchange = () => { selectedImportProfileId = claimantSelect.value; };
+    const batchSelect = body.querySelector('#biBatchSelect');
+    const newBatchInput = body.querySelector('#biNewBatchName');
+    batchSelect.onchange = () => {
+      selectedImportBatchId = batchSelect.value;
+      newBatchInput.classList.toggle('hidden', selectedImportBatchId !== NEW_IMPORT_BATCH);
+      if (selectedImportBatchId === NEW_IMPORT_BATCH) newBatchInput.focus();
+    };
+    newBatchInput.oninput = () => { newImportBatchName = newBatchInput.value; };
 
     body.querySelectorAll('[data-bi-group]').forEach((cb) => {
       cb.onchange = () => {
@@ -4084,6 +4167,8 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         render();
       };
     });
+    enhanceNativeSelects(body);
+    setupInlineProfileCreation(body);
   };
   render();
 
@@ -4098,8 +4183,32 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
   ];
   let cleanupOnClose = allPreviewPaths;
   const createdEntries = [];
+  let resolvedBatchId = '';
+  let resolvedBatchName = '';
   let m;
+  const assignCreatedEntriesToBatch = async (progress) => {
+    const ids = createdEntries.map((entry) => entry.entry_id || entry.id).filter(Boolean);
+    if (!ids.length || !selectedImportBatchId) return;
+    if (selectedImportBatchId === NEW_IMPORT_BATCH && !newImportBatchName.trim()) {
+      throw new Error('请填写新批次名称');
+    }
+    progress.update('正在设置报账批次…');
+    if (selectedImportBatchId === NEW_IMPORT_BATCH) {
+      if (!resolvedBatchId) {
+        const batch = await Api.createBatch(newImportBatchName.trim(), '', ids);
+        resolvedBatchId = batch.id;
+        resolvedBatchName = batch.name;
+      } else {
+        await Api.setEntriesBatch(ids, resolvedBatchId);
+      }
+      return;
+    }
+    await Api.setEntriesBatch(ids, selectedImportBatchId);
+    resolvedBatchId = selectedImportBatchId;
+    resolvedBatchName = activeBatches.find((batch) => batch.id === selectedImportBatchId)?.name || '';
+  };
   const finishCreatedEntries = async (progress) => {
+    await assignCreatedEntriesToBatch(progress);
     if (pendingMaterialInfos.length) progress.update('正在识别并匹配随附材料…');
     const bind = pendingMaterialInfos.length && createdEntries.length
       ? await autoBindMaterialInfos(pendingMaterialInfos, createdEntries)
@@ -4112,9 +4221,9 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
     await refreshEntries();
     m.close();
     if (bind.auto && bind.auto.length) {
-      toast(`已创建 ${createdEntries.length} 条，并绑定 ${bind.auto.length} 份材料`, 'ok');
+      toast(`已创建 ${createdEntries.length} 条${resolvedBatchName ? `到「${resolvedBatchName}」` : ''}，并绑定 ${bind.auto.length} 份材料`, 'ok');
     } else {
-      toast(`已创建 ${createdEntries.length} 条`, 'ok');
+      toast(`已创建 ${createdEntries.length} 条${resolvedBatchName ? `到「${resolvedBatchName}」` : ''}`, 'ok');
     }
   };
   m = modal({
@@ -4127,6 +4236,11 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         m.close();
       }),
       mkBtn('创建选中条目', 'primary', async () => {
+        if (selectedImportBatchId === NEW_IMPORT_BATCH && !newImportBatchName.trim()) {
+          toast('请填写新批次名称', 'err');
+          body.querySelector('#biNewBatchName')?.focus();
+          return;
+        }
         const payload = groups
           .filter((g) => g.selected && !g.created)
           .map((g) => ({ key: g.key, label: g.label, files: g.files.map((f) => ({ path: f.path, type: f.type })) }));
@@ -4283,7 +4397,10 @@ async function openEntryDetail(entryId, currentDetail = null) {
           ${lockedKV('价税合计', 'total', e.total, true, true)}
           ${lockedKV('购买方', 'buyer_name', e.buyer_name)}
           <span class="k">报账人</span>
-          <span><select class="detail-profile-select" id="deProfile">${profileOptionsHtml(e.profile_id)}</select></span>
+          <span class="profile-picker-row compact">
+            <select class="detail-profile-select" id="deProfile">${profileOptionsHtml(e.profile_id)}</select>
+            <button type="button" class="btn small ghost profile-create-btn" data-create-profile data-profile-target="#deProfile">新建</button>
+          </span>
         </div>
         ${e.check_message ? `<p class="hint warn compact-hint">${esc(e.check_message)}</p>` : ''}
       </div>
@@ -4302,8 +4419,8 @@ async function openEntryDetail(entryId, currentDetail = null) {
     <div class="detail-section">
       <h3>报账材料<span class="h3-line"></span></h3>
       <div class="material-drop" id="materialDrop">
-        <b>拖拽材料到这里</b>
-        <span>PDF 自动识别为发票或查验单，图片自动作为付款截图；也可用下方添加按钮。</span>
+        <b>拖拽或粘贴材料到当前条目</b>
+        <span>打开详情后粘贴的图片会直接作为本条目的付款截图，并继续进行金额识别和材料校验。</span>
       </div>
       <div class="att-groups">${attachSection}</div>
     </div>
@@ -4582,12 +4699,12 @@ async function openEntryDetail(entryId, currentDetail = null) {
     };
   });
 
-  State.activeDetailEntryId = entryId;
   const mm = modal({
     title: e.seller || (e.invoice_no ? '发票 ' + e.invoice_no : '报账条目'),
     wide: true, body,
     onClose: () => {
       if (State.activeDetailEntryId === entryId) State.activeDetailEntryId = null;
+      if (State.activeDetailModal === mm) State.activeDetailModal = null;
     },
     footer: [
       mkBtn('删除条目', 'danger', async () => {
@@ -4604,6 +4721,8 @@ async function openEntryDetail(entryId, currentDetail = null) {
       mkBtn('关闭', 'ghost', () => mm.close()),
     ],
   });
+  State.activeDetailEntryId = entryId;
+  State.activeDetailModal = mm;
 
   // ---- 阿里云识别结果（有差异时默认展开）：必须在 modal 创建后再加载，
   // loadOcrDetail 的回调会引用 mm，提前调用会触发 TDZ 错误。
@@ -4951,10 +5070,16 @@ function setupClipboardUpload() {
       }
       if (activeEntryId) {
         progress.update(State.paymentOcrEnabled ? '正在添加材料并识别付款金额…' : '正在添加材料…');
-        await addMaterialInfosToEntry(activeEntryId, infos);
+        const result = await addMaterialInfosToEntry(activeEntryId, infos);
         await cleanupDroppedPaths(paths);
-        await refreshEntries();
-        toast(`已从剪切板添加 ${infos.length} 份材料`, 'ok');
+        const detailModal = State.activeDetailModal;
+        if (detailModal?.mask?.isConnected && $('#modalRoot').lastChild === detailModal.mask) {
+          progress.update('正在刷新材料状态和校验结果…');
+          await reopenEntryDetail(detailModal, activeEntryId, { affectsStatus: true });
+        } else {
+          await refreshEntries();
+        }
+        toast(result.message || `已添加 ${infos.length} 份材料到当前条目`, 'ok');
         return;
       }
       const invoiceInfos = infos.filter(isInvoiceImportInfo);

@@ -78,6 +78,10 @@ def test_set_version_updates_frontend_asset_cache_keys(tmp_path):
     (tmp_path / "tidoc_print").mkdir()
     (tmp_path / "tidoc" / "__init__.py").write_text('__version__ = "0.1.0"\n', "utf-8")
     (tmp_path / "tidoc_print" / "__init__.py").write_text('__version__ = "0.1.0"\n', "utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## 2026-09-13 · v9.8.7\n\n### Fixed\n\n- 修复更新说明。\n",
+        "utf-8",
+    )
     index = tmp_path / "tidoc" / "web" / "index.html"
     index.write_text(
         '<link href="styles.css?v=0.1.0"><script src="api.js?v=0.1.0"></script>'
@@ -94,3 +98,6 @@ def test_set_version_updates_frontend_asset_cache_keys(tmp_path):
     assert "styles.css?v=9.8.7" in updated
     assert "api.js?v=9.8.7" in updated
     assert "app.js?v=9.8.7" in updated
+    release_info = (tmp_path / "tidoc" / "release_info.py").read_text("utf-8")
+    assert "RELEASE_VERSION = '9.8.7'" in release_info
+    assert '"修复更新说明。"' in release_info

@@ -1875,6 +1875,7 @@ class Api:
     def startup_update_state(self):
         """记录已启动版本，并在真正升级后的首次启动返回本次变化。"""
         from .services.updater import version_gt
+        from .release_info import RELEASE_NOTES, RELEASE_VERSION
 
         previous = self._preference_value(APP_LAST_SEEN_VERSION_KEY, "")
         upgraded = bool(previous and version_gt(__version__, previous))
@@ -1890,6 +1891,10 @@ class Api:
                 raw_notes = (item.get("asset") or {}).get("notes") or []
                 notes = raw_notes if isinstance(raw_notes, list) else [str(raw_notes)]
                 break
+            # 安装包升级或旧缓存尚未刷新时，缓存里可能没有当前版本说明。
+            # 当前版本的说明随核心程序一起打包，保证任何升级路径都能展示。
+            if not notes and RELEASE_VERSION == __version__:
+                notes = [str(note) for note in RELEASE_NOTES if str(note).strip()]
             # A cached result belongs to the old binary. Normalize it immediately
             # so the settings indicator cannot remain orange after a real upgrade.
             self._set_preference_value(

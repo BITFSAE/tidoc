@@ -105,6 +105,25 @@ def test_startup_update_state_only_announces_real_upgrade(tmp_path):
     assert unwrap(api.startup_update_state())["upgraded"] is False
 
 
+def test_startup_update_state_falls_back_to_packaged_notes_when_cache_is_stale(tmp_path):
+    from tidoc.release_info import RELEASE_NOTES
+
+    api = Api(tmp_path)
+    unwrap(api.set_app_preference(APP_LAST_SEEN_VERSION_KEY, "0.0.1"))
+    api._record_update_check({
+        "updates": [{
+            "component": "core",
+            "latest_version": "0.0.2",
+            "asset": {"notes": ["旧版本说明"]},
+        }]
+    })
+
+    upgraded = unwrap(api.startup_update_state())
+
+    assert upgraded["upgraded"] is True
+    assert upgraded["notes"] == RELEASE_NOTES
+
+
 def test_cleanup_removes_only_rebuildable_files(monkeypatch, tmp_path):
     api = Api(tmp_path)
     dropped = api.data_root.dropped_dir / "drop" / "temp.pdf"

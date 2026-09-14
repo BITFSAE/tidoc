@@ -121,6 +121,7 @@ class Api:
         self._window = None
         self._update_health_path = Path(update_health_path) if update_health_path else None
         self._verification_sessions: dict[str, dict] = {}
+        self._bindle_inspection_cache: dict | None = None
         self._launch_files = [launch_file] if launch_file else []
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
         self._apply_title_profiles()
@@ -1602,20 +1603,48 @@ class Api:
     def inspect_bindle(self, path):
         from .services.bindle import inspect_bindle
 
-        return inspect_bindle(path, self.entries)
+        package = Path(path).resolve()
+        before = package.stat()
+        result = inspect_bindle(package, self.entries)
+        after = package.stat()
+        before_fingerprint = (before.st_size, before.st_mtime_ns)
+        after_fingerprint = (after.st_size, after.st_mtime_ns)
+        if before_fingerprint != after_fingerprint:
+            raise ValueError("绑定包在检查期间发生了变化，请重新导入。")
+        self._bindle_inspection_cache = {
+            "path": str(package),
+            "fingerprint": after_fingerprint,
+            "result": result,
+        }
+        return result
 
     @_guard
     def import_bindle(self, path, profile_id, allow_tampered=False, options=None):
         from .services.bindle import import_bindle
 
-        result = import_bindle(
-            self.entries,
-            self.attachments,
-            path,
-            profile_id,
-            allow_tampered,
-            options,
+        package = Path(path).resolve()
+        stat = package.stat()
+        fingerprint = (stat.st_size, stat.st_mtime_ns)
+        cached = self._bindle_inspection_cache
+        inspected = (
+            cached["result"]
+            if cached
+            and cached["path"] == str(package)
+            and cached["fingerprint"] == fingerprint
+            else None
         )
+        try:
+            result = import_bindle(
+                self.entries,
+                self.attachments,
+                package,
+                profile_id,
+                allow_tampered,
+                options,
+                inspected=inspected,
+            )
+        finally:
+            self._bindle_inspection_cache = None
         if result.get("imported") or result.get("updated"):
             self._sync_entry_statuses()
         return result

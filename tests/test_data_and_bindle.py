@@ -1005,7 +1005,68 @@ def test_bindle_import_can_leave_entries_out_of_batches(repos, tmp_path):
     assert target_entries.get(result["entry_ids"][0])["batches"] == []
 
 
-def test_bindle_import_selects_claimant_and_safely_complements_existing_entry(repos, tmp_path):
+def test_bindle_import_can_select_and_assign_entries_individually(repos, tmp_path):
+    source_profile = repos["profiles"].create("张三", "李老师")
+    source_ids = [
+        repos["entries"].create(
+            source_profile["id"],
+            parsed=ParsedInvoice(invoice_no=invoice_no, total=Decimal(total)),
+        )
+        for invoice_no, total in (("A100", "12.00"), ("B200", "23.00"), ("C300", "34.00"))
+    ]
+    package = export_bindle(
+        repos["entries"], repos["attachments"], source_ids,
+        tmp_path / "逐条导入.tidoc", {source_profile["id"]: source_profile},
+    )
+
+    target_root = DataRoot(tmp_path / "individual-target")
+    target_db = Database(target_root.db_path)
+    target_profiles = ProfileRepo(target_db)
+    target_profile = target_profiles.create("张三", "李老师")
+    target_entries = EntryRepo(target_db)
+    target_attachments = AttachmentRepo(target_db, target_root)
+    from tidoc.db.batches import BatchRepo
+
+    target_batches = BatchRepo(target_db)
+    existing_id = target_entries.create(
+        target_profile["id"],
+        parsed=ParsedInvoice(invoice_no="A100", total=Decimal("12.00")),
+    )
+    old_batch = target_batches.create("原批次", entry_ids=[existing_id])
+    destination_batch = target_batches.create("指定批次")
+
+    preview = inspect_bindle(package, target_entries)
+    assert preview["entries"][0]["import_action"] == "unchanged"
+    assert preview["entries"][0]["existing_batches"] == [{
+        "id": old_batch["id"], "name": "原批次", "archived": False,
+    }]
+
+    result = import_bindle(
+        target_entries,
+        target_attachments,
+        package,
+        target_profile["id"],
+        options={
+            "selected_entry_indexes": [0, 1],
+            "entry_batch_overrides": {
+                "0": {"mode": "existing", "batch_id": destination_batch["id"]},
+                "1": {"mode": "new", "batch_name": "逐条新批次"},
+            },
+        },
+    )
+
+    assert result["imported"] == 1
+    assert result["updated"] == 0
+    assert result["individual_batch_assignments"] == 2
+    assert {entry["invoice_no"] for entry in target_entries.list()} == {"A100", "B200"}
+    assert target_entries.get(existing_id)["batches"][0]["id"] == destination_batch["id"]
+    imported = next(entry for entry in target_entries.list() if entry["invoice_no"] == "B200")
+    assert imported["batches"][0]["name"] == "逐条新批次"
+
+
+def test_bindle_import_selects_claimant_and_safely_complements_existing_entry(
+    repos, tmp_path, monkeypatch
+):
     first = repos["profiles"].create("张三", "李老师")
     second = repos["profiles"].create("王五", "赵老师")
     first_entry = repos["entries"].create(
@@ -1036,7 +1097,18 @@ def test_bindle_import_selects_claimant_and_safely_complements_existing_entry(re
     target_entries.update_field(existing_id, "notes", "本人备注", target_first["id"])
     target_entries.set_meta(existing_id, tags=["未报销"])
 
+    original_get = target_entries.get
+    preview_get_calls = 0
+
+    def counted_get(entry_id):
+        nonlocal preview_get_calls
+        preview_get_calls += 1
+        return original_get(entry_id)
+
+    monkeypatch.setattr(target_entries, "get", counted_get)
     preview = inspect_bindle(package, target_entries)
+    monkeypatch.setattr(target_entries, "get", original_get)
+    assert preview_get_calls == 0
     preview_first = next(entry for entry in preview["entries"] if entry["invoice_no"] == "A100")
     assert preview_first["import_action"] == "merge"
     assert set(preview_first["merge_preview"]["labels"]) == {
@@ -1069,6 +1141,38 @@ def test_bindle_import_selects_claimant_and_safely_complements_existing_entry(re
     )
     assert again["updated"] == 0
     assert len(again["skipped"]) == 1
+
+
+def test_api_reuses_verified_bindle_preview_for_confirmed_import(api, tmp_path, monkeypatch):
+    from tidoc.engine.models import ParsedInvoice
+    from tidoc.services import bindle as bindle_service
+
+    profile = api.profiles.create("张三", "李老师")
+    entry_id = api.entries.create(
+        profile["id"], parsed=ParsedInvoice(invoice_no="CACHE-1", total=Decimal("12.00"))
+    )
+    package = export_bindle(
+        api.entries,
+        api.attachments,
+        [entry_id],
+        tmp_path / "检查复用.tidoc",
+        {profile["id"]: profile},
+    )
+    original_inspect = bindle_service.inspect_bindle
+    inspections = 0
+
+    def counted_inspect(*args, **kwargs):
+        nonlocal inspections
+        inspections += 1
+        return original_inspect(*args, **kwargs)
+
+    monkeypatch.setattr(bindle_service, "inspect_bindle", counted_inspect)
+    inspected = api.inspect_bindle(str(package))
+    assert inspected["ok"] is True
+    imported = api.import_bindle(str(package), profile["id"])
+
+    assert imported["ok"] is True
+    assert inspections == 1
 
 
 def test_bindle_merge_fills_invoice_number_when_file_hash_matches(repos, tmp_path):

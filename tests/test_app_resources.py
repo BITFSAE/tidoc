@@ -284,6 +284,7 @@ def test_card_drag_state_does_not_cover_amount_with_text():
 
 def test_bindle_preview_is_compact_and_keeps_legacy_profile_mapping():
     source = (app.web_dir() / "app.js").read_text("utf-8")
+    styles = (app.web_dir() / "styles.css").read_text("utf-8")
     preview = source.split(
         "async function openBindleImportPreview", 1
     )[1].split("async function doImport", 1)[0]
@@ -293,12 +294,21 @@ def test_bindle_preview_is_compact_and_keeps_legacy_profile_mapping():
     assert 'name="bindleBatchMode"' in preview
     assert "defaultBatchMode = activeBatches.length ? 'existing' : 'new'" in preview
     assert "suggestedBatchName" in preview
-    assert "confirmBindleWithoutBatch(selectedCount)" in preview
+    assert "confirmBindleWithoutBatch(withoutBatchCount)" in preview
     assert "selected_profile_ids" in preview
+    assert "selected_entry_indexes" in preview
+    assert "entry_batch_overrides" in preview
     assert "data-bind-profile-enabled" in preview
+    assert "data-bind-entry-enabled" in preview
+    assert "data-bind-entry-adjust" in preview
+    assert "existing_batches" in preview
     assert "条将留在「未进批次」" in preview
     assert "仍然不加入" in preview
     assert 'class="bindle-entry-head"' in preview
+    assert "entries.slice(0, 100)" not in preview
+    assert "--bindle-entry-columns:" in styles
+    assert "grid-template-columns: var(--bindle-entry-columns)" in styles
+    assert "minmax(84px, auto)" not in styles
     assert "已读取 ${esc(baseName(path))}" not in preview
     assert "给全部导入条目添加标签" not in preview
 

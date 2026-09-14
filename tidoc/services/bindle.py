@@ -23,7 +23,7 @@ from pathlib import Path
 
 from ..db.attachments import AttachmentRepo
 from ..db.entries import EntryRepo
-from .signing import MANIFEST_NAME, sign_bytes, verify
+from .signing import MANIFEST_NAME, sign_bytes, sign_file, verify, verify_stream
 from .summary import build_summary
 
 BINDLE_VERSION = 4
@@ -165,7 +165,7 @@ def export_bindle(
                     continue
                 arcname = f"attachments/{att['stored_path']}"
                 zf.write(abs_path, arcname)
-                signatures[arcname] = sign_bytes(abs_path.read_bytes())
+                signatures[arcname] = sign_file(abs_path)
 
         profiles = [
             _serialize_profile(profile_lookup[profile_id])
@@ -220,16 +220,30 @@ def inspect_bindle(path: str | Path, entries_repo: EntryRepo | None = None) -> d
         signatures = manifest.get("signatures", {})
         tampered: list[str] = []
 
+        verified_payloads: dict[str, bytes] = {}
         for arcname, expected in signatures.items():
             if arcname not in names:
                 tampered.append(arcname)  # 文件被删
                 continue
-            if not verify(zf.read(arcname), expected):
+            if arcname in {ENTRIES_NAME, SUMMARY_NAME}:
+                payload = zf.read(arcname)
+                verified_payloads[arcname] = payload
+                valid = verify(payload, expected)
+            else:
+                with zf.open(arcname) as member:
+                    valid = verify_stream(member, expected)
+            if not valid:
                 tampered.append(arcname)
 
-        # 也检查是否有清单外的附件被偷加（仅提示，不阻断）
-        entries_payload = json.loads(zf.read(ENTRIES_NAME))
-        summary = json.loads(zf.read(SUMMARY_NAME)) if SUMMARY_NAME in names else {}
+        # 结构数据在校验时已经解压，直接复用，避免大包重复读取。
+        entries_bytes = verified_payloads.get(ENTRIES_NAME)
+        if entries_bytes is None:
+            entries_bytes = zf.read(ENTRIES_NAME)
+        entries_payload = json.loads(entries_bytes)
+        summary_bytes = verified_payloads.get(SUMMARY_NAME)
+        if summary_bytes is None and SUMMARY_NAME in names:
+            summary_bytes = zf.read(SUMMARY_NAME)
+        summary = json.loads(summary_bytes) if summary_bytes else {}
 
     result = {
         "entries": entries_payload.get("entries", []),
@@ -275,8 +289,21 @@ def _matching_entry_id(entry: dict, by_number: dict[str, str], by_hash: dict[str
     return ""
 
 
-def _merge_preview(entries_repo: EntryRepo, existing_id: str, incoming: dict) -> dict:
-    existing = entries_repo.get(existing_id) or {}
+def _merge_preview(
+    entries_repo: EntryRepo,
+    existing_id: str,
+    incoming: dict,
+    existing: dict | None = None,
+) -> dict:
+    if existing is None:
+        existing = entries_repo.get(existing_id) or {}
+        existing["_ocr_results"] = [
+            dict(row) for row in entries_repo.db.conn.execute(
+                "SELECT provider, file_sha256, created_at, normalized "
+                "FROM ocr_results WHERE entry_id = ?",
+                (existing_id,),
+            ).fetchall()
+        ]
     local_by_hash = {
         str(attachment.get("sha256") or ""): attachment
         for attachment in existing.get("attachments") or []
@@ -320,13 +347,10 @@ def _merge_preview(entries_repo: EntryRepo, existing_id: str, incoming: dict) ->
     adds_items = bool(incoming.get("items") and not existing.get("items"))
     existing_ocr = {
         (
-            str(result["provider"] or ""), str(result["file_sha256"] or ""),
-            str(result["created_at"] or ""), str(result["normalized"] or ""),
+            str(result.get("provider") or ""), str(result.get("file_sha256") or ""),
+            str(result.get("created_at") or ""), str(result.get("normalized") or ""),
         )
-        for result in entries_repo.db.conn.execute(
-            "SELECT provider, file_sha256, created_at, normalized FROM ocr_results WHERE entry_id = ?",
-            (existing_id,),
-        ).fetchall()
+        for result in existing.get("_ocr_results") or []
     }
     added_ocr = sum(
         1 for result in incoming.get("ocr_results") or []
@@ -340,10 +364,7 @@ def _merge_preview(entries_repo: EntryRepo, existing_id: str, incoming: dict) ->
             str(row["field"] or ""), str(row["old_value"] or ""),
             str(row["new_value"] or ""), str(row["changed_at"] or ""),
         )
-        for row in entries_repo.db.conn.execute(
-            "SELECT field, old_value, new_value, changed_at FROM field_history WHERE entry_id = ?",
-            (existing_id,),
-        ).fetchall()
+        for row in existing.get("history") or []
     }
     added_history = sum(
         1 for history in incoming.get("history") or []
@@ -386,17 +407,108 @@ def _merge_preview(entries_repo: EntryRepo, existing_id: str, incoming: dict) ->
     }
 
 
+def _import_preview_snapshots(entries_repo: EntryRepo, entry_ids: set[str]) -> dict[str, dict]:
+    """Load all local comparison data in batches instead of querying per entry."""
+    if not entry_ids:
+        return {}
+    conn = entries_repo.db.conn
+    snapshots: dict[str, dict] = {}
+    ordered_ids = sorted(entry_ids)
+    for offset in range(0, len(ordered_ids), 900):
+        batch = ordered_ids[offset:offset + 900]
+        placeholders = ",".join("?" for _ in batch)
+        for row in conn.execute(
+            f"SELECT * FROM entries WHERE id IN ({placeholders})", batch
+        ).fetchall():
+            entry = dict(row)
+            entry["tags"] = json.loads(entry.get("tags") or "[]")
+            entry["fields"] = {}
+            entry["items"] = []
+            entry["attachments"] = []
+            entry["batches"] = []
+            entry["history"] = []
+            entry["_ocr_results"] = []
+            snapshots[entry["id"]] = entry
+
+        for row in conn.execute(
+            f"SELECT entry_id, field, origin, current, modified, value_source "
+            f"FROM entry_fields WHERE entry_id IN ({placeholders})",
+            batch,
+        ).fetchall():
+            if row["entry_id"] in snapshots:
+                snapshots[row["entry_id"]]["fields"][row["field"]] = {
+                    "origin": row["origin"],
+                    "current": row["current"],
+                    "modified": bool(row["modified"]),
+                    "value_source": row["value_source"] or "",
+                }
+
+        for row in conn.execute(
+            f"SELECT * FROM attachments WHERE entry_id IN ({placeholders})",
+            batch,
+        ).fetchall():
+            if row["entry_id"] in snapshots:
+                snapshots[row["entry_id"]]["attachments"].append(dict(row))
+
+        for row in conn.execute(
+            f"SELECT entry_id, id FROM items WHERE entry_id IN ({placeholders})",
+            batch,
+        ).fetchall():
+            if row["entry_id"] in snapshots:
+                snapshots[row["entry_id"]]["items"].append({"id": row["id"]})
+
+        for row in conn.execute(
+            f"""SELECT be.entry_id, b.id, b.name, b.archived
+                  FROM batch_entries be
+                  JOIN batches b ON b.id = be.batch_id
+                 WHERE be.entry_id IN ({placeholders})
+                 ORDER BY b.archived ASC, b.updated_at DESC""",
+            batch,
+        ).fetchall():
+            if row["entry_id"] in snapshots:
+                snapshots[row["entry_id"]]["batches"].append({
+                    "id": row["id"],
+                    "name": row["name"],
+                    "archived": bool(row["archived"]),
+                })
+
+        for row in conn.execute(
+            f"SELECT * FROM field_history WHERE entry_id IN ({placeholders})",
+            batch,
+        ).fetchall():
+            if row["entry_id"] in snapshots:
+                snapshots[row["entry_id"]]["history"].append(dict(row))
+
+        for row in conn.execute(
+            f"SELECT entry_id, provider, file_sha256, created_at, normalized "
+            f"FROM ocr_results WHERE entry_id IN ({placeholders})",
+            batch,
+        ).fetchall():
+            if row["entry_id"] in snapshots:
+                snapshots[row["entry_id"]]["_ocr_results"].append(dict(row))
+    return snapshots
+
+
 def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict) -> None:
     by_number, by_hash = _entry_identity_maps(entries_repo.db.conn)
     counts = {"new": 0, "merge": 0, "unchanged": 0}
-    for entry in inspected.get("entries") or []:
-        existing_id = _matching_entry_id(entry, by_number, by_hash)
+    entries = inspected.get("entries") or []
+    matches = [
+        _matching_entry_id(entry, by_number, by_hash)
+        for entry in entries
+    ]
+    snapshots = _import_preview_snapshots(
+        entries_repo, {entry_id for entry_id in matches if entry_id}
+    )
+    for entry, existing_id in zip(entries, matches):
         if not existing_id:
             entry["import_action"] = "new"
             counts["new"] += 1
             continue
-        preview = _merge_preview(entries_repo, existing_id, entry)
+        existing = snapshots.get(existing_id) or {}
+        preview = _merge_preview(entries_repo, existing_id, entry, existing)
         entry["existing_entry_id"] = existing_id
+        entry["existing_batches"] = existing.get("batches") or []
         entry["merge_preview"] = preview
         entry["import_action"] = "merge" if preview["has_changes"] else "unchanged"
         counts[entry["import_action"]] += 1
@@ -665,6 +777,8 @@ def import_bindle(
     profile_id: str,
     allow_tampered: bool = False,
     options: dict | None = None,
+    *,
+    inspected: dict | None = None,
 ) -> dict:
     """把一个 .tidoc 包导入到当前库，附件落地到指定条目目录。
 
@@ -686,8 +800,37 @@ def import_bindle(
     new_batch_name = str(options.get("batch_name") or "").strip()
     if target_batch_id and new_batch_name:
         raise ValueError("已有批次和新建批次只能选择一个。")
+    entry_selection_supplied = "selected_entry_indexes" in options
+    try:
+        selected_entry_indexes = {
+            int(value) for value in (options.get("selected_entry_indexes") or [])
+        }
+    except (TypeError, ValueError) as exc:
+        raise ValueError("逐条导入选择无效，请重新打开导入预览。") from exc
+    entry_batch_overrides: dict[int, dict] = {}
+    for raw_index, raw_override in (options.get("entry_batch_overrides") or {}).items():
+        try:
+            entry_index = int(raw_index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("逐条批次设置无效，请重新选择。") from exc
+        override = dict(raw_override or {})
+        mode = str(override.get("mode") or "default")
+        if mode not in {"default", "none", "existing", "new"}:
+            raise ValueError("逐条批次设置无效，请重新选择。")
+        if mode == "default":
+            continue
+        normalized = {"mode": mode}
+        if mode == "existing":
+            normalized["batch_id"] = str(override.get("batch_id") or "").strip()
+            if not normalized["batch_id"]:
+                raise ValueError("请为逐条设置选择报账批次。")
+        elif mode == "new":
+            normalized["batch_name"] = str(override.get("batch_name") or "").strip()
+            if not normalized["batch_name"]:
+                raise ValueError("请填写逐条设置的新批次名称。")
+        entry_batch_overrides[entry_index] = normalized
 
-    inspected = inspect_bindle(path)
+    inspected = inspected if inspected is not None else inspect_bindle(path)
     if inspected["tampered"] and not allow_tampered:
         return {
             "imported": 0,
@@ -722,6 +865,16 @@ def import_bindle(
         "SELECT 1 FROM batches WHERE id = ?", (target_batch_id,)
     ).fetchone():
         raise ValueError("所选批次不存在，导入前请重新选择。")
+    override_batch_ids = {
+        override["batch_id"]
+        for override in entry_batch_overrides.values()
+        if override["mode"] == "existing"
+    }
+    for override_batch_id in override_batch_ids:
+        if not conn.execute(
+            "SELECT 1 FROM batches WHERE id = ?", (override_batch_id,)
+        ).fetchone():
+            raise ValueError("逐条设置中的批次已不存在，请重新选择。")
     profile_count_before = len(existing_profiles)
     profile_by_identity = {
         (str(profile.get("name") or "").strip(), str(profile.get("reviewer") or "").strip()): profile["id"]
@@ -730,6 +883,11 @@ def import_bindle(
     source_profile_map: dict[str, str] = {}
     created_profile_ids: list[str] = []
     batch_created = False
+    global_batch_created = False
+    destination_by_entry_index: dict[int, str] = {}
+    affected_entry_indexes: set[int] = set()
+    individually_assigned = 0
+    globally_assigned = 0
 
     def resolve_profile(profile: dict | None, source_id: str = "") -> str:
         if source_id and source_id in source_profile_map:
@@ -766,9 +924,15 @@ def import_bindle(
 
     try:
         with zipfile.ZipFile(path, "r") as zf:
-            for e in inspected["entries"]:
+            for entry_index, e in enumerate(inspected["entries"]):
                 source_profile_id = str(e.get("profile_id") or "__fallback__")
-                if selection_supplied and source_profile_id not in selected_profile_ids:
+                if entry_selection_supplied and entry_index not in selected_entry_indexes:
+                    continue
+                if (
+                    not entry_selection_supplied
+                    and selection_supplied
+                    and source_profile_id not in selected_profile_ids
+                ):
                     continue
                 invoice_no = str(e.get("invoice_no") or "").strip()
                 invoice_hashes = {
@@ -781,6 +945,7 @@ def import_bindle(
                     e, existing_by_invoice_no, existing_by_invoice_hash
                 )
                 if existing_id:
+                    destination_by_entry_index[entry_index] = existing_id
                     changes = _merge_existing_entry(
                         conn, entries_repo, attachments_repo, zf, existing_id, e,
                         import_tags, now, created_files, bool(inspected["tampered"]),
@@ -788,6 +953,7 @@ def import_bindle(
                     if changes:
                         if existing_id not in updated_ids:
                             updated_ids.append(existing_id)
+                        affected_entry_indexes.add(entry_index)
                         merged.append({
                             "entry_id": existing_id,
                             "invoice_no": invoice_no,
@@ -940,43 +1106,92 @@ def import_bindle(
                          actual_digest, att.get("note", ""), att.get("added_at", now)),
                     )
                 imported_ids.append(new_id)
+                destination_by_entry_index[entry_index] = new_id
+                affected_entry_indexes.add(entry_index)
                 if invoice_no:
                     existing_by_invoice_no[invoice_no] = new_id
                 for digest in invoice_hashes:
                     existing_by_invoice_hash[digest] = new_id
 
             affected_ids = list(dict.fromkeys(imported_ids + updated_ids))
-            if affected_ids and new_batch_name:
-                target_batch_id = uuid.uuid4().hex
+            created_batches_by_name: dict[str, str] = {}
+
+            def ensure_new_batch(name: str) -> str:
+                nonlocal batch_created
+                normalized_name = str(name or "").strip()
+                existing_created = created_batches_by_name.get(normalized_name)
+                if existing_created:
+                    return existing_created
+                created_id = uuid.uuid4().hex
                 conn.execute(
                     """INSERT INTO batches(id, name, note, archived, created_at, updated_at)
                        VALUES(?,?,?,0,?,?)""",
-                    (target_batch_id, new_batch_name, "", now, now),
+                    (created_id, normalized_name, "", now, now),
                 )
                 batch_created = True
-            if affected_ids and target_batch_id:
-                for imported_id in affected_ids:
-                    previous_rows = conn.execute(
-                        "SELECT batch_id FROM batch_entries WHERE entry_id = ?",
-                        (imported_id,),
-                    ).fetchall()
-                    conn.execute(
-                        "DELETE FROM batch_entries WHERE entry_id = ?", (imported_id,)
-                    )
+                created_batches_by_name[normalized_name] = created_id
+                return created_id
+
+            default_affected_indexes = [
+                entry_index
+                for entry_index in affected_entry_indexes
+                if entry_index not in entry_batch_overrides
+            ]
+            if default_affected_indexes and new_batch_name:
+                target_batch_id = ensure_new_batch(new_batch_name)
+                global_batch_created = True
+
+            assignments: dict[str, tuple[str, bool]] = {}
+            if target_batch_id:
+                for entry_index in default_affected_indexes:
+                    destination_id = destination_by_entry_index.get(entry_index)
+                    if destination_id:
+                        assignments[destination_id] = (target_batch_id, False)
+
+            for entry_index, override in entry_batch_overrides.items():
+                destination_id = destination_by_entry_index.get(entry_index)
+                if not destination_id:
+                    continue
+                mode = override["mode"]
+                if mode == "existing":
+                    override_target = override["batch_id"]
+                elif mode == "new":
+                    override_target = ensure_new_batch(override["batch_name"])
+                else:
+                    override_target = ""
+                assignments[destination_id] = (override_target, True)
+
+            for destination_id, (assignment_batch_id, is_individual) in assignments.items():
+                previous_rows = conn.execute(
+                    "SELECT batch_id FROM batch_entries WHERE entry_id = ?",
+                    (destination_id,),
+                ).fetchall()
+                previous_ids = [row["batch_id"] for row in previous_rows]
+                if previous_ids == ([assignment_batch_id] if assignment_batch_id else []):
+                    continue
+                conn.execute(
+                    "DELETE FROM batch_entries WHERE entry_id = ?", (destination_id,)
+                )
+                if assignment_batch_id:
                     conn.execute(
                         """INSERT OR IGNORE INTO batch_entries(batch_id, entry_id, note, added_at)
                            VALUES(?,?,?,?)""",
-                        (target_batch_id, imported_id, "", now),
+                        (assignment_batch_id, destination_id, "", now),
                     )
-                    for previous in previous_rows:
-                        conn.execute(
-                            "UPDATE batches SET updated_at = ? WHERE id = ?",
-                            (now, previous["batch_id"]),
-                        )
-                conn.execute(
-                    "UPDATE batches SET updated_at = ? WHERE id = ?",
-                    (now, target_batch_id),
-                )
+                for previous_id in previous_ids:
+                    conn.execute(
+                        "UPDATE batches SET updated_at = ? WHERE id = ?",
+                        (now, previous_id),
+                    )
+                if assignment_batch_id:
+                    conn.execute(
+                        "UPDATE batches SET updated_at = ? WHERE id = ?",
+                        (now, assignment_batch_id),
+                    )
+                if is_individual:
+                    individually_assigned += 1
+                else:
+                    globally_assigned += 1
 
             if affected_ids and created_profile_ids:
                 has_default = conn.execute(
@@ -1028,8 +1243,10 @@ def import_bindle(
     affected_ids = list(dict.fromkeys(imported_ids + updated_ids))
     if import_tags and affected_ids:
         message_parts.append(f"已给所选 {len(affected_ids)} 条添加标签")
-    if target_batch_id and affected_ids:
-        message_parts.append("已移到新建批次" if batch_created else "已移到所选批次")
+    if globally_assigned:
+        message_parts.append("已移到新建批次" if global_batch_created else "已移到所选批次")
+    if individually_assigned:
+        message_parts.append(f"已按逐条设置调整 {individually_assigned} 条批次")
     message = "；".join(message_parts) + "。"
 
     return {
@@ -1042,8 +1259,9 @@ def import_bindle(
         "entry_ids": imported_ids,
         "profiles_imported": len(created_profile_ids),
         "profile_ids": created_profile_ids,
-        "batch_id": target_batch_id if affected_ids else "",
+        "batch_id": target_batch_id if globally_assigned else "",
         "batch_created": batch_created,
+        "individual_batch_assignments": individually_assigned,
         "tags_applied": import_tags if affected_ids else [],
         "message": message,
     }

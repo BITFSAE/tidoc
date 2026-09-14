@@ -5432,17 +5432,45 @@ async function openBindleImportPreview(path, insp, options = {}) {
       <input data-bind-profile-reviewer aria-label="审核人" value="${esc(profile.reviewer || '')}" placeholder="填写审核人"/>
       <span>${counts.get(profile.sourceId) || 0} 条</span>
     </div>`).join('');
-  const entryRows = entries.slice(0, 100).map((entry) => {
+  const perEntryBatchOptions = activeBatches.map((batch) =>
+    `<option value="batch:${esc(batch.id)}">${esc(batch.name)} · ${batch.stats?.count || 0} 条</option>`
+  ).join('');
+  const entryRows = entries.map((entry, entryIndex) => {
     const profile = packageProfiles.find((item) => item.sourceId === (entry.profile_id || '__fallback__'));
-    const action = entry.import_action === 'merge'
-      ? `补充${entry.merge_preview?.labels?.length ? ' · ' + entry.merge_preview.labels.join('、') : ''}`
-      : entry.import_action === 'unchanged' ? '无变化' : '新增';
-    return `<div class="bindle-entry-row${initiallySelected.has(entry.profile_id || '__fallback__') ? '' : ' off'}" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}">
+    const isExisting = entry.import_action === 'merge' || entry.import_action === 'unchanged';
+    const action = entry.import_action === 'merge' ? '补充' : isExisting ? '已有' : '新增';
+    const actionDetail = entry.import_action === 'merge'
+      ? (entry.merge_preview?.labels || []).join('、')
+      : entry.import_action === 'unchanged'
+        ? '包内材料和信息已齐全'
+        : `包内材料 ${(entry.attachments || []).length} 份`;
+    const existingBatchNames = (entry.existing_batches || []).map((batch) => batch.name).filter(Boolean);
+    const currentLocation = isExisting
+      ? `所在批次 · ${existingBatchNames.length ? existingBatchNames.join('、') : '未进批次'}`
+      : '本机无此条目';
+    return `<div class="bindle-entry-row${initiallySelected.has(entry.profile_id || '__fallback__') ? '' : ' off'}" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}" data-bind-entry-index="${entryIndex}">
+      <input type="checkbox" data-bind-entry-enabled aria-label="导入发票 ${esc(entry.invoice_no || entryIndex + 1)}" ${initiallySelected.has(entry.profile_id || '__fallback__') ? 'checked' : ''}/>
       <span class="mono">${esc(entry.invoice_no || '无发票号')}</span>
       <span class="bindle-entry-seller" data-tooltip-overflow="${esc(entry.seller || '')}">${esc(entry.seller || '未识别销售方')}</span>
-      <span>${fmtMoney(entry.total)}</span>
+      <span class="bindle-entry-amount">${fmtMoney(entry.total)}</span>
       <span class="bindle-entry-owner">${esc(profile?.name || entry.profile_name || '未填写')} · ${esc(profile?.reviewer || entry.reviewer || '未填写')}</span>
-      <span class="bindle-entry-action ${esc(entry.import_action || 'new')}">${esc(action)}</span>
+      <div class="bindle-entry-result">
+        <div><span class="bindle-entry-action ${esc(entry.import_action || 'new')}">${esc(action)}</span><button type="button" class="bindle-entry-adjust" data-bind-entry-adjust aria-expanded="false" aria-controls="bindleEntryOverride${entryIndex}">单独设置</button></div>
+        <small data-tooltip-overflow="${esc(actionDetail)}">${esc(actionDetail)}</small>
+        <small class="bindle-entry-location" data-tooltip-overflow="${esc(currentLocation)}">${esc(currentLocation)}</small>
+        <small class="bindle-entry-target-summary"></small>
+      </div>
+      <div class="bindle-entry-override hidden" id="bindleEntryOverride${entryIndex}" data-bind-entry-override>
+        <span>本条导入到</span>
+        <select data-bind-entry-batch aria-label="设置该条目的目标批次">
+          <option value="default">按上方统一设置</option>
+          <option value="none">不加入批次</option>
+          ${perEntryBatchOptions}
+          <option value="new">新建批次…</option>
+        </select>
+        <input class="hidden" data-bind-entry-new-batch aria-label="该条目的新批次名称" placeholder="输入新批次名称"/>
+        <button type="button" class="link-btn" data-bind-entry-reset>恢复统一设置</button>
+      </div>
     </div>`;
   }).join('');
   const existingTagOptions = (tags || []).map((tag) => `<option value="${esc(tag)}"></option>`).join('');
@@ -5491,12 +5519,17 @@ async function openBindleImportPreview(path, insp, options = {}) {
         </div>
       </div>
     </section>
-    <section class="bindle-import-section">
-      <h3>条目</h3>
-      <div class="bindle-entry-list">
-        ${entryRows ? '<div class="bindle-entry-head"><span>发票号</span><span>销售方</span><span>金额</span><span>归属</span><span>处理</span></div>' + entryRows : '<div class="bindle-empty">包内没有条目</div>'}
+    <section class="bindle-import-section bindle-entry-section">
+      <div class="bindle-section-head">
+        <h3>条目 <span class="bindle-selection-count" id="bindleSelectionCount"></span></h3>
+        <div class="bindle-entry-tools">
+          <label><input type="checkbox" id="bindleEntrySelectAll"/> 全选条目</label>
+          <button type="button" class="link-btn" id="bindleCustomizeEntries" aria-pressed="false">逐条调整</button>
+        </div>
       </div>
-      ${entries.length > 100 ? '<div class="bindle-list-note">显示前 100 条，不影响导入</div>' : ''}
+      <div class="bindle-entry-list">
+        ${entryRows ? '<div class="bindle-entry-head"><span></span><span>发票号</span><span>销售方</span><span class="bindle-entry-amount">金额</span><span>报账人 · 审核人</span><span>本机情况</span></div>' + entryRows : '<div class="bindle-empty">包内没有条目</div>'}
+      </div>
     </section>`;
 
   const tagInput = body.querySelector('#bindleTagInput');
@@ -5511,7 +5544,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
       if (input.checked && input.value === 'new') newBatch.focus();
     };
   });
-  body.querySelectorAll('[data-bind-profile]').forEach((row) => {
+  const profileRowElements = [...body.querySelectorAll('[data-bind-profile]')];
+  const entryRowElements = [...body.querySelectorAll('[data-bind-entry-index]')];
+  profileRowElements.forEach((row) => {
     const enabledInput = row.querySelector('[data-bind-profile-enabled]');
     const nameInput = row.querySelector('[data-bind-profile-name]');
     const reviewerInput = row.querySelector('[data-bind-profile-reviewer]');
@@ -5524,43 +5559,138 @@ async function openBindleImportPreview(path, insp, options = {}) {
     };
     nameInput.oninput = syncOwner;
     reviewerInput.oninput = syncOwner;
-    enabledInput.onchange = () => syncBindleSelection();
+    enabledInput.onchange = () => {
+      entryRowElements.forEach((entryRow) => {
+        if (entryRow.dataset.bindEntryProfile === row.dataset.bindProfile) {
+          entryRow.querySelector('[data-bind-entry-enabled]').checked = enabledInput.checked;
+        }
+      });
+      syncBindleSelection();
+    };
   });
 
-  const selectedSourceIds = () => new Set(
-    [...body.querySelectorAll('[data-bind-profile-enabled]:checked')]
-      .map((input) => input.closest('[data-bind-profile]').dataset.bindProfile)
+  const selectedEntryRows = () => entryRowElements.filter(
+    (row) => row.querySelector('[data-bind-entry-enabled]').checked
   );
-  const selectedEntryCount = () => {
-    const selected = selectedSourceIds();
-    return entries.filter((entry) => selected.has(entry.profile_id || '__fallback__')).length;
-  };
+  const selectedEntryIndexes = () => new Set(
+    selectedEntryRows().map((row) => Number(row.dataset.bindEntryIndex))
+  );
+  const selectedSourceIds = () => new Set(
+    selectedEntryRows().map((row) => row.dataset.bindEntryProfile)
+  );
+  const selectedEntryCount = () => selectedEntryRows().length;
   let importButton;
   const syncBindleSelection = () => {
-    const selected = selectedSourceIds();
-    body.querySelectorAll('[data-bind-profile]').forEach((row) => {
-      const enabled = selected.has(row.dataset.bindProfile);
-      row.classList.toggle('off', !enabled);
-      row.querySelector('[data-bind-profile-name]').disabled = !enabled;
-      row.querySelector('[data-bind-profile-reviewer]').disabled = !enabled;
+    const selectedRows = selectedEntryRows();
+    const selectedIndexes = new Set(selectedRows.map((row) => row.dataset.bindEntryIndex));
+    entryRowElements.forEach((row) => {
+      row.classList.toggle('off', !selectedIndexes.has(row.dataset.bindEntryIndex));
     });
-    body.querySelectorAll('[data-bind-entry-profile]').forEach((row) => {
-      row.classList.toggle('off', !selected.has(row.dataset.bindEntryProfile));
+    profileRowElements.forEach((row) => {
+      const matchingRows = entryRowElements.filter(
+        (entryRow) => entryRow.dataset.bindEntryProfile === row.dataset.bindProfile
+      );
+      const selectedCount = matchingRows.filter(
+        (entryRow) => entryRow.querySelector('[data-bind-entry-enabled]').checked
+      ).length;
+      const enabledInput = row.querySelector('[data-bind-profile-enabled]');
+      enabledInput.checked = selectedCount > 0 && selectedCount === matchingRows.length;
+      enabledInput.indeterminate = selectedCount > 0 && selectedCount < matchingRows.length;
+      row.classList.toggle('off', selectedCount === 0);
+      row.querySelector('[data-bind-profile-name]').disabled = selectedCount === 0;
+      row.querySelector('[data-bind-profile-reviewer]').disabled = selectedCount === 0;
     });
     const all = body.querySelector('#bindleSelectAll');
-    all.checked = selected.size === packageProfiles.length;
-    all.indeterminate = selected.size > 0 && selected.size < packageProfiles.length;
+    const selectedProfiles = profileRowElements.filter(
+      (row) => row.querySelector('[data-bind-profile-enabled]').checked
+    ).length;
+    const partialProfiles = profileRowElements.some(
+      (row) => row.querySelector('[data-bind-profile-enabled]').indeterminate
+    );
+    all.checked = selectedProfiles === packageProfiles.length;
+    all.indeterminate = partialProfiles || (selectedProfiles > 0 && selectedProfiles < packageProfiles.length);
+    const entryAll = body.querySelector('#bindleEntrySelectAll');
+    entryAll.checked = selectedRows.length > 0 && selectedRows.length === entryRowElements.length;
+    entryAll.indeterminate = selectedRows.length > 0 && selectedRows.length < entryRowElements.length;
+    body.querySelector('#bindleSelectionCount').textContent = `· 已选 ${selectedRows.length} / ${entries.length}`;
     if (importButton) {
-      const count = selectedEntryCount();
-      importButton.textContent = count ? `导入 ${count} 条` : '请选择报账人';
-      importButton.disabled = !count;
+      importButton.textContent = selectedRows.length ? `导入 ${selectedRows.length} 条` : '请选择条目';
+      importButton.disabled = !selectedRows.length;
     }
   };
   body.querySelector('#bindleSelectAll').onchange = (ev) => {
-    body.querySelectorAll('[data-bind-profile-enabled]').forEach((input) => {
-      input.checked = ev.target.checked;
+    entryRowElements.forEach((row) => {
+      row.querySelector('[data-bind-entry-enabled]').checked = ev.target.checked;
     });
     syncBindleSelection();
+  };
+  body.querySelector('#bindleEntrySelectAll').onchange = (ev) => {
+    entryRowElements.forEach((row) => {
+      row.querySelector('[data-bind-entry-enabled]').checked = ev.target.checked;
+    });
+    syncBindleSelection();
+  };
+  entryRowElements.forEach((row) => {
+    row.querySelector('[data-bind-entry-enabled]').onchange = syncBindleSelection;
+    const adjustButton = row.querySelector('[data-bind-entry-adjust]');
+    const editor = row.querySelector('[data-bind-entry-override]');
+    const select = row.querySelector('[data-bind-entry-batch]');
+    const newBatchInput = row.querySelector('[data-bind-entry-new-batch]');
+    const summary = row.querySelector('.bindle-entry-target-summary');
+    const syncOverride = () => {
+      const isNew = select.value === 'new';
+      newBatchInput.classList.toggle('hidden', !isNew);
+      let label = '';
+      if (select.value === 'none') label = '目标 · 未进批次';
+      else if (select.value.startsWith('batch:')) label = `目标 · ${select.selectedOptions[0]?.textContent || '已有批次'}`;
+      else if (isNew) label = `目标 · ${newBatchInput.value.trim() || '待填写新批次'}`;
+      summary.textContent = label;
+      row.classList.toggle('has-bindle-override', !!label);
+    };
+    adjustButton.onclick = () => {
+      const opening = editor.classList.contains('hidden');
+      entryRowElements.forEach((otherRow) => {
+        if (otherRow === row) return;
+        otherRow.querySelector('[data-bind-entry-override]').classList.add('hidden');
+        otherRow.classList.remove('editing-bindle-override');
+        const otherButton = otherRow.querySelector('[data-bind-entry-adjust]');
+        otherButton.textContent = '单独设置';
+        otherButton.setAttribute('aria-expanded', 'false');
+      });
+      editor.classList.toggle('hidden', !opening);
+      row.classList.toggle('editing-bindle-override', opening);
+      adjustButton.textContent = opening ? '收起' : '单独设置';
+      adjustButton.setAttribute('aria-expanded', String(opening));
+      if (opening) enhanceNativeSelects(select);
+    };
+    select.onchange = () => {
+      syncOverride();
+      if (select.value === 'new') newBatchInput.focus();
+    };
+    newBatchInput.oninput = syncOverride;
+    row.querySelector('[data-bind-entry-reset]').onclick = () => {
+      select.value = 'default';
+      newBatchInput.value = '';
+      syncOverride();
+    };
+    syncOverride();
+  });
+  const entrySection = body.querySelector('.bindle-entry-section');
+  const customizeEntries = body.querySelector('#bindleCustomizeEntries');
+  customizeEntries.onclick = () => {
+    const customizing = !entrySection.classList.contains('customizing');
+    entrySection.classList.toggle('customizing', customizing);
+    customizeEntries.setAttribute('aria-pressed', String(customizing));
+    customizeEntries.textContent = customizing ? '完成调整' : '逐条调整';
+    if (!customizing) {
+      entryRowElements.forEach((row) => {
+        row.querySelector('[data-bind-entry-override]').classList.add('hidden');
+        row.classList.remove('editing-bindle-override');
+        const adjustButton = row.querySelector('[data-bind-entry-adjust]');
+        adjustButton.textContent = '单独设置';
+        adjustButton.setAttribute('aria-expanded', 'false');
+      });
+    }
   };
 
   let m;
@@ -5573,8 +5703,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
       mkBtn('取消', 'ghost', () => m.close()),
       (importButton = mkBtn('确认导入', 'primary', async () => {
         const selected = selectedSourceIds();
+        const selectedIndexes = selectedEntryIndexes();
         const selectedCount = selectedEntryCount();
-        if (!selectedCount) { toast('请选择要导入的报账人', 'err'); return; }
+        if (!selectedCount) { toast('请选择要导入的条目', 'err'); return; }
         const tampered = body.querySelector('#bindleAllowTampered');
         if (tampered && !tampered.checked) {
           toast('请确认完整性异常后再导入', 'err');
@@ -5596,8 +5727,31 @@ async function openBindleImportPreview(path, insp, options = {}) {
         const batchName = batchMode === 'new' ? newBatch.value.trim() : '';
         if (batchMode === 'existing' && !batchId) { toast('请选择报账批次', 'err'); return; }
         if (batchMode === 'new' && !batchName) { toast('请填写新批次名称', 'err'); return; }
-        if (batchMode === 'none' && selectedCount) {
-          const confirmed = await confirmBindleWithoutBatch(selectedCount);
+        const entryBatchOverrides = {};
+        let invalidEntryBatch = false;
+        let withoutBatchCount = 0;
+        selectedEntryRows().forEach((row) => {
+          const entryIndex = row.dataset.bindEntryIndex;
+          const entryBatch = row.querySelector('[data-bind-entry-batch]');
+          const mode = entryBatch.value;
+          if (mode === 'none') {
+            entryBatchOverrides[entryIndex] = { mode: 'none' };
+            withoutBatchCount += 1;
+          } else if (mode.startsWith('batch:')) {
+            entryBatchOverrides[entryIndex] = {
+              mode: 'existing', batch_id: mode.slice('batch:'.length),
+            };
+          } else if (mode === 'new') {
+            const individualBatchName = row.querySelector('[data-bind-entry-new-batch]').value.trim();
+            if (!individualBatchName) invalidEntryBatch = true;
+            entryBatchOverrides[entryIndex] = { mode: 'new', batch_name: individualBatchName };
+          } else if (batchMode === 'none') {
+            withoutBatchCount += 1;
+          }
+        });
+        if (invalidEntryBatch) { toast('请填写逐条设置的新批次名称', 'err'); return; }
+        if (withoutBatchCount) {
+          const confirmed = await confirmBindleWithoutBatch(withoutBatchCount);
           if (!confirmed) return;
         }
         const options = {
@@ -5606,6 +5760,8 @@ async function openBindleImportPreview(path, insp, options = {}) {
           batch_id: batchId,
           batch_name: batchName,
           selected_profile_ids: [...selected],
+          selected_entry_indexes: [...selectedIndexes],
+          entry_batch_overrides: entryBatchOverrides,
         };
         const progress = taskProgress('正在导入条目和附件…');
         try {

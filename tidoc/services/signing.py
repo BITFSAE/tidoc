@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from typing import BinaryIO
 from pathlib import Path
 
 # 内置密钥。注意：这是检测级方案，密钥随软件分发，能识别手工乱改即达标。
@@ -29,6 +30,21 @@ def sign_file(path: str | Path, key: bytes = _BUILTIN_KEY) -> str:
     return h.hexdigest()
 
 
+def sign_stream(stream: BinaryIO, key: bytes = _BUILTIN_KEY) -> str:
+    """Calculate a signature without loading a large archive member into memory."""
+    digest = hmac.new(key, digestmod=hashlib.sha256)
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def verify(data: bytes, signature: str, key: bytes = _BUILTIN_KEY) -> bool:
     """常数时间比较，防时序侧信道。"""
     return hmac.compare_digest(sign_bytes(data, key), signature)
+
+
+def verify_stream(
+    stream: BinaryIO, signature: str, key: bytes = _BUILTIN_KEY
+) -> bool:
+    """Verify an archive member incrementally to cap memory and allocation cost."""
+    return hmac.compare_digest(sign_stream(stream, key), signature)

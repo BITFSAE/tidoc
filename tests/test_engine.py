@@ -291,6 +291,34 @@ def test_pdf_layout_keeps_empty_buyer_tax_id_separate_from_seller(monkeypatch, t
     assert parsed.seller == "深圳维特智能科技有限公司"
 
 
+def test_pdf_layout_reads_tax_ids_drawn_above_their_labels(monkeypatch, tmp_path):
+    normal_text = """电子发票（普通发票） 发票号码：26132000002616586876
+开票日期：2026年08月11日
+名称： 名称：
+北京理工大学 河北科泓日化有限公司
+12100000400009127B 91130182MA0F1MQCXC
+价税合计（小写） ¥17.67
+"""
+    layout_text = """购  名称：北京理工大学                 河北科泓日化有限公司销  名称：
+信      12100000400009127B             91130182MA0F1MQCXC信
+息  统一社会信用代码/纳税人识别号：      息  统一社会信用代码/纳税人识别号：
+*其他化学制品*75%酒精                 桶 2 8.747524752475217.50 1% 0.17
+"""
+    monkeypatch.setattr(parser_module, "_pdf_text", lambda _path: normal_text)
+    monkeypatch.setattr(parser_module, "_pdf_layout_text", lambda _path: layout_text)
+
+    parsed = parse_pdf(tmp_path / "tax-ids-above-labels.pdf")
+
+    assert parsed.buyer_name == "北京理工大学"
+    assert parsed.buyer_tax_id == "12100000400009127B"
+    assert parsed.seller == "河北科泓日化有限公司"
+    assert len(parsed.items) == 1
+    assert parsed.items[0].actual_name == "75%酒精"
+    assert parsed.items[0].unit == "桶"
+    assert parsed.items[0].quantity == Decimal("2")
+    assert parsed.items[0].total == Decimal("17.67")
+
+
 def test_pdf_skips_download_label_before_detached_party_values():
     text = """电子发票（普通发票） 发票号码：
 开票日期：

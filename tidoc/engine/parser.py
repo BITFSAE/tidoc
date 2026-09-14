@@ -205,6 +205,15 @@ def _extract_layout_parties(text: str) -> tuple[str, str, str, str] | None:
         buyer_tax_id, seller_tax_id = values
         roles_located = True
         break
+    if roles_located and not buyer_tax_id and not seller_tax_id:
+        # Some tax-platform PDFs draw both tax ids one visual row above the
+        # labels.  Layout extraction preserves their left-to-right order but
+        # leaves the labelled row empty.  Only use the ordered fallback when
+        # both values are present, so a genuinely empty buyer cell cannot
+        # consume the seller's sole tax id.
+        tax_ids = _collect_tax_ids(lines)
+        if len(tax_ids) >= 2:
+            buyer_tax_id, seller_tax_id = tax_ids[:2]
     if not roles_located:
         tax_ids = _collect_tax_ids(lines)
         buyer_tax_id = tax_ids[0] if len(tax_ids) >= 1 else ""
@@ -540,6 +549,25 @@ def _packed_quantity_amount(value: str) -> tuple[Decimal, Decimal] | None:
     return None
 
 
+def _joined_unit_price_amount(
+    value: str, quantity: Decimal
+) -> tuple[Decimal, Decimal] | None:
+    """Split a unit price and amount concatenated into one numeric token."""
+    last_dot = value.rfind(".")
+    if last_dot < 0 or len(value) - last_dot != 3:
+        return None
+    integer_tail = re.search(r"\d+$", value[:last_dot])
+    if not integer_tail:
+        return None
+    for integer_digits in range(1, len(integer_tail.group(0)) + 1):
+        amount_start = last_dot - integer_digits
+        unit_price = d(value[:amount_start])
+        amount = d(value[amount_start:])
+        if unit_price > 0 and money(quantity * unit_price) == money(amount):
+            return unit_price, amount
+    return None
+
+
 def _parse_loose_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Decimal] | None:
     """解析被 PDF 文本流拆乱的金额行。
 
@@ -570,6 +598,28 @@ def _parse_loose_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decima
                 quantity,
                 amount,
                 d(packed.group("tax")),
+            )
+
+    # Quantity can remain separate while unit price and amount are fused:
+    # ``桶 2 8.747524752475217.50 1% 0.17``.
+    joined_amount = re.search(
+        r"(?P<unit>[\u4e00-\u9fffA-Za-z]{1,4})\s+"
+        r"(?P<quantity>\d+(?:\.\d+)?)\s+"
+        r"(?P<joined>-?\d+(?:\.\d+){2,})\s+"
+        r"(?P<rate>\d+(?:\.\d+)?)%\s+"
+        r"(?P<tax>-?\d+(?:\.\d+)?)\s*$",
+        compact,
+    )
+    if joined_amount:
+        quantity = d(joined_amount.group("quantity"))
+        split = _joined_unit_price_amount(joined_amount.group("joined"), quantity)
+        if split:
+            _unit_price, amount = split
+            return (
+                joined_amount.group("unit"),
+                quantity,
+                amount,
+                d(joined_amount.group("tax")),
             )
 
     # Quantity and unit price can also be concatenated while the line amount

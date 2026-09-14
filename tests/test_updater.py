@@ -1,17 +1,23 @@
 import hashlib
+import io
 import json
 import ssl
 import urllib.error
 import zipfile
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from tidoc.services.updater import (
-    CoreUpdateManager,
     WINDOWS_INSTALLER_SCRIPT,
+    CoreUpdateManager,
+    _download_core_archive,
+    _download_url_resumable,
+    _download_url_segmented,
+    _prepare_linear_partial,
     _prune_old_component_versions,
+    _segment_paths,
     check_updates,
     download_update,
     downloaded_core_update_info,
@@ -27,11 +33,140 @@ from tidoc.services.updater import (
 )
 
 
+class _MemoryResponse:
+    def __init__(self, data: bytes, *, status: int = 200, headers: dict | None = None):
+        self._stream = io.BytesIO(data)
+        self.status = status
+        self.headers = headers or {}
+
+    def read(self, size: int = -1) -> bytes:
+        return self._stream.read(size)
+
+    def getcode(self) -> int:
+        return self.status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def _range_urlopen(payload: bytes, calls: list[str]):
+    def open_request(request, timeout):
+        range_value = request.get_header("Range") or ""
+        calls.append(range_value)
+        if not range_value:
+            return _MemoryResponse(
+                payload,
+                headers={"Content-Length": str(len(payload))},
+            )
+        spec = range_value.removeprefix("bytes=")
+        start_text, end_text = spec.split("-", 1)
+        start = int(start_text)
+        end = int(end_text) if end_text else len(payload) - 1
+        return _MemoryResponse(
+            payload[start:end + 1],
+            status=206,
+            headers={
+                "Content-Length": str(end - start + 1),
+                "Content-Range": f"bytes {start}-{end}/{len(payload)}",
+            },
+        )
+
+    return open_request
+
+
 def test_version_compare():
     assert parse_version("v1.2.3") == (1, 2, 3)
     assert version_gt("0.1.1", "0.1.0")
     assert version_gt("0.2.0", "0.1.9")
     assert not version_gt("0.1.0", "0.1.0")
+
+
+def test_segmented_download_resumes_parts_and_merges_in_order(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    payload = bytes(range(64))
+    output = tmp_path / "update.zip.part"
+    parts = _segment_paths(output, 4)
+    parts[0].write_bytes(payload[:5])
+    calls = []
+    progress = []
+    monkeypatch.setattr(updater.urllib.request, "urlopen", _range_urlopen(payload, calls))
+
+    _download_url_segmented(
+        "https://example.com/update.zip",
+        output,
+        len(payload),
+        30,
+        lambda done, total, speed: progress.append((done, total, speed)),
+        part_count=4,
+    )
+
+    assert output.read_bytes() == payload
+    assert "bytes=5-15" in calls
+    assert progress[-1][0:2] == (len(payload), len(payload))
+    assert not any(path.exists() for path in parts)
+
+
+def test_linear_download_resumes_existing_prefix(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    payload = b"a resumable update payload"
+    output = tmp_path / "update.zip.part"
+    output.write_bytes(payload[:9])
+    calls = []
+    monkeypatch.setattr(updater.urllib.request, "urlopen", _range_urlopen(payload, calls))
+
+    _download_url_resumable(
+        "https://example.com/update.zip", output, len(payload), 30
+    )
+
+    assert output.read_bytes() == payload
+    assert calls == ["bytes=9-"]
+
+
+def test_windows_segmented_download_falls_back_to_single_stream(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    payload = b"server ignores range"
+    output = tmp_path / "update.zip.part"
+    calls = []
+    modes = []
+
+    def ignores_range(request, timeout):
+        calls.append(request.get_header("Range") or "")
+        return _MemoryResponse(payload, headers={"Content-Length": str(len(payload))})
+
+    monkeypatch.setattr(updater, "current_platform", lambda: "windows")
+    monkeypatch.setattr(updater, "SEGMENTED_DOWNLOAD_MIN_BYTES", 1)
+    monkeypatch.setattr(updater.urllib.request, "urlopen", ignores_range)
+
+    _download_core_archive(
+        "https://example.com/update.zip",
+        output,
+        len(payload),
+        30,
+        mode_changed=modes.append,
+    )
+
+    assert output.read_bytes() == payload
+    assert calls == ["bytes=0-0", ""]
+    assert modes == ["segmented", "single"]
+
+
+def test_segmented_fallback_builds_a_contiguous_linear_prefix(tmp_path):
+    output = tmp_path / "update.zip.part"
+    parts = _segment_paths(output, 4)
+    parts[0].write_bytes(b"abcd")
+    parts[1].write_bytes(b"efgh")
+    parts[2].write_bytes(b"ij")
+    parts[3].write_bytes(b"mnop")
+
+    _prepare_linear_partial(output, 16, 4)
+
+    assert output.read_bytes() == b"abcdefghij"
 
 
 def test_extract_silent_windows_update_requires_one_safe_root(tmp_path):
@@ -111,6 +246,34 @@ def test_core_update_manager_downloads_verifies_and_stages(monkeypatch, tmp_path
     assert status["progress"] == 1.0
     assert (Path(status["stage_dir"]) / "tidoc.exe").read_bytes() == b"new-core"
     assert downloaded_core_update_info(tmp_path / "updates", "windows")["version"] == "9.9.9"
+
+
+def test_core_update_manager_discards_complete_file_with_bad_checksum(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    root = tmp_path / "updates" / "core" / "windows" / "9.9.9"
+    root.mkdir(parents=True)
+    partial = root / "update.zip.part"
+    partial.write_bytes(b"wrong complete payload")
+    asset = {
+        "filename": "update.zip",
+        "url": "https://example.com/update.zip",
+        "sha256": "0" * 64,
+        "size": partial.stat().st_size,
+        "root_name": "tidoc",
+    }
+    monkeypatch.setattr(updater, "current_platform", lambda: "windows")
+    monkeypatch.setattr(
+        updater,
+        "_download_core_archive",
+        lambda *_args, **_kwargs: None,
+    )
+    manager = CoreUpdateManager(tmp_path / "updates")
+
+    manager._download_worker(asset, "9.9.9")
+
+    assert manager.status()["state"] == "failed"
+    assert not partial.exists()
 
 
 def test_check_updates_from_file_manifest(tmp_path):

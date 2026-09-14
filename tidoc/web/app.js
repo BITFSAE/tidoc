@@ -586,6 +586,40 @@ function setUpdateNotice(status) {
 
 let coreUpdatePollTimer = null;
 
+function coreUpdateStage(runtime = {}) {
+  if (runtime.stage === 'verify') return { short: '校验', label: '正在校验更新包完整性' };
+  if (runtime.stage === 'extract') return { short: '准备', label: '正在准备更新文件' };
+  if (runtime.stage === 'install') return { short: '更新', label: '正在退出并更新' };
+  return { short: `${Math.round((Number(runtime.progress) || 0) * 100)}%`, label: '正在下载更新' };
+}
+
+function coreUpdateDownloadDetail(runtime = {}) {
+  const bits = [];
+  const done = Number(runtime.downloaded_bytes) || 0;
+  const total = Number(runtime.total_bytes) || 0;
+  const speed = Number(runtime.speed_bps) || 0;
+  if (total) bits.push(`${done ? fmtBytes(done) : '0 KB'} / ${fmtBytes(total)}`);
+  if (speed) bits.push(`${fmtBytes(speed)}/秒`);
+  if (runtime.download_mode === 'segmented') bits.push('加速下载');
+  return bits.join(' · ');
+}
+
+function coreUpdateProgressMarkup(runtime = {}) {
+  const stage = coreUpdateStage(runtime);
+  if ((runtime.stage || 'download') === 'download' || runtime.stage === 'starting') {
+    const pct = Math.round((Number(runtime.progress) || 0) * 100);
+    const detail = coreUpdateDownloadDetail(runtime);
+    return `<div class="update-operation-status" aria-busy="true">
+      <div class="update-progress determinate" role="progressbar" aria-label="下载更新" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
+      <div class="hint">${esc(stage.label)} · ${pct}%${detail ? ` · ${esc(detail)}` : ''}</div>
+    </div>`;
+  }
+  return `<div class="update-operation-status" aria-busy="true">
+    <div class="update-progress" role="progressbar" aria-label="${esc(stage.label)}"><span></span></div>
+    <div class="hint">${esc(stage.label)}…</div>
+  </div>`;
+}
+
 function renderCoreUpdateAction(core = null) {
   const btn = $('#updateActionBtn');
   if (!btn) return;
@@ -601,10 +635,12 @@ function renderCoreUpdateAction(core = null) {
   btn.classList.toggle('failed', state === 'failed');
   btn.classList.toggle('installing', state === 'installing');
   const pct = btn.querySelector('[data-update-percent]');
-  if (pct) pct.textContent = `${Math.round((Number(runtime.progress) || 0) * 100)}%`;
+  const stage = coreUpdateStage(runtime);
+  if (pct) pct.textContent = stage.short;
   const version = runtime.version || candidate?.latest_version || '';
+  const downloadDetail = coreUpdateDownloadDetail(runtime);
   const labels = {
-    downloading: `正在下载 v${version}`,
+    downloading: `${stage.label} v${version}${downloadDetail ? ` · ${downloadDetail}` : ''}`,
     ready: `重启并更新到 v${version}`,
     failed: '下载失败，点击重试',
     installing: '正在退出并更新',
@@ -3703,9 +3739,9 @@ async function openUpdateDialog() {
         state = '<span class="update-badge pending">已下载</span>';
         action = '<button class="btn small" data-restart-core>重启更新</button>';
       } else if (u.component === 'core' && State.coreUpdateRuntime?.state === 'downloading') {
-        const pct = Math.round((Number(State.coreUpdateRuntime.progress) || 0) * 100);
-        state = `<span class="update-badge available">${pct}%</span>`;
-        action = '<button class="btn small" disabled>下载中</button>';
+        const stage = coreUpdateStage(State.coreUpdateRuntime);
+        state = `<span class="update-badge available">${esc(stage.short)}</span>`;
+        action = `<button class="btn small" disabled>${esc(stage.label.replace(/^正在/, ''))}</button>`;
       } else if (u.component === 'core' && u.asset?.auto_update && State.coreUpdateRuntime?.install_supported) {
         action = '<button class="btn small" data-download-core>下载更新</button>';
       } else if (u.downloaded) {
@@ -3759,8 +3795,7 @@ async function openUpdateDialog() {
           renderCoreUpdateAction(core);
           const op = body.querySelector('#updateOperation');
           while (State.coreUpdateRuntime?.state === 'downloading') {
-            const pct = Math.round((Number(State.coreUpdateRuntime.progress) || 0) * 100);
-            if (op) op.innerHTML = `<div class="update-progress determinate"><span style="width:${pct}%"></span></div><div class="hint">正在下载并校验 · ${pct}%</div>`;
+            if (op) op.innerHTML = coreUpdateProgressMarkup(State.coreUpdateRuntime);
             await new Promise((resolve) => setTimeout(resolve, 500));
             State.coreUpdateRuntime = await Api.coreUpdateStatus();
             renderCoreUpdateAction(core);

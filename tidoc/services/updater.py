@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import platform
+import re
 import shutil
 import ssl
 import subprocess
@@ -18,11 +18,12 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from pathlib import Path
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from tidoc import __version__ as CORE_VERSION
@@ -35,6 +36,13 @@ COMPONENT_CORE = "core"
 # 更新对话框逐行展示的可选组件（核心不在其中，单独渲染）
 INSTALLABLE_COMPONENTS = (COMPONENT_PRINT, COMPONENT_OCR)
 CORE_APP_NAMES = {"windows": "tidoc.exe", "macos": "tidoc.app"}
+WINDOWS_DOWNLOAD_PARTS = 4
+SEGMENTED_DOWNLOAD_MIN_BYTES = 4 * 1024 * 1024
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+class SegmentedDownloadUnavailable(RuntimeError):
+    """The server cannot safely satisfy a multi-range download."""
 
 
 WINDOWS_INSTALLER_SCRIPT = r'''
@@ -652,7 +660,7 @@ class CoreUpdateManager:
         self._state: dict[str, Any] = {
             "state": "idle", "version": "", "progress": 0.0,
             "downloaded_bytes": 0, "total_bytes": 0, "speed_bps": 0.0,
-            "stage": "", "stage_dir": "", "file_path": "", "error": "",
+            "stage": "", "download_mode": "", "stage_dir": "", "file_path": "", "error": "",
             "install_supported": silent_core_update_supported(),
         }
         self._restore_ready_state()
@@ -673,7 +681,7 @@ class CoreUpdateManager:
                 "state": "ready", "version": version, "progress": 1.0,
                 "downloaded_bytes": int(info.get("size") or 0),
                 "total_bytes": int(info.get("size") or 0),
-                "stage": "ready", "stage_dir": str(stage),
+                "stage": "ready", "download_mode": "", "stage_dir": str(stage),
                 "file_path": str(info.get("file_path") or ""),
             })
 
@@ -698,7 +706,7 @@ class CoreUpdateManager:
             self._state.update({
                 "state": "downloading", "version": version, "progress": 0.0,
                 "downloaded_bytes": 0, "total_bytes": int(auto_asset.get("size") or 0),
-                "speed_bps": 0.0, "stage": "download", "stage_dir": "",
+                "speed_bps": 0.0, "stage": "download", "download_mode": "starting", "stage_dir": "",
                 "file_path": "", "error": "", "install_supported": True,
             })
             self._thread = threading.Thread(
@@ -717,31 +725,53 @@ class CoreUpdateManager:
     def _download_worker(self, asset: dict[str, Any], version: str) -> None:
         try:
             root = self.updates_dir / COMPONENT_CORE / current_platform() / version
-            if root.exists():
-                shutil.rmtree(root)
             root.mkdir(parents=True, exist_ok=True)
             filename = str(asset.get("filename") or "tidoc-update.zip")
             archive = root / filename
             partial = archive.with_suffix(archive.suffix + ".part")
 
-            def on_progress(done: int, total: int, elapsed: float) -> None:
+            def on_progress(done: int, total: int, speed_bps: float) -> None:
                 expected_total = total or int(asset.get("size") or 0)
                 self._set(
                     progress=min(1.0, done / expected_total) if expected_total else 0.0,
                     downloaded_bytes=done,
                     total_bytes=expected_total,
-                    speed_bps=done / elapsed,
+                    speed_bps=speed_bps,
                 )
 
-            _download_url(str(asset.get("url") or ""), partial, 180, on_progress)
             expected = str(asset.get("sha256") or "").lower()
+            downloaded_path = partial
+            if archive.is_file() and expected and sha256_file(archive).lower() == expected:
+                downloaded_path = archive
+                size = archive.stat().st_size
+                on_progress(size, int(asset.get("size") or size), 0.0)
+            else:
+                if archive.exists():
+                    archive.unlink()
+                _download_core_archive(
+                    str(asset.get("url") or ""),
+                    partial,
+                    int(asset.get("size") or 0),
+                    180,
+                    on_progress,
+                    mode_changed=lambda mode: self._set(download_mode=mode),
+                )
             self._set(stage="verify")
-            actual = sha256_file(partial).lower()
+            actual = sha256_file(downloaded_path).lower()
             if not expected or actual != expected:
+                if downloaded_path == partial:
+                    try:
+                        partial.unlink()
+                    except FileNotFoundError:
+                        pass
+                _remove_segment_files(partial, WINDOWS_DOWNLOAD_PARTS)
                 raise RuntimeError("更新包完整性校验失败。")
-            partial.replace(archive)
+            if downloaded_path == partial:
+                partial.replace(archive)
             self._set(stage="extract")
             extract_root = root / "staged"
+            if extract_root.exists():
+                shutil.rmtree(extract_root)
             staged = extract_core_update_archive(
                 archive, extract_root,
                 root_name=str(asset.get("root_name") or ("tidoc.app" if current_platform() == "macos" else "tidoc")),
@@ -757,11 +787,11 @@ class CoreUpdateManager:
             marker.write_text(json.dumps(info, ensure_ascii=False, indent=2), "utf-8")
             self._set(
                 state="ready", progress=1.0, downloaded_bytes=info["size"],
-                total_bytes=info["size"], speed_bps=0.0, stage="ready",
+                total_bytes=info["size"], speed_bps=0.0, stage="ready", download_mode="",
                 stage_dir=str(staged), file_path=str(archive), error="",
             )
         except Exception as exc:
-            self._set(state="failed", progress=0.0, stage="", error=str(exc))
+            self._set(state="failed", speed_bps=0.0, stage="", download_mode="", error=str(exc))
         finally:
             with self._lock:
                 self._thread = None
@@ -933,6 +963,307 @@ def _read_url(url: str, timeout: int) -> bytes:
         raise
 
 
+def _download_core_archive(
+    url: str,
+    out_path: Path,
+    total_size: int,
+    timeout: int,
+    progress=None,
+    mode_changed=None,
+) -> None:
+    """Download a core archive with Windows acceleration and safe fallback."""
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    use_segments = (
+        current_platform() == "windows"
+        and scheme in {"http", "https"}
+        and total_size >= SEGMENTED_DOWNLOAD_MIN_BYTES
+    )
+    if use_segments:
+        if mode_changed:
+            mode_changed("segmented")
+        try:
+            _download_url_segmented(
+                url,
+                out_path,
+                total_size,
+                timeout,
+                progress,
+                part_count=WINDOWS_DOWNLOAD_PARTS,
+            )
+            return
+        except Exception as segmented_error:  # noqa: BLE001 - safe single-stream fallback
+            _prepare_linear_partial(out_path, total_size, WINDOWS_DOWNLOAD_PARTS)
+            if mode_changed:
+                mode_changed("single")
+            try:
+                _download_url_resumable(url, out_path, total_size, timeout, progress)
+            except Exception as single_error:
+                raise RuntimeError(
+                    "加速下载和普通下载均未完成："
+                    f"{single_error}（加速连接：{segmented_error}）"
+                ) from single_error
+            _remove_segment_files(out_path, WINDOWS_DOWNLOAD_PARTS)
+            return
+
+    if mode_changed:
+        mode_changed("single")
+    _download_url_resumable(url, out_path, total_size, timeout, progress)
+
+
+def _download_url_segmented(
+    url: str,
+    out_path: Path,
+    total_size: int,
+    timeout: int,
+    progress=None,
+    *,
+    part_count: int = WINDOWS_DOWNLOAD_PARTS,
+) -> None:
+    """Download fixed byte ranges in parallel and keep each range resumable."""
+    if total_size <= 0 or part_count < 2:
+        raise SegmentedDownloadUnavailable("更新服务器没有提供可分段的文件大小。")
+    ranges = _segment_ranges(total_size, part_count)
+    paths = _segment_paths(out_path, part_count)
+    existing = []
+    for path, (start, end) in zip(paths, ranges):
+        expected = end - start + 1
+        size = path.stat().st_size if path.is_file() else 0
+        if size > expected:
+            path.unlink()
+            size = 0
+        existing.append(size)
+    if (
+        any(size < end - start + 1 for size, (start, end) in zip(existing, ranges))
+        and not any(existing)
+        and not _server_supports_ranges(url, total_size, timeout)
+    ):
+        raise SegmentedDownloadUnavailable("更新服务器暂不支持分段下载。")
+
+    progress_lock = threading.Lock()
+    stop_event = threading.Event()
+    done_by_part = list(existing)
+    resumed_bytes = sum(existing)
+    started = time.monotonic()
+
+    def report() -> None:
+        if not progress:
+            return
+        done = sum(done_by_part)
+        elapsed = max(time.monotonic() - started, 0.001)
+        progress(done, total_size, max(0, done - resumed_bytes) / elapsed)
+
+    def download_part(index: int) -> None:
+        part_path = paths[index]
+        range_start, range_end = ranges[index]
+        have = done_by_part[index]
+        request_start = range_start + have
+        if request_start > range_end:
+            return
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept-Encoding": "identity",
+                "Range": f"bytes={request_start}-{range_end}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if not _valid_range_response(resp, request_start, range_end, total_size):
+                raise SegmentedDownloadUnavailable("更新服务器返回了不完整的分段响应。")
+            with part_path.open("ab" if have else "wb") as out:
+                while not stop_event.is_set():
+                    chunk = resp.read(DOWNLOAD_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    with progress_lock:
+                        done_by_part[index] += len(chunk)
+                        report()
+        expected_part_size = range_end - range_start + 1
+        if part_path.stat().st_size != expected_part_size:
+            raise RuntimeError("更新包分段下载不完整。")
+
+    report()
+    first_error: Exception | None = None
+    with ThreadPoolExecutor(max_workers=part_count, thread_name_prefix="tidoc-update") as pool:
+        futures = [pool.submit(download_part, index) for index in range(part_count)]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001 - fallback handles all worker failures
+                if first_error is None:
+                    first_error = exc
+                    stop_event.set()
+    if first_error is not None:
+        raise first_error
+
+    with out_path.open("wb") as out:
+        for part_path in paths:
+            with part_path.open("rb") as part:
+                shutil.copyfileobj(part, out, DOWNLOAD_CHUNK_BYTES)
+    if out_path.stat().st_size != total_size:
+        raise RuntimeError("更新包合并后的大小不正确。")
+    _remove_segment_files(out_path, part_count)
+    if progress:
+        elapsed = max(time.monotonic() - started, 0.001)
+        progress(total_size, total_size, max(0, total_size - resumed_bytes) / elapsed)
+
+
+def _download_url_resumable(
+    url: str,
+    out_path: Path,
+    total_size: int,
+    timeout: int,
+    progress=None,
+) -> None:
+    """Continue a linear partial download when the server accepts Range."""
+    existing = out_path.stat().st_size if out_path.is_file() else 0
+    if total_size and existing > total_size:
+        out_path.unlink()
+        existing = 0
+    if total_size and existing == total_size:
+        if progress:
+            progress(existing, total_size, 0.0)
+        return
+
+    headers = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
+    if existing:
+        headers["Range"] = f"bytes={existing}-"
+    req = urllib.request.Request(url, headers=headers)
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            append = bool(existing and _response_status(resp) == 206)
+            if append and not _content_range_starts_at(resp, existing):
+                append = False
+            base = existing if append else 0
+            response_total = _response_total_size(resp, base)
+            expected_total = total_size or response_total
+            with out_path.open("ab" if append else "wb") as out:
+                done = base
+                while True:
+                    chunk = resp.read(DOWNLOAD_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        elapsed = max(time.monotonic() - started, 0.001)
+                        progress(done, expected_total, max(0, done - base) / elapsed)
+    except urllib.error.URLError as exc:
+        if _is_certificate_error(exc):
+            fallback_started = time.monotonic()
+            _download_url_with_system_trust(url, out_path, timeout, exc)
+            size = out_path.stat().st_size
+            if progress:
+                elapsed = max(time.monotonic() - fallback_started, 0.001)
+                progress(size, total_size or size, size / elapsed)
+        else:
+            raise
+    final_size = out_path.stat().st_size
+    if total_size and final_size != total_size:
+        raise RuntimeError(f"更新包下载不完整：应为 {total_size} 字节，实际为 {final_size} 字节。")
+
+
+def _server_supports_ranges(url: str, total_size: int, timeout: int) -> bool:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept-Encoding": "identity",
+            "Range": "bytes=0-0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return _valid_range_response(resp, 0, 0, total_size) and len(resp.read(2)) == 1
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def _response_status(response) -> int:
+    status = getattr(response, "status", None)
+    if status is None:
+        try:
+            status = response.getcode()
+        except AttributeError:
+            status = 0
+    return int(status or 0)
+
+
+def _content_range(response) -> tuple[int, int, int] | None:
+    value = str(response.headers.get("Content-Range") or "")
+    match = re.fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+)", value, flags=re.IGNORECASE)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def _valid_range_response(response, start: int, end: int, total: int) -> bool:
+    parsed = _content_range(response)
+    return _response_status(response) == 206 and parsed == (start, end, total)
+
+
+def _content_range_starts_at(response, start: int) -> bool:
+    parsed = _content_range(response)
+    return bool(parsed and parsed[0] == start)
+
+
+def _response_total_size(response, base: int = 0) -> int:
+    parsed = _content_range(response)
+    if parsed:
+        return parsed[2]
+    return base + int(response.headers.get("Content-Length") or 0)
+
+
+def _segment_ranges(total_size: int, part_count: int) -> list[tuple[int, int]]:
+    return [
+        (total_size * index // part_count, total_size * (index + 1) // part_count - 1)
+        for index in range(part_count)
+    ]
+
+
+def _segment_paths(out_path: Path, part_count: int) -> list[Path]:
+    return [out_path.with_name(f"{out_path.name}.{index}") for index in range(part_count)]
+
+
+def _prepare_linear_partial(out_path: Path, total_size: int, part_count: int) -> None:
+    """Reuse the contiguous prefix of failed range downloads for single-stream fallback."""
+    ranges = _segment_ranges(total_size, part_count)
+    paths = _segment_paths(out_path, part_count)
+    prefix: list[Path] = []
+    prefix_size = 0
+    for part_path, (start, end) in zip(paths, ranges):
+        if not part_path.is_file():
+            break
+        size = min(part_path.stat().st_size, end - start + 1)
+        if not size:
+            break
+        prefix.append(part_path)
+        prefix_size += size
+        if size != end - start + 1:
+            break
+    existing = out_path.stat().st_size if out_path.is_file() else 0
+    if existing <= total_size and existing >= prefix_size:
+        return
+    with out_path.open("wb") as out:
+        for part_path, (start, end) in zip(prefix, ranges):
+            remaining = min(part_path.stat().st_size, end - start + 1)
+            with part_path.open("rb") as part:
+                while remaining:
+                    chunk = part.read(min(DOWNLOAD_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    remaining -= len(chunk)
+
+
+def _remove_segment_files(out_path: Path, part_count: int) -> None:
+    for path in _segment_paths(out_path, part_count):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _download_url(url: str, out_path: Path, timeout: int, progress=None) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
@@ -941,18 +1272,20 @@ def _download_url(url: str, out_path: Path, timeout: int, progress=None) -> None
             done = 0
             started = time.monotonic()
             while True:
-                chunk = resp.read(256 * 1024)
+                chunk = resp.read(DOWNLOAD_CHUNK_BYTES)
                 if not chunk:
                     break
                 out.write(chunk)
                 done += len(chunk)
                 if progress:
-                    progress(done, total, max(time.monotonic() - started, 0.001))
+                    elapsed = max(time.monotonic() - started, 0.001)
+                    progress(done, total, done / elapsed)
     except urllib.error.URLError as exc:
         if _is_certificate_error(exc):
             _download_url_with_system_trust(url, out_path, timeout, exc)
             if progress:
-                progress(out_path.stat().st_size, out_path.stat().st_size, 1.0)
+                size = out_path.stat().st_size
+                progress(size, size, 0.0)
             return
         raise
 

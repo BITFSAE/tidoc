@@ -1649,7 +1649,8 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
   display: block; width: 42%; height: 100%; border-radius: inherit; background: var(--primary);
   animation: updateSlide 1.05s ease-in-out infinite;
 }
-.update-progress.determinate span { animation: none; transform: none; transition: width .18s ease; }
+.update-progress.determinate span { animation: none; transform: none; transition: width .18s linear; }
+.update-operation-status .hint { font-variant-numeric: tabular-nums; }
 @keyframes updateSlide {
   0% { transform: translateX(-110%); }
   100% { transform: translateX(260%); }

@@ -210,6 +210,9 @@ def test_frontend_upgrade_confirmation_shows_version_transition():
     assert "next_check_at" in source
     assert "state: 'downloading'" in source
     assert "progress: 0" in source
+    assert "function coreUpdateProgressMarkup" in source
+    assert "正在校验更新包完整性" in source
+    assert "加速下载" in source
 
 
 def test_core_download_reuses_cached_asset(monkeypatch, tmp_path):

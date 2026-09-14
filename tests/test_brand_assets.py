@@ -35,8 +35,8 @@ def test_release_builds_use_platform_icons_and_register_tidoc_file_icons():
     assert 'UTTypeIdentifier string com.bitfsae.tidoc.bindle' in workflow
     assert 'public.filename-extension:0 string tidoc' in workflow
     assert "SetupIconFile=..\\..\\icon\\windows\\icon.ico" in installer
-    assert 'DestName: "tidoc-file.ico"' in installer
-    assert 'ValueData: "{app}\\tidoc-file.ico,0"' in installer
+    assert 'DestName: "tidoc-file.ico"' not in installer
+    assert 'ValueData: "{app}\\tidoc.exe,0"' in installer
 
 
 def test_brand_generator_preserves_platform_specific_corner_behavior():

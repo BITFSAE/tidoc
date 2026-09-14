@@ -135,6 +135,36 @@ def _system_uses_dark_mode() -> bool:
     return False
 
 
+def _migrate_windows_file_icon() -> bool:
+    """Point Tidoc's legacy file icon registration at the packaged executable."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return False
+    try:
+        import winreg
+
+        executable = Path(sys.executable).resolve()
+        legacy_icon = executable.with_name("tidoc-file.ico")
+        key_path = r"Software\Classes\Tidoc.Bindle\DefaultIcon"
+        access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, access) as key:
+            current, _ = winreg.QueryValueEx(key, "")
+            icon_path = str(current).rsplit(",", 1)[0].strip().strip('"')
+            if Path(icon_path).resolve() != legacy_icon:
+                return False
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"{executable},0")
+    except (ImportError, OSError, TypeError, ValueError):
+        return False
+
+    # Ask Explorer to discard its cached association metadata immediately.
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+    except (AttributeError, OSError):
+        pass
+    return True
+
+
 def _initial_window_background(api: Api) -> str:
     mode = api._preference_value(_THEME_PREFERENCE_KEY, "system")
     if mode == "dark" or (mode == "system" and _system_uses_dark_mode()):
@@ -214,6 +244,7 @@ def main() -> None:
         return
     stop_event = threading.Event()
     try:
+        _migrate_windows_file_icon()
         _install_native_stderr_filter()
         from .db.paths import resolve_data_root
 

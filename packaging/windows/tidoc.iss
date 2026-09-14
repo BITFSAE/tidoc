@@ -40,17 +40,16 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\..\icon\windows\icon.ico"; DestDir: "{app}"; DestName: "tidoc-file.ico"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Tidoc"; Filename: "{app}\tidoc.exe"
 Name: "{autodesktop}\Tidoc"; Filename: "{app}\tidoc.exe"; Tasks: desktopicon
 
-; .tidoc 绑定包关联：双击用 Tidoc 打开，并使用明确安装的多尺寸文件图标。
+; .tidoc 绑定包关联：双击用 Tidoc 打开，文件图标直接取自已嵌入 ICO 的主程序。
 [Registry]
 Root: HKA; Subkey: "Software\Classes\.tidoc"; ValueType: string; ValueName: ""; ValueData: "Tidoc.Bindle"; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\Tidoc.Bindle"; ValueType: string; ValueName: ""; ValueData: "Tidoc 绑定包"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\Tidoc.Bindle\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\tidoc-file.ico,0"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Tidoc.Bindle\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\tidoc.exe,0"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Tidoc.Bindle\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\tidoc.exe"" ""%1"""; Flags: uninsdeletekey
 
 [Run]

@@ -1,4 +1,6 @@
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from tidoc import __version__
 from tidoc import app
@@ -40,6 +42,38 @@ def test_update_health_path_requires_absolute_path(tmp_path):
     assert app._update_health_path_from_argv(
         ["--update-health-file", "relative.json"]
     ) is None
+
+
+def test_windows_file_icon_registration_migrates_from_removed_loose_icon(
+    monkeypatch, tmp_path
+):
+    executable = tmp_path / "Tidoc" / "tidoc.exe"
+    legacy_icon = executable.with_name("tidoc-file.ico")
+    writes = []
+
+    class Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    fake_winreg = SimpleNamespace(
+        HKEY_CURRENT_USER=object(),
+        KEY_QUERY_VALUE=1,
+        KEY_SET_VALUE=2,
+        REG_SZ=1,
+        OpenKey=lambda *_args: Key(),
+        QueryValueEx=lambda *_args: (f'"{legacy_icon}",0', 1),
+        SetValueEx=lambda *args: writes.append(args),
+    )
+    monkeypatch.setattr(app.sys, "platform", "win32")
+    monkeypatch.setattr(app.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(app.sys, "executable", str(executable))
+    monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
+
+    assert app._migrate_windows_file_icon() is True
+    assert writes[0][-1] == f"{executable.resolve()},0"
 
 
 def test_webview_settings_allow_tax_site_certificate_fallback():

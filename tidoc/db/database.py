@@ -1,7 +1,7 @@
 """SQLite connection, consistent backups and composable transactions."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 import os
 import sqlite3
@@ -19,11 +19,14 @@ def backup_connection(conn: sqlite3.Connection, target: str | Path) -> Path:
         raise ValueError('备份文件已存在。')
     temporary = target.with_name(target.name + '.' + uuid.uuid4().hex + '.tmp')
     try:
-        with sqlite3.connect(str(temporary)) as destination:
+        # sqlite3's own context manager only commits; Windows refuses to rename or delete a
+        # file that still has an open handle, so the connection must be closed explicitly.
+        with closing(sqlite3.connect(str(temporary))) as destination:
             conn.backup(destination)
             if destination.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                 raise ValueError('数据库备份校验失败。')
-        with temporary.open('rb') as handle:
+        # fsync needs a writable descriptor on Windows (a read-only one raises EBADF).
+        with temporary.open('r+b') as handle:
             os.fsync(handle.fileno())
         os.replace(temporary, target)
         return target

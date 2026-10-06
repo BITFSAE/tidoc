@@ -85,6 +85,8 @@ def test_set_version_updates_frontend_asset_cache_keys(tmp_path):
     index = tmp_path / "tidoc" / "web" / "index.html"
     index.write_text(
         '<link href="styles.css?v=0.1.0"><script src="api.js?v=0.1.0"></script>'
+        '<script src="schema-form.js?v=0.1.0"></script>'
+        '<script src="adapter-ui.js?v=0.1.0"></script>'
         '<script src="app.js?v=0.1.0"></script>',
         "utf-8",
     )
@@ -97,6 +99,8 @@ def test_set_version_updates_frontend_asset_cache_keys(tmp_path):
     updated = index.read_text("utf-8")
     assert "styles.css?v=9.8.7" in updated
     assert "api.js?v=9.8.7" in updated
+    assert "schema-form.js?v=9.8.7" in updated
+    assert "adapter-ui.js?v=9.8.7" in updated
     assert "app.js?v=9.8.7" in updated
     release_info = (tmp_path / "tidoc" / "release_info.py").read_text("utf-8")
     assert "RELEASE_VERSION = '9.8.7'" in release_info

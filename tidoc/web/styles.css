@@ -100,40 +100,40 @@
 }
 
 :root[data-theme="dark"] {
-  /* 更接近 VS Code 的中性近黑：画布最暗、面板逐级提亮，去掉整体蓝雾。 */
-  --paper: #131418;
-  --paper-2: #1b1c21;
-  --panel: #17181d;
-  --panel-raised: #1e2026;
-  --panel-glass: rgba(23, 24, 29, .9);
-  --ink: #e7e9ee;
-  --ink-soft: #a8adb8;
-  --ink-faint: #767b86;
-  --ink-on-color: #f7f9fc;
-  --line: #2f3138;
-  --line-soft: #24262c;
-  --line-hover: #45484f;
+  /* 纯中性近黑（r=g=b，无蓝紫偏色）：画布最暗、面板逐级提亮；强调色用天蓝（色相约 210°），不用偏紫的薰衣草蓝。 */
+  --paper: #141414;
+  --paper-2: #1c1c1c;
+  --panel: #181818;
+  --panel-raised: #212121;
+  --panel-glass: rgba(24, 24, 24, .9);
+  --ink: #e6e6e6;
+  --ink-soft: #a6a6a6;
+  --ink-faint: #7b7b7b;
+  --ink-on-color: #f8f8f8;
+  --line: #303030;
+  --line-soft: #262626;
+  --line-hover: #484848;
 
-  --primary: #7aa2f7;
-  --primary-ink: #111a29;
-  --primary-soft: #1d3153;
-  --primary-hover: #263142;
-  --primary-line: #5274a8;
-  --primary-line-soft: #3f5d87;
-  --primary-ring: rgba(122, 162, 247, .22);
-  --primary-ring-strong: rgba(122, 162, 247, .38);
-  --primary-tint: rgba(122, 162, 247, .13);
-  --primary-tint-strong: rgba(122, 162, 247, .20);
-  --primary-shadow: rgba(22, 36, 66, .55);
-  --selected-top: #20304a;
-  --selected-bottom: #1b293e;
+  --primary: #59a6f8;
+  --primary-ink: #0b1928;
+  --primary-soft: #172e45;
+  --primary-hover: #222b35;
+  --primary-line: #47739e;
+  --primary-line-soft: #395979;
+  --primary-ring: rgba(89, 166, 248, .22);
+  --primary-ring-strong: rgba(89, 166, 248, .38);
+  --primary-tint: rgba(89, 166, 248, .13);
+  --primary-tint-strong: rgba(89, 166, 248, .20);
+  --primary-shadow: rgba(14, 36, 60, .55);
+  --selected-top: #1c3045;
+  --selected-bottom: #172636;
   --selection-hover: rgba(255, 255, 255, .08);
-  --selection-divider: #40516b;
+  --selection-divider: #3b5268;
 
-  --univ: #8eadff;
-  --univ-soft: #202f54;
-  --univ-ink: #bfd0ff;
-  --univ-line: rgba(142, 173, 255, .28);
+  --univ: #6ab2fb;
+  --univ-soft: #19334d;
+  --univ-ink: #afd6fd;
+  --univ-line: rgba(106, 178, 251, .28);
   --found: #5bcaa0;
   --found-soft: #173a31;
   --found-ink: #9ae4c5;
@@ -158,32 +158,32 @@
   --modified-soft: #3c2b1d;
   --modified-line: #6e4f32;
 
-  --canvas-warm: rgba(120, 124, 138, .05);
-  --canvas-cool: rgba(58, 96, 158, .06);
+  --canvas-warm: rgba(128, 128, 128, .05);
+  --canvas-cool: rgba(70, 120, 180, .05);
   --canvas-grid: rgba(255, 255, 255, .012);
   --modal-scrim: rgba(0, 0, 0, .66);
-  --readonly: #1a1b20;
-  --neutral-chip: #26282f;
+  --readonly: #1b1b1b;
+  --neutral-chip: #282828;
   --person-bg: #19362d;
   --person-ink: #80d8b4;
   --person-line: rgba(128, 216, 180, .24);
-  --draft-bg: #26282f;
-  --draft-ink: #aab3c0;
-  --ocr: #aebcff;
-  --ocr-soft: #29304f;
-  --ocr-hover: #333c61;
-  --ocr-panel: #222a43;
-  --ocr-line: rgba(174, 188, 255, .30);
-  --ocr-line-soft: rgba(174, 188, 255, .24);
-  --drag-surface: rgba(30, 32, 38, .97);
-  --scroll-thumb: rgba(196, 204, 216, .26);
-  --scroll-thumb-hover: rgba(196, 204, 216, .4);
-  --toast-bg: #24262e;
-  --toast-working: #2a2c35;
+  --draft-bg: #282828;
+  --draft-ink: #aaaaaa;
+  --ocr: #89c7e6;
+  --ocr-soft: #203946;
+  --ocr-hover: #294b5b;
+  --ocr-panel: #1c313b;
+  --ocr-line: rgba(137, 199, 230, .30);
+  --ocr-line-soft: rgba(137, 199, 230, .24);
+  --drag-surface: rgba(33, 33, 33, .97);
+  --scroll-thumb: rgba(200, 200, 200, .26);
+  --scroll-thumb-hover: rgba(200, 200, 200, .4);
+  --toast-bg: #242424;
+  --toast-working: #2b2b2b;
   --toast-ok: #266643;
   --toast-error: #9f3d3b;
-  --toast-ink: #f7f9fc;
-  --toast-dot: #7aa2f7;
+  --toast-ink: #f8f8f8;
+  --toast-dot: #59a6f8;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .24);
   --shadow: 0 2px 5px rgba(0, 0, 0, .28), 0 12px 30px rgba(0, 0, 0, .20);
@@ -236,7 +236,7 @@ body {
 :root.theme-transition .modal-foot,
 :root.theme-transition .settings-block,
 :root.theme-transition .entry-context-menu,
-:root.theme-transition .drag-guide,
+:root.theme-transition .drag-hint,
 :root.theme-transition input,
 :root.theme-transition select,
 :root.theme-transition .select-trigger,
@@ -271,10 +271,11 @@ body {
 
 .app { display: grid; grid-template-columns: 1fr; height: 100vh; }
 
+/* 批次栏与状态预设同在工具条第二行（见 .toolbar-view-row）：放得下时批次在左、预设靠右，
+   放不下时 wrap-reverse 让预设换到上一行、批次栏独占下一行。 */
 .batch-folders {
   display: flex; align-items: center; gap: 10px;
-  min-width: 0; margin-bottom: 8px; padding-bottom: 10px;
-  border-bottom: 1px solid var(--line-soft);
+  flex: 1 1 auto; min-width: 0; max-width: 100%;
 }
 .batch-folders.hidden { display: none; }
 .batch-scope {
@@ -291,7 +292,7 @@ body {
 .batch-scope-divider { width: 1px; height: 24px; flex: 0 0 auto; background: var(--line); }
 .batch-folder-track {
   display: flex; align-items: center; gap: 7px; overflow-x: auto;
-  flex: 1; min-width: 0; padding: 2px 0;
+  flex: 1 1 auto; min-width: 0; padding: 2px 0;
   scrollbar-width: thin;
 }
 /* 批次 = 索引卡片标签：细描边 + 顶部彩条，比整块色块更利落 */
@@ -591,8 +592,10 @@ body {
 }
 .toolbar-query-row { flex-wrap: wrap; }
 .toolbar-query-row .quick-chips { flex: 0 1 auto; }
-.toolbar-query-row .search { flex: 1 1 320px; min-width: 220px; }
-.search { position: relative; flex: 1 1 0%; max-width: none; min-width: 240px; }
+/* 搜索框与筛选控件始终同行：窄屏时只压缩搜索框，不再独占一行。 */
+.toolbar-view-row { flex-wrap: wrap-reverse; row-gap: 8px; }
+.toolbar-query-row .search { flex: 1 1 140px; min-width: 140px; }
+.search { position: relative; flex: 1 1 0%; max-width: none; min-width: 140px; }
 .search-ico { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--ink-faint); pointer-events: none; }
 .search input {
   width: 100%; height: 36px; padding: 8px 40px 8px 36px; font-size: 13px;
@@ -621,7 +624,7 @@ body {
 .search input:not(:placeholder-shown) ~ #searchKbd { display: none; }
 
 .quick-chips { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; min-width: 0; }
-.view-presets { display: inline-flex; align-items: center; min-height: 36px; background: var(--paper-2); border: 1px solid var(--line-soft); border-radius: 10px; padding: 3px; gap: 2px; }
+.view-presets { flex: 0 0 auto; display: inline-flex; align-items: center; min-height: 36px; background: var(--paper-2); border: 1px solid var(--line-soft); border-radius: 10px; padding: 3px; gap: 2px; }
 .preset-btn {
   border: none; background: transparent; color: var(--ink-soft);
   border-radius: 8px; padding: 6px 9px; cursor: pointer; font-size: 12px; font-weight: 600;
@@ -680,8 +683,7 @@ body {
 }
 .chip-toggle.active { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
 
-@media (max-width: 920px) {
-  .toolbar-query-row .search { flex: 1 1 100%; }
+@media (max-width: 720px) {
   .toolbar-query-row .quick-chips { overflow-x: auto; padding-bottom: 2px; }
 }
 
@@ -751,7 +753,7 @@ body {
 }
 
 /* ---------------------------------------------------------------- content */
-.content { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 16px 24px 24px; overflow: hidden; }
+.content { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 12px 24px 24px; overflow: hidden; }
 .content-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; margin-bottom: 10px; flex-wrap: wrap; }
 .content-summary { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
 .stats { font-size: 12px; color: var(--ink-soft); display: flex; gap: 14px; align-items: center; min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: thin; white-space: nowrap; padding-bottom: 1px; }
@@ -1761,41 +1763,29 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .toast.err { background: var(--toast-error); } .toast.err::before { background: var(--toast-ink); }
 .toast.ok { background: var(--toast-ok); } .toast.ok::before { background: var(--toast-ink); }
 
-/* drag overlay */
+/* 拖入文件：空白区（虚线框）= 导入，悬停的卡片（高亮）= 绑定材料；底部只留一条随位置变化的提示。 */
 body.dragging-files .content {
-  position: relative;
   outline: 2px dashed var(--primary);
   outline-offset: -12px;
   background: var(--primary-tint);
 }
-body.dragging-files .content::before {
-  content: "松开空白处：批量导入发票";
-  position: absolute; z-index: 3; top: 12px; left: 50%; transform: translateX(-50%);
-  padding: 7px 12px; border-radius: 999px; background: var(--primary);
-  color: var(--primary-ink); font-size: 12px; font-weight: 700; box-shadow: var(--shadow);
-  pointer-events: none;
-}
-body.dragging-files .entry-card {
-  box-shadow: inset 0 0 0 2px var(--found-line);
-}
-body.dragging-files .entry-card:hover,
+body.dragging-files.drag-over-card .content { outline-color: transparent; background: none; }
 body.dragging-files .entry-card.card-dragging {
   border-color: var(--found);
   background: var(--found-soft);
+  box-shadow: inset 0 0 0 2px var(--found-line);
 }
 .drag-overlay {
   position: fixed; inset: 0; z-index: 200; pointer-events: none;
-  display: flex; align-items: flex-start; justify-content: center;
-  padding-top: 86px;
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 0 16px 28px;
 }
-.drag-guide {
-  display: inline-flex; align-items: center; gap: 16px;
-  padding: 10px 14px; border: 1px solid var(--primary-ring-strong);
-  border-radius: 999px; background: var(--drag-surface);
-  box-shadow: var(--shadow-lg);
+.drag-hint {
+  padding: 8px 16px; border: 1px solid var(--primary-ring-strong);
+  border-radius: 999px; background: var(--drag-surface); box-shadow: var(--shadow-lg);
+  color: var(--primary); font-size: 13px; font-weight: 600; text-align: center;
 }
-.drag-guide b { font-size: 13px; color: var(--primary); }
-.drag-guide span { font-size: 12px; color: var(--ink-soft); }
+body.drag-over-card .drag-hint { border-color: var(--found-line); color: var(--found-ink); }
 .material-drop.dragging {
   border-color: var(--found);
   background: var(--found-soft);
@@ -1833,8 +1823,6 @@ body.dragging-files .entry-card.card-dragging {
   .settings-path { grid-template-columns: 1fr; }
   .attach-item { align-items: flex-start; flex-direction: column; }
   .attach-actions { justify-content: flex-start; }
-  .drag-guide { align-items: flex-start; border-radius: 12px; flex-direction: column; gap: 4px; }
-  body.dragging-files .entry-card::after { display: none; }
 }
 
 .hidden { display: none !important; }

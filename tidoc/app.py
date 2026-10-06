@@ -23,10 +23,12 @@ _STDERR_SUPPRESS_PATTERNS = (
     "NSSoftLinking - The function '_TSMMenuKeyTransWithModifiersBeginWithEvent'",
     "error messaging the mach port for IMKCFRunLoopWakeUpReliable",
     "Ignoring wrong pointing object",
+    # 从微信等应用拖入受保护缓存文件时 WebKit 的提示；界面已给出可读的原因和处理办法。
+    "sandbox_extension_issue_file",
 )
 _THEME_PREFERENCE_KEY = "tidoc.themeMode"
 _LIGHT_WINDOW_BACKGROUND = "#f4f1ea"
-_DARK_WINDOW_BACKGROUND = "#131418"
+_DARK_WINDOW_BACKGROUND = "#141414"
 
 
 def _install_native_stderr_filter() -> None:

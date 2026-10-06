@@ -4998,7 +4998,9 @@ function readFileAsDataURL(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+    // 微信等应用的缓存文件受系统保护，WebKit 读不到时只会报英文的 "The I/O read operation failed."。
+    reader.onerror = () => reject(new Error(
+      `无法读取「${file.name || '拖入的文件'}」：文件可能在受系统保护的位置（如微信的缓存），请先另存到桌面或「下载」文件夹再拖入。`));
     reader.readAsDataURL(file);
   });
 }
@@ -5047,14 +5049,15 @@ function setupMaterialDrop(zone, entryId, onDone) {
 function setupGlobalDrop() {
   let hideTimer = null;
   const hasFiles = (dt) => dt && Array.from(dt.types || []).includes('Files');
-  const keepOverlayVisible = () => {
+  const keepOverlayVisible = (ev) => {
     showDragOverlay();
+    updateDragHint(ev.target instanceof Element && !!ev.target.closest('.entry-card'));
     clearTimeout(hideTimer);
     hideTimer = setTimeout(hideDragOverlay, 220);
   };
   document.addEventListener('dragenter', (ev) => {
     if (!hasFiles(ev.dataTransfer)) return;
-    keepOverlayVisible();
+    keepOverlayVisible(ev);
   });
   document.addEventListener('dragleave', (ev) => {
     if (ev.clientX <= 0 || ev.clientY <= 0 ||
@@ -5066,7 +5069,7 @@ function setupGlobalDrop() {
   document.addEventListener('dragover', (ev) => {
     if (!hasFiles(ev.dataTransfer)) return;
     ev.preventDefault();
-    keepOverlayVisible();
+    keepOverlayVisible(ev);
   });
   document.addEventListener('drop', async (ev) => {
     if (!ev.dataTransfer?.files?.length) return;
@@ -5195,19 +5198,28 @@ function setupClipboardUpload() {
   });
 }
 
+// 拖入文件时只留一条提示：空白区（虚线框）导入，悬停的条目卡片（高亮）绑定材料。
+const DRAG_HINT_IMPORT = '松开导入：发票 PDF / XML 或 .tidoc 绑定包';
+const DRAG_HINT_BIND = '松开添加到此条目：付款截图、实物图或查验单';
+
 function showDragOverlay() {
+  // 弹窗里没有「空白区导入」，页面级提示会误导；弹窗内的材料拖放区自带高亮。
+  if ($('#modalRoot')?.lastChild) return;
   document.body.classList.add('dragging-files');
   if ($('.drag-overlay')) return;
-  const ov = el('div', 'drag-overlay', `
-    <div class="drag-guide">
-      <b>空白列表区：导入发票 PDF/XML 或 .tidoc 绑定包</b>
-      <span>拖到条目卡片：绑定付款截图、实物图或查验单；绑定包会进入导入预览</span>
-    </div>`);
-  document.body.appendChild(ov);
+  document.body.appendChild(el('div', 'drag-overlay', '<div class="drag-hint"></div>'));
+  updateDragHint(false);
+}
+
+function updateDragHint(onCard) {
+  document.body.classList.toggle('drag-over-card', onCard);
+  const hint = $('.drag-hint');
+  if (hint) hint.textContent = onCard ? DRAG_HINT_BIND : DRAG_HINT_IMPORT;
 }
 
 function hideDragOverlay() {
-  document.body.classList.remove('dragging-files');
+  document.body.classList.remove('dragging-files', 'drag-over-card');
+  $$('.entry-card.card-dragging').forEach((card) => card.classList.remove('card-dragging'));
   const ov = $('.drag-overlay');
   if (ov) ov.remove();
 }

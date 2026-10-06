@@ -253,7 +253,8 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "showPhysicalAction" in source
     assert "左键点击条目上的批次标签" not in source
     assert "在卡片或详情添加付款截图、实物图和查验单" in source
-    assert '<details class="settings-block">' in source
+    # 抬头与材料要求已移到「报账方案」页，设置页只保留折叠的高级数据维护。
+    assert '<details class="settings-advanced">' in source and 'data-material-requirement' not in source
     assert ".att-group-actions" in css
     assert ".att-group.has .attach-item" in css
     assert ".archive-confirm-note" in css

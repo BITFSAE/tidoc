@@ -147,7 +147,7 @@ const AdapterUI = (() => {
     { title: '绑定包', keys: ['transfer.include_notes', 'transfer.include_tags'] },
   ];
   const settingHelp = {
-    'entry.default_title_id': '新建或批量导入条目时自动带入；留空则跟随发票识别。',
+    'entry.default_title_id': '新建或批量导入条目时自动带入；留空则跟随发票识别。新添加的抬头保存后才能选择。',
     'entry.default_paid_to_invoice': '新建或导入时用发票金额填写实付；关闭后留空，等待确认。',
     'entry.suggested_tags': '录入时可一键添加的常用标签，用顿号或逗号分隔。',
     'profile.default_view': '新建、导入条目时是默认本人报账，还是先选择报账人（代填）。',
@@ -258,12 +258,9 @@ const AdapterUI = (() => {
     };
   }
 
-  function settingRow(key, spec, scheme, onChange) {
-    const policy = scheme.definition.scheme.settings?.[key] || {};
-    const locked = 'fixed' in policy || policy.editable === false;
-    // 基线 = 方案包自身给出的值（后端按包解析，含 import_defaults / default_outputs）；旧后端缺字段时退回注册默认值。
-    const baseline = locked ? spec.value : (scheme.settings_baseline?.[key] ?? spec.default ?? null);
-    const initial = spec.value;
+  // 一行设置：左侧说明（含「已自定义 / 恢复默认」），右侧控件；变化时标出未保存，并与方案包基线比较。
+  // makeControl(notify) 返回 { node, get, set, setDisabled, stacked? }。
+  function buildRow({ key, label, help, locked, baseline, initial, makeControl, onChange }) {
     const row = el('div', 'settings-row' + (locked ? ' is-locked' : ''));
     const copy = el('div', 'settings-row-copy');
     const title = el('b');
@@ -271,14 +268,14 @@ const AdapterUI = (() => {
     const reset = el('button', 'link-btn');
     reset.type = 'button';
     reset.textContent = '恢复默认';
-    title.append(document.createTextNode(labels[key] || spec.label || key));
+    title.append(document.createTextNode(label));
     if (locked) title.append(el('small', 'setting-flag', '方案固定'));
     title.append(custom, reset);
-    const help = el('span');
-    help.textContent = (settingHelp[key] || '') + (locked ? (settingHelp[key] ? ' ' : '') + '此项由当前方案固定，不能修改。' : '');
-    copy.append(title, help);
+    const helpNode = el('span');
+    helpNode.textContent = help + (locked ? (help ? ' ' : '') + '此项由当前方案固定，不能修改。' : '');
+    copy.append(title, helpNode);
     const holder = el('div', 'settings-row-control');
-    const control = settingControl(key, spec, scheme, () => { paint(); onChange(); });
+    const control = makeControl(() => { paint(); onChange(); });
     holder.append(control.node);
     if (control.stacked) row.classList.add('is-stacked');
     row.append(copy, holder);
@@ -300,17 +297,131 @@ const AdapterUI = (() => {
     };
   }
 
+  function settingRow(key, spec, scheme, onChange) {
+    const policy = scheme.definition.scheme.settings?.[key] || {};
+    const locked = 'fixed' in policy || policy.editable === false;
+    return buildRow({
+      key, locked, onChange,
+      label: labels[key] || spec.label || key,
+      help: settingHelp[key] || '',
+      // 基线 = 方案包自身给出的值（后端按包解析，含 import_defaults / default_outputs）；旧后端缺字段时退回注册默认值。
+      baseline: locked ? spec.value : (scheme.settings_baseline?.[key] ?? spec.default ?? null),
+      initial: spec.value,
+      makeControl: (notify) => settingControl(key, spec, scheme, notify),
+    });
+  }
+
+  // ---- 抬头与材料要求：它们是方案本身的内容，和普通设置一起编辑、一起保存，一次保存只生成一个新版本。
+  const TITLES_KEY = 'scheme:titles';
+  const REQUIREMENT_PREFIX = 'scheme:requirement:';
+  const REQUIREMENT_ROWS = [
+    ['payment_screenshot', '付款截图', '付款凭证图片。'],
+    ['physical_image', '实物图', '物资照片。'],
+    ['inspection_pdf', '查验单', '发票查验单 PDF。'],
+    ['paid_amount', '实付金额', '实际支付金额；没有填写时条目不算材料齐备。'],
+  ];
+  const titleList = (titles) => (titles || []).map((t) => ({ name: t.name || '', tax_id: t.tax_id || '' }));
+
+  function titlesControl(initial, notify) {
+    const wrap = el('div', 'settings-titleprofiles');
+    const list = el('div', 'settings-titleprofile-list');
+    const empty = el('div', 'settings-titleprofile-empty', '未配置抬头：只提示明细与金额问题，不按抬头校验。');
+    const addButton = mkBtn('添加抬头', 'small ghost', () => { const row = addRow({}); row.querySelector('[data-tp-name]').focus(); notify(); });
+    const refreshEmpty = () => { empty.hidden = list.children.length > 0; };
+    function addRow(title) {
+      const row = el('div', 'settings-titleprofile-row');
+      row.innerHTML = '<input data-tp-name placeholder="抬头名称" aria-label="抬头名称"/>'
+        + '<input data-tp-tax placeholder="税号（可选）" aria-label="税号"/>'
+        + '<button type="button" class="btn small ghost" data-tp-remove>移除</button>';
+      row.querySelector('[data-tp-name]').value = title.name || '';
+      row.querySelector('[data-tp-tax]').value = title.tax_id || '';
+      row.addEventListener('input', notify);
+      row.querySelector('[data-tp-remove]').onclick = () => { row.remove(); refreshEmpty(); notify(); };
+      list.append(row);
+      refreshEmpty();
+      return row;
+    }
+    const fill = (titles) => { list.replaceChildren(); titleList(titles).forEach((t) => addRow(t)); refreshEmpty(); };
+    fill(initial);
+    wrap.append(empty, list, addButton);
+    return {
+      node: wrap,
+      stacked: true,
+      get: () => [...list.children].map((row) => ({
+        name: row.querySelector('[data-tp-name]').value.trim(),
+        tax_id: row.querySelector('[data-tp-tax]').value.trim(),
+      })).filter((t) => t.name || t.tax_id),
+      set: fill,
+      setDisabled: (disabled) => { for (const input of wrap.querySelectorAll('input,button')) input.disabled = disabled; },
+    };
+  }
+
+  function requirementControl(initial, notify) {
+    const label = el('label', 'switch-line'), input = el('input'), text = el('span');
+    input.type = 'checkbox';
+    input.checked = initial === true;
+    const paint = () => { text.textContent = input.checked ? '必需' : '可选'; };
+    input.onchange = () => { paint(); notify(); };
+    paint();
+    label.append(input, text);
+    return {
+      node: label,
+      get: () => input.checked,
+      set: (next) => { input.checked = next === true; paint(); },
+      setDisabled: (disabled) => { input.disabled = disabled; },
+    };
+  }
+
+  function titlesRow(scheme, onChange) {
+    return buildRow({
+      key: TITLES_KEY, locked: false, onChange,
+      label: '报账抬头',
+      help: '发票识别与校验按这些抬头、税号进行，可添加其他学校或单位。新添加的抬头保存后，才能在「条目录入」里选为默认抬头。',
+      baseline: titleList(scheme.titles_baseline),
+      initial: titleList(scheme.definition.scheme.titles),
+      makeControl: (notify) => titlesControl(scheme.definition.scheme.titles, notify),
+    });
+  }
+
+  // 方案里定义了的内置材料（发票固定必需）可以开关；方案自己规定的其他材料只读列出。
+  function requirementRows(scheme, onChange) {
+    const current = scheme.requirements || {};
+    const baseline = scheme.requirements_baseline || {};
+    return REQUIREMENT_ROWS.filter(([key]) => key in current).map(([key, label, help]) => buildRow({
+      key: REQUIREMENT_PREFIX + key, locked: false, onChange, label, help,
+      baseline: baseline[key] === true,
+      initial: current[key] === true,
+      makeControl: (notify) => requirementControl(current[key] === true, notify),
+    }));
+  }
+
+  function fixedMaterialRows(scheme) {
+    const builtin = ['invoice', 'payment_screenshot', 'physical_image', 'inspection_pdf'];
+    const rows = [['invoice', '发票', '发票 PDF 或 XML；始终必需。', '必需']];
+    for (const role of scheme.definition.materials || []) {
+      if (builtin.includes(role.id) || role.id === 'other' && !(role.min_count > 0)) continue;
+      const need = role.min_count > 0 ? `必需，至少 ${role.min_count} 份` : '可选';
+      rows.push([role.id, role.label, '由方案规定，不能在这里修改。', need + (role.max_count != null ? `，最多 ${role.max_count} 份` : '')]);
+    }
+    return rows.map(([, label, help, state]) => {
+      const row = el('div', 'settings-row is-locked');
+      const copy = el('div', 'settings-row-copy');
+      copy.append(el('b', null, esc(label)), el('span', null, esc(help)));
+      row.append(copy, el('span', 'settings-fixed-required', esc(state)));
+      return row;
+    });
+  }
+
   function schemeContents(scheme) {
     const definition = scheme.definition;
-    const titles = definition.scheme.titles || [];
+    // 抬头和材料要求已经可以在上面编辑；这里只留不能在界面修改的输出与条件规则。
     const sections = [
-      ['报账抬头', titles.map((t) => `${esc(t.name)}${t.tax_id ? ` <span>税号 ${esc(t.tax_id)}</span>` : ''}`)],
-      ['材料要求', definition.materials.map((r) => `${esc(r.label)} <span>${r.min_count > 0 ? `必需，至少 ${r.min_count} 份` : '可选'}${r.max_count != null ? `，最多 ${r.max_count} 份` : ''}</span>`)],
       ['输出', definition.outputs.map((o) => `${esc(o.label)} <span>${esc(outputTypeLabels[o.type] || o.type)}</span>`)],
       ['条件规则', definition.rules.map((r) => esc(r.message))],
     ].filter(([, items]) => items.length);
+    if (!sections.length) return null;
     const block = el('details', 'settings-block scheme-contents');
-    block.innerHTML = '<summary class="settings-block-title">方案内容（只读）</summary>'
+    block.innerHTML = '<summary class="settings-block-title">其他方案内容（只读）</summary>'
       + sections.map(([title, items]) => `<div class="scheme-contents-section"><h4>${title}</h4><ul>${items.map((item) => `<li>${item}</li>`).join('')}</ul></div>`).join('');
     return block;
   }
@@ -409,6 +520,24 @@ const AdapterUI = (() => {
       }
       page.append(summary);
 
+      // 抬头与材料要求放在最前面：它们是方案的基础定义，下面的「新建默认抬头」等设置依赖抬头列表。
+      const titlesBlock = el('section', 'settings-block');
+      titlesBlock.append(el('div', 'settings-block-title', '抬头与税号'));
+      const titlesEntry = titlesRow(scheme, () => sync());
+      rows.set(TITLES_KEY, titlesEntry);
+      titlesBlock.append(titlesEntry.node);
+      page.append(titlesBlock);
+      const materialsBlock = el('section', 'settings-block');
+      materialsBlock.append(el('div', 'settings-block-title', '材料要求'));
+      const fixedRows = fixedMaterialRows(scheme);
+      materialsBlock.append(fixedRows[0]);
+      for (const entry of requirementRows(scheme, () => sync())) {
+        rows.set(entry.key, entry);
+        materialsBlock.append(entry.node);
+      }
+      materialsBlock.append(...fixedRows.slice(1));
+      page.append(materialsBlock);
+
       // 分组渲染：方案声明 hidden 的设置不显示，advanced 的收进「高级设置」，未归组的设置不丢失。
       const policies = scheme.definition.scheme.settings || {};
       const visibleKeys = Object.keys(descriptions).filter((key) => policies[key]?.presentation !== 'hidden');
@@ -437,7 +566,8 @@ const AdapterUI = (() => {
         if (advancedKeys.some((key) => rows.get(key).isDirty())) block.open = true;
         page.append(block);
       }
-      page.append(schemeContents(scheme));
+      const contents = schemeContents(scheme);
+      if (contents) page.append(contents);
       const stopped = (await Api.listSchemes(true)).filter((s) => s.disabled);
       if (stopped.length) {
         const block = el('details', 'settings-block');
@@ -470,14 +600,20 @@ const AdapterUI = (() => {
           save.disabled = true;
           try {
             // 与方案包默认值相同的项走 clear（清除本地覆盖）；其余提交具体值，空值（默认抬头选"无"）也是具体值。
-            const values = {}, clear = [];
+            const values = {}, clear = [], changes = {};
+            const requirements = {};
             for (const row of dirty) {
+              if (row.key === TITLES_KEY) { changes.titles = row.get(); continue; }
+              if (row.key.startsWith(REQUIREMENT_PREFIX)) { requirements[row.key.slice(REQUIREMENT_PREFIX.length)] = row.get(); continue; }
               const value = row.get();
               if (sameValue(value, row.baseline)) clear.push(row.key); else values[row.key] = value;
             }
-            const updated = await Api.updateSchemeSettings(scheme.id, scheme.revision_id, values, clear);
+            if (Object.keys(requirements).length) changes.material_requirements = requirements;
+            const updated = await Api.updateScheme(scheme.id, scheme.revision_id, { ...changes, settings: values, clear });
             await refresh();
             await render(scheme.id);
+            // 抬头变了：工具栏的抬头筛选、卡片色条和分组标题都要跟着更新。
+            if (changes.titles) { await refreshTitleOptions(); renderEntries(); }
             toast(updated.current_revision_id === scheme.revision_id ? '设置没有变化' : '已保存。新建条目使用新设置，已有条目沿用原规则。', 'ok');
           } catch (e) {
             showErrors(body, e);

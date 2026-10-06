@@ -78,5 +78,6 @@ def test_web_api_surface_has_title_profile_methods():
     source = (Path(__file__).resolve().parents[1] / "tidoc" / "web" / "api.js").read_text("utf-8")
 
     assert "titleProfiles: () => call('title_profiles')" in source
-    assert "setTitleProfiles: (profiles) => call('set_title_profiles', profiles || [])" in source
+    # 抬头随方案一起保存（updateScheme），界面不再单独保存抬头。
+    assert "updateScheme: (id,revision,changes) => call('update_scheme',id,revision,changes||{})" in source
     assert "takeLaunchFile: () => call('take_launch_file')" in source

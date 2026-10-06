@@ -173,3 +173,19 @@ def test_entries_expose_their_own_verification_setting(api):
     entry_id=api.entries.create(profile['id'])
     assert api.entries.get(entry_id)['verification_visible'] is True
     assert {e['id']:e for e in api.entries.list()}[entry_id]['verification_visible'] is True
+
+
+def test_titles_and_material_requirements_live_in_the_scheme_page():
+    app=(WEB/'app.js').read_text()
+    adapter=(WEB/'adapter-ui.js').read_text()
+    api=(WEB/'api.js').read_text()
+    settings=app.split('async function buildSettings',1)[1].split('// 更新对话框里的可选组件',1)[0]
+    # 设置页不再有「扩展」：抬头与材料要求属于方案，统一在方案页编辑并随「保存更改」一起提交。
+    assert '扩展' not in settings and 'data-material-requirement' not in settings and 'setTitleProfiles' not in app
+    assert "TITLES_KEY" in adapter and "REQUIREMENT_PREFIX" in adapter
+    assert 'Api.updateScheme(scheme.id, scheme.revision_id' in adapter
+    assert "updateScheme: (id,revision,changes) => call('update_scheme',id,revision,changes||{})" in api
+    assert 'setMaterialRequirements' not in api and 'setTitleProfiles' not in api
+    # 与普通设置共用未保存提示、恢复默认和一次性保存。
+    assert 'titles_baseline' in adapter and 'requirements_baseline' in adapter
+    assert "if (changes.titles) { await refreshTitleOptions(); renderEntries(); }" in adapter

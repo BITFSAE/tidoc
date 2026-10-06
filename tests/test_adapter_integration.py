@@ -239,28 +239,50 @@ def test_batch_output_settings_validate_persist_and_check_revision_constraints(t
     api.db.close()
 
 
-def test_payment_recognition_defaults_to_manual_and_existing_schemes_follow_once(tmp_path,monkeypatch):
-    from tidoc.adapters.registry import SETTINGS
-    setting=SETTINGS['assist.payment_ocr']
-    assert setting['default']=='manual'
-    # 模拟升级前建立的数据库：当时的核心默认是本地识别。
-    monkeypatch.setitem(setting,'default','local')
+def test_payment_recognition_defaults_to_manual(tmp_path):
     api=setup_api(tmp_path/'data')
-    untouched=api.adapters.get_scheme()
-    chosen=next(s for s in api.adapters.list_schemes() if s['id']!=untouched['id'])
-    api.adapters.update_scheme_settings(chosen['id'],chosen['current_revision_id'],{'assist.payment_ocr':'local'})
-    assert untouched['definition']['effective_settings']['assist.payment_ocr']=='local'
-    # 升级到新默认后首次启动：没人改过的方案跟随新默认，明确选择过的保持不变。
-    monkeypatch.setitem(setting,'default','manual')
-    api.adapters.db.conn.execute("DELETE FROM meta WHERE key='adapter.defaults.payment_ocr_manual'")
-    api.adapters.db.conn.commit()
-    api.adapters.bootstrap()
-    value=lambda scheme_id:api.adapters.get_scheme(scheme_id)['definition']['effective_settings']['assist.payment_ocr']
-    assert value(untouched['id'])=='manual'
-    assert value(chosen['id'])=='local'
-    # 只执行一次：用户之后再选本地识别不会被改回去。
-    current=api.adapters.get_scheme(untouched['id'])
-    api.adapters.update_scheme_settings(untouched['id'],current['current_revision_id'],{'assist.payment_ocr':'local'})
-    api.adapters.bootstrap()
-    assert value(untouched['id'])=='local'
+    for scheme in api.adapters.list_schemes():
+        assert scheme['definition']['effective_settings']['assist.payment_ocr']=='manual'
+    assert api.app_preference('tidoc.paymentScreenshotOcr')['data']=='0'
+    api.db.close()
+
+
+def test_update_scheme_saves_titles_requirements_and_settings_as_one_revision(tmp_path):
+    api=setup_api(tmp_path/'data')
+    scheme=api.scheme_details()['data']
+    before=len(scheme['revision_history'])
+    result=api.update_scheme(scheme['id'],scheme['current_revision_id'],{
+        'titles':[{'name':'甲单位','tax_id':'111'},{'name':'乙单位','tax_id':'222'}],
+        'material_requirements':{'payment_screenshot':True,'paid_amount':True},
+        'settings':{'print.numbering':False},
+        'clear':[],
+    })
+    assert result['ok'],result
+    saved=api.scheme_details(scheme['id'])['data']
+    assert len(saved['revision_history'])==before+1
+    assert [t['name'] for t in saved['definition']['scheme']['titles']]==['甲单位','乙单位']
+    assert saved['requirements']['payment_screenshot'] and saved['requirements']['paid_amount']
+    assert not saved['requirements']['inspection_pdf']
+    assert saved['definition']['effective_settings']['print.numbering'] is False
+    # 恢复默认所需的包基线不受本地修改影响。
+    assert saved['titles_baseline']==scheme['definition']['scheme']['titles']
+    assert saved['requirements_baseline']==scheme['requirements']
+    api.db.close()
+
+
+def test_update_scheme_clears_default_title_when_that_title_is_removed(tmp_path):
+    api=setup_api(tmp_path/'data')
+    scheme=api.scheme_details()['data']
+    first=api.update_scheme(scheme['id'],scheme['current_revision_id'],{'titles':[{'name':'甲单位','tax_id':'111'},{'name':'乙单位','tax_id':'222'}]})['data']
+    jia=next(t['id'] for t in first['definition']['scheme']['titles'] if t['name']=='甲单位')
+    second=api.update_scheme(first['id'],first['current_revision_id'],{'settings':{'entry.default_title_id':jia}})['data']
+    assert second['definition']['effective_settings']['entry.default_title_id']==jia
+    # 同一次保存里移除甲单位：默认抬头一并清空，而不是留下无效引用。
+    third=api.update_scheme(second['id'],second['current_revision_id'],{'titles':[{'name':'乙单位','tax_id':'222'}]})
+    assert third['ok'],third
+    assert third['data']['definition']['effective_settings']['entry.default_title_id'] is None
+    assert api.update_scheme(second['id'],second['current_revision_id'],{'bogus':1})['ok'] is False
+    # 旧修订号保存会被拒绝，避免覆盖别处的修改。
+    stale=api.update_scheme(second['id'],second['current_revision_id'],{'settings':{'print.numbering':False}})
+    assert stale['ok'] is False
     api.db.close()

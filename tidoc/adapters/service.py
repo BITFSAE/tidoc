@@ -5,7 +5,6 @@ from copy import deepcopy
 import hashlib
 import inspect
 import json
-import sqlite3
 import os
 from pathlib import Path
 import shutil
@@ -344,31 +343,7 @@ class AdapterService:
                 self._set_meta('adapter.legacy','1' if legacy else '0')
         for _,resource in prepared:
             self._finish_operation(resource)
-        self._follow_default_changes()
         return self.setup_state()
-
-    # 核心默认值调整后，没人改过该设置的已有方案跟着新默认走（只影响之后新建的条目，已有条目沿用创建时的修订）。
-    # 用户明确选过值、或方案包自己规定了值的，保持不动。每项调整只执行一次。
-    DEFAULT_CHANGES=(('adapter.defaults.payment_ocr_manual','assist.payment_ocr','local'),)
-
-    def _follow_default_changes(self):
-        for meta_key,setting,old_default in self.DEFAULT_CHANGES:
-            if self._meta(meta_key)=='1':
-                continue
-            for item in self.packages.list_schemes(True):
-                try:
-                    scheme=self.get_scheme(item['id'])
-                    if setting in scheme['overrides'].get('settings',{}):
-                        continue
-                    if scheme['definition']['scheme'].get('settings',{}).get(setting):
-                        continue
-                    if scheme['definition']['effective_settings'].get(setting)==old_default:
-                        self._change_definition(scheme['id'],scheme['current_revision_id'],deepcopy(scheme['overrides']))
-                except (ValueError,KeyError,sqlite3.Error):
-                    # 某个方案无法跟随新默认（例如包文件缺失）时保持原样，不能因此影响软件启动。
-                    continue
-            with self.db.transaction():
-                self._set_meta(meta_key,'1')
 
     def _has_legacy_data(self):
         return bool(self._preferences()) or any(
@@ -551,12 +526,16 @@ class AdapterService:
         result['revision_history']=self.revision_history(result['id'])
         return result
 
-    def setting_baseline(self,scheme):
-        """Effective settings as the package alone defines them, without local overrides."""
+    def package_baseline(self,scheme):
+        """The package's own definition resolved without any local overrides."""
         from .resolver import resolve_definition
         record=self.packages.revision_record(scheme['current_revision_id'])
         base=self.packages.get_package(record['content_hash'])['definition']
-        return resolve_definition(base)['effective_settings']
+        return resolve_definition(base)
+
+    def setting_baseline(self,scheme):
+        """Effective settings as the package alone defines them, without local overrides."""
+        return self.package_baseline(scheme)['effective_settings']
 
     def get_revision(self,revision_id):
         return self.packages.get_revision(revision_id)
@@ -632,13 +611,16 @@ class AdapterService:
             self.packages.set_current_revision(scheme_id,revision,overrides=overrides,expected_revision=expected_revision,commit=False)
         return self.get_scheme(scheme_id)
 
-    def update_scheme_settings(self,scheme_id,expected_revision,values,clear=()):
-        """Save changed settings; keys listed in `clear` revert to the package default.
+    def update_scheme(self,scheme_id,expected_revision,settings=None,clear=(),titles=None,material_requirements=None):
+        """Save settings, the title list and the material requirements as one new revision.
 
-        None is an explicit empty value only for nullable settings (the default title). For every
-        other setting None keeps its older meaning of "revert to the default".
+        `settings` maps names to values; names in `clear` revert to the package default. None is an
+        explicit empty value only for nullable settings (the default title). For every other
+        setting None keeps its older meaning of "revert to the default". `titles` replaces the
+        whole title list; `material_requirements` only changes the keys it contains.
         """
         from .registry import SETTINGS
+        values={} if settings is None else settings
         if not isinstance(values,dict):
             raise ValueError('设置必须是对象。')
         clear=() if clear is None else clear
@@ -648,15 +630,28 @@ class AdapterService:
             raise ValueError('同一项设置不能同时修改和恢复默认。')
         scheme=self.get_scheme(scheme_id)
         overrides=deepcopy(scheme['overrides'])
-        settings=overrides.setdefault('settings',{})
+        if titles is not None:
+            overrides['titles']=self._normalize_titles(titles,scheme['definition']['scheme'].get('titles',[]))
+        if material_requirements is not None:
+            overrides.update(self._requirements_overrides(scheme['definition'],material_requirements))
+        chosen=overrides.setdefault('settings',{})
         for key in clear:
-            settings.pop(key,None)
+            chosen.pop(key,None)
         for key,value in values.items():
             if value is None and not SETTINGS.get(key,{}).get('nullable'):
-                settings.pop(key,None)
+                chosen.pop(key,None)
             else:
-                settings[key]=value
+                chosen[key]=value
+        # 默认抬头必须是方案里的抬头：抬头被移除（或在同一次保存里被换掉）时一并清空。
+        key='entry.default_title_id'
+        default=chosen[key] if key in chosen else self.setting_baseline(scheme).get(key)
+        listed={t['id'] for t in overrides.get('titles',scheme['definition']['scheme'].get('titles',[]))}
+        if default and default not in listed:
+            chosen[key]=None
         return self._change_definition(scheme_id,expected_revision,overrides)
+
+    def update_scheme_settings(self,scheme_id,expected_revision,values,clear=()):
+        return self.update_scheme(scheme_id,expected_revision,settings=values,clear=clear)
 
     def restore_setting_defaults(self,scheme_id,expected_revision,keys=None):
         overrides=self.get_scheme(scheme_id)['overrides'].get('settings',{})
@@ -687,12 +682,7 @@ class AdapterService:
 
     def update_titles(self,profiles,scheme_id=None,expected_revision=None):
         scheme=self.get_scheme(scheme_id)
-        overrides=deepcopy(scheme['overrides'])
-        overrides['titles']=self._normalize_titles(profiles,scheme['definition']['scheme'].get('titles',[]))
-        current=scheme['definition']['effective_settings'].get('entry.default_title_id')
-        if current and current not in {t['id'] for t in overrides['titles']}:
-            overrides.setdefault('settings',{})['entry.default_title_id']=None
-        return self._change_definition(scheme['id'],expected_revision or scheme['current_revision_id'],overrides)
+        return self.update_scheme(scheme['id'],expected_revision or scheme['current_revision_id'],titles=profiles)
 
     @staticmethod
     def _requirements_overrides(definition,requirements):
@@ -714,17 +704,18 @@ class AdapterService:
                 rules.append({'id':'legacy_paid_amount_required','stage':'complete','when':{'all':[]},'require':[{'field':'invoice.paid_amount'}], 'message':'请填写实付金额。'})
         return {'materials':materials,'rules':rules}
 
-    def material_requirements(self,scheme_id=None):
-        definition=self.get_scheme(scheme_id)['definition']
+    @staticmethod
+    def requirements_of(definition):
         result={r['id']:r.get('min_count',0)>0 for r in definition['materials'] if r['id'] in ('invoice','payment_screenshot','physical_image','inspection_pdf')}
         result['paid_amount']=any(any(q.get('field') in ('invoice.paid_amount','entry.paid_amount') for q in r.get('require',[])) and r.get('when',{'all':[]})=={'all':[]} for r in definition['rules'])
         return result
 
+    def material_requirements(self,scheme_id=None):
+        return self.requirements_of(self.get_scheme(scheme_id)['definition'])
+
     def update_material_requirements(self,requirements,scheme_id=None,expected_revision=None):
         scheme=self.get_scheme(scheme_id)
-        overrides=deepcopy(scheme['overrides'])
-        overrides.update(self._requirements_overrides(scheme['definition'],requirements))
-        self._change_definition(scheme['id'],expected_revision or scheme['current_revision_id'],overrides)
+        self.update_scheme(scheme['id'],expected_revision or scheme['current_revision_id'],material_requirements=requirements)
         return self.material_requirements(scheme['id'])
 
     @staticmethod

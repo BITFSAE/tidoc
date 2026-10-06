@@ -281,7 +281,12 @@ class Api:
     def scheme_details(self, scheme_id=None):
         scheme = self.adapters.get_scheme(scheme_id)
         # 方案包自身给出的设置值（不含本地覆盖）：界面据此标出已自定义的项，并只保存真正改动的项。
-        scheme["settings_baseline"] = self.adapters.setting_baseline(scheme)
+        baseline = self.adapters.package_baseline(scheme)
+        scheme["settings_baseline"] = baseline["effective_settings"]
+        # 抬头与材料要求同理：界面据此标出已自定义的项，并提供「恢复默认」。
+        scheme["titles_baseline"] = baseline["scheme"].get("titles", [])
+        scheme["requirements_baseline"] = self.adapters.requirements_of(baseline)
+        scheme["requirements"] = self.adapters.requirements_of(scheme["definition"])
         return scheme
 
     @_guard
@@ -338,6 +343,17 @@ class Api:
     @_guard
     def disable_scheme(self,scheme_id):
         return self.adapters.disable_scheme(scheme_id)
+
+    @_guard
+    def update_scheme(self,scheme_id,expected_revision,changes=None):
+        """一次保存方案的设置、抬头和材料要求，只生成一个新修订。"""
+        changes=changes or {}
+        unknown=set(changes)-{"settings","clear","titles","material_requirements"}
+        if unknown:
+            raise ValueError("方案更改包含未知项："+"、".join(sorted(unknown)))
+        return self.adapters.update_scheme(scheme_id,expected_revision,
+            settings=changes.get("settings"),clear=changes.get("clear"),
+            titles=changes.get("titles"),material_requirements=changes.get("material_requirements"))
 
     @_guard
     def update_scheme_settings(self,scheme_id,expected_revision,values,clear=None):

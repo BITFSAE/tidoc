@@ -2,7 +2,7 @@
   "format": "tidoc-team-adapter",
   "schema_version": "1.0",
   "package_id": "org.tidoc.generic",
-  "package_version": "1.0.0",
+  "package_version": "1.0.1",
   "name": "通用报账",
   "description": "通用报账的材料与输出规则。",
   "author": "Tidoc",
@@ -13,7 +13,8 @@
       "output.attachments.v1",
       "output.docx.v1",
       "output.pdf.v1",
-      "output.xlsx.v1"
+      "output.xlsx.v1",
+      "rules.v1"
     ]
   }
 }

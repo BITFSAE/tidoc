@@ -3092,7 +3092,6 @@ async function openSettings(options = {}) {
 
 async function buildSettings(options = {}) {
   let paths, printStatus, appInfo, multiMode;
-  let materialRequirementsMode;
   let autoUpdateMode, maintenance, verificationPrefs, ocrStatus, showCreatedAtMode;
   const themeMode = State.themeMode;
   try {
@@ -3103,17 +3102,14 @@ async function buildSettings(options = {}) {
     maintenance = await Api.storageMaintenanceStatus();
     const prefValues = await Promise.all([
       Api.appPreference(MULTI_CLAIMANT_KEY, State.multiClaimantMode ? '1' : '0'),
-      Api.materialRequirements(),
       Api.appPreference(AUTO_UPDATE_KEY, '1'),
       Api.invoiceVerificationPreferences(),
       Api.appPreference(SHOW_CREATED_AT_KEY, '0'),
     ]);
     multiMode = prefValues[0] === '1';
-    materialRequirementsMode = { ...(prefValues[1] || {}) };
-    autoUpdateMode = prefValues[2] === '1';
-    verificationPrefs = prefValues[3];
-    showCreatedAtMode = prefValues[4] === '1';
-    State.materialRequirements = materialRequirementsMode;
+    autoUpdateMode = prefValues[1] === '1';
+    verificationPrefs = prefValues[2];
+    showCreatedAtMode = prefValues[3] === '1';
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
 
@@ -3135,7 +3131,7 @@ async function buildSettings(options = {}) {
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>报账方案</b>
-            <span>当前使用「${esc(State.scheme?.name || '未选择')}」。新建默认抬头、实付初值、付款识别、绑定包内容和输出默认值都在这里设置</span>
+            <span>当前使用「${esc(State.scheme?.name || '未选择')}」。抬头与税号、材料要求、新建默认值、付款识别、绑定包内容和输出默认值都在这里设置</span>
           </div>
           <button class="btn small" id="setAdapters">管理</button>
         </div>
@@ -3214,43 +3210,6 @@ async function buildSettings(options = {}) {
           <label class="switch-line"><input type="checkbox" id="setShowCreatedAt" ${showCreatedAtMode ? 'checked' : ''}/><span>${showCreatedAtMode ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
-
-      <!-- 扩展 -->
-      <details class="settings-block">
-        <summary class="settings-block-title">扩展</summary>
-        <div class="settings-requirements-head">
-          <div class="settings-row-copy">
-            <b>抬头与税号</b>
-            <span>发票识别与校验按这些抬头、税号进行，可添加其他学校或单位</span>
-          </div>
-        </div>
-        <div id="setTitleProfiles" class="settings-titleprofile-list"></div>
-        <div class="settings-row-actions">
-          <button class="btn small ghost" id="setTpAdd">添加抬头</button>
-        </div>
-        <div class="settings-requirements-head">
-          <div class="settings-row-copy">
-            <b>材料要求</b>
-            <span>只有标为“必需”的项目会影响条目的材料齐备状态</span>
-          </div>
-        </div>
-        <div class="settings-requirement-list">
-          <div class="settings-requirement-row">
-            <div class="settings-row-copy"><b>发票</b><span>发票 PDF 或 XML</span></div>
-            <span class="settings-fixed-required">必需</span>
-          </div>
-          ${[
-            ['payment_screenshot', '付款截图', '付款凭证图片'],
-            ['physical_image', '实物图', '物资照片'],
-            ['inspection_pdf', '查验单', '发票查验单 PDF'],
-            ['paid_amount', '实付金额', '实际支付金额'],
-          ].map(([key, label, hint]) => `
-            <div class="settings-requirement-row">
-              <div class="settings-row-copy"><b>${label}</b><span>${hint}</span></div>
-              <label class="switch-line"><input type="checkbox" data-material-requirement="${key}" ${materialRequirementsMode[key] ? 'checked' : ''}/><span>${materialRequirementsMode[key] ? '必需' : '可选'}</span></label>
-            </div>`).join('')}
-        </div>
-      </details>
 
       <!-- 查验单归档 -->
       <div class="settings-block">
@@ -3402,86 +3361,6 @@ async function buildSettings(options = {}) {
     } finally {
       themeSelect.disabled = false;
     }
-  };
-  body.querySelectorAll('[data-material-requirement]').forEach((input) => {
-    input.onchange = async () => {
-      const key = input.dataset.materialRequirement;
-      const enabled = input.checked;
-      const label = input.nextElementSibling;
-      input.disabled = true;
-      try {
-        const next = { ...State.materialRequirements, [key]: enabled, invoice: true };
-        State.materialRequirements = await Api.setMaterialRequirements(next);
-        label.textContent = enabled ? '必需' : '可选';
-        await loadBatches();
-        await refreshEntries();
-        toast(`${key === 'paid_amount' ? '实付金额' : key === 'payment_screenshot' ? '付款截图' : key === 'physical_image' ? '实物图' : '查验单'}已设为${enabled ? '必需' : '可选'}`, 'ok');
-      } catch (e) {
-        input.checked = !enabled;
-        toast(e.message, 'err');
-      } finally {
-        input.disabled = false;
-      }
-    };
-  });
-  // 抬头与税号配置：就地编辑，失焦/移除即保存，并同步各处抬头下拉。
-  const tpList = body.querySelector('#setTitleProfiles');
-  const titleProfileRowHtml = (profile = {}) => `
-    <input data-tp-name placeholder="抬头名称" value="${esc(profile.name || '')}"/>
-    <input data-tp-tax placeholder="税号（可选）" value="${esc(profile.tax_id || '')}"/>
-    <button type="button" class="btn small ghost" data-tp-remove title="移除该抬头">移除</button>`;
-  const renderTitleProfileRows = () => {
-    tpList.innerHTML = '';
-    State.titleProfiles.forEach((profile) => {
-      tpList.appendChild(el('div', 'settings-titleprofile-row', titleProfileRowHtml(profile)));
-    });
-    if (!State.titleProfiles.length) {
-      tpList.appendChild(el('div', 'settings-titleprofile-empty', '未配置抬头：只提示明细与金额问题，不按抬头校验。'));
-    }
-  };
-  const refillSettingsTitleSelects = () => {
-    const defSel = body.querySelector('#setDefaultTitle');
-    const current = defSel.value;
-    const titles = State.titleOptions.length ? State.titleOptions : configuredTitleNames();
-    defSel.innerHTML = '<option value="">全部</option>' + titles.map((title) =>
-      `<option value="${esc(title)}"${title === current ? ' selected' : ''}>${esc(TITLE_SHORT[title] || title)}</option>`).join('');
-    if (current && !titles.includes(current)) {
-      defSel.value = '';
-      State.activeTitle = '';
-    }
-  };
-  const saveTitleProfiles = async () => {
-    const profiles = [...tpList.querySelectorAll('.settings-titleprofile-row')].map((row) => ({
-      name: row.querySelector('[data-tp-name]').value.trim(),
-      tax_id: row.querySelector('[data-tp-tax]').value.trim(),
-    })).filter((profile) => profile.name || profile.tax_id);
-    try {
-      await Api.setTitleProfiles(profiles);
-      // 方案会在抬头被移除时清掉失效的默认抬头；统一从方案重新读取，抬头、颜色和默认值保持一致。
-      await AdapterUI.refresh();
-      renderTitleProfileRows();
-      await refreshTitleOptions();
-      refillSettingsTitleSelects();
-      renderEntries();   // 卡片色条和分组标题的颜色随抬头列表变化
-      toast('抬头与税号已保存', 'ok');
-    } catch (e) { toast(e.message, 'err'); }
-  };
-  renderTitleProfileRows();
-  tpList.addEventListener('click', (ev) => {
-    const remove = ev.target.closest('[data-tp-remove]');
-    if (remove) {
-      remove.closest('.settings-titleprofile-row').remove();
-      saveTitleProfiles();
-    }
-  });
-  tpList.addEventListener('change', (ev) => {
-    if (ev.target.matches('[data-tp-name], [data-tp-tax]')) saveTitleProfiles();
-  });
-  body.querySelector('#setTpAdd').onclick = () => {
-    renderTitleProfileRows();
-    const row = el('div', 'settings-titleprofile-row', titleProfileRowHtml());
-    tpList.appendChild(row);
-    row.querySelector('[data-tp-name]').focus();
   };
   body.querySelector('#setMultiClaimant').onchange = async (ev) => {
     const enabled = ev.target.checked;

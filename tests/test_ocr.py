@@ -1236,7 +1236,7 @@ def test_install_ocr_component_from_local_manifest(tmp_path):
     from tidoc.services.updater import install_ocr_component, installed_component_info, sha256_file
 
     artifact = tmp_path / "tidoc_ocr"
-    artifact.write_text("#!/bin/sh\nexit 0\n")
+    artifact.write_text("#!/bin/sh\nexit 0\n",'utf-8')
     manifest = {
         "components": {
             "ocr": {

@@ -172,9 +172,9 @@ def test_install_refreshes_digest_even_with_same_size_mtime(storage):
     preview=service.inspect_adapter(path)
     file=path/'manifest.json'
     stamp=file.stat()
-    data=file.read_text().replace('Storage fixture','Changed fixture')
-    assert len(data)==len(file.read_text())
-    file.write_text(data)
+    data=file.read_text('utf-8').replace('Storage fixture','Changed fixture')
+    assert len(data)==len(file.read_text('utf-8'))
+    file.write_text(data,'utf-8')
     import os
     os.utime(file,ns=(stamp.st_atime_ns,stamp.st_mtime_ns))
     before=db.conn.execute('SELECT COUNT(*) FROM schemes').fetchone()[0]
@@ -228,9 +228,9 @@ def test_unbound_source_adapter_values_are_read_only_form_history(storage,tmp_pa
 
 def test_same_package_version_different_contents_is_conflict(storage):
     _,_,service,_,path=storage
-    manifest=json.loads((path/'manifest.json').read_text())
+    manifest=json.loads((path/'manifest.json').read_text('utf-8'))
     manifest['name']='Other'
-    (path/'manifest.json').write_text(json.dumps(manifest))
+    (path/'manifest.json').write_text(json.dumps(manifest),'utf-8')
     with pytest.raises(ValueError,match='同版本'):
         service.inspect_adapter(path)
 
@@ -565,7 +565,7 @@ def test_data_root_migration_rolls_back_all_directories(tmp_path,monkeypatch):
     root=DataRoot(tmp_path/'old')
     (root.adapter_packages_dir/'retained').mkdir()
     (root.export_jobs_dir/'job').mkdir()
-    (root.backups_dir/'backup').write_text('backup')
+    (root.backups_dir/'backup').write_text('backup','utf-8')
     import shutil
     real=shutil.move
     calls=[]
@@ -579,7 +579,7 @@ def test_data_root_migration_rolls_back_all_directories(tmp_path,monkeypatch):
         root.migrate_to(tmp_path/'new')
     assert (root.adapter_packages_dir/'retained').exists()
     assert (root.export_jobs_dir/'job').exists()
-    assert (root.backups_dir/'backup').read_text()=='backup'
+    assert (root.backups_dir/'backup').read_text('utf-8')=='backup'
     monkeypatch.setattr(shutil,'move',real)
     new=root.migrate_to(tmp_path/'new')
     assert (new/'adapters/packages/retained').exists()

@@ -194,7 +194,7 @@ def _transfer_source(tmp_path):
     person=api.profiles.create('虚构报账人','')
     eid=api.entries.create(person['id'],parsed=ParsedInvoice(total=Decimal('5.00'),invoice_no='PORTABLE-1'))
     api.adapters.save_extension_values('entry',eid,{'public':'项目甲','phone':'001234','private':'NEVER-SEND'})
-    material=tmp_path/'invoice.xml';material.write_text('<invoice/>')
+    material=tmp_path/'invoice.xml';material.write_text('<invoice/>','utf-8')
     api.attachments.add(eid,material,'invoice_xml')
     api.entries.recompute_status(eid)
     path=bindle_service.export_bindle(api.entries,api.attachments,[eid],tmp_path/'source.tidoc',
@@ -464,7 +464,7 @@ def test_mixed_pinned_transfer_defaults_filter_entry_and_summary_together(tmp_pa
         api.entries.update_field(entry_id,'notes',f'note-{index}',profile['id'])
         api.entries.set_meta(entry_id,tags=[f'tag-{index}'])
         attachment=tmp_path/f'attachment-{index}.txt'
-        attachment.write_text(f'attachment-{index}')
+        attachment.write_text(f'attachment-{index}','utf-8')
         api.attachments.add(entry_id,attachment,'other',f'attachment-note-{index}')
         entry_ids.append(entry_id)
     try:
@@ -540,7 +540,7 @@ def test_mixed_pinned_transfer_defaults_filter_entry_and_summary_together(tmp_pa
         api.entries.update_field(entry_id,'notes',f'note-{index}',profile['id'])
         api.entries.set_meta(entry_id,tags=[f'tag-{index}'])
         attachment=tmp_path/f'attachment-{index}.txt'
-        attachment.write_text(f'attachment-{index}')
+        attachment.write_text(f'attachment-{index}','utf-8')
         api.attachments.add(entry_id,attachment,'other',f'attachment-note-{index}')
         entry_ids.append(entry_id)
     try:

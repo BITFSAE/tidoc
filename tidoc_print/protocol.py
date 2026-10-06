@@ -237,7 +237,10 @@ def convert_v1_request(request):
     for entry in source:
         for key in ('invoice_pdfs','payment_images','inspection_pdfs','physical_images'):
             paths += [Path(path).resolve() for path in entry.get(key,[])]
-    root = Path(os.path.commonpath([str(path.parent) for path in paths]))
+    try:
+        root = Path(os.path.commonpath([str(path.parent) for path in paths]))
+    except ValueError as exc:  # Windows: materials and component templates on different drives
+        raise ProtocolError('旧版打印请求的材料与打印组件不在同一磁盘，无法转换', 'UNSAFE_RESOURCE_PATH') from exc
     # Organization values belong to the canonical installed builtin definition.
     builtin = _component_resource(LEGACY_SCHEME, package='tidoc')
     try:
@@ -255,7 +258,7 @@ def convert_v1_request(request):
         attachments = []
         for key, role, kind in (('invoice_pdfs','invoice','invoice_pdf'),('payment_images','payment_screenshot','payment_screenshot'),('inspection_pdfs','inspection_pdf','inspection_pdf'),('physical_images','physical_image','physical_image')):
             for ri,path in enumerate(entry.get(key,[])):
-                attachments.append({'id':f'{eid}-{key}-{ri}','role_id':role,'type':kind,'original_name':Path(path).name,'stored_path':str(Path(path).resolve().relative_to(root))})
+                attachments.append({'id':f'{eid}-{key}-{ri}','role_id':role,'type':kind,'original_name':Path(path).name,'stored_path':Path(path).resolve().relative_to(root).as_posix()})
         data = {'id':eid,'title':entry.get('title',''),'title_profile_id':entry.get('title_profile_id') or ('legacy:'+str(entry.get('title',''))),'buyer_tax_id':entry.get('buyer_tax_id',''),'invoice_no':entry.get('invoice_no',''),'invoice_date':entry.get('invoice_date',''),'seller':entry.get('seller',''),'total':entry.get('total'),'total_present':entry.get('total_present'),'profile_id':eid,'profile_name':entry.get('profile_name',''),'reviewer':entry.get('reviewer',''),'fields':{'paid_amount':{'current':entry.get('paid_amount')}},'items':[{**item,'name':item.get('product_name') or item.get('actual_name','')} for item in entry.get('items',[])], 'attachments':attachments}
         old_payee = profiles.get(eid)
         payee = {'id':eid,'name':old_payee.get('person_name',''),'personnel_id':old_payee.get('student_id',''),'contact':old_payee.get('contact',''),'account_type':'personal_bank','bank_name':old_payee.get('bank_name',''),'account_number':old_payee.get('bank_card','')} if old_payee else None
@@ -290,7 +293,7 @@ def convert_v1_request(request):
                 directory += '_' + hashlib.sha256(repr((title,tax,payee)).encode()).hexdigest()[:8]
             item = {'output':output,'context':context,'filename':directory+'/'+name,'resources':resources,'group_id':str(group_index)}
             if template:
-                item['template']=str(template.resolve().relative_to(root))
+                item['template']=template.resolve().relative_to(root).as_posix()
             files.append(item)
     if not files:
         raise ProtocolError('没有选中的可生成输出')

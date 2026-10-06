@@ -60,7 +60,7 @@ def test_xml_missing_zero_negative_and_precise_amounts(tmp_path):
     claimant=api.create_profile('测试人员','')['data']
     for index,value in enumerate(('', '0.00', '-12.30','12.3456')):
         path=tmp_path/f'{index}.xml'
-        path.write_text(f'<root><EIid>{index}</EIid><BuyerName>虚构单位</BuyerName><TotalTax-includedAmount>{value}</TotalTax-includedAmount></root>')
+        path.write_text(f'<root><EIid>{index}</EIid><BuyerName>虚构单位</BuyerName><TotalTax-includedAmount>{value}</TotalTax-includedAmount></root>','utf-8')
         parsed=parse_xml(path)
         eid=api.entries.create(claimant['id'],parsed=parsed)
         entry=api.entries.get(eid)
@@ -123,7 +123,7 @@ def test_real_lab_conditional_role_fields_and_reclassification(tmp_path):
     api.set_default_scheme(scheme['id'])
     claimant=api.create_profile('虚构人员','')['data']
     eid=api.entries.create(claimant['id'],parsed=ParsedInvoice(total=Decimal('1200'),source='xml',invoice_no='LAB-1'))
-    invoice=tmp_path/'invoice.xml';invoice.write_text('<invoice/>')
+    invoice=tmp_path/'invoice.xml';invoice.write_text('<invoice/>','utf-8')
     api.attachments.add(eid,invoice,'invoice_xml')
     entry=api.entries.get(eid)
     assert any(d['code']=='RULE_CONDITION_PENDING' for d in entry['diagnostics'])
@@ -149,14 +149,14 @@ def test_live_form_preview_uses_real_entry_context_and_never_saves(tmp_path):
     import shutil
     source=Path(__file__).resolve().parents[1]/'examples/adapters/lab'
     package=tmp_path/'lab-preview';shutil.copytree(source,package)
-    fields_path=package/'fields.json';data=json.loads(fields_path.read_text())
+    fields_path=package/'fields.json';data=json.loads(fields_path.read_text('utf-8'))
     data['fields'].append({'id':'trigger','scope':'entry','label':'显示开关','type':'text',
         'required_at':[],'presentation':'visible','sensitive':False,'transfer':'include'})
     purpose=next(field for field in data['fields'] if field['id']=='purpose')
     purpose['visible_when']={'all':[
         {'field':'entry.fields.trigger','op':'eq','value':'yes'},
         {'field':'invoice.paid_amount','op':'gte','value':'4.00'}]}
-    fields_path.write_text(json.dumps(data,ensure_ascii=False))
+    fields_path.write_text(json.dumps(data,ensure_ascii=False),'utf-8')
     api=setup_api(tmp_path/'data')
     result=api.inspect_adapter(str(package));assert result['ok'],result
     scheme=api.install_adapter((result.get('data') or result)['preview_id'])['data']
@@ -226,11 +226,11 @@ def test_batch_output_settings_validate_persist_and_check_revision_constraints(t
     import shutil
     fixed_package=tmp_path/'fixed-setting';shutil.copytree(
         Path(__file__).resolve().parents[1]/'examples/adapters/minimal',fixed_package)
-    manifest_path=fixed_package/'manifest.json';manifest=json.loads(manifest_path.read_text())
-    manifest['package_id']='org.tidoc.test.fixed-batch-output';manifest_path.write_text(json.dumps(manifest))
-    scheme_path=fixed_package/'scheme.json';scheme=json.loads(scheme_path.read_text())
+    manifest_path=fixed_package/'manifest.json';manifest=json.loads(manifest_path.read_text('utf-8'))
+    manifest['package_id']='org.tidoc.test.fixed-batch-output';manifest_path.write_text(json.dumps(manifest),'utf-8')
+    scheme_path=fixed_package/'scheme.json';scheme=json.loads(scheme_path.read_text('utf-8'))
     scheme['settings']={'print.numbering':{'fixed':True,'editable':False,'presentation':'visible'}}
-    scheme_path.write_text(json.dumps(scheme))
+    scheme_path.write_text(json.dumps(scheme),'utf-8')
     inspected=api.inspect_adapter(str(fixed_package));assert inspected['ok'],inspected
     fixed=api.install_adapter((inspected.get('data') or inspected)['preview_id'])['data']
     api.batches.set_default_binding(batch['id'],fixed['id'],fixed['current_revision_id'])

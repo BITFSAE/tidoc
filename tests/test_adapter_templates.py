@@ -126,13 +126,13 @@ def test_source_and_executable_same_v2_protocol_and_semantics(tmp_path):
     assert Path(direct['files'][0]['path']).exists()
     req['output_dir']=str(tmp_path/'external')
     input_path=tmp_path/'input.json';output_path=tmp_path/'result.json'
-    input_path.write_text(json.dumps(req,ensure_ascii=False))
-    proc=subprocess.run([sys.executable,'-m','tidoc_print','--input',str(input_path),'--result',str(output_path)],text=True,capture_output=True,timeout=20)
+    input_path.write_text(json.dumps(req,ensure_ascii=False),'utf-8')
+    proc=subprocess.run([sys.executable,'-m','tidoc_print','--input',str(input_path),'--result',str(output_path)],text=True,encoding='utf-8',capture_output=True,timeout=20)
     assert proc.returncode==0,proc.stderr
-    result=json.loads(output_path.read_text())
+    result=json.loads(output_path.read_text('utf-8'))
     assert result['ok']
     assert Document(result['data']['files'][0]['path']).paragraphs[0].text==Document(direct['files'][0]['path']).paragraphs[0].text
-    cap=subprocess.run([sys.executable,'-m','tidoc_print','--capabilities'],text=True,capture_output=True,timeout=10)
+    cap=subprocess.run([sys.executable,'-m','tidoc_print','--capabilities'],text=True,encoding='utf-8',capture_output=True,timeout=10)
     assert json.loads(cap.stdout)['ipc_versions']==[1,2]
 
 
@@ -188,7 +188,7 @@ def test_material_pdf_all_custom_roles_layout_a4_and_original_unchanged(tmp_path
     assert 'CUSTOM' in pages[-1].extract_text()
     assert 'No.' not in PdfReader(invoice).pages[0].extract_text()
     assert float(PdfReader(invoice).pages[0].mediabox.width)==300
-    (root/'unsupported.txt').write_text('raw')
+    (root/'unsupported.txt').write_text('raw','utf-8')
     with pytest.raises(ValueError,match='不能转换'):
         render_pdf_bundle(context(),{'pdf':{'include_roles':['custom:test:contract']}},[{'entry_id':'one','role_id':'custom:test:contract','path':'unsupported.txt'}],root,tmp_path/'invalid.pdf')
 
@@ -226,7 +226,7 @@ from tidoc_print.context import context_field_catalog
 from tidoc.adapters.registry import FIELD_CATALOG
 assert context_field_catalog()==FIELD_CATALOG
 '''
-    result=subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,timeout=10)
+    result=subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,encoding='utf-8',timeout=10)
     assert result.returncode==0,result.stderr
 
 
@@ -290,7 +290,7 @@ def test_missing_frozen_legacy_scheme_is_explicit_and_v2_still_works(tmp_path,mo
 
 def test_invalid_packaged_catalog_is_not_misreported_as_bad_template(tmp_path,monkeypatch):
     root=frozen_resources(tmp_path,monkeypatch)
-    (root/'tidoc_print/context_fields.json').write_text('{"title.name":"unknown"}')
+    (root/'tidoc_print/context_fields.json').write_text('{"title.name":"unknown"}','utf-8')
     template=make_template(tmp_path/'template.docx')
     assert validate_template(template)[0]['code']=='INVALID_CONTEXT_CATALOG'
 
@@ -334,7 +334,7 @@ def test_arbitrary_three_word_output_ids_source_and_cli_match(tmp_path):
     direct=render_request(req)
     req['output_dir']=str(tmp_path/'cli-out')
     result_path=run_cli(tmp_path,req)
-    response=json.loads(result_path.read_text())
+    response=json.loads(result_path.read_text('utf-8'))
     assert response['ok'],response
     assert len(direct['files'])==len(response['data']['files'])==3
     assert [f['output_id'] for f in response['data']['files']]==['purchase_request','settlement','equipment_record']
@@ -345,9 +345,9 @@ def test_arbitrary_three_word_output_ids_source_and_cli_match(tmp_path):
 def run_cli(tmp_path,payload,*args):
     input_path=tmp_path/'cli-request.json';result_path=tmp_path/'cli-result.json'
     input_path.write_text(json.dumps(payload,ensure_ascii=False),'utf-8')
-    proc=subprocess.run([sys.executable,'-m','tidoc_print','--input',str(input_path),'--result',str(result_path),*args],capture_output=True,text=True,timeout=20)
+    proc=subprocess.run([sys.executable,'-m','tidoc_print','--input',str(input_path),'--result',str(result_path),*args],capture_output=True,text=True,encoding='utf-8',timeout=20)
     assert result_path.exists(),proc.stderr
-    assert (proc.returncode==0)==json.loads(result_path.read_text())['ok']
+    assert (proc.returncode==0)==json.loads(result_path.read_text('utf-8'))['ok']
     return result_path
 
 
@@ -355,7 +355,7 @@ def test_v1_cli_and_source_share_defaults_and_semantics(tmp_path):
     payload=legacy_request(tmp_path)
     direct=render_request(payload)
     payload['out_dir']=str(tmp_path/'cli-out')
-    response=json.loads(run_cli(tmp_path,payload).read_text())
+    response=json.loads(run_cli(tmp_path,payload).read_text('utf-8'))
     assert response['ok'],response
     assert [f['output_id'] for f in direct['files']]==['reimburse_doc','acceptance_doc']
     for expected,actual in zip(direct['files'],response['data']['files']):
@@ -377,7 +377,7 @@ def test_cli_cancel_timeout_for_both_protocols_never_publish(tmp_path,version,fa
         cancel=tmp_path/'cancel';cancel.touch();args=['--cancel-file',str(cancel)]
     else:
         args=['--timeout','0.000000001']
-    response=json.loads(run_cli(tmp_path,req,*args).read_text())
+    response=json.loads(run_cli(tmp_path,req,*args).read_text('utf-8'))
     assert not response['ok']
     assert response['code']==('EXPORT_CANCELED' if failure=='cancel' else 'EXPORT_TIMEOUT')
     assert not Path(req.get('out_dir') or req['output_dir']).exists()
@@ -457,12 +457,12 @@ def test_runtime_rejects_malformed_context_before_any_output(tmp_path,mutation,l
     assert 'PRIVATE' not in json.dumps(error.value.diagnostics)
     assert not Path(req['output_dir']).exists()
     assert not list(tmp_path.glob('.tidoc-print-*'))
-    source=tmp_path/'request.json';source.write_text(json.dumps(req))
+    source=tmp_path/'request.json';source.write_text(json.dumps(req),'utf-8')
     result=tmp_path/'result.json'
     proc=subprocess.run([sys.executable,'-m','tidoc_print','--input',str(source),
-                         '--result',str(result)],capture_output=True,text=True,timeout=20)
+                         '--result',str(result)],capture_output=True,text=True,encoding='utf-8',timeout=20)
     assert proc.returncode==1
-    external=json.loads(result.read_text())
+    external=json.loads(result.read_text('utf-8'))
     assert external['code']==error.value.code
     assert external['diagnostics']==error.value.diagnostics
     assert not Path(req['output_dir']).exists()

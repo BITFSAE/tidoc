@@ -192,7 +192,7 @@ class ExportPlanner:
         path=confined_path(base,output['template'])
         if not path.is_relative_to(self.root):
             raise ValueError('模板不在不可变方案资源目录内')
-        return {'path':str(path.relative_to(self.root)),'sha256':resource_digest(path),'kind':'template'}
+        return {'path':path.relative_to(self.root).as_posix(),'sha256':resource_digest(path),'kind':'template'}
 
     def _resources(self,entries,output):
         resources=[]
@@ -208,7 +208,7 @@ class ExportPlanner:
                 if output['type'] in ('docx','xlsx'):continue
                 if output['type']=='pdf_bundle' and role=='invoice' and att.get('type')=='invoice_xml':continue
                 source=confined_path(self.root/'attachments',att['stored_path'])
-                resources.append({'id':att.get('id') or f'{entry["id"]}-{index}','entry_id':entry['id'],'path':str(source.relative_to(self.root)),'sha256':resource_digest(source),'role_id':role,'original_name':att.get('original_name') or source.name,'label':role_defs.get(role,{}).get('label') or att.get('role_label') or ''})
+                resources.append({'id':att.get('id') or f'{entry["id"]}-{index}','entry_id':entry['id'],'path':source.relative_to(self.root).as_posix(),'sha256':resource_digest(source),'role_id':role,'original_name':att.get('original_name') or source.name,'label':role_defs.get(role,{}).get('label') or att.get('role_label') or ''})
         return resources
 
     def _preflight(self,context,definition,output,raw_entries,resources,template=None,generic=False):

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def run_cli(*args):
-    return subprocess.run([sys.executable, "-m", "tidoc.adapter_tools", *map(str, args)], cwd=ROOT, text=True, capture_output=True)
+    return subprocess.run([sys.executable, "-m", "tidoc.adapter_tools", *map(str, args)], cwd=ROOT, text=True,encoding='utf-8', capture_output=True)
 
 
 def test_cli_validate_json_and_diagnostic_exit(tmp_path):

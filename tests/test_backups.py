@@ -23,11 +23,11 @@ def test_prune_keeps_the_newest_and_only_touches_upgrade_backups(tmp_path):
     folder = tmp_path / 'backups'
     names = [f'tidoc-before-{letter}.sqlite' for letter in 'abcde']
     make_backups(folder, names)
-    (folder / 'notes.txt').write_text('mine')
-    (folder / 'tidoc-before-x.sqlite.tmp').write_text('partial')
+    (folder / 'notes.txt').write_text('mine','utf-8')
+    (folder / 'tidoc-before-x.sqlite.tmp').write_text('partial','utf-8')
     (folder / 'tidoc-before-dir.sqlite').mkdir()
     outside = tmp_path / 'outside.sqlite'
-    outside.write_text('not a backup')
+    outside.write_text('not a backup','utf-8')
     (folder / 'tidoc-before-link.sqlite').symlink_to(outside)
 
     assert [item['name'] for item in list_backups(folder)] == names[::-1]
@@ -36,10 +36,10 @@ def test_prune_keeps_the_newest_and_only_touches_upgrade_backups(tmp_path):
     assert result['size'] == 1 + 2 + 3
     assert [item['name'] for item in list_backups(folder)] == ['tidoc-before-e.sqlite', 'tidoc-before-d.sqlite']
     # everything that is not a regular upgrade backup is left alone
-    assert (folder / 'notes.txt').read_text() == 'mine'
+    assert (folder / 'notes.txt').read_text('utf-8') == 'mine'
     assert (folder / 'tidoc-before-x.sqlite.tmp').exists()
     assert (folder / 'tidoc-before-dir.sqlite').is_dir()
-    assert (folder / 'tidoc-before-link.sqlite').is_symlink() and outside.read_text() == 'not a backup'
+    assert (folder / 'tidoc-before-link.sqlite').is_symlink() and outside.read_text('utf-8') == 'not a backup'
     assert prune_backups(folder, keep=2)['count'] == 0
     for bad in (0, -1, True, '2', None):
         with pytest.raises(ValueError, match='至少'):

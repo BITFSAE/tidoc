@@ -1,11 +1,20 @@
 """测试夹具：真实发票样本目录 + 临时数据根。"""
 
 import glob
+import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
 SAMPLE_DIR = "/Users/poli/invoice2docx/invoices"
+
+
+def pytest_configure(config):
+    # Windows CI checks the repo out on D: but keeps TEMP on C:. Tests that combine repo
+    # resources with temporary files need both on one drive, so default basetemp to the repo.
+    if os.name == "nt" and not config.option.basetemp:
+        config.option.basetemp = Path(__file__).resolve().parents[1] / ".pytest_tmp"
 
 
 @pytest.fixture

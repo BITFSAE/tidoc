@@ -110,9 +110,9 @@ class AdapterPackageTests(unittest.TestCase):
             copy = Path(tmp) / 'pkg'
             import shutil
             shutil.copytree(ROOT / 'examples' / 'adapters' / 'minimal', copy)
-            manifest = json.loads((copy / 'manifest.json').read_text())
+            manifest = json.loads((copy / 'manifest.json').read_text('utf-8'))
             manifest['runtime_hook'] = 'bad'
-            (copy / 'manifest.json').write_text(json.dumps(manifest))
+            (copy / 'manifest.json').write_text(json.dumps(manifest),'utf-8')
             result = validate_package(copy)
         self.assertFalse(result['ok'])
         self.assertIn('SCHEMA_INVALID', {e['code'] for e in result['errors']})
@@ -218,60 +218,60 @@ class AdapterDomainValidationTests(unittest.TestCase):
 
     def test_in_rule_operand_is_validated(self):
         def mutate(package):
-            path=package/'rules.json'; data=json.loads(path.read_text())
+            path=package/'rules.json'; data=json.loads(path.read_text('utf-8'))
             data['rules']=[{'id':'check','stage':'complete',
                 'when':{'field':'invoice.total','op':'in','value':1},
                 'require':[],'message':'check'}]
-            path.write_text(json.dumps(data))
+            path.write_text(json.dumps(data),'utf-8')
         result=self._mutate_example(mutate)
         self.assertIn('RULE_OPERAND_TYPE',{item['code'] for item in result['errors']})
 
     def test_rule_required_field_references_must_exist_and_match_stage(self):
         def mutate(package):
-            path=package/'fields.json'; fields=json.loads(path.read_text())
+            path=package/'fields.json'; fields=json.loads(path.read_text('utf-8'))
             fields['fields']=[{'id':'code','scope':'batch','label':'批次号','type':'text',
                 'required_at':[],'presentation':'visible','sensitive':False,'transfer':'include'}]
-            path.write_text(json.dumps(fields))
-            path=package/'manifest.json'; manifest=json.loads(path.read_text())
+            path.write_text(json.dumps(fields),'utf-8')
+            path=package/'manifest.json'; manifest=json.loads(path.read_text('utf-8'))
             manifest['requires']['capabilities'].append('fields.v1')
-            path.write_text(json.dumps(manifest))
-            path=package/'rules.json'; data=json.loads(path.read_text())
+            path.write_text(json.dumps(manifest),'utf-8')
+            path=package/'rules.json'; data=json.loads(path.read_text('utf-8'))
             data['rules']=[{'id':'check','stage':'complete',
                 'when':{'field':'invoice.total','op':'gte','value':'0'},
                 'require':[{'field':'batch.fields.code'}],'message':'check'}]
-            path.write_text(json.dumps(data))
+            path.write_text(json.dumps(data),'utf-8')
         result=self._mutate_example(mutate)
         self.assertIn('RULE_FIELD_STAGE_INVALID',{item['code'] for item in result['errors']})
 
     def test_batch_group_by_requires_declared_scalar_field(self):
         def mutate(package):
-            path=package/'outputs.json'; data=json.loads(path.read_text())
+            path=package/'outputs.json'; data=json.loads(path.read_text('utf-8'))
             data['outputs'][0]['group_by']=['title','batch.fields.missing']
-            path.write_text(json.dumps(data))
+            path.write_text(json.dumps(data),'utf-8')
         result=self._mutate_example(mutate)
         self.assertIn('OUTPUT_GROUP_FIELD_INVALID',{item['code'] for item in result['errors']})
 
     def test_multiselect_cannot_be_batch_group_key(self):
         def mutate(package):
-            fields_path=package/'fields.json'; fields=json.loads(fields_path.read_text())
+            fields_path=package/'fields.json'; fields=json.loads(fields_path.read_text('utf-8'))
             fields['fields']=[{'id':'tags','scope':'batch','label':'标签','type':'multiselect',
                 'required_at':[],'presentation':'visible','sensitive':False,'transfer':'include',
                 'options':[{'value':'a','label':'A'}]}]
-            fields_path.write_text(json.dumps(fields))
-            path=package/'outputs.json'; data=json.loads(path.read_text())
+            fields_path.write_text(json.dumps(fields),'utf-8')
+            path=package/'outputs.json'; data=json.loads(path.read_text('utf-8'))
             data['outputs'][0]['group_by']=['title','batch.fields.tags']
-            path.write_text(json.dumps(data))
+            path.write_text(json.dumps(data),'utf-8')
         result=self._mutate_example(mutate)
         self.assertIn('OUTPUT_GROUP_FIELD_INVALID',{item['code'] for item in result['errors']})
 
     def test_required_reviewer_cannot_be_hidden_but_optional_reviewer_can(self):
         def mutate(required, presentation):
             def edit(package):
-                path=package/'scheme.json'; data=json.loads(path.read_text())
+                path=package/'scheme.json'; data=json.loads(path.read_text('utf-8'))
                 data['settings']={
                     'profile.reviewer_required':{'default':required,'editable':True,'presentation':'visible'},
                     'profile.reviewer_presentation':{'default':presentation,'editable':True,'presentation':'visible'}}
-                path.write_text(json.dumps(data))
+                path.write_text(json.dumps(data),'utf-8')
             return self._mutate_example(edit)
         denied=mutate(True,'hidden')
         self.assertIn('PROFILE_HIDDEN_REQUIRED',{x['code'] for x in denied['errors']})
@@ -280,14 +280,14 @@ class AdapterDomainValidationTests(unittest.TestCase):
 
     def test_visible_when_may_read_own_scope_but_not_another_form_scope(self):
         def mutate(package):
-            path=package/'fields.json';data=json.loads(path.read_text())
+            path=package/'fields.json';data=json.loads(path.read_text('utf-8'))
             data['fields']=[{'id':'code','scope':'batch','label':'批次编号','type':'text',
                 'required_at':[],'presentation':'visible','sensitive':False,'transfer':'include',
                 'visible_when':{'field':'invoice.total','op':'gt','value':'0'}}]
-            path.write_text(json.dumps(data))
-            path=package/'manifest.json';manifest=json.loads(path.read_text())
+            path.write_text(json.dumps(data),'utf-8')
+            path=package/'manifest.json';manifest=json.loads(path.read_text('utf-8'))
             manifest['requires']['capabilities'].extend(['fields.v1','rules.v1'])
-            path.write_text(json.dumps(manifest))
+            path.write_text(json.dumps(manifest),'utf-8')
         result=self._mutate_example(mutate)
         self.assertIn('RULE_FIELD_STAGE_INVALID',{item['code'] for item in result['errors']})
 
@@ -296,9 +296,9 @@ class AdapterDomainValidationTests(unittest.TestCase):
         from tidoc.adapters.resolver import resolve_definition
         with tempfile.TemporaryDirectory() as temp:
             package=Path(temp)/'pkg';shutil.copytree(ROOT/'examples/adapters/minimal',package)
-            path=package/'scheme.json';scheme=json.loads(path.read_text())
+            path=package/'scheme.json';scheme=json.loads(path.read_text('utf-8'))
             scheme['import_defaults']={'entry.default_paid_to_invoice':False,'entry.suggested_tags':['lab']}
-            path.write_text(json.dumps(scheme))
+            path.write_text(json.dumps(scheme),'utf-8')
             result=load_package(package)
             effective=resolve_definition(result.definition)['effective_settings']
             self.assertFalse(effective['entry.default_paid_to_invoice'])
@@ -306,17 +306,17 @@ class AdapterDomainValidationTests(unittest.TestCase):
 
     def test_import_defaults_reject_unknown_keys_and_settings_shadowing(self):
         def mutate(package):
-            path=package/'scheme.json';scheme=json.loads(path.read_text())
+            path=package/'scheme.json';scheme=json.loads(path.read_text('utf-8'))
             scheme['import_defaults']={'arbitrary':{'anything':True}}
-            path.write_text(json.dumps(scheme))
+            path.write_text(json.dumps(scheme),'utf-8')
         result=self._mutate_example(mutate)
         self.assertIn('SCHEMA_INVALID',{x['code'] for x in result['errors']})
 
     def test_core_generic_output_ids_are_reserved(self):
         def mutate(package):
-            path=package/'outputs.json';data=json.loads(path.read_text())
+            path=package/'outputs.json';data=json.loads(path.read_text('utf-8'))
             data['outputs'][0]['id']='generic_overview'
-            path.write_text(json.dumps(data))
+            path.write_text(json.dumps(data),'utf-8')
         result=self._mutate_example(mutate)
         self.assertIn('OUTPUT_ID_RESERVED',{x['code'] for x in result['errors']})
 

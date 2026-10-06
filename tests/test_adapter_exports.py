@@ -86,7 +86,7 @@ def test_xlsx_configured_columns_formula_text_and_unique_invoice_sum(tmp_path):
 
 def test_zip_roles_subject_isolation_safe_names_and_private_payee(tmp_path):
     root=tmp_path/'resources';root.mkdir()
-    (root/'one.txt').write_text('contract')
+    (root/'one.txt').write_text('contract','utf-8')
     entries=[raw('a',title='同名',tax='1'),raw('b',title='同名',tax='2')]
     context=build_export_context(entries,payee={'name':'private','account_number':'SECRET'},output={'type':'attachment_zip'})
     resources=[{'id':e['id'],'entry_id':e['id'],'role_id':'custom:test:contract','path':'one.txt','original_name':'contract.txt'} for e in entries]
@@ -195,7 +195,7 @@ def test_initial_export_record_failure_is_recoverable_without_publishing(planner
     original=planner._save_record_files
     def fail_record(job):
         directory=planner._job_dir(job['id']);directory.mkdir(parents=True,exist_ok=True)
-        (directory/'context.json.tmp').write_text('partial record')
+        (directory/'context.json.tmp').write_text('partial record','utf-8')
         raise OSError('simulated disk full')
     monkeypatch.setattr(planner,'_save_record_files',fail_record)
     with pytest.raises(ExportPreflightError) as error:
@@ -269,7 +269,7 @@ def test_grouping_revisions_payees_same_name_tax_and_batches(planner_setup,tmp_p
     person=ProfileRepo(planner.db).create('测试乙','')
     eid2=entries.create(person['id'],parsed=ParsedInvoice(invoice_no='0002',buyer_name='测试大学',buyer_tax_id='DIFFERENT',total=Decimal('0')),scheme_id=sid,scheme_revision_id=new_revision)
     entries.update_field(eid2,'paid_amount','0')
-    source=tmp_path/'second.xml';source.write_text('<invoice/>')
+    source=tmp_path/'second.xml';source.write_text('<invoice/>','utf-8')
     attachments.add(eid2,source,'invoice_xml')
     p1=adapters.payees.create(name='收款甲',personnel_id='001',bank_name='银行A',account_number='0001')
     p2=adapters.payees.create(name='收款乙',personnel_id='002',bank_name='银行B',account_number='0002')
@@ -351,7 +351,7 @@ def test_component_timeout_and_restart_recovery_do_not_publish(planner_setup,mon
     job=planner._new_job(snapshot)
     planner.jobs.update(job['id'],status='running')
     staging=root.export_jobs_dir/job['id']/'staging';staging.mkdir()
-    (staging/'partial.xlsx').write_text('partial')
+    (staging/'partial.xlsx').write_text('partial','utf-8')
     assert job['id'] in planner.recover_jobs()
     assert planner.jobs.get(job['id'])['status']=='failed'
     assert not staging.exists()
@@ -374,10 +374,10 @@ def test_planner_package_can_define_three_arbitrary_word_outputs(planner_setup,t
                         'payee_mode':'none','group_by':['title'],'rows':'invoice_summary',
                         'amount_basis':'invoice','filename':label+'_{export.date}.docx',
                         'template':f'templates/{oid}.docx'})
-    manifest=json.loads((source/'manifest.json').read_text());manifest['package_id']='org.tests.flexible-word'
+    manifest=json.loads((source/'manifest.json').read_text('utf-8'));manifest['package_id']='org.tests.flexible-word'
     manifest['name']='研究团队单据';manifest['requires']['capabilities']=required_capabilities({'outputs':outputs})
     (source/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False),'utf-8')
-    scheme=json.loads((source/'scheme.json').read_text());scheme['default_outputs']=[o['id'] for o in outputs]
+    scheme=json.loads((source/'scheme.json').read_text('utf-8'));scheme['default_outputs']=[o['id'] for o in outputs]
     (source/'scheme.json').write_text(json.dumps(scheme,ensure_ascii=False),'utf-8')
     (source/'outputs.json').write_text(json.dumps({'outputs':outputs},ensure_ascii=False),'utf-8')
     if (source/'checksums.json').exists():(source/'checksums.json').unlink()
@@ -405,7 +405,7 @@ def test_export_preflight_blocks_material_maximum_on_pinned_revision(planner_set
     planner,entries,attachments,adapters,eid,root=planner_setup
     # Existing materials may exceed a newly selected revision even though the
     # attachment API correctly enforces the current limit for future additions.
-    invoice_xml=tmp_path/'invoice.xml';invoice_xml.write_text('<invoice/>')
+    invoice_xml=tmp_path/'invoice.xml';invoice_xml.write_text('<invoice/>','utf-8')
     attachments.add(eid,invoice_xml,'invoice_xml')
     base=entries.get(eid);definition=deepcopy(adapters.get_revision(base['scheme_revision_id']))
     next(role for role in definition['materials'] if role['id']=='invoice')['max_count']=1
@@ -440,7 +440,7 @@ def test_local_copies_sharing_revision_have_separate_output_and_field_choices(pl
     assert first['current_revision_id']==second['current_revision_id']==revision
     planner.db.conn.execute('UPDATE entries SET scheme_id=?,scheme_revision_id=? WHERE id=?',(first['id'],revision,eid));planner.db.conn.commit()
     eid2=entries.create(original['profile_id'],parsed=ParsedInvoice(invoice_no='COPY-002',buyer_name='测试大学',buyer_tax_id='TEST',total=Decimal('20')),scheme_id=second['id'],scheme_revision_id=revision)
-    xml=tmp_path/'copy-invoice.xml';xml.write_text('<invoice/>');attachments.add(eid2,xml,'invoice_xml')
+    xml=tmp_path/'copy-invoice.xml';xml.write_text('<invoice/>','utf-8');attachments.add(eid2,xml,'invoice_xml')
     bindings=[first['id']+':'+revision,second['id']+':'+revision]
     fields={bindings[0]:{'signer':'甲私人签署'},bindings[1]:{'signer':'乙私人签署'}}
     options={'date':'2026-10-06','output_ids_by_binding':{bindings[0]:['overview'],bindings[1]:[]},
@@ -450,7 +450,7 @@ def test_local_copies_sharing_revision_have_separate_output_and_field_choices(pl
     assert len(plan['files'])==1
     assert plan['groups'][0]['scheme_id']==first['id']
     assert plan['groups'][0]['entry_ids']==[eid]
-    validator=Draft202012Validator(json.loads((Path(__file__).resolve().parents[1]/'schemas/team-adapter/1/context.schema.json').read_text()))
+    validator=Draft202012Validator(json.loads((Path(__file__).resolve().parents[1]/'schemas/team-adapter/1/context.schema.json').read_text('utf-8')))
     snapshot=planner._plans[plan['plan_id']]
     assert snapshot['files'][0]['context']['export']['fields']==fields[bindings[0]]
     assert not list(validator.iter_errors(snapshot['files'][0]['context']))
@@ -518,7 +518,7 @@ def test_new_imports_in_old_batch_use_frozen_defaults_and_xml_only(tmp_path):
     paths=[]
     for number in ('OLD-001','OLD-002'):
         path=tmp_path/(number+'.xml')
-        path.write_text(f'<root><EIid>{number}</EIid><BuyerName>旧单位</BuyerName><BuyerTaxID>OLD</BuyerTaxID><TotalTax-includedAmount>12.30</TotalTax-includedAmount></root>')
+        path.write_text(f'<root><EIid>{number}</EIid><BuyerName>旧单位</BuyerName><BuyerTaxID>OLD</BuyerTaxID><TotalTax-includedAmount>12.30</TotalTax-includedAmount></root>','utf-8')
         paths.append(path)
     first=api.create_entry(profile['id'],xml_path=str(paths[0]),batch_id=batch['id'])
     assert first['ok'],first
@@ -608,7 +608,7 @@ def test_generic_material_pdf_supports_external_roles_and_title_isolation(planne
     job=planner.run(plan['plan_id'])
     assert job['status']=='completed',job['diagnostics']
     assert sorted(len(PdfReader(file['path']).pages) for file in job['files'])==[1,2]
-    non_pdf=tmp_path/'contract.txt';non_pdf.write_text('original contract')
+    non_pdf=tmp_path/'contract.txt';non_pdf.write_text('original contract','utf-8')
     attachments.add(eid,non_pdf,'other')
     blocked=planner.preview([eid],['generic_materials'])
     assert not blocked['ok']
@@ -619,7 +619,7 @@ def test_xml_only_folder_import_and_pinned_suggested_tags(tmp_path):
     from tidoc.api import Api
     from tidoc.services.folder_import import scan_folder
     invoice=tmp_path/'only.xml'
-    invoice.write_text('<root><EIid>98765432100123456789</EIid><BuyerName>样例单位</BuyerName><TotalTax-includedAmount>1.00</TotalTax-includedAmount></root>')
+    invoice.write_text('<root><EIid>98765432100123456789</EIid><BuyerName>样例单位</BuyerName><TotalTax-includedAmount>1.00</TotalTax-includedAmount></root>','utf-8')
     scanned=scan_folder(tmp_path)
     assert scanned['invoice_pdf_count']==0
     assert scanned['invoice_xml_only_count']==1

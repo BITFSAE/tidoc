@@ -591,6 +591,6 @@ def test_migrate_refuses_nonempty_target(tmp_path):
     root = DataRoot(tmp_path / "old")
     target = tmp_path / "busy"
     target.mkdir()
-    (target / "somefile").write_text("x")
+    (target / "somefile").write_text("x",'utf-8')
     with pytest.raises(ValueError):
         root.migrate_to(target)

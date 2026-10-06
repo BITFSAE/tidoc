@@ -44,6 +44,12 @@
   --found-soft: #def3eb;
   --found-ink: #0a5a44;
   --found-line: rgba(15, 125, 94, .18);
+  --purple: #7048a8;
+  --purple-soft: #eee6f8;
+  --purple-line: rgba(112, 72, 168, .2);
+  --teal: #1b7a78;
+  --teal-soft: #dcf1ef;
+  --teal-line: rgba(27, 122, 120, .2);
 
   --warn: #a8650f;
   --warn-soft: #fbf0d8;
@@ -132,6 +138,12 @@
   --found-soft: #173a31;
   --found-ink: #9ae4c5;
   --found-line: rgba(91, 202, 160, .26);
+  --purple: #c0a2f0;
+  --purple-soft: #2d2145;
+  --purple-line: rgba(192, 162, 240, .28);
+  --teal: #62cfc9;
+  --teal-soft: #163a38;
+  --teal-line: rgba(98, 207, 201, .26);
 
   --warn: #efb35e;
   --warn-soft: #3b2c19;
@@ -401,10 +413,8 @@ body {
 }
 .group-sel:hover { border-color: var(--primary); background: var(--primary-soft); }
 .group-name { font-size: 14.5px; font-weight: 700; color: var(--ink); font-family: var(--font-display); }
-.group-head.title-univ { border-color: var(--univ-line); }
-.group-head.title-found { border-color: var(--found-line); }
-.group-head.title-univ .group-name { color: var(--univ); }
-.group-head.title-found .group-name { color: var(--found); }
+.group-head:is(.title-blue, .title-green, .title-amber, .title-purple, .title-teal, .title-red) { border-color: var(--tc-line); }
+.group-head:is(.title-blue, .title-green, .title-amber, .title-purple, .title-teal, .title-red) .group-name { color: var(--tc); }
 .group-meta { font-size: 12px; color: var(--ink-faint); }
 .group-meta b { color: var(--ink-soft); }
 
@@ -796,8 +806,7 @@ body {
   align-content: start; gap: 10px; padding: 8px 8px 8px 0;
 }
 .entry-list[data-density="compact"] { gap: 6px; }
-.entry-list[data-density="compact"] .entry-card { grid-template-columns: 18px 3px minmax(0, 1fr) auto; gap: 10px; padding: 8px 12px; }
-.entry-list[data-density="compact"] .entry-stripe { height: 28px; }
+.entry-list[data-density="compact"] .entry-card { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 8px 12px 8px 18px; }
 .entry-list[data-density="compact"] .entry-item-title { font-size: 13px; max-width: 42ch; }
 .entry-list[data-density="compact"] .entry-line2 { margin-top: 2px; gap: 9px; }
 .entry-list[data-density="compact"] .entry-line3 { display: none; }
@@ -816,9 +825,9 @@ body {
 /* ---------------------------------------------------------------- entry card */
 .entry-card {
   position: relative;
-  display: grid; grid-template-columns: 22px 4px 1fr auto; gap: 14px; align-items: center;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center;
   background: var(--panel-raised); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 14px 16px; cursor: pointer; transition: transform .14s, box-shadow .14s, border-color .14s;
+  padding: 14px 16px 14px 22px; cursor: pointer; transition: transform .14s, box-shadow .14s, border-color .14s;
   min-width: 0;
 }
 .entry-card:hover { box-shadow: var(--shadow); transform: translateY(-1px); border-color: var(--line-hover); }
@@ -828,12 +837,23 @@ body {
   box-shadow: 0 0 0 3px var(--primary-soft), var(--shadow);
 }
 .entry-card.card-dragging { border-color: var(--primary); background: var(--primary-soft); }
-.entry-card.selected { background: linear-gradient(180deg, var(--selected-top), var(--selected-bottom)); border-color: var(--primary); }
-.entry-check { display: flex; justify-content: center; align-items: center; align-self: stretch; cursor: pointer; border-radius: 7px; }
-.entry-check input { width: 17px; height: 17px; cursor: pointer; accent-color: var(--primary); }
-.entry-stripe { width: 4px; height: 38px; border-radius: 3px; background: var(--line); cursor: pointer; }
-.entry-card.title-univ .entry-stripe { background: var(--univ); box-shadow: 0 0 0 3px var(--univ-soft); }
-.entry-card.title-found .entry-stripe { background: var(--found); box-shadow: 0 0 0 3px var(--found-soft); }
+/* 选中靠整张卡片变色（没有复选框）：底色渐变加一圈加粗的主色边框。 */
+.entry-card.selected {
+  background: linear-gradient(180deg, var(--selected-top), var(--selected-bottom));
+  border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary);
+}
+.entry-card.selected:focus-visible { box-shadow: 0 0 0 1px var(--primary), 0 0 0 4px var(--primary-soft); }
+/* 抬头色条：卡片左侧整条边（贴着卡片内缘，跟随圆角）。无颜色的抬头显示中性灰；
+   ::before 把悬浮区域向右多扩一点，窄条也容易指到。 */
+.entry-stripe {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 6px;
+  border-radius: calc(var(--radius) - 1px) 0 0 calc(var(--radius) - 1px);
+  background: var(--line-hover);
+}
+.entry-stripe::before { content: ""; position: absolute; inset: 0 -8px 0 0; }
+.entry-card:is(.title-blue, .title-green, .title-amber, .title-purple, .title-teal, .title-red) .entry-stripe {
+  background: var(--tc);
+}
 
 .entry-main { min-width: 0; }
 .entry-line1 { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
@@ -901,8 +921,10 @@ body {
 .entry-context-menu button:hover { background: var(--paper-2); }
 .entry-context-menu button.danger { color: var(--blocked); }
 
+/* 层级：弹窗遮罩 50+ < 通知 100 < 右键菜单 120 < 下拉列表 400 < 悬浮提示 500。
+   提示必须在最上面，否则下拉展开时它自己选项的提示会被列表盖住。 */
 .fast-tooltip {
-  position: fixed; z-index: 300; max-width: min(360px, calc(100vw - 16px));
+  position: fixed; z-index: 500; max-width: min(360px, calc(100vw - 16px));
   padding: 5px 8px; border-radius: 6px; background: #25282e; color: #fff;
   font-size: 11.5px; line-height: 1.4; white-space: pre-line; pointer-events: none;
   opacity: 0; transform: translateY(-2px); transition: opacity .05s, transform .05s;
@@ -1027,7 +1049,7 @@ input[type="date"] { color: var(--ink-soft); }
 
 /* 浮层列表 */
 .select-menu {
-  position: fixed; z-index: 300; min-width: 112px; max-height: 320px; overflow-y: auto; overscroll-behavior: contain;
+  position: fixed; z-index: 400; min-width: 112px; max-height: 320px; overflow-y: auto; overscroll-behavior: contain;
   padding: 5px; background: var(--panel-raised); border: 1px solid var(--line); border-radius: 10px;
   box-shadow: var(--shadow-lg); animation: selectMenuIn .12s ease;
 }
@@ -1279,6 +1301,9 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .att-group.has .att-group-status { color: var(--pass); }
 .att-group-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
 .att-group-add { margin-left: 0; }
+.att-group-loose > summary { cursor: pointer; list-style: none; }
+.att-group-loose > summary::-webkit-details-marker { display: none; }
+.att-group-loose[open] > summary { margin-bottom: 8px; }
 .att-group.has .attach-item { background: transparent; border-color: transparent; }
 .att-group-hint { font-size: 12px; color: var(--ink-faint); margin-top: 6px; padding-left: 16px; }
 .att-group .attach-list { margin-top: 8px; }
@@ -2042,11 +2067,12 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 .modal-foot-note { margin-right:auto; align-self:center; font-size:12.5px; color:var(--ink-soft); }
 .modal-foot-note.is-dirty { color:var(--univ-ink); font-weight:600; }
 .adapter-entry .btn { margin:0 8px 8px 0; }
-.adapter-materials { display:grid; gap:10px; margin-top:12px; }
-.adapter-materials .attach-item { flex-wrap:wrap; gap:8px; }
-.title-blue { --title-color:var(--blue, #3c68af); }
-.title-green { --title-color:var(--green, #407453); }
-.title-amber { --title-color:var(--amber, #97702f); }
-.title-purple { --title-color:var(--purple, #7953a4); }
-.title-red { --title-color:var(--danger, #b34b4b); }
-.title-teal { --title-color:var(--teal, #327972); }
+.adapter-entry .scheme-desc { margin:4px 0 10px; }
+.adapter-entry .hint { margin:8px 0 0; }
+/* 抬头语义色：卡片左侧色条、分组标题共用；neutral 不着色。颜色随明暗主题自动切换。 */
+.title-blue { --tc:var(--univ); --tc-soft:var(--univ-soft); --tc-line:var(--univ-line); }
+.title-green { --tc:var(--found); --tc-soft:var(--found-soft); --tc-line:var(--found-line); }
+.title-amber { --tc:var(--warn); --tc-soft:var(--warn-soft); --tc-line:var(--warn-line); }
+.title-purple { --tc:var(--purple); --tc-soft:var(--purple-soft); --tc-line:var(--purple-line); }
+.title-teal { --tc:var(--teal); --tc-soft:var(--teal-soft); --tc-line:var(--teal-line); }
+.title-red { --tc:var(--blocked); --tc-soft:var(--blocked-soft); --tc-line:var(--blocked-line); }

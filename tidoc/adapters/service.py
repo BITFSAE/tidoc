@@ -5,6 +5,7 @@ from copy import deepcopy
 import hashlib
 import inspect
 import json
+import sqlite3
 import os
 from pathlib import Path
 import shutil
@@ -343,7 +344,31 @@ class AdapterService:
                 self._set_meta('adapter.legacy','1' if legacy else '0')
         for _,resource in prepared:
             self._finish_operation(resource)
+        self._follow_default_changes()
         return self.setup_state()
+
+    # 核心默认值调整后，没人改过该设置的已有方案跟着新默认走（只影响之后新建的条目，已有条目沿用创建时的修订）。
+    # 用户明确选过值、或方案包自己规定了值的，保持不动。每项调整只执行一次。
+    DEFAULT_CHANGES=(('adapter.defaults.payment_ocr_manual','assist.payment_ocr','local'),)
+
+    def _follow_default_changes(self):
+        for meta_key,setting,old_default in self.DEFAULT_CHANGES:
+            if self._meta(meta_key)=='1':
+                continue
+            for item in self.packages.list_schemes(True):
+                try:
+                    scheme=self.get_scheme(item['id'])
+                    if setting in scheme['overrides'].get('settings',{}):
+                        continue
+                    if scheme['definition']['scheme'].get('settings',{}).get(setting):
+                        continue
+                    if scheme['definition']['effective_settings'].get(setting)==old_default:
+                        self._change_definition(scheme['id'],scheme['current_revision_id'],deepcopy(scheme['overrides']))
+                except (ValueError,KeyError,sqlite3.Error):
+                    # 某个方案无法跟随新默认（例如包文件缺失）时保持原样，不能因此影响软件启动。
+                    continue
+            with self.db.transaction():
+                self._set_meta(meta_key,'1')
 
     def _has_legacy_data(self):
         return bool(self._preferences()) or any(

@@ -95,3 +95,79 @@ def test_javascript_parses_in_node_if_available():
     if node:
         for name in ('app.js','api.js','adapter-ui.js','schema-form.js'):
             subprocess.run([node,'--check',str(WEB/name)],check=True,capture_output=True)
+
+
+def test_card_and_detail_keep_the_original_material_workflow():
+    source=(WEB/'app.js').read_text()
+    adapter=(WEB/'adapter-ui.js').read_text()
+    card=source.split('function entryCard(',1)[1].split('right.querySelectorAll',1)[0]
+    # 卡片仍是 发票/实付/付款/查验(/实物) 一行，带完成状态、右键打开和在线查验；方案只补自定义材料按钮。
+    for needle in ("actionBtn('invoice'","actionBtn('paid'","actionBtn('pay'","actionBtn('inspect'","actionBtn('physical'",'AdapterUI.cardActions(e)'):
+        assert needle in card,needle
+    assert 'onlineVerificationFlow(e.id)' in source
+    cards=adapter.split('function cardActions(',1)[1].split('function jobs(',1)[0]
+    assert 'action-state' in cards and 'oncontextmenu' in cards
+    assert 'data-card-materials' not in adapter
+    # 详情页的材料分组由 app.js 渲染；方案信息只是附加的折叠区，不能隐藏或搬走原来的材料区与拖放区。
+    decorate=adapter.split('function decorateEntry(',1)[1].split('function chooser(',1)[0]
+    assert 'hidden=true' not in decorate and 'materialDrop' not in decorate
+    assert 'data-add-att-role' in source and 'data-online-verification' in source
+
+
+def test_list_entries_expose_role_counts_for_custom_material_cards(api):
+    profile=api.profiles.create('Role','')
+    entry_id=api.entries.create(profile['id'])
+    api.db.conn.execute("INSERT INTO attachments(id,entry_id,type,original_name,stored_path,sha256,role_id,added_at) "
+                        "VALUES('a1',?,'invoice_pdf','a.pdf','a.pdf','h1','invoice','now')",(entry_id,))
+    api.db.conn.commit()
+    listed={e['id']:e for e in api.entries.list()}[entry_id]
+    assert listed['role_counts']=={'invoice':1}
+    assert '_role_counts' not in listed
+
+
+def test_tooltips_stay_above_dropdown_menus_and_option_tips_only_show_when_truncated():
+    css=(WEB/'styles.css').read_text()
+    z=lambda selector:int(re.search(re.escape(selector)+r'\s*\{[^}]*?z-index:\s*(\d+)',css).group(1))
+    assert z('.fast-tooltip')>z('.select-menu')>z('.entry-context-menu')
+    select=(WEB/'select.js').read_text()
+    assert 'MENU_Z = 400' in select and z('.select-menu')==400
+    menu=select.split('function renderMenu(',1)[1].split('function openMenu(',1)[0]
+    assert 'title=' not in menu and 'data-tooltip-overflow' in menu
+    app=(WEB/'app.js').read_text()
+    tooltips=app.split('function setupFastTooltips()',1)[1].split('let autoUpdateCheckTimer',1)[0]
+    # 展开下拉时只显示列表内的提示；提示放在列表侧边；点击或按键后立即收起。
+    for needle in ("'.select-menu:not([hidden])'","target.closest('.select-menu')","addEventListener('pointerdown', hide, true)","addEventListener('keydown', hide, true)"):
+        assert needle in tooltips,needle
+
+
+def test_titles_without_a_color_get_distinct_stripe_colors():
+    css=(WEB/'styles.css').read_text()
+    adapter=(WEB/'adapter-ui.js').read_text()
+    app=(WEB/'app.js').read_text()
+    assert 'titleColors(State.titleProfiles)' in adapter
+    # 色条与分组标题按语义色上色（卡片类名已带 title- 前缀，不再重复拼接）。
+    assert ".entry-card:is(.title-blue" in css and ".group-head:is(.title-blue" in css
+    for color in ('blue','green','amber','purple','teal','red'):
+        assert f'.title-{color} {{ --tc:' in css
+    assert "' title-' + tcls" not in app and "(tcls ? ' ' + tcls : '')" in app
+
+
+def test_card_has_no_checkbox_and_stripe_names_the_title():
+    source=(WEB/'app.js').read_text()
+    css=(WEB/'styles.css').read_text()
+    card=source.split('function entryCard(',1)[1].split('function entryCards(',1)[0]
+    # 选中靠点击卡片；复选框与"切换选中"的色条按钮都是重复入口，色条只负责标明抬头。
+    assert "entry-check" not in source and 'entry-check' not in css
+    assert '切换选中' not in source and 'entryTitleTooltip(e)' in card
+    assert "card.append(stripe, main, right)" in card
+    assert 'function entryTitleTooltip(' in source and '抬头：' in source
+    # 卡片上不重复显示已知信息：单一报账人／已按报账人筛选、正在查看的批次。
+    assert "State.profiles.length > 1 && !$('#filterProfile')?.value" in card
+    assert 'batch.id !== focusedBatchId' in card
+
+
+def test_entries_expose_their_own_verification_setting(api):
+    profile=api.profiles.create('Verify','')
+    entry_id=api.entries.create(profile['id'])
+    assert api.entries.get(entry_id)['verification_visible'] is True
+    assert {e['id']:e for e in api.entries.list()}[entry_id]['verification_visible'] is True

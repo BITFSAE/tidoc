@@ -26,7 +26,7 @@ const State = {
   currentBatch: null,    // 当前批次详情（含批次级催办备注）
   allTags: [],           // 全库用过的标签
   multiClaimantMode: false,
-  paymentOcrEnabled: true,
+  paymentOcrEnabled: false,
   defaultPaidToInvoice: true,
   defaultEntryTitle: '',
   materialRequirements: {},
@@ -393,11 +393,17 @@ function setupFastTooltips() {
   }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['title'] });
 
   let active = null;
+  let pointerY = null;   // 最近一次鼠标的纵向位置，供高而窄的目标定位提示
   const hide = () => {
     active = null;
     tooltip.classList.remove('visible');
   };
   const show = (target) => {
+    // 下拉列表展开时，只显示列表内选项的提示；触发器和周围控件的提示会叠在列表上，直接隐藏。
+    if (target && document.querySelector('.select-menu:not([hidden])') && !target.closest('.select-menu')) {
+      hide();
+      return;
+    }
     const overflowText = target?.dataset.tooltipOverflow;
     if (overflowText && target.scrollWidth <= target.clientWidth && target.scrollHeight <= target.clientHeight) {
       hide();
@@ -413,14 +419,30 @@ function setupFastTooltips() {
     tooltip.classList.add('visible');
     const rect = target.getBoundingClientRect();
     const tip = tooltip.getBoundingClientRect();
-    const left = Math.max(8, Math.min(rect.left + rect.width / 2 - tip.width / 2, window.innerWidth - tip.width - 8));
+    let left = Math.max(8, Math.min(rect.left + rect.width / 2 - tip.width / 2, window.innerWidth - tip.width - 8));
     const below = rect.bottom + 7;
-    const top = below + tip.height <= window.innerHeight - 8 ? below : Math.max(8, rect.top - tip.height - 7);
+    let top = below + tip.height <= window.innerHeight - 8 ? below : Math.max(8, rect.top - tip.height - 7);
+    if (target.dataset.tooltipSide === 'right') {
+      // 高而窄的目标（卡片色条）：提示贴在右侧、跟着鼠标高度，而不是出现在目标底部很远的地方。
+      left = Math.min(rect.right + 10, window.innerWidth - tip.width - 8);
+      const y = pointerY ?? rect.top + rect.height / 2;
+      top = Math.max(8, Math.min(y - tip.height / 2, window.innerHeight - tip.height - 8));
+    }
+    const menu = target.closest('.select-menu');
+    if (menu) {
+      // 下拉列表里的提示放在列表右侧（放不下就放左侧），垂直对齐到选项，不盖住相邻选项。
+      const box = menu.getBoundingClientRect();
+      const right = box.right + 8;
+      if (right + tip.width <= window.innerWidth - 8) left = right;
+      else if (box.left - tip.width - 8 >= 8) left = box.left - tip.width - 8;
+      top = Math.max(8, Math.min(rect.top + rect.height / 2 - tip.height / 2, window.innerHeight - tip.height - 8));
+    }
     tooltip.style.left = `${left}px`;
     tooltip.style.top = `${top}px`;
   };
   const tooltipTarget = (node) => node?.closest?.('[data-tooltip], [data-tooltip-overflow]');
   document.addEventListener('pointerover', (ev) => {
+    pointerY = ev.clientY;
     const target = tooltipTarget(ev.target);
     if (target && target !== active) show(target);
   });
@@ -428,8 +450,11 @@ function setupFastTooltips() {
     const next = tooltipTarget(ev.relatedTarget);
     if (next !== active) next ? show(next) : hide();
   });
-  document.addEventListener('focusin', (ev) => show(tooltipTarget(ev.target)));
+  document.addEventListener('focusin', (ev) => { pointerY = null; show(tooltipTarget(ev.target)); });
   document.addEventListener('focusout', hide);
+  // 按下鼠标或按键即收起提示（点开下拉、点按钮后提示不该继续挂在原地）。
+  document.addEventListener('pointerdown', hide, true);
+  document.addEventListener('keydown', hide, true);
   document.addEventListener('scroll', hide, true);
   window.addEventListener('blur', hide);
 }
@@ -1061,14 +1086,35 @@ function updateListSummary() {
   $('#stats').innerHTML = parts.join('');
 }
 
+// 附件归属的方案材料角色；内置类型的角色标识与附件类型一致。
+function attachmentRoleId(attachment) {
+  return attachment.role_id || (['invoice_pdf', 'invoice_xml'].includes(attachment.type) ? 'invoice' : attachment.type);
+}
+
+// 条目冻结的方案里的材料角色；旧数据没有方案时返回 null。
+function entryMaterialRole(entry, roleId) {
+  return (entry.material_roles || []).find((role) => role.id === roleId) || null;
+}
+
+// 方案可关闭发票查验入口；关闭后"查验"只负责补充查验单 PDF。
+function verificationVisible(entry) {
+  if (entry && typeof entry.verification_visible === 'boolean') return entry.verification_visible;
+  return AdapterUI.settings()['assist.verification_visible'] !== false;
+}
+
 function listEntryFromDetail(entry) {
   const fields = entry.fields || {};
   const attachmentTypes = {};
+  const roleCounts = {};
   (entry.attachments || []).forEach((attachment) => {
     attachmentTypes[attachment.type] = (attachmentTypes[attachment.type] || 0) + 1;
+    if (attachment.role_definition_revision_id && attachment.role_definition_revision_id !== entry.scheme_revision_id) return;
+    const role = attachmentRoleId(attachment);
+    roleCounts[role] = (roleCounts[role] || 0) + 1;
   });
   return {
     ...entry,
+    role_counts: roleCounts,
     fields,
     modified_fields: entryHasPaidDifference(entry) ? ['paid_amount'] : [],
     attachment_count: Object.values(attachmentTypes).reduce((sum, count) => sum + count, 0),
@@ -1170,27 +1216,18 @@ async function reopenEntryDetail(modalRef, entryId, options = {}) {
 
 function entryCard(e) {
   const tcls = TITLE_CLASS[e.title] || '';
-  const card = el('div', 'entry-card' + (tcls ? ' title-' + tcls : '') +
+  const card = el('div', 'entry-card' + (tcls ? ' ' + tcls : '') +
     (State.selected.has(e.id) ? ' selected' : ''));
   card.dataset.entryId = e.id;
   card.setAttribute('role', 'option');
   card.setAttribute('aria-selected', State.selected.has(e.id) ? 'true' : 'false');
-  card.setAttribute('aria-label', `${itemCardLabel(e)}，${fmtMoney(e.total)}`);
+  card.setAttribute('aria-label', `${itemCardLabel(e)}，${e.title ? e.title + '，' : ''}${fmtMoney(e.total)}`);
   card.setAttribute('aria-keyshortcuts', 'Enter Space ArrowUp ArrowDown Home End');
 
-  const check = el('div', 'entry-check');
-  check.onclick = (ev) => { ev.stopPropagation(); if (ev.detail > 1) return; toggleSelect(e.id, ev.shiftKey); };
-  check.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
-  const cb = el('input');
-  cb.type = 'checkbox'; cb.checked = State.selected.has(e.id);
-  cb.onclick = (ev) => { ev.stopPropagation(); if (ev.detail > 1) { ev.preventDefault(); return; } toggleSelect(e.id, ev.shiftKey); };
-  cb.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
-  check.appendChild(cb);
-
+  // 抬头色条：卡片左侧整条边，颜色取自抬头；悬浮显示抬头名称。选中靠点击卡片（Space 键同样可选），卡片本身会变色，不再放复选框。
   const stripe = el('div', 'entry-stripe');
-  stripe.title = '切换选中';
-  stripe.onclick = (ev) => { ev.stopPropagation(); if (ev.detail > 1) return; toggleSelect(e.id, ev.shiftKey); };
-  stripe.ondblclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
+  stripe.dataset.tooltip = entryTitleTooltip(e);
+  stripe.dataset.tooltipSide = 'right';
 
   // 校验状态：仅在 warning/blocked 时突出显示（pass 不占视觉）
   const checkBadge = (e.check_status && e.check_status !== 'pass')
@@ -1207,11 +1244,15 @@ function entryCard(e) {
     ? `<button class="badge ocr badge-action" data-card-ocr="1" title="阿里云识别存在待确认差异，点击查看">OCR</button>` : '';
   const recognizedBadge = (e.ocr_recognized && !e.ocr_pending)
     ? `<button class="badge ocr badge-action" data-card-ocr="1" title="已用阿里云识别，点击查看">已识别</button>` : '';
-  const owner = State.profileById[e.profile_id];
+  // 已按报账人筛选、或只有一个报账人时，每张卡片都带同一个名字是重复信息，不再显示。
+  const owner = (State.profiles.length > 1 && !$('#filterProfile')?.value) ? State.profileById[e.profile_id] : null;
   const ownerBadge = owner
     ? `<button class="badge person badge-action" data-card-owner="${esc(e.profile_id)}"${owner.reviewer ? ` title="审核人：${esc(owner.reviewer)} · 点击编辑"` : ' title="点击编辑报账人"'}>${esc(owner.name)}</button>` : '';
+  // 正在查看某个批次时，卡片上不再重复显示这个批次；仍属于其他批次的才显示。
+  const focusedBatchId = actualBatchId();
+  const otherBatches = (e.batches || []).filter((batch) => batch.id !== focusedBatchId);
   const batchBadges = (e.batches || []).length
-    ? e.batches.map((batch) =>
+    ? otherBatches.map((batch) =>
       `<button class="badge batch badge-action${batch.archived ? ' archived' : ''}" data-card-batch="${esc(batch.id)}" ` +
       `title="${batch.archived ? '已归档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</button>`
     ).join('')
@@ -1256,15 +1297,33 @@ function entryCard(e) {
   }
 
   const right = el('div', 'entry-right');
-  const showPhysicalAction = !e.material_roles?.length && (State.materialRequirements.physical_image || e.has_physical);
+  const hasRoles = !!e.material_roles?.length;
+  // 付款 / 查验由方案的快捷操作决定；实物图沿用"必需或已有才显示"。旧数据没有方案时按内置四类处理。
+  const quickRole = (roleId) => !hasRoles || !!entryMaterialRole(e, roleId)?.quick_action;
+  const physicalRole = entryMaterialRole(e, 'physical_image');
+  const showPhysicalAction = hasRoles
+    ? !!physicalRole && physicalRole.presentation !== 'hidden'
+      && (!!e.has_physical || !!physicalRole.quick_action || physicalRole.min_count > 0)
+    : (State.materialRequirements.physical_image || e.has_physical);
   const detailAction = `<button class="entry-detail-action" data-card-action="detail">${showPhysicalAction ? '详情' : '打开详情'}</button>`;
   const paymentCount = Number(e.attachment_types?.payment_screenshot || 0);
   const paymentActionLabel = paymentCount > 1
     ? `付款<span class="payment-count">×${paymentCount}</span>`
     : '付款';
-  const commonActions = e.material_roles?.length
-    ? `${actionBtn('paid', '实付', !!paidCur, paidCur ? '修改实付金额' : '填写实付金额')}${AdapterUI.cardActions(e)}`
-    : `${actionBtn('invoice', '发票', e.has_invoice, '添加发票材料')}${actionBtn('paid', '实付', !!paidCur, '填写实付金额')}${actionBtn('pay', paymentActionLabel, e.has_payment, '添加付款截图')}${actionBtn('inspect', '查验', e.has_inspection, '添加查验材料')}`;
+  const onlineVerify = verificationVisible(e);
+  const commonActions = [
+    actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '左键补充发票 PDF；右键打开已有材料' : '添加发票 PDF'),
+    actionBtn('paid', '实付', !!paidCur, paidCur ? '已填写实付金额；点击修改' : '填写实付金额'),
+    quickRole('payment_screenshot')
+      ? actionBtn('pay', paymentActionLabel, e.has_payment, e.has_payment ? `已有 ${paymentCount} 张付款截图；左键继续添加，右键打开最近一张` : '添加付款截图')
+      : '',
+    quickRole('inspection_pdf')
+      ? actionBtn('inspect', '查验', e.has_inspection, onlineVerify
+        ? (e.has_inspection ? '左键重新查验或补充；右键打开已有查验单' : '打开官网查验并自动归档 PDF')
+        : (e.has_inspection ? '左键补充查验单 PDF；右键打开已有查验单' : '添加查验单 PDF'))
+      : '',
+    AdapterUI.cardActions(e),
+  ].join('');
   const physicalAction = actionBtn('physical', '实物', e.has_physical, e.has_physical ? '左键继续添加实物图；右键打开已有实物图' : '添加实物图');
   right.innerHTML = `
     <div class="entry-total">${fmtMoney(e.total)}</div>
@@ -1282,7 +1341,7 @@ function entryCard(e) {
       else if (action === 'paid') await quickPaidFlow(e);
       else if (action === 'pay') await quickAddAttachment(e.id, 'payment_screenshot');
       else if (action === 'physical') await quickAddAttachment(e.id, 'physical_image');
-      else if (action === 'inspect') await onlineVerificationFlow(e.id);
+      else if (action === 'inspect') await (onlineVerify ? onlineVerificationFlow(e.id) : quickAddAttachment(e.id, 'inspection_pdf'));
     };
     if (['invoice', 'pay', 'physical', 'inspect'].includes(b.dataset.cardAction)) {
       b.oncontextmenu = async (ev) => {
@@ -1313,7 +1372,7 @@ function entryCard(e) {
   });
 
   AdapterUI.bindCardActions(right,e);
-  card.append(check, stripe, main, right);
+  card.append(stripe, main, right);
   card.onclick = (ev) => {
     if (ev.detail > 1) {
       ev.preventDefault();
@@ -1353,6 +1412,14 @@ function entryCard(e) {
     finally { progress.close(); }
   };
   return card;
+}
+
+// 卡片色条的悬浮文字：这条发票的抬头；抬头不在方案的抬头列表里时提示出来（工具栏的抬头筛选也有对应的红点）。
+function entryTitleTooltip(entry) {
+  const name = entry.title || '';
+  if (!name) return '抬头：未填写';
+  const configured = !!entry.title_profile || State.titleProfiles.some((title) => title.name === name);
+  return configured ? `抬头：${name}` : `抬头：${name}（方案里没有这个抬头）`;
 }
 
 function itemCardLabel(entry) {
@@ -1479,7 +1546,7 @@ function renderGroupedEntries(list) {
     const allSel = items.every((e) => State.selected.has(e.id));
     const tcls = State.groupBy === 'title' ? (TITLE_CLASS[name] || '') : '';
 
-    const head = el('div', 'group-head' + (tcls ? ' title-' + tcls : ''));
+    const head = el('div', 'group-head' + (tcls ? ' ' + tcls : ''));
     head.innerHTML = `
       <button class="group-sel" title="选中/取消这组">${allSel ? '✓' : ''}</button>
       <span class="group-name">${esc(name)}</span>
@@ -1642,8 +1709,6 @@ function syncVisibleSelectionState() {
     const selected = State.selected.has(card.dataset.entryId);
     card.classList.toggle('selected', selected);
     card.setAttribute('aria-selected', selected ? 'true' : 'false');
-    const checkbox = card.querySelector('.entry-check input');
-    if (checkbox) checkbox.checked = selected;
   });
   updateSelectionBar();
 }
@@ -3900,7 +3965,7 @@ function usageGuideStepsMarkup() {
   return `<div><b>1 · 导入发票</b><span>拖入或粘贴发票 PDF/XML；多张用“导入发票”。</span></div>
     <div><b>2 · 补齐材料</b><span>在卡片或详情添加付款截图、实物图和查验单；右键可打开已有文件。</span></div>
     <div><b>3 · 核对条目</b><span>从“待补材料”或“识别提醒”进入详情，确认实付、明细和备注。</span></div>
-    <div><b>4 · 组织批次</b><span>勾选条目后移动到批次；点击批次右侧“⋯”可编辑批次、填写批次备注、归档，已归档批次可从“已归档”查看并恢复。</span></div>
+    <div><b>4 · 组织批次</b><span>选中条目后移动到批次；点击批次右侧“⋯”可编辑批次、填写批次备注、归档，已归档批次可从“已归档”查看并恢复。</span></div>
     <div><b>5 · 导出打印</b><span>选中条目后导出绑定包、汇总或打印材料。</span></div>
     <div><b>6 · 后续查找</b><span>用抬头、报账人、状态、日期、金额或关键词筛选。</span></div>`;
 }
@@ -4379,53 +4444,109 @@ async function openEntryDetail(entryId, currentDetail = null) {
     ).join('')}<td class="act"><button class="del-row" data-del-item="${it.id}" title="删除此行">${CLOSE_ICON}</button></td></tr>`;
   }).join('') || `<tr><td colspan="6" style="color:var(--ink-soft)">无明细</td></tr>`;
 
-  // 附件按报账所需的三类分组展示：发票 / 付款截图 / 查验单；缺的类别显式提示
+  // 附件按条目方案里的材料角色分组展示（发票 / 付款截图 / 查验单 / 自定义材料…）；缺的角色显式提示。
+  // 旧数据没有方案时回退到内置四类。
   const atts = e.attachments || [];
-  const attGroup = (label, types, hint, requirementKey = types[0]) => {
-    const list = atts.filter((a) => types.includes(a.type));
-    const has = list.length > 0;
-    const isInspection = types[0] === 'inspection_pdf';
-    const required = requirementKey in State.materialRequirements
-      ? State.materialRequirements[requirementKey] !== false
-      : false;
-    const rows = list.map((a) => `
+  const roles = (e.material_roles || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+  const requiredRoleIds = new Set(roles.filter((role) => role.min_count > 0).map((role) => role.id));
+  (e.diagnostics || []).forEach((d) => {
+    if (['MATERIAL_REQUIRED', 'RULE_MATERIAL_REQUIRED'].includes(d.code)) requiredRoleIds.add(d.target);
+  });
+  const isLiveAttachment = (a) => !a.role_definition_revision_id || a.role_definition_revision_id === e.scheme_revision_id;
+  const reclassifiableRoles = roles.filter((role) => role.id !== 'invoice' && role.reclassifiable !== false);
+  const attRow = (a, byRole) => `
       <div class="attach-item">
         <span class="attach-name" title="${esc(a.abs_path || a.stored_path)}">${esc(a.original_name)}</span>
         <div class="attach-actions">
-          <select class="attach-type-select" data-att-type="${a.id}">
-            ${ATTACHMENT_TYPE_OPTS.map(([v, l]) => `<option value="${v}"${v === a.type ? ' selected' : ''}>${l}</option>`).join('')}
-          </select>
+          ${byRole
+            ? `<select class="attach-type-select" data-att-role="${a.id}" aria-label="调整材料角色">
+                <option value="">调整材料角色</option>
+                ${reclassifiableRoles.map((role) => `<option value="${esc(role.id)}"${role.id === attachmentRoleId(a) && isLiveAttachment(a) ? ' selected' : ''}>${esc(role.label)}</option>`).join('')}
+              </select>`
+            : `<select class="attach-type-select" data-att-type="${a.id}">
+                ${ATTACHMENT_TYPE_OPTS.map(([v, l]) => `<option value="${v}"${v === a.type ? ' selected' : ''}>${l}</option>`).join('')}
+              </select>`}
           <input class="attach-note" data-att-note="${a.id}" value="${esc(a.note || '')}" placeholder="附件备注"/>
           <button class="btn small ghost" data-open-att="${a.id}">打开</button>
           <button class="btn small ghost" data-reveal-att="${a.id}">位置</button>
           <button class="btn small ghost" data-replace-att="${a.id}">替换</button>
           <button class="btn small danger" data-del-att="${a.id}">删除</button>
         </div>
-      </div>`).join('');
+      </div>`;
+  // spec: { key, label, list, required, hint, addType, roleId, online }
+  const attGroup = (spec) => {
+    const { list } = spec;
+    const has = list.length > 0;
+    const rows = list.map((a) => attRow(a, !!spec.roleId && spec.roleId.startsWith('custom:'))).join('');
     return `
-      <div class="att-group${has ? ' has' : ' missing'}" data-att-group="${types[0]}" data-att-requirement="${requirementKey}" data-att-required="${required ? '1' : '0'}" data-att-hint="${esc(hint)}">
+      <div class="att-group${has ? ' has' : ' missing'}" data-att-group="${esc(spec.key)}" data-att-required="${spec.required ? '1' : '0'}" data-att-hint="${esc(spec.hint)}">
         <div class="att-group-head">
           <span class="att-group-dot"></span>
-          <span class="att-group-title">${label}</span>
-          <span class="att-group-required">${required ? '必需' : '可选'}</span>
-          <span class="att-group-status">${has ? `已上传 ${list.length}` : (required ? '未上传' : '可选 · 未上传')}</span>
+          <span class="att-group-title">${esc(spec.label)}</span>
+          <span class="att-group-required">${spec.required ? '必需' : '可选'}</span>
+          <span class="att-group-status">${has ? `已上传 ${list.length}` : (spec.required ? '未上传' : '可选 · 未上传')}</span>
           <span class="att-group-actions">
-            ${isInspection ? '<button class="btn small att-group-add verify-online" data-online-verification>在线查验</button>' : ''}
-            <button class="btn small att-group-add" data-add-att-type="${types[0]}" data-add-att-label="${label}">＋ ${isInspection ? '上传' : '添加'}</button>
+            ${spec.online ? '<button class="btn small att-group-add verify-online" data-online-verification>在线查验</button>' : ''}
+            <button class="btn small att-group-add" ${spec.roleId ? `data-add-att-role="${esc(spec.roleId)}"` : `data-add-att-type="${esc(spec.addType)}"`}>＋ ${spec.online ? '上传' : '添加'}</button>
           </span>
         </div>
-        ${has ? `<div class="attach-list">${rows}</div>` : `<div class="att-group-hint">${hint}</div>`}
+        ${has ? `<div class="attach-list">${rows}</div>` : `<div class="att-group-hint">${esc(spec.hint)}</div>`}
       </div>`;
   };
-  const attachSection = [
-    attGroup('发票', ['invoice_pdf', 'invoice_xml'], '上传发票 PDF 或 XML，用于识别发票信息。', 'invoice'),
-    attGroup('付款截图', ['payment_screenshot'], '上传付款截图，作为实付凭证。', 'payment_screenshot'),
-    (State.materialRequirements.physical_image || atts.some((a) => a.type === 'physical_image')
-      ? attGroup('实物图', ['physical_image'], '上传实物照片，作为物资凭证。', 'physical_image') : ''),
-    attGroup('查验单', ['inspection_pdf'], '上传发票查验单 PDF。', 'inspection_pdf'),
-    (atts.some((a) => a.type === 'other')
-      ? attGroup('其他', ['other'], '') : ''),
-  ].join('');
+  const BUILTIN_ROLE_HINTS = {
+    invoice: '上传发票 PDF 或 XML，用于识别发票信息。',
+    payment_screenshot: '上传付款截图，作为实付凭证。',
+    physical_image: '上传实物照片，作为物资凭证。',
+    inspection_pdf: '上传发票查验单 PDF。',
+    other: '',
+  };
+  const verifyOnline = verificationVisible(e);
+  let attachSection = '';
+  if (roles.length) {
+    const shownIds = new Set();
+    attachSection = roles.map((role) => {
+      const list = atts.filter((a) => isLiveAttachment(a) && attachmentRoleId(a) === role.id);
+      const required = requiredRoleIds.has(role.id);
+      // 隐藏的角色只在已有材料时出现；实物图与"其他材料"沿用"必需或已有才显示"，方案自定义的材料总是显示以便添加。
+      if (role.presentation === 'hidden' && !list.length) return '';
+      if (['physical_image', 'other'].includes(role.id) && !list.length && !required && !role.quick_action) return '';
+      shownIds.add(role.id);
+      const custom = role.id.startsWith('custom:');
+      return attGroup({
+        key: role.id,
+        label: role.label,
+        list,
+        required,
+        hint: BUILTIN_ROLE_HINTS[role.id] ?? `上传${role.label}${role.extensions?.length ? `（${role.extensions.join(' ')}）` : ''}。`,
+        addType: role.id === 'invoice' ? 'invoice_pdf' : custom ? 'other' : role.id,
+        roleId: custom ? role.id : '',
+        online: role.id === 'inspection_pdf' && verifyOnline,
+      });
+    }).join('');
+    // 来自其他方案版本或外部方案、本方案没有对应角色的材料：保留展示，可手动对应到本方案角色。
+    const loose = atts.filter((a) => !(isLiveAttachment(a) && shownIds.has(attachmentRoleId(a))));
+    if (loose.length) {
+      attachSection += `
+      <details class="att-group has att-group-loose" data-att-required="0" data-att-hint="">
+        <summary class="att-group-head"><span class="att-group-dot"></span><span class="att-group-title">已有材料／外部材料</span><span class="att-group-status">${loose.length} 份</span></summary>
+        <div class="attach-list">${loose.map((a) => attRow(a, true)).join('')}</div>
+      </details>`;
+    }
+  } else {
+    const legacyGroup = (key, label, types, hint) => attGroup({
+      key, label, list: atts.filter((a) => types.includes(a.type)),
+      required: key in State.materialRequirements ? State.materialRequirements[key] !== false : false,
+      hint, addType: types[0], online: key === 'inspection_pdf',
+    });
+    attachSection = [
+      legacyGroup('invoice', '发票', ['invoice_pdf', 'invoice_xml'], BUILTIN_ROLE_HINTS.invoice),
+      legacyGroup('payment_screenshot', '付款截图', ['payment_screenshot'], BUILTIN_ROLE_HINTS.payment_screenshot),
+      (State.materialRequirements.physical_image || atts.some((a) => a.type === 'physical_image')
+        ? legacyGroup('physical_image', '实物图', ['physical_image'], BUILTIN_ROLE_HINTS.physical_image) : ''),
+      legacyGroup('inspection_pdf', '查验单', ['inspection_pdf'], BUILTIN_ROLE_HINTS.inspection_pdf),
+      (atts.some((a) => a.type === 'other') ? legacyGroup('other', '其他', ['other'], '') : ''),
+    ].join('');
+  }
 
   const history = (e.history || []).map((h) => `
     <div class="hitem">
@@ -4671,6 +4792,22 @@ async function openEntryDetail(entryId, currentDetail = null) {
   body.querySelectorAll('[data-add-att-type]').forEach((btn) => {
     btn.onclick = () => addAttachmentFlow(entryId, mm, btn.dataset.addAttType);
   });
+  body.querySelectorAll('[data-add-att-role]').forEach((btn) => {
+    btn.onclick = () => {
+      const role = (e.material_roles || []).find((item) => item.id === btn.dataset.addAttRole);
+      if (role) AdapterUI.attachRole(e, role, () => reopenEntryDetail(mm, entryId, { affectsStatus: true }));
+    };
+  });
+  body.querySelectorAll('[data-att-role]').forEach((sel) => {
+    sel.onchange = async () => {
+      if (!sel.value) return;
+      try {
+        await Api.reclassifyAttachment(sel.dataset.attRole, sel.value);
+        toast('材料角色已更新', 'ok');
+        await reopenEntryDetail(mm, entryId, { affectsStatus: true });
+      } catch (err) { toast(err.message, 'err'); }
+    };
+  });
   body.querySelectorAll('[data-online-verification]').forEach((btn) => {
     btn.onclick = () => {
       mm.close();
@@ -4735,7 +4872,9 @@ async function openEntryDetail(entryId, currentDetail = null) {
           if (status) status.textContent = count
             ? `已上传 ${count}`
             : (group.dataset.attRequired === '1' ? '未上传' : '可选 · 未上传');
-          if (!count) {
+          if (!count && group.classList.contains('att-group-loose')) {
+            group.remove();
+          } else if (!count) {
             group.classList.remove('has');
             group.classList.add('missing');
             group.querySelector('.attach-list')?.remove();

@@ -489,6 +489,7 @@ def test_api_can_recognize_payment_ocr_without_applying(api, sample_xmls, tmp_pa
 def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
     api, tmp_path, monkeypatch
 ):
+    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
     from tidoc.db import TYPE_INVOICE_XML
     from tidoc.engine.models import ParsedInvoice
     from tidoc.services import folder_import
@@ -552,6 +553,7 @@ def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
 
 
 def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypatch):
+    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
     from tidoc.engine.models import ParsedInvoice
     from tidoc.services import folder_import
 

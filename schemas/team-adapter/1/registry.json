@@ -566,7 +566,7 @@
       "type": "boolean"
     },
     "assist.payment_ocr": {
-      "default": "local",
+      "default": "manual",
       "enum": [
         "local",
         "cloud",

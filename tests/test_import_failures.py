@@ -484,6 +484,7 @@ def test_reset_data_root_failure_restores_database_connection(api, tmp_path, mon
 
 
 def test_deleting_last_ocr_payment_restores_invoice_total(api, tmp_path, monkeypatch):
+    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
     from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]
@@ -536,6 +537,7 @@ def test_deleting_ocr_payment_preserves_later_manual_amount(api, tmp_path, monke
 
 
 def test_paid_amount_waits_until_last_payment_is_deleted(api, tmp_path, monkeypatch):
+    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
     from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]
@@ -567,6 +569,7 @@ def test_paid_amount_waits_until_last_payment_is_deleted(api, tmp_path, monkeypa
 
 
 def test_reclassifying_last_payment_restores_invoice_total(api, tmp_path, monkeypatch):
+    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
     from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]

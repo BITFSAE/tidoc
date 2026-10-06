@@ -22,13 +22,23 @@ const AdapterUI = (() => {
     try { return await action(id); }
     finally { settled = true; clearInterval(timer); dialog.close(); }
   }
+  // 抬头没有指定颜色（neutral，方案里无处设置）时按顺序分配不同的颜色，避免所有抬头的卡片色条都一样；
+  // 方案明确指定的颜色保持不变，且不会被分给其他抬头。
+  const TITLE_PALETTE = ['blue', 'green', 'purple', 'teal', 'amber', 'red'];
+  function titleColors(titles) {
+    const explicit = new Set(titles.map(t => t.color).filter(c => c && c !== 'neutral'));
+    const free = TITLE_PALETTE.filter(c => !explicit.has(c));
+    let next = 0;
+    return titles.map(t => (t.color && t.color !== 'neutral') ? t.color : (free.length ? free[next++ % free.length] : 'neutral'));
+  }
   async function refresh() {
     schemes = await Api.listSchemes(); current = schemes.find(s => s.is_default) || schemes[0] || null;
     State.schemes = schemes; State.scheme = current;
     State.titleProfiles = current?.definition?.scheme?.titles || [];
     for (const key of Object.keys(TITLE_CLASS)) delete TITLE_CLASS[key];
     for (const key of Object.keys(TITLE_SHORT)) delete TITLE_SHORT[key];
-    for (const title of State.titleProfiles) { TITLE_CLASS[title.name] = 'title-' + (title.color || 'neutral'); TITLE_SHORT[title.name] = title.short_name || title.name; }
+    const colors = titleColors(State.titleProfiles);
+    State.titleProfiles.forEach((title, index) => { TITLE_CLASS[title.name] = 'title-' + colors[index]; TITLE_SHORT[title.name] = title.short_name || title.name; });
     State.defaultPaidToInvoice = settings()['entry.default_paid_to_invoice'];
     State.defaultEntryTitle = State.titleProfiles.find(t => t.id === settings()['entry.default_title_id'])?.name || '';
     State.materialRequirements = await Api.materialRequirements();
@@ -118,7 +128,7 @@ const AdapterUI = (() => {
     node.classList.remove('hidden'); node.textContent = error.message || String(error); node.focus();
   }
   function diagnosticsMarkup(items) { return items.map(d => `<p class="hint ${['required','blocked'].includes(d.severity) ? 'warn' : ''}">${esc(d.message || d.code)}</p>`).join(''); }
-  const labels = { 'entry.default_title_id':'默认抬头', 'entry.default_paid_to_invoice':'实付初值取发票总额', 'entry.suggested_tags':'建议标签', 'profile.reviewer_required':'审核人必填', 'profile.reviewer_presentation':'审核人显示方式', 'profile.default_view':'初始报账人视图', 'payee.personnel_number_label':'人员编号名称', 'print.default_outputs':'默认输出', 'print.numbering':'材料编号', 'print.image_layout':'图片布局', 'print.content_order':'材料排序', 'print.amount_basis':'金额口径', 'print.payee_mode':'收款方式', 'print.sort_by':'条目排序', 'assist.cloud_ocr_visible':'显示云识别入口', 'assist.verification_visible':'显示查验入口', 'assist.payment_ocr':'付款识别方式', 'transfer.include_notes':'绑定包包含备注', 'transfer.include_tags':'绑定包包含标签' };
+  const labels = { 'entry.default_title_id':'默认抬头', 'entry.default_paid_to_invoice':'实付初值取发票总额', 'entry.suggested_tags':'建议标签', 'profile.reviewer_required':'审核人必填', 'profile.reviewer_presentation':'审核人显示方式', 'profile.default_view':'初始报账人视图', 'payee.personnel_number_label':'人员编号名称', 'print.default_outputs':'默认输出', 'print.numbering':'材料编号', 'print.image_layout':'图片布局', 'print.content_order':'材料排序', 'print.amount_basis':'金额口径', 'print.payee_mode':'收款方式', 'print.sort_by':'条目排序', 'assist.cloud_ocr_visible':'显示云识别入口', 'assist.verification_visible':'显示查验入口', 'assist.payment_ocr':'付款截图金额识别（实验性）', 'transfer.include_notes':'绑定包包含备注', 'transfer.include_tags':'绑定包包含标签' };
   const choiceLabels={visible:'显示',advanced:'高级选项',hidden:'隐藏',self:'本人报账',delegate:'代填',invoice:'发票金额',paid:'实付金额',single:'统一收款',by_claimant:'分别收款',none:'不含收款信息',entry:'按条目',role:'按材料',selection:'当前选择顺序',invoice_date:'发票日期',invoice_no:'发票号',claimant:'报账人',seller:'销售方',created_at:'创建时间',local:'本地识别',cloud:'云识别',manual:'手动填写',a4_portrait_1:'A4 纵向，每页 1 张',a4_portrait_2:'A4 纵向，每页 2 张',a4_portrait_4:'A4 纵向，每页 4 张',a4_landscape_1:'A4 横向，每页 1 张',a4_landscape_2:'A4 横向，每页 2 张',a4_landscape_4:'A4 横向，每页 4 张'};
   function outputSettingsForm(definition,catalog,keys,values={}) {
     const fields=keys.map(key=>{const spec=catalog[key];const policy=definition.scheme.settings[key]||{};const fixed='fixed' in policy||policy.editable===false;return {id:key,label:labels[key],type:'select',editable:!fixed,presentation:'visible',options:(spec.type==='boolean'?['true','false']:spec.enum||[]).map(value=>({value,label:value==='true'?'开启':value==='false'?'关闭':choiceLabels[value]||value})),help:fixed?'由方案固定。':'留空沿用方案或批次设置。'};});
@@ -151,7 +161,7 @@ const AdapterUI = (() => {
     'print.content_order': '材料 PDF 按条目逐条排列，还是按材料类型归并。',
     'print.numbering': '在合并后的材料 PDF 页面上标注编号。',
     'print.image_layout': '图片类材料在材料 PDF 里的纸张方向与每页张数。',
-    'assist.payment_ocr': '识别付款截图金额的方式；手动填写时不读取截图。',
+    'assist.payment_ocr': '默认手动填写实付金额，不读取截图。本地识别使用系统自带 OCR，效果有限，识别结果仅供参考，请核对后再使用。',
     'assist.cloud_ocr_visible': '在条目里显示云识别入口。',
     'assist.verification_visible': '在条目里显示发票查验入口。',
     'transfer.include_notes': '导出绑定包时带上条目备注、材料备注及备注修改记录。',
@@ -617,30 +627,30 @@ const AdapterUI = (() => {
   async function attachRole(entry,role,onSaved) {
     try{const picked=await Api.pickFiles(true,role.extensions?.length?[`${role.label} (${role.extensions.map(e=>'*'+e).join(';')})`]:null);const paths=picked.paths||[];for(const path of paths){let type=role.id.startsWith('custom:')?'other':role.id;if(role.id==='invoice')type=String(path).toLowerCase().endsWith('.xml')?'invoice_xml':'invoice_pdf';await Api.addAttachment(entry.id,path,type,'',{role_id:role.id});}if(paths.length)await onSaved();}catch(e){toast(e.message,'err');}
   }
-  function decorateEntry(body,entry,refreshDetail) {
-    const roles=entry.material_roles||[];
-    const section=el('div','detail-section adapter-entry');section.innerHTML=`<h3>报账信息<span class="h3-line"></span></h3><p class="hint">${esc(entry.adapter?.scheme_name||'')} · 修订 ${esc(entry.scheme_revision_id?.slice(0,8)||'')}</p>`;
-    section.append(mkBtn('填写报账信息','small ghost',()=>editFields('entry',entry.id,null,null,refreshDetail)),mkBtn('更改方案','small ghost',()=>rebind([entry.id])));
-    section.insertAdjacentHTML('beforeend',diagnosticsMarkup(entry.diagnostics||[]));
-    for(const source of entry.adapter_sources||[]){const historical=el('details');historical.innerHTML=`<summary>来源报账信息 · ${esc(source.definition?.manifest?.name||'外部方案')}</summary>`;const fields=source.definition?.fields||[];for(const record of source.extension_values||[]){const field=fields.find(f=>f.id===record.field_id);const row=el('p','hint');row.textContent=(field?.label||record.field_id)+'：'+JSON.stringify(record.value);historical.append(row);}section.append(historical);}
-    const material=el('div','adapter-materials');
-    const used=new Set();
-    for(const role of roles){const list=(entry.attachments||[]).filter(a=>(a.role_id||(['invoice_pdf','invoice_xml'].includes(a.type)?'invoice':a.type))===role.id && (!a.role_definition_revision_id||a.role_definition_revision_id===entry.scheme_revision_id));if(role.presentation==='hidden'&&!list.length)continue;
-      const group=el('div','att-group');const head=el('div','att-group-head');head.append(el('b',null,esc(role.label)),el('span','hint',`${list.length} 份${role.min_count?' · 最少 '+role.min_count+' 份':''}`),mkBtn('添加','small ghost',()=>attachRole(entry,role,refreshDetail)));group.append(head);
-      for(const att of list){used.add(att.id);group.append(materialRow(att,roles,refreshDetail));}material.append(group);
-    }
-    const historical=(entry.attachments||[]).filter(a=>!used.has(a.id));if(historical.length){const group=el('details');group.innerHTML='<summary>已有材料／外部材料</summary>';for(const att of historical)group.append(materialRow(att,roles,refreshDetail));material.append(group);}
-    section.append(material);
-    for(const item of entry.extension_history||[]){const row=el('p','hint');row.textContent=(item.kind==='rebind'?'规则变更':item.kind==='material'?'材料角色变更':'附加信息变更')+' · '+item.changed_at;section.append(row);}
-    const drop=body.querySelector('#materialDrop');const original=drop?.closest('.detail-section');if(drop)section.insertBefore(drop,material);if(original)original.hidden=true;
-    body.append(section);
+  // 条目当前方案版本下归属某个材料角色的附件；其他版本冻结下来的材料不计入。
+  function roleAttachments(entry,roleId) {
+    return (entry.attachments||[]).filter(a=>(a.role_id||(['invoice_pdf','invoice_xml'].includes(a.type)?'invoice':a.type))===roleId&&(!a.role_definition_revision_id||a.role_definition_revision_id===entry.scheme_revision_id));
   }
-  function materialRow(att,roles,refreshDetail) {
-    const row=el('div','attach-item');const name=el('span','attach-name');name.textContent=att.original_name;row.append(name,mkBtn('打开','small ghost',()=>Api.openAttachment(att.id)));
-    row.append(mkBtn('位置','small ghost',()=>Api.revealAttachment(att.id)),mkBtn('替换','small ghost',async()=>{try{const picked=await Api.pickFiles(false);const path=picked.paths?.[0];if(path){await Api.updateAttachment(att.id,{src_path:path,type:att.type});await refreshDetail();}}catch(e){toast(e.message,'err');}}));
-    const note=el('input','attach-note');note.setAttribute('aria-label','材料备注');note.placeholder='材料备注';note.value=att.note||'';note.onchange=async()=>{try{await Api.updateAttachment(att.id,{note:note.value});}catch(e){toast(e.message,'err');}};row.append(note);
-    if(!['invoice_pdf','invoice_xml'].includes(att.type)){const select=el('select');select.setAttribute('aria-label','材料角色');select.innerHTML='<option value="">调整材料角色</option>'+roles.filter(r=>r.id!=='invoice'&&r.reclassifiable!==false).map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('');select.onchange=async()=>{if(!select.value)return;try{await Api.reclassifyAttachment(att.id,select.value);await refreshDetail();}catch(e){toast(e.message,'err');}};row.append(select);}
-    row.append(mkBtn('删除','small danger',async()=>{try{await Api.deleteAttachment(att.id);await refreshDetail();}catch(e){toast(e.message,'err');}}));return row;
+  // 详情页的材料分组由 app.js 渲染（与改动前一致）；这里只补方案信息：报账字段、规则提示、来源方案和变更记录。
+  function decorateEntry(body,entry,refreshDetail) {
+    const definition=entry.adapter?.definition;
+    const hasFields=(definition?.fields||[]).some(f=>f.scope==='entry');
+    const materialCodes=new Set(['MATERIAL_REQUIRED','RULE_MATERIAL_REQUIRED','INVOICE_BLOCKED']);
+    const notices=(entry.diagnostics||[]).filter(d=>!materialCodes.has(d.code));
+    const sources=entry.adapter_sources||[];
+    const history=entry.extension_history||[];
+    const section=el('details','detail-section minor-section adapter-entry');
+    section.open=hasFields||notices.length>0;
+    section.innerHTML=`<summary>报账方案 · ${esc(entry.adapter?.scheme_name||'未选择')}${notices.length?' <span class="badge warning">待处理</span>':''}</summary><p class="scheme-desc">修订 ${esc(entry.scheme_revision_id?.slice(0,8)||'')}</p>`;
+    const actions=el('div');
+    if(hasFields)actions.append(mkBtn('填写报账信息','small ghost',()=>editFields('entry',entry.id,null,null,refreshDetail)));
+    actions.append(mkBtn('更改方案','small ghost',()=>rebind([entry.id])));
+    section.append(actions);
+    section.insertAdjacentHTML('beforeend',diagnosticsMarkup(notices));
+    for(const source of sources){const historical=el('details');historical.innerHTML=`<summary>来源报账信息 · ${esc(source.definition?.manifest?.name||'外部方案')}</summary>`;const fields=source.definition?.fields||[];for(const record of source.extension_values||[]){const field=fields.find(f=>f.id===record.field_id);const row=el('p','hint');row.textContent=(field?.label||record.field_id)+'：'+JSON.stringify(record.value);historical.append(row);}section.append(historical);}
+    for(const item of history){const row=el('p','hint');row.textContent=(item.kind==='rebind'?'规则变更':item.kind==='material'?'材料角色变更':'附加信息变更')+' · '+item.changed_at;section.append(row);}
+    const anchor=body.querySelector('details.minor-section');
+    if(anchor)anchor.before(section);else body.append(section);
   }
   function chooser(selected='') { if(schemes.length<=1)return '';return `<label class="form-row">报账方案<select data-import-scheme>${schemes.map(s=>`<option value="${esc(s.id)}"${s.id===(selected||current?.id)?' selected':''}>${esc(s.name)}</option>`).join('')}</select></label>`; }
   async function batchFields(batchId) {
@@ -722,13 +732,30 @@ const AdapterUI = (() => {
     const render=()=>{const chosen=fields.find(f=>f.id===$('[data-batch-field]',body).value);form=SchemaForm.create({fields:chosen?[chosen]:[],values:{}});$('[data-batch-control]',body).replaceChildren(form.root);};render();$('[data-batch-field]',body).onchange=render;
     m=modal({title:'批量填写报账信息',body,footer:[mkBtn('取消','ghost',()=>m.close()),mkBtn('保存到所选条目','primary',async()=>{try{const id=$('[data-batch-field]',body).value;await Api.batchSaveExtensionValues(ids,id,form.values()[id]);m.close();await refreshEntries();}catch(e){form.errors(e);}})]});
   }
+  // 卡片快捷按钮：内置材料（发票/付款/查验/实物）由 app.js 渲染；这里只补方案自定义的材料角色。
+  function customQuickRoles(entry) {
+    return (entry.material_roles||[]).filter(r=>r.id.startsWith('custom:')&&r.quick_action&&r.presentation!=='hidden').sort((a,b)=>(a.order||0)-(b.order||0));
+  }
   function cardActions(entry) {
-    const roles=(entry.material_roles||[]).filter(r=>r.quick_action&&r.presentation!=='hidden').sort((a,b)=>(a.order||0)-(b.order||0)).slice(0,4);
-    return roles.map(role=>`<button data-card-role="${esc(role.id)}" title="${esc('添加'+role.label)}">${esc(role.label)}</button>`).join('')+`<button data-card-materials>材料</button>`;
+    return customQuickRoles(entry).map(role=>{
+      const count=entry.role_counts?.[role.id]||0;
+      const title=count?`已有 ${count} 份${role.label}；左键继续添加，右键打开最近一份`:`添加${role.label}`;
+      return `<button class="${count?'done':''}" data-card-role="${esc(role.id)}" title="${esc(title)}"><span class="action-state"></span>${esc(role.label)}</button>`;
+    }).join('');
   }
   function bindCardActions(root,entry) {
-    for(const button of root.querySelectorAll('[data-card-role]'))button.onclick=async event=>{event.stopPropagation();const detail=await Api.getEntry(entry.id);const role=detail.material_roles.find(r=>r.id===button.dataset.cardRole);if(role)await attachRole(detail,role,()=>refreshEntryCard(entry.id));};
-    root.querySelector('[data-card-materials]')?.addEventListener('click',async event=>{event.stopPropagation();const detail=await Api.getEntry(entry.id);const body=el('div');let m;for(const role of detail.material_roles||[])body.append(mkBtn(role.label,'ghost',()=>attachRole(detail,role,()=>refreshEntryCard(entry.id))));m=modal({title:'添加材料',body,footer:[mkBtn('完成','primary',()=>m.close())]});});
+    for(const button of root.querySelectorAll('[data-card-role]')){
+      const roleId=button.dataset.cardRole;
+      button.onclick=async event=>{
+        event.stopPropagation();if(event.detail>1){event.preventDefault();return;}
+        try{const detail=await Api.getEntry(entry.id);const role=(detail.material_roles||[]).find(r=>r.id===roleId);if(role)await attachRole(detail,role,()=>syncEntryAfterChange(entry.id,{affectsStatus:true}));}catch(e){toast(e.message,'err');}
+      };
+      button.oncontextmenu=async event=>{
+        event.preventDefault();event.stopPropagation();
+        try{const detail=await Api.getEntry(entry.id);const list=roleAttachments(detail,roleId);const latest=list[list.length-1];if(!latest){toast('当前条目还没有该材料','err');return;}await Api.openAttachment(latest.id);}catch(e){toast(e.message,'err');}
+      };
+      button.ondblclick=event=>{event.preventDefault();event.stopPropagation();};
+    }
   }
   function jobs(focusId=null) { return openOnce('export-jobs', () => withLoading('正在打开导出记录…', () => jobsPage(focusId))); }
   async function jobsPage(focusId=null) {
@@ -802,5 +829,5 @@ const AdapterUI = (() => {
     m = modal({ title: '导出记录', key: 'export-jobs', wide: true, body, footer: [mkBtn('完成', 'primary', () => m.close())] });
     $('.is-focus', body)?.scrollIntoView({ block: 'nearest' });
   }
-  return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,jobs};
+  return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs};
 })();

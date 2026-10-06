@@ -251,6 +251,7 @@ class EntryRepo:
         row = self.db.conn.execute("SELECT name FROM schemes WHERE id=?", (entry.get("scheme_id"),)).fetchone()
         entry["adapter"] = {"scheme_name": row[0] if row else "", "revision_id": entry["scheme_revision_id"], "definition": definition}
         entry["material_roles"] = definition.get("materials", [])
+        entry["verification_visible"] = definition.get("effective_settings", {}).get("assist.verification_visible", True)
         entry["diagnostics"] = entry["completeness"].get("diagnostics", [])
         entry["extension_history"] = [dict(r) for r in self.db.conn.execute("SELECT * FROM extension_history WHERE scope='entry' AND owner_id=? ORDER BY id", (entry["id"],))]
 
@@ -545,10 +546,12 @@ class EntryRepo:
             entry['diagnostics']=entry['completeness'].get('diagnostics',[])
             if definition:
                 entry["material_roles"] = definition.get("materials",[])
+                entry["verification_visible"] = definition.get("effective_settings",{}).get("assist.verification_visible",True)
                 entry["diagnostics"] = entry["completeness"].get("diagnostics",[])
                 matches = [t for t in definition.get("scheme",{}).get("titles",[]) if t.get("id") == entry.get("title_profile_id")]
                 entry["title_profile"] = matches[0] if matches else None
-            entry.pop("_role_counts",None)
+            # 卡片按材料角色显示"已添加"状态，自定义角色没有独立的附件类型，需要角色计数。
+            entry["role_counts"] = dict(entry.pop("_role_counts", None) or {})
             entry.pop("_claimant",None)
             result.append(entry)
         return result

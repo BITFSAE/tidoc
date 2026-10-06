@@ -24,7 +24,7 @@
 | `print.sort_by` | `select` | `"selection"` | scheme, batch, export |
 | `assist.cloud_ocr_visible` | `boolean` | `true` | scheme |
 | `assist.verification_visible` | `boolean` | `true` | scheme |
-| `assist.payment_ocr` | `select` | `"local"` | scheme |
+| `assist.payment_ocr` | `select` | `"manual"` | scheme |
 | `transfer.include_notes` | `boolean` | `true` | scheme |
 | `transfer.include_tags` | `boolean` | `true` | scheme |
 

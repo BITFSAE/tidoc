@@ -85,6 +85,10 @@ def test_payment_recognition_preview_and_execution_use_each_pinned_revision(tmp_
     from tidoc.services import folder_import
     api=setup_api(tmp_path/'data')
     person=api.create_profile('付款识别人员','')['data']
+    # 付款识别默认是手动填写；这里明确开启本地识别，才能和之后改回手动的修订对比。
+    scheme=api.adapters.get_scheme()
+    api.adapters.update_scheme_settings(scheme['id'],scheme['current_revision_id'],
+                                       {'assist.payment_ocr':'local'})
     enabled=api.entries.create(person['id'],parsed=ParsedInvoice(total=Decimal('10.00')))
     scheme=api.adapters.get_scheme()
     api.adapters.update_scheme_settings(scheme['id'],scheme['current_revision_id'],
@@ -232,4 +236,31 @@ def test_batch_output_settings_validate_persist_and_check_revision_constraints(t
     api.batches.set_default_binding(batch['id'],fixed['id'],fixed['current_revision_id'])
     with pytest.raises(ValueError):
         api.adapters.update_batch_output_settings(batch['id'],{'print.numbering':False})
+    api.db.close()
+
+
+def test_payment_recognition_defaults_to_manual_and_existing_schemes_follow_once(tmp_path,monkeypatch):
+    from tidoc.adapters.registry import SETTINGS
+    setting=SETTINGS['assist.payment_ocr']
+    assert setting['default']=='manual'
+    # 模拟升级前建立的数据库：当时的核心默认是本地识别。
+    monkeypatch.setitem(setting,'default','local')
+    api=setup_api(tmp_path/'data')
+    untouched=api.adapters.get_scheme()
+    chosen=next(s for s in api.adapters.list_schemes() if s['id']!=untouched['id'])
+    api.adapters.update_scheme_settings(chosen['id'],chosen['current_revision_id'],{'assist.payment_ocr':'local'})
+    assert untouched['definition']['effective_settings']['assist.payment_ocr']=='local'
+    # 升级到新默认后首次启动：没人改过的方案跟随新默认，明确选择过的保持不变。
+    monkeypatch.setitem(setting,'default','manual')
+    api.adapters.db.conn.execute("DELETE FROM meta WHERE key='adapter.defaults.payment_ocr_manual'")
+    api.adapters.db.conn.commit()
+    api.adapters.bootstrap()
+    value=lambda scheme_id:api.adapters.get_scheme(scheme_id)['definition']['effective_settings']['assist.payment_ocr']
+    assert value(untouched['id'])=='manual'
+    assert value(chosen['id'])=='local'
+    # 只执行一次：用户之后再选本地识别不会被改回去。
+    current=api.adapters.get_scheme(untouched['id'])
+    api.adapters.update_scheme_settings(untouched['id'],current['current_revision_id'],{'assist.payment_ocr':'local'})
+    api.adapters.bootstrap()
+    assert value(untouched['id'])=='local'
     api.db.close()

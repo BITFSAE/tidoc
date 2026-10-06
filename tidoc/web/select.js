@@ -29,7 +29,7 @@
 
   const WIDTH_CAP = 420;        // 浮层最大宽度（长抬头不撑满整屏）
   const MIN_MENU_WIDTH = 112;
-  const MENU_Z = 400;           // 基础层级，实际使用时会压过当前最高的弹窗遮罩
+  const MENU_Z = 400;           // 基础层级（低于悬浮提示的 500），实际使用时会压过当前最高的弹窗遮罩
   const EDGE = 8;               // 距视口边缘留白
   const GAP = 6;                // 触发器与浮层间距
 
@@ -40,6 +40,8 @@
   let prefixTimer = 0;
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
   const decode = (text) => {
     const holder = document.createElement('textarea');
     holder.innerHTML = text;
@@ -240,10 +242,12 @@
     const selected = record.select.value;
     node.innerHTML = record.options.map((option, index) => {
       const active = option.value === selected;
+      const label = escapeHtml(option.label);
+      // 只有被省略号截断的选项才需要提示（全局提示组件按需判断），并放在列表侧边，不盖住相邻选项。
       return `<div class="select-menu-option${active ? ' is-selected' : ''}" role="option"` +
         ` id="selectMenuOption${index}" data-index="${index}" data-value="${encodeURIComponent(option.value)}"` +
-        ` aria-selected="${active ? 'true' : 'false'}" title="${option.label.replace(/"/g, '&quot;')}">` +
-        `<span class="select-menu-label">${option.label}</span>` +
+        ` aria-selected="${active ? 'true' : 'false'}">` +
+        `<span class="select-menu-label" data-tooltip-overflow="${label}">${label}</span>` +
         `<span class="select-menu-check" aria-hidden="true">${active ? CHECK_ICON : ''}</span></div>`;
     }).join('');
     return node;

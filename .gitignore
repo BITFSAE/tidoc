@@ -28,3 +28,6 @@ Thumbs.db
 # 编辑器
 .vscode/
 .idea/
+
+# 本地 agent skills
+.agents/

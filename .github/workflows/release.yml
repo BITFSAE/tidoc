@@ -27,6 +27,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+          pip install -r requirements-print.txt
       - name: Run tests
         run: pytest -q
 
@@ -71,7 +72,16 @@ jobs:
           --collect-submodules tidoc
           --icon "icon/windows/icon.ico"
           --add-data "tidoc/web;tidoc/web"
+          --add-data "schemas/team-adapter;schemas/team-adapter"
+          --add-data "tidoc/builtin_adapters;tidoc/builtin_adapters"
+          --add-data "tidoc_print/context_fields.json;tidoc_print"
           scripts/tidoc_app_entry.py
+
+      - name: Smoke-test Windows core
+        shell: pwsh
+        run: |
+          $coreTest = Start-Process -FilePath ".\dist\tidoc\tidoc.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($coreTest.ExitCode -ne 0) { throw "Windows core self-test failed ($($coreTest.ExitCode))" }
 
       - name: Build Windows installer
         shell: pwsh
@@ -90,7 +100,10 @@ jobs:
           --name tidoc_print
           --paths "."
           --collect-submodules tidoc_print
+          --add-data "tidoc_print/context_fields.json;tidoc_print"
+          --add-data "schemas/team-adapter/1/context.schema.json;schemas/team-adapter/1"
           --add-data "tidoc_print/templates;tidoc_print/templates"
+          --add-data "tidoc/builtin_adapters/org.bitfsae.reimbursement/scheme.json;tidoc/builtin_adapters/org.bitfsae.reimbursement"
           scripts/tidoc_print_entry.py
 
       - name: Smoke-test Windows print component
@@ -162,6 +175,9 @@ jobs:
           --argv-emulation
           --osx-bundle-identifier "com.bitfsae.tidoc"
           --add-data "tidoc/web:tidoc/web"
+          --add-data "schemas/team-adapter:schemas/team-adapter"
+          --add-data "tidoc/builtin_adapters:tidoc/builtin_adapters"
+          --add-data "tidoc_print/context_fields.json:tidoc_print"
           scripts/tidoc_app_entry.py
 
       - name: Register .tidoc document icon
@@ -223,7 +239,10 @@ jobs:
           --name tidoc_print
           --paths "."
           --collect-submodules tidoc_print
+          --add-data "tidoc_print/context_fields.json:tidoc_print"
+          --add-data "schemas/team-adapter/1/context.schema.json:schemas/team-adapter/1"
           --add-data "tidoc_print/templates:tidoc_print/templates"
+          --add-data "tidoc/builtin_adapters/org.bitfsae.reimbursement/scheme.json:tidoc/builtin_adapters/org.bitfsae.reimbursement"
           scripts/tidoc_print_entry.py
 
       - name: Smoke-test macOS print component

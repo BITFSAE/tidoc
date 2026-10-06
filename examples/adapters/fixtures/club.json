@@ -1,0 +1,50 @@
+{
+  "package_id": "org.example.club",
+  "entries": [
+    {
+      "invoice_no": "CLUB-001",
+      "buyer_name": "示例社团抬头",
+      "buyer_tax_id": "200000000000000001",
+      "total": "650.00",
+      "paid_amount": "650.00",
+      "items": [
+        {
+          "name": "活动展架",
+          "unit": "件",
+          "quantity": "1",
+          "total": "650.00"
+        }
+      ],
+      "fields": {
+        "event": "迎新活动"
+      },
+      "materials": [
+        "invoice",
+        "payment_screenshot",
+        "custom:org.example.club:quote"
+      ],
+      "invoice_date": "2026-10-05",
+      "seller": "样例供应商",
+      "claimant": {
+        "name": "示例报账人"
+      }
+    }
+  ],
+  "expected": {
+    "entry_count": 1,
+    "invoice_total": "650.00",
+    "required_materials": [
+      "custom:org.example.club:quote"
+    ],
+    "outputs": [
+      "overview",
+      "attachments",
+      "club_purchase"
+    ],
+    "contains_text": [
+      "社团采购材料说明",
+      "迎新活动"
+    ]
+  },
+  "schema_version": 1
+}

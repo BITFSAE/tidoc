@@ -1,0 +1,30 @@
+{
+  "rules": [
+    {
+      "id": "equipment_needs_approval",
+      "stage": "complete",
+      "when": {
+        "all": [
+          {
+            "field": "entry.fields.purpose",
+            "op": "eq",
+            "value": "equipment"
+          },
+          {
+            "field": "invoice.total",
+            "op": "gte",
+            "value": "1000.00"
+          }
+        ]
+      },
+      "require": [
+        {
+          "material": "custom:org.example.lab:approval",
+          "min_count": 1
+        }
+      ],
+      "message": "设备采购达到本方案设定金额，请补充审批材料。",
+      "severity": "required"
+    }
+  ]
+}

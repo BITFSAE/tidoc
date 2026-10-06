@@ -27,7 +27,10 @@ def sample_pdfs():
 @pytest.fixture
 def api():
     from tidoc.api import Api
-    return Api(tempfile.mkdtemp())
+    api = Api(tempfile.mkdtemp())
+    scheme = next(s for s in api.adapters.list_schemes() if s["package_id"]=="org.bitfsae.reimbursement")
+    api.adapters.complete_adapter_setup(scheme["id"])
+    return api
 
 
 @pytest.fixture

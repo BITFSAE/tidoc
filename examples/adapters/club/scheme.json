@@ -1,0 +1,13 @@
+{
+  "organization": {
+    "name": "学生社团",
+    "department": "",
+    "purpose": "活动物资",
+    "storage_location": ""
+  },
+  "titles": [],
+  "settings": {},
+  "default_outputs": [
+    "overview"
+  ]
+}

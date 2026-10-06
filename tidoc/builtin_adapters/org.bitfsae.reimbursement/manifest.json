@@ -1,0 +1,21 @@
+{
+  "format": "tidoc-team-adapter",
+  "schema_version": "1.0",
+  "package_id": "org.bitfsae.reimbursement",
+  "package_version": "1.0.0",
+  "name": "BITFSAE 车队报账",
+  "description": "BITFSAE 车队报账的材料与输出规则。",
+  "author": "BITFSAE",
+  "requires": {
+    "adapter_api": 1,
+    "capabilities": [
+      "fields.v1",
+      "material-roles.v1",
+      "output.attachments.v1",
+      "output.docx.v1",
+      "output.pdf.v1",
+      "output.xlsx.v1",
+      "rules.v1"
+    ]
+  }
+}

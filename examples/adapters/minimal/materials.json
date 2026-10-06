@@ -1,0 +1,18 @@
+{
+  "roles": [
+    {
+      "id": "invoice",
+      "label": "发票",
+      "extensions": [
+        ".pdf",
+        ".xml"
+      ],
+      "min_count": 1,
+      "max_count": null,
+      "order": 0,
+      "quick_action": true,
+      "reclassifiable": false,
+      "presentation": "visible"
+    }
+  ]
+}

@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tidoc.app/schemas/team-adapter/1/rules.schema.json",
+  "type": "object",
+  "properties": {
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "stage": {
+            "enum": [
+              "complete",
+              "export"
+            ]
+          },
+          "when": {
+            "$ref": "#/$defs/condition"
+          },
+          "require": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "material": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "min_count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000
+                },
+                "field": {
+                  "type": "string",
+                  "maxLength": 160
+                }
+              },
+              "required": [],
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "required": [
+                    "material"
+                  ]
+                },
+                {
+                  "required": [
+                    "field"
+                  ]
+                }
+              ]
+            },
+            "maxItems": 100
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "warning",
+              "required"
+            ]
+          },
+          "x_metadata": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "stage",
+          "when",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 100
+    }
+  },
+  "required": [
+    "rules"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "all": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/condition"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "all"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "any": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/condition"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "any"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "not"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "maxLength": 160
+            },
+            "op": {
+              "enum": [
+                "eq",
+                "ne",
+                "in",
+                "gt",
+                "gte",
+                "lt",
+                "lte",
+                "present"
+              ]
+            },
+            "value": {}
+          },
+          "required": [
+            "field",
+            "op"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

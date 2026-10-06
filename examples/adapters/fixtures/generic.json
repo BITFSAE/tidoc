@@ -1,0 +1,60 @@
+{
+  "package_id": "org.tidoc.generic",
+  "entries": [
+    {
+      "invoice_no": "GEN-001",
+      "buyer_name": "示例甲单位",
+      "buyer_tax_id": "000000000000000001",
+      "total": "125.40",
+      "paid_amount": "125.40",
+      "items": [
+        {
+          "name": "USB-C线缆",
+          "unit": "根",
+          "quantity": "2",
+          "total": "25.40"
+        }
+      ],
+      "invoice_date": "2026-10-05",
+      "seller": "样例供应商",
+      "claimant": {
+        "name": "示例报账人",
+        "reviewer": "示例审核人"
+      },
+      "materials": [
+        "invoice",
+        "payment_screenshot"
+      ]
+    },
+    {
+      "invoice_no": "GEN-002",
+      "buyer_name": "示例乙单位",
+      "buyer_tax_id": "000000000000000002",
+      "total": "300.00",
+      "paid_amount": null,
+      "items": [],
+      "invoice_date": "2026-10-05",
+      "seller": "样例供应商",
+      "claimant": {
+        "name": "示例报账人",
+        "reviewer": "示例审核人"
+      },
+      "materials": [
+        "invoice",
+        "payment_screenshot"
+      ]
+    }
+  ],
+  "expected": {
+    "entry_count": 2,
+    "invoice_total": "425.40",
+    "paid_total": null,
+    "title_groups": 2,
+    "summary_row_count": 2,
+    "outputs": [
+      "overview",
+      "attachments"
+    ]
+  },
+  "schema_version": 1
+}

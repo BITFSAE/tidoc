@@ -1,0 +1,17 @@
+{
+  "fields": [
+    {
+      "id": "event",
+      "scope": "entry",
+      "label": "活动名称",
+      "type": "text",
+      "required_at": [
+        "complete"
+      ],
+      "presentation": "visible",
+      "sensitive": false,
+      "transfer": "include",
+      "max_length": 100
+    }
+  ]
+}

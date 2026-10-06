@@ -7,6 +7,8 @@ from .models import (
     CheckResult,
     ParsedInvoice,
     ParsedItem,
+    RecognitionContext,
+    PolicyContext,
 )
 from .money import d, fmt_decimal, fmt_money, money
 from .validator import (
@@ -41,6 +43,8 @@ __all__ = [
     "CheckResult",
     "ParsedInvoice",
     "ParsedItem",
+    "RecognitionContext",
+    "PolicyContext",
     "d",
     "money",
     "fmt_money",

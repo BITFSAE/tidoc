@@ -1,0 +1,21 @@
+{
+  "format": "tidoc-team-adapter",
+  "schema_version": "1.0",
+  "package_id": "org.example.club",
+  "package_version": "1.0.0",
+  "name": "学生社团活动报账",
+  "description": "学生社团活动报账的材料与输出规则。",
+  "author": "示例社团",
+  "requires": {
+    "adapter_api": 1,
+    "capabilities": [
+      "fields.v1",
+      "material-roles.v1",
+      "output.attachments.v1",
+      "output.docx.v1",
+      "output.pdf.v1",
+      "output.xlsx.v1",
+      "rules.v1"
+    ]
+  }
+}

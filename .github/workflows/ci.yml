@@ -27,6 +27,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+          pip install -r requirements-print.txt
+
+      - name: Verify adapter resources, examples and CLI
+        run: >-
+          python -m pytest -q tests/test_adapter_tools.py tests/test_adapter_resources.py
+          tests/test_adapters.py tests/test_adapter_templates.py tests/test_adapter_exports.py
+          tests/test_print.py
 
       - name: Run tests
         run: pytest -q

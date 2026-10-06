@@ -417,7 +417,7 @@ def refresh_entry_check(entries_repo: EntryRepo, entry_id: str) -> None:
         total=d(entry.get("total")),
         items=_entry_items_to_parsed(entry.get("items") or []),
     )
-    check = check_invoice(parsed, expected_title=entry.get("title") or "")
+    check = check_invoice(parsed, expected_title=entry.get("title") or "",context=entries_repo.policy_context(entry_id))
     entries_repo.set_check(entry_id, check.status, check.message)
     entries_repo.recompute_status(entry_id)
 
@@ -471,7 +471,7 @@ def _replace_items(entries_repo: EntryRepo, entry_id: str, normalized: dict) -> 
         total=d(entry.get("total")),  # 条目总额是权威值，明细向总额对齐
         items=parsed_items,
     )
-    check = check_invoice(parsed, expected_title=entry.get("title") or "")
+    check = check_invoice(parsed, expected_title=entry.get("title") or "",context=entries_repo.policy_context(entry_id))
     entries_repo.replace_recognized_items(
         # OCR 只替换明细，不改变条目识别来源；否则后续再识别会误以为
         # XML 权威信息已被覆盖，导致 XML 条目被自动替换。
@@ -749,7 +749,7 @@ def _infer_legacy_applied_changes(
         try:
             from ..engine.parser import parse_pdf
 
-            parsed = parse_pdf(Path(attachments_dir) / pdf["stored_path"])
+            parsed = parse_pdf(Path(attachments_dir) / pdf["stored_path"],context=entries_repo.recognition_context(entry_id))
             before = [
                 {
                     "name": item.name,

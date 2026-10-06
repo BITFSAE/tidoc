@@ -1,6 +1,6 @@
 """服务层：汇总、绑定包导出 / 导入、HMAC 签名、文件夹批量导入。"""
 
-from .bindle import export_bindle, import_bindle, inspect_bindle
+from .bindle import export_bindle, import_bindle, inspect_bindle, preview_bindle_transfer
 from .exports import export_attachment_zip, export_overview_xlsx
 from .folder_import import scan_files, scan_folder
 from .signing import sign_bytes, sign_file, verify
@@ -10,6 +10,7 @@ __all__ = [
     "export_bindle",
     "import_bindle",
     "inspect_bindle",
+    "preview_bindle_transfer",
     "export_attachment_zip",
     "export_overview_xlsx",
     "scan_folder",

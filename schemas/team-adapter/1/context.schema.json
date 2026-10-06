@@ -1,0 +1,1440 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tidoc.app/schemas/team-adapter/1/context.schema.json",
+  "title": "Tidoc ExportContext v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "scheme": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "package_id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "package_version": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "revision_id": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "organization": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "department": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "purpose": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "storage_location": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "contact": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "integer",
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 100
+                  }
+                ]
+              },
+              "maxProperties": 100
+            },
+            "department": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "purpose": {
+              "type": "string",
+              "maxLength": 1000
+            },
+            "storage_location": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 2000
+            },
+            "contact": {
+              "type": "string",
+              "maxLength": 2000
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "title": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "tax_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 100
+            },
+            "short_name": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "color": {
+              "enum": [
+                "neutral",
+                "blue",
+                "green",
+                "amber",
+                "purple",
+                "red",
+                "teal"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "tax_id",
+            "short_name",
+            "color"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "batch": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "note": {
+              "type": "string",
+              "maxLength": 5000
+            },
+            "notes": {
+              "type": "string",
+              "maxLength": 5000
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "integer",
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 100
+                  }
+                ]
+              },
+              "maxProperties": 100
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "payee": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "person_name": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "personnel_id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "personnel_number": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "contact": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "phone": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "account_type": {
+              "enum": [
+                "personal_bank",
+                "corporate_bank",
+                "none"
+              ]
+            },
+            "bank_name": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "account_number": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": [
+                      "string",
+                      "number",
+                      "integer",
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 100
+                  }
+                ]
+              },
+              "maxProperties": 100
+            },
+            "created_at": {
+              "type": "string",
+              "maxLength": 80
+            },
+            "updated_at": {
+              "type": "string",
+              "maxLength": 80
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "export": {
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "output_id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": [
+                  "string",
+                  "number",
+                  "integer",
+                  "boolean",
+                  "null"
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 100
+              }
+            ]
+          },
+          "maxProperties": 100
+        },
+        "options": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": "string",
+              "maxLength": 80
+            },
+            "document_date": {
+              "type": "string",
+              "maxLength": 80
+            },
+            "numbering": {
+              "type": "boolean"
+            },
+            "annotate": {
+              "type": "boolean"
+            },
+            "storage_location": {
+              "type": "string",
+              "maxLength": 5000
+            },
+            "batch_note": {
+              "type": "string",
+              "maxLength": 5000
+            },
+            "amount_basis": {
+              "enum": [
+                "invoice",
+                "paid"
+              ]
+            },
+            "sort_by": {
+              "enum": [
+                "invoice_date",
+                "invoice_no",
+                "claimant",
+                "seller",
+                "created_at",
+                "selection"
+              ]
+            },
+            "image_layout": {
+              "enum": [
+                "a4_portrait_1",
+                "a4_portrait_2",
+                "a4_portrait_4",
+                "a4_landscape_1",
+                "a4_landscape_2",
+                "a4_landscape_4"
+              ]
+            },
+            "content_order": {
+              "enum": [
+                "entry",
+                "role"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "date",
+        "output_id",
+        "fields",
+        "options"
+      ],
+      "additionalProperties": false
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entry"
+      },
+      "maxItems": 10000
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/row"
+      },
+      "maxItems": 50000
+    },
+    "totals": {
+      "type": "object",
+      "properties": {
+        "invoice": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "paid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "known_invoice": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "known_paid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "selected": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "amount": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "missing_paid_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "entry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "row_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50000
+        },
+        "missing_invoice": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "missing_paid": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "missing_selected": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "amount_basis": {
+          "enum": [
+            "invoice",
+            "paid"
+          ]
+        }
+      },
+      "required": [
+        "invoice",
+        "paid",
+        "known_invoice",
+        "known_paid",
+        "selected",
+        "amount",
+        "missing_paid_count",
+        "count",
+        "entry_count",
+        "row_count",
+        "missing_invoice",
+        "missing_paid",
+        "missing_selected",
+        "amount_basis"
+      ],
+      "additionalProperties": false
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/diagnostic"
+      },
+      "maxItems": 10000
+    }
+  },
+  "required": [
+    "schema_version",
+    "scheme",
+    "title",
+    "batch",
+    "payee",
+    "export",
+    "entries",
+    "rows",
+    "totals",
+    "diagnostics"
+  ],
+  "$defs": {
+    "fields": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": [
+              "string",
+              "number",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100
+          }
+        ]
+      },
+      "maxProperties": 100
+    },
+    "title": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "tax_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 100
+        },
+        "short_name": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "color": {
+          "enum": [
+            "neutral",
+            "blue",
+            "green",
+            "amber",
+            "purple",
+            "red",
+            "teal"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "tax_id",
+        "short_name",
+        "color"
+      ],
+      "additionalProperties": false
+    },
+    "invoice": {
+      "type": "object",
+      "properties": {
+        "paid_amount": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "title_id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "number": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "date": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "seller": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "total": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "buyer_name": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "buyer_tax_id": {
+          "type": "string",
+          "maxLength": 100
+        }
+      },
+      "required": [
+        "paid_amount",
+        "title_id",
+        "number",
+        "date",
+        "seller",
+        "total",
+        "buyer_name",
+        "buyer_tax_id"
+      ],
+      "additionalProperties": false
+    },
+    "claimant": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "reviewer": {
+          "type": "string",
+          "maxLength": 300
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "reviewer"
+      ],
+      "additionalProperties": false
+    },
+    "entry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "entry_id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "scheme_id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "revision_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "tax_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 100
+            },
+            "short_name": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "color": {
+              "enum": [
+                "neutral",
+                "blue",
+                "green",
+                "amber",
+                "purple",
+                "red",
+                "teal"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "tax_id",
+            "short_name",
+            "color"
+          ],
+          "additionalProperties": false
+        },
+        "batch": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                "name": {
+                  "type": "string",
+                  "maxLength": 300
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 5000
+                },
+                "notes": {
+                  "type": "string",
+                  "maxLength": 5000
+                },
+                "fields": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "oneOf": [
+                      {
+                        "type": [
+                          "string",
+                          "number",
+                          "integer",
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 100
+                      }
+                    ]
+                  },
+                  "maxProperties": 100
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claimant": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "reviewer": {
+              "type": "string",
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "reviewer"
+          ],
+          "additionalProperties": false
+        },
+        "invoice": {
+          "type": "object",
+          "properties": {
+            "paid_amount": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 64
+            },
+            "title_id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "number": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "date": {
+              "type": "string",
+              "maxLength": 80
+            },
+            "seller": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "total": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 64
+            },
+            "buyer_name": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "buyer_tax_id": {
+              "type": "string",
+              "maxLength": 100
+            }
+          },
+          "required": [
+            "paid_amount",
+            "title_id",
+            "number",
+            "date",
+            "seller",
+            "total",
+            "buyer_name",
+            "buyer_tax_id"
+          ],
+          "additionalProperties": false
+        },
+        "title_id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "actual_name": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "product_name": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "buyer_name": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "buyer_tax_id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "invoice_no": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "invoice_date": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "seller": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "total": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "paid_amount": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "actual_item_name": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "status": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "check_status": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "completeness": {
+          "$ref": "#/$defs/completeness"
+        },
+        "created_at": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": [
+                  "string",
+                  "number",
+                  "integer",
+                  "boolean",
+                  "null"
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 100
+              }
+            ]
+          },
+          "maxProperties": 100
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 50000
+              },
+              "actual_name": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "product_name": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 100
+              },
+              "quantity": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "total": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "unit_price": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "spec": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "is_summary": {
+                "type": "boolean"
+              },
+              "defaults": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 80
+                },
+                "maxItems": 20
+              }
+            },
+            "required": [
+              "index",
+              "actual_name",
+              "product_name",
+              "unit",
+              "quantity",
+              "total",
+              "unit_price",
+              "spec",
+              "is_summary",
+              "defaults"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1000
+        },
+        "materials": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "role_id": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 120
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "type": {
+                "type": "string",
+                "maxLength": 80
+              }
+            },
+            "required": [
+              "id",
+              "role_id",
+              "label",
+              "name",
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 5000
+        },
+        "attachment_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        }
+      },
+      "required": [
+        "id",
+        "entry_id",
+        "scheme_id",
+        "revision_id",
+        "title",
+        "batch",
+        "claimant",
+        "invoice",
+        "title_id",
+        "actual_name",
+        "product_name",
+        "buyer_name",
+        "buyer_tax_id",
+        "invoice_no",
+        "invoice_date",
+        "seller",
+        "total",
+        "paid_amount",
+        "actual_item_name",
+        "notes",
+        "status",
+        "check_status",
+        "completeness",
+        "created_at",
+        "fields",
+        "items",
+        "materials",
+        "attachment_count"
+      ],
+      "additionalProperties": false
+    },
+    "row": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "actual_name": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "product_name": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 100
+        },
+        "quantity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "total": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "unit_price": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "spec": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "is_summary": {
+          "type": "boolean"
+        },
+        "defaults": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "maxItems": 20
+        },
+        "invoice_date": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "is_first": {
+          "type": "boolean"
+        },
+        "reviewer": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "tax_id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50000
+        },
+        "entry_id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "entry": {
+          "$ref": "#/$defs/entry"
+        },
+        "claimant": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "invoice": {
+          "type": "object",
+          "properties": {
+            "paid_amount": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 64
+            },
+            "title_id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "number": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "date": {
+              "type": "string",
+              "maxLength": 80
+            },
+            "seller": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "total": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 64
+            },
+            "buyer_name": {
+              "type": "string",
+              "maxLength": 500
+            },
+            "buyer_tax_id": {
+              "type": "string",
+              "maxLength": 100
+            }
+          },
+          "required": [
+            "paid_amount",
+            "title_id",
+            "number",
+            "date",
+            "seller",
+            "total",
+            "buyer_name",
+            "buyer_tax_id"
+          ],
+          "additionalProperties": false
+        },
+        "seller": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "invoice_no": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "paid_amount": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "invoice_total": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "amount": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "storage_location": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "first_for_invoice": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "actual_name",
+        "product_name",
+        "unit",
+        "quantity",
+        "total",
+        "unit_price",
+        "spec",
+        "is_summary",
+        "defaults",
+        "invoice_date",
+        "is_first",
+        "reviewer",
+        "tax_id",
+        "index",
+        "entry_id",
+        "entry",
+        "claimant",
+        "title",
+        "invoice",
+        "seller",
+        "invoice_no",
+        "paid_amount",
+        "invoice_total",
+        "amount",
+        "storage_location",
+        "first_for_invoice"
+      ],
+      "additionalProperties": false
+    },
+    "diagnostic": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "required",
+            "blocked"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "rule_id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "stage": {
+          "enum": [
+            "complete",
+            "export"
+          ]
+        },
+        "suggested_action": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "file": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial",
+            "draft"
+          ]
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "maxItems": 1000
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/diagnostic"
+          },
+          "maxItems": 1000
+        }
+      }
+    }
+  }
+}

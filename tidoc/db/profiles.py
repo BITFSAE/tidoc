@@ -24,9 +24,10 @@ class ProfileRepo:
     def __init__(self, db: Database):
         self.db = db
 
-    def create(self, name: str, reviewer: str, is_default: bool = False, **optional) -> dict:
-        if not name.strip() or not reviewer.strip():
-            raise ValueError("本人姓名与审核人均为必填。")
+    def create(self, name: str, reviewer: str = "", is_default: bool = False, **optional) -> dict:
+        if not str(name or "").strip():
+            raise ValueError("本人姓名为必填。")
+        reviewer = str(reviewer or "")
         profile_id = uuid.uuid4().hex
         previous_count = self._count()
         if is_default:
@@ -68,6 +69,8 @@ class ProfileRepo:
         return _row_to_dict(row) if row else None
 
     def update(self, profile_id: str, **fields) -> dict:
+        if "name" in fields and not str(fields["name"] or "").strip():
+            raise ValueError("本人姓名为必填。")
         allowed = {"name", "reviewer", *OPTIONAL_FIELDS}
         sets, params = [], []
         for key, value in fields.items():

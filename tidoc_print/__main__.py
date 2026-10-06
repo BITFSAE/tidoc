@@ -1,106 +1,95 @@
-"""独立打印组件进程入口。
-
-PyInstaller 打包后由核心通过 JSON 文件 IPC 调用，避免把 docx/reportlab 等重依赖塞进核心包。
-"""
-
+"""Bounded JSON IPC entrypoint for the optional component."""
 from __future__ import annotations
-
 import argparse
 import json
-import traceback
-from decimal import Decimal
+import os
 from pathlib import Path
-
-# Keep these imports explicit.  The public package exports them lazily via
-# __getattr__, which PyInstaller cannot reliably discover when building the
-# standalone component.
-from .builder import PrintOptions, build_print_package
-from .models import PersonProfile, PrintEntry, PrintItem
+from .protocol import capabilities, render_request
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(prog="tidoc_print")
-    parser.add_argument("--input", help="核心传入的 JSON payload")
-    parser.add_argument("--result", help="组件写出的 JSON 结果")
-    parser.add_argument(
-        "--self-test",
-        action="store_true",
-        help="验证打印组件及其依赖可以正常导入",
-    )
+def self_test_status():
+    status = capabilities()
+    result = {'ok': not status['missing'], **status}
+    if not result['ok']:
+        return result
+    try:
+        from tempfile import TemporaryDirectory
+        from docx import Document
+        from PIL import Image
+        from pypdf import PdfReader, PdfWriter
+        from .context import build_export_context
+        with TemporaryDirectory(prefix='tidoc-print-self-test-') as directory:
+            root = Path(directory) / 'resources'; root.mkdir()
+            template = root / 'template.docx'
+            document = Document(); document.add_paragraph('{{ title.name }} {{ totals.invoice|money(true) }}')
+            document.save(template)
+            writer = PdfWriter(); writer.add_blank_page(300, 400); writer.write(root / 'invoice.pdf')
+            Image.new('RGB', (40, 60), 'blue').save(root / 'payment.png')
+            entry = {'id': 'self-test', 'title': '自检主体', 'total': '0'}
+            files = []
+            for kind, filename in (('docx', 'document.docx'), ('pdf_bundle', 'materials.pdf')):
+                output = {'id': 'self_test_' + kind, 'type': kind, 'payee_mode': 'none',
+                          'pdf': {'include_roles': ['invoice', 'payment_screenshot'],
+                                  'image_layout': 'a4_landscape_2', 'numbering': True}}
+                item = {'output': output, 'filename': filename,
+                        'context': build_export_context([entry], output=output)}
+                if kind == 'docx':
+                    item['template'] = template.name
+                else:
+                    item['resources'] = [
+                        {'id': 'invoice', 'entry_id': entry['id'], 'role_id': 'invoice', 'path': 'invoice.pdf'},
+                        {'id': 'payment', 'entry_id': entry['id'], 'role_id': 'payment_screenshot', 'path': 'payment.png'}]
+                files.append(item)
+            rendered = render_request({'ipc_version': 2, 'job_id': 'component-self-test',
+                'resources_root': str(root), 'output_dir': str(Path(directory) / 'output'), 'files': files})
+            if Document(rendered['files'][0]['path']).paragraphs[0].text != '自检主体 ¥0.00':
+                raise ValueError('Word 内容检查失败')
+            if len(PdfReader(rendered['files'][1]['path']).pages) != 2:
+                raise ValueError('PDF 页数检查失败')
+            result['smoke_outputs'] = ['docx', 'pdf_bundle']
+    except Exception as exc:
+        result.update(ok=False, code='COMPONENT_SELF_TEST_FAILED', error=str(exc))
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(prog='tidoc_print')
+    parser.add_argument('--input')
+    parser.add_argument('--result')
+    parser.add_argument('--capabilities', action='store_true')
+    parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--timeout',type=float,default=120)
+    parser.add_argument('--cancel-file')
     args = parser.parse_args()
-
+    if args.capabilities:
+        print(json.dumps(capabilities(),ensure_ascii=False)); return 0
     if args.self_test:
-        print(json.dumps({"ok": True, "component": "tidoc_print"}))
-        return 0
+        status = self_test_status()
+        print(json.dumps(status,ensure_ascii=False))
+        return 0 if status['ok'] else 1
     if not args.input or not args.result:
-        parser.error("--input 和 --result 必须同时提供")
-
+        parser.error('--input 和 --result 必须同时提供')
     result_path = Path(args.result)
     try:
-        payload = json.loads(Path(args.input).read_text("utf-8"))
-        entries = [_entry_from_dict(item) for item in payload.get("entries") or []]
-        profiles = {
-            key: PersonProfile(**(value or {}))
-            for key, value in (payload.get("profiles") or {}).items()
-        }
-        options = PrintOptions(**(payload.get("options") or {}))
-        results = build_print_package(entries, payload["out_dir"], options, profiles)
-        data = {"results": [{"title": r.title, "files": r.files} for r in results]}
-        _write_result(result_path, {"ok": True, "data": data})
-        return 0
-    except Exception as exc:  # noqa: BLE001
-        _write_result(result_path, {
-            "ok": False,
-            "error": str(exc),
-            "traceback": traceback.format_exc(),
-        })
+        if Path(args.input).stat().st_size>32*1024*1024:
+            raise ValueError('打印请求文件超过限制')
+        payload=json.loads(Path(args.input).read_text('utf-8'))
+        payload['timeout_seconds']=min(args.timeout,payload.get('timeout_seconds',120))
+        if args.cancel_file:
+            payload['cancel_file']=args.cancel_file
+        data=render_request(payload)
+        _write_result(result_path,{'ok':True,'data':data}); return 0
+    except Exception as exc:
+        _write_result(result_path,{'ok':False,'error':str(exc),'code':getattr(exc,'code','RENDER_FAILED'),'diagnostics':getattr(exc,'diagnostics',[])})
         return 1
 
 
-def _entry_from_dict(data: dict) -> PrintEntry:
-    items = [_item_from_dict(item) for item in data.get("items") or []]
-    return PrintEntry(
-        entry_id=data.get("entry_id", ""),
-        title=data.get("title", ""),
-        invoice_no=data.get("invoice_no", ""),
-        invoice_date=data.get("invoice_date", ""),
-        seller=data.get("seller", ""),
-        total=_dec(data.get("total")),
-        paid_amount=data.get("paid_amount", ""),
-        profile_name=data.get("profile_name", ""),
-        reviewer=data.get("reviewer", ""),
-        items=items,
-        invoice_pdfs=list(data.get("invoice_pdfs") or []),
-        payment_images=list(data.get("payment_images") or []),
-        inspection_pdfs=list(data.get("inspection_pdfs") or []),
-    )
+def _write_result(path,result):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    tmp=path.with_suffix(path.suffix+'.tmp')
+    tmp.write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8')
+    os.replace(tmp,path)
 
 
-def _item_from_dict(data: dict) -> PrintItem:
-    quantity = data.get("quantity")
-    return PrintItem(
-        actual_name=data.get("actual_name", ""),
-        product_name=data.get("product_name", ""),
-        unit=data.get("unit", ""),
-        quantity=_dec(quantity) if quantity not in (None, "") else None,
-        total=_dec(data.get("total")),
-        seller=data.get("seller", ""),
-        invoice_no=data.get("invoice_no", ""),
-        storage_location=data.get("storage_location", ""),
-    )
-
-
-def _dec(value) -> Decimal:
-    try:
-        return Decimal(str(value if value not in (None, "") else "0"))
-    except Exception:
-        return Decimal("0")
-
-
-def _write_result(path: Path, result: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(result, ensure_ascii=False, indent=2), "utf-8")
-
-
-if __name__ == "__main__":
+if __name__=='__main__':
     raise SystemExit(main())

@@ -1,0 +1,379 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tidoc.app/schemas/team-adapter/1/outputs.schema.json",
+  "type": "object",
+  "properties": {
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "type": {
+            "enum": [
+              "docx",
+              "pdf_bundle",
+              "xlsx",
+              "attachment_zip"
+            ]
+          },
+          "template": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "default_selected": {
+            "type": "boolean"
+          },
+          "when": {
+            "$ref": "#/$defs/condition"
+          },
+          "payee_mode": {
+            "enum": [
+              "single",
+              "by_claimant",
+              "none"
+            ]
+          },
+          "group_by": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {"enum": ["title", "claimant", "payee", "batch"]},
+                {"type": "string", "pattern": "^batch\\.fields\\.[a-z][a-z0-9_]{0,63}$"}
+              ]
+            },
+            "maxItems": 4
+          },
+          "rows": {
+            "enum": [
+              "invoice_summary",
+              "invoice_items"
+            ]
+          },
+          "amount_basis": {
+            "enum": [
+              "invoice",
+              "paid"
+            ]
+          },
+          "filename": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "pdf": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "content_order": {
+                "enum": [
+                  "entry",
+                  "role"
+                ]
+              },
+              "image_layout": {
+                "enum": [
+                  "a4_portrait_1",
+                  "a4_portrait_2",
+                  "a4_portrait_4",
+                  "a4_landscape_1",
+                  "a4_landscape_2",
+                  "a4_landscape_4"
+                ]
+              },
+              "numbering": {
+                "type": "boolean"
+              },
+              "include_roles": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "maxItems": 25
+              },
+              "page_size": {
+                "enum": [
+                  "preserve",
+                  "a4"
+                ]
+              },
+              "margin_mm": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 40
+              }
+            }
+          },
+          "columns": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "maxLength": 160
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "width": {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 120
+                },
+                "format": {
+                  "enum": [
+                    "text",
+                    "date",
+                    "money",
+                    "number"
+                  ]
+                },
+                "total": {
+                  "enum": [
+                    "sum",
+                    "count"
+                  ]
+                },
+                "scope": {
+                  "enum": [
+                    "entry",
+                    "row"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "label"
+              ]
+            }
+          },
+          "attachments": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "roles": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "maxItems": 25
+              },
+              "group_by": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {"enum": ["title", "claimant", "entry"]},
+                    {"type": "string", "pattern": "^batch\\.fields\\.[a-z][a-z0-9_]{0,63}$"}
+                  ]
+                },
+                "maxItems": 3
+              },
+              "directory_template": {
+                "type": "string",
+                "maxLength": 240
+              },
+              "filename_template": {
+                "type": "string",
+                "maxLength": 240
+              },
+              "include_manifest": {
+                "type": "boolean"
+              }
+            }
+          },
+          "x_metadata": {
+            "type": "object"
+          },
+          "required_fields": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 160
+            },
+            "maxItems": 100
+          },
+          "sort_by": {
+            "enum": [
+              "invoice_date",
+              "invoice_no",
+              "claimant",
+              "seller",
+              "created_at",
+              "selection"
+            ]
+          },
+          "row_defaults": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "quantity_mode": {
+                "enum": [
+                  "sum_compat",
+                  "sum_same_unit"
+                ]
+              },
+              "unit": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "quantity": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "storage_location": {
+                "type": "string",
+                "maxLength": 200
+              }
+            }
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "type",
+          "default_selected",
+          "payee_mode",
+          "group_by",
+          "rows",
+          "amount_basis",
+          "filename"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "docx"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "then": {
+              "required": [
+                "template"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "pdf_bundle"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            "then": {
+              "properties": {
+                "pdf": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "maxItems": 30
+    }
+  },
+  "required": [
+    "outputs"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "all": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/condition"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "all"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "any": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/condition"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "any"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "not"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "maxLength": 160
+            },
+            "op": {
+              "enum": [
+                "eq",
+                "ne",
+                "in",
+                "gt",
+                "gte",
+                "lt",
+                "lte",
+                "present"
+              ]
+            },
+            "value": {}
+          },
+          "required": [
+            "field",
+            "op"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

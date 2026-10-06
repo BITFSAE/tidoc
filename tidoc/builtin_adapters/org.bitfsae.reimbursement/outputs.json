@@ -1,0 +1,106 @@
+{
+  "outputs": [
+    {
+      "id": "reimbursement",
+      "label": "报账说明",
+      "type": "docx",
+      "template": "templates/reimbursement.docx",
+      "default_selected": true,
+      "payee_mode": "single",
+      "group_by": [
+        "title"
+      ],
+      "rows": "invoice_summary",
+      "row_defaults": {
+        "quantity_mode": "sum_compat",
+        "unit": "个",
+        "quantity": "1",
+        "storage_location": "工训楼"
+      },
+      "amount_basis": "invoice",
+      "filename": "{title.short_name}_报账说明_{export.date}.docx"
+    },
+    {
+      "id": "acceptance",
+      "label": "验收单",
+      "type": "docx",
+      "template": "templates/acceptance.docx",
+      "default_selected": true,
+      "payee_mode": "none",
+      "group_by": [
+        "title"
+      ],
+      "rows": "invoice_summary",
+      "row_defaults": {
+        "quantity_mode": "sum_compat",
+        "unit": "个",
+        "quantity": "1",
+        "storage_location": "工训楼"
+      },
+      "amount_basis": "invoice",
+      "filename": "{title.short_name}_验收单_{export.date}.docx"
+    },
+    {
+      "id": "materials",
+      "label": "按条目材料拼接 PDF",
+      "type": "pdf_bundle",
+      "default_selected": true,
+      "payee_mode": "none",
+      "group_by": [
+        "title"
+      ],
+      "rows": "invoice_summary",
+      "amount_basis": "invoice",
+      "filename": "{title.short_name}_按条目材料拼接.pdf",
+      "pdf": {
+        "image_layout": "a4_landscape_2",
+        "content_order": "entry",
+        "numbering": true,
+        "include_roles": [
+          "invoice",
+          "payment_screenshot",
+          "inspection_pdf"
+        ]
+      }
+    },
+    {
+      "id": "overview",
+      "label": "总览表",
+      "type": "xlsx",
+      "default_selected": false,
+      "payee_mode": "none",
+      "group_by": [],
+      "rows": "invoice_summary",
+      "amount_basis": "invoice",
+      "filename": "{title.short_name}_报账总览.xlsx",
+      "columns": []
+    },
+    {
+      "id": "attachments",
+      "label": "附件整理包",
+      "type": "attachment_zip",
+      "default_selected": false,
+      "payee_mode": "none",
+      "group_by": [
+        "title"
+      ],
+      "rows": "invoice_summary",
+      "amount_basis": "invoice",
+      "filename": "{title.short_name}_报账材料.zip",
+      "attachments": {
+        "roles": [
+          "invoice",
+          "payment_screenshot",
+          "physical_image",
+          "inspection_pdf",
+          "other"
+        ],
+        "group_by": [
+          "title",
+          "claimant"
+        ],
+        "include_manifest": true
+      }
+    }
+  ]
+}

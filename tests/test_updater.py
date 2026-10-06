@@ -541,7 +541,7 @@ def test_source_run_prefers_workspace_print_code_over_installed_component(monkey
 
     assert status["available"] is True
     assert status["mode"] == "python"
-    assert status["version"] == "0.1.20"
+    assert status["version"] == tidoc_print.__version__
 
 
 def test_frozen_core_reports_removed_component_as_needing_repair(monkeypatch, tmp_path):

@@ -52,6 +52,7 @@ class ParsedInvoice:
     total: Decimal = Decimal("0")
     items: list[ParsedItem] = field(default_factory=list)
     source: str = ""           # 数据来源说明（xml / pdf / xml+pdf）
+    total_present: bool | None = None  # False means absent; zero is a valid invoice amount.
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +64,7 @@ class ParsedInvoice:
             "total": str(self.total),
             "items": [item.to_dict() for item in self.items],
             "source": self.source,
+            "total_present": self.total_present,
         }
 
 
@@ -75,3 +77,26 @@ class CheckResult:
 
     def to_dict(self) -> dict:
         return {"status": self.status, "message": self.message}
+
+
+@dataclass(frozen=True)
+class RecognitionContext:
+    """Candidates belong to the selected revision, including an explicitly empty list."""
+
+    titles: tuple[dict, ...] = ()
+
+    @classmethod
+    def from_definition(cls, definition: dict):
+        return cls(tuple(dict(t) for t in definition.get("scheme", {}).get("titles", [])))
+
+    @property
+    def fingerprint(self) -> str:
+        import hashlib
+        import json
+        return hashlib.sha256(json.dumps(self.titles, ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class PolicyContext(RecognitionContext):
+    """Explicit title policy, independent of other windows or API instances."""

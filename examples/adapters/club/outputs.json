@@ -1,0 +1,69 @@
+{
+  "outputs": [
+    {
+      "id": "materials",
+      "label": "材料 PDF",
+      "type": "pdf_bundle",
+      "default_selected": true,
+      "payee_mode": "none",
+      "group_by": [
+        "title"
+      ],
+      "rows": "invoice_summary",
+      "amount_basis": "invoice",
+      "filename": "{title.short_name}_材料.pdf",
+      "pdf": {
+        "image_layout": "a4_landscape_2",
+        "content_order": "entry"
+      }
+    },
+    {
+      "id": "overview",
+      "label": "总览表",
+      "type": "xlsx",
+      "default_selected": true,
+      "payee_mode": "none",
+      "group_by": [],
+      "rows": "invoice_summary",
+      "amount_basis": "invoice",
+      "filename": "报账总览.xlsx",
+      "columns": []
+    },
+    {
+      "id": "attachments",
+      "label": "附件整理包",
+      "type": "attachment_zip",
+      "default_selected": false,
+      "payee_mode": "none",
+      "group_by": [
+        "title"
+      ],
+      "rows": "invoice_summary",
+      "amount_basis": "invoice",
+      "filename": "报账材料.zip",
+      "attachments": {
+        "roles": [
+          "invoice",
+          "payment_screenshot",
+          "physical_image",
+          "inspection_pdf",
+          "other"
+        ]
+      }
+    },
+    {
+      "id": "club_purchase",
+      "label": "社团采购说明",
+      "type": "docx",
+      "template": "templates/club_purchase.docx",
+      "default_selected": false,
+      "payee_mode": "none",
+      "group_by": [
+        "title"
+      ],
+      "rows": "invoice_summary",
+      "amount_basis": "invoice",
+      "filename": "{title.short_name}_采购说明.docx"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "fields": [
+    {
+      "id": "project_code",
+      "scope": "batch",
+      "label": "经费项目编号",
+      "type": "text",
+      "required_at": [
+        "export"
+      ],
+      "presentation": "visible",
+      "sensitive": false,
+      "transfer": "never",
+      "max_length": 80
+    },
+    {
+      "id": "purpose",
+      "scope": "entry",
+      "label": "采购用途",
+      "type": "select",
+      "options": [
+        {
+          "value": "equipment",
+          "label": "设备"
+        },
+        {
+          "value": "consumable",
+          "label": "耗材"
+        }
+      ],
+      "required_at": [
+        "complete"
+      ],
+      "presentation": "visible",
+      "sensitive": false,
+      "transfer": "include"
+    }
+  ]
+}

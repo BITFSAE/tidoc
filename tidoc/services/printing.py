@@ -1,265 +1,179 @@
-"""核心 ↔ 打印导出组件的适配层（设计文档第 9 节）。
-
-打印组件（tidoc_print）是可选安装件，重依赖不进核心。这里：
-- 探测组件是否可用。
-- 把核心的条目 dict + 附件 + profile 转成组件的 PrintEntry。
-- 调组件生成打印件；组件未装时给出清晰提示，不让核心崩。
-"""
-
+"""Core transport adapter. Both development and installed components use JSON IPC v2."""
 from __future__ import annotations
-
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict, is_dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from ..db.attachments import (
-    TYPE_INSPECTION,
-    TYPE_INVOICE_PDF,
-    TYPE_PAYMENT,
-)
-from ..db.entries import EntryRepo
-from ..db.profiles import ProfileRepo
 from .updater import COMPONENT_PRINT, installed_component_info
 
+_CAPABILITIES_CACHE = {}
 
-def component_status(components_dir: str | Path | None = None) -> dict:
-    """打印组件是否可用 + 缺哪些依赖。核心据此决定入口是否置灰。"""
-    frozen = bool(getattr(sys, "frozen", False))
 
-    # 从源码启动时优先使用当前工作区的 tidoc_print。否则开发机只要装过
-    # 发布版组件，就会悄悄继续调用旧可执行文件，让本地代码修改看似不生效。
+def _command(executable=None):
+    if executable:
+        path=Path(executable)
+        if path.suffix=='.app':
+            candidates=list((path/'Contents'/'MacOS').iterdir())
+            path=next((item for item in candidates if item.is_file() and os.access(item,os.X_OK)),path)
+        return [str(path)]
+    return [sys.executable,'-m','tidoc_print']
+
+
+def _query_capabilities(executable):
+    from .exports import resource_digest
+    path=Path(executable)
+    identity=resource_digest(path) if path.is_file() else str(path.stat().st_mtime_ns)
+    key=(str(path),identity)
+    if key in _CAPABILITIES_CACHE:
+        return _CAPABILITIES_CACHE[key]
+    try:
+        proc=subprocess.run(_command(executable)+['--capabilities'],text=True,capture_output=True,timeout=10,check=False)
+        value=json.loads(proc.stdout) if proc.returncode==0 else {}
+        if not isinstance(value,dict): value={}
+    except (OSError,ValueError,subprocess.TimeoutExpired):
+        value={}
+    _CAPABILITIES_CACHE.clear();_CAPABILITIES_CACHE[key]=value
+    return value
+
+
+def component_status(components_dir=None):
+    frozen=bool(getattr(sys,'frozen',False))
+    tidoc_print=None
+    source_info=None
     if not frozen:
         try:
             import tidoc_print
-        except Exception:  # noqa: BLE001
-            tidoc_print = None
-        if tidoc_print is not None and tidoc_print.is_available():
-            return {
-                "available": True,
-                "mode": "python",
-                "version": getattr(tidoc_print, "__version__", ""),
-                "missing": [],
-            }
-
-    installed = (
-        installed_component_info(components_dir, COMPONENT_PRINT)
-        if components_dir
-        else {"marker_exists": False, "needs_repair": False, "issue": ""}
-    )
-    external = Path(installed["executable"]) if installed.get("valid") else None
-    if external:
-        return {
-            "available": True,
-            "mode": "external",
-            "path": str(external),
-            "version": installed.get("version", ""),
-            "missing": [],
-        }
-
-    # A packaged core must never fall back to the tidoc_print package fragment
-    # that PyInstaller may have discovered while analysing this adapter.  The
-    # heavy dependencies belong exclusively to the external component.
-    if frozen:
-        return {
-            "available": False,
-            "mode": "repair" if installed.get("needs_repair") else "missing",
-            "missing": ["打印导出组件"],
-            "needs_repair": bool(installed.get("needs_repair")),
-            "error": installed.get("issue") or "打印导出组件未安装",
-        }
-
-    if tidoc_print is None:
-        return {"available": False, "mode": "missing", "missing": ["tidoc_print"]}
-    return {"available": False, "mode": "python", "missing": tidoc_print.missing_dependencies()}
+            from tidoc_print.protocol import capabilities
+            info=capabilities()
+            source_info=info
+            if info['renderers']:
+                return {'available':True,'mode':'python','version':tidoc_print.__version__,'missing':[],**info}
+        except ImportError:
+            pass
+    installed=installed_component_info(components_dir,COMPONENT_PRINT) if components_dir else {}
+    if installed.get('valid'):
+        info=_query_capabilities(installed['executable'])
+        return {'available':True,'mode':'external','path':installed['executable'],'version':installed.get('version',''),'missing':[],**info,'ipc_versions':info.get('ipc_versions',[1]),'renderers':info.get('renderers',[]),'needs_update':2 not in info.get('ipc_versions',[])}
+    return {'available':False,'mode':'repair' if installed.get('needs_repair') else ('python' if tidoc_print else 'missing'),'missing':source_info.get('missing',[]) if source_info is not None else (tidoc_print.missing_dependencies() if tidoc_print else ['打印导出组件']),'needs_repair':bool(installed.get('needs_repair')),'error':('打印导出组件缺少所需资源，请修复组件。' if source_info is not None else installed.get('issue') or '打印导出组件未安装'),'ipc_versions':[],'renderers':[]}
 
 
-def _to_decimal(v) -> Decimal:
-    try:
-        return Decimal(str(v)) if v not in (None, "") else Decimal("0")
-    except Exception:
-        return Decimal("0")
+def execute_print_request(request,components_dir=None,cancel_check=None):
+    status=component_status(components_dir)
+    if not status['available']:
+        raise RuntimeError('打印导出组件未安装或缺少依赖：'+', '.join(status['missing']))
+    if 2 not in status.get('ipc_versions',[]):
+        raise RuntimeError('打印导出组件不支持此报账方案，请检查更新。')
+    needed={item['output']['type'] for item in request['files']}
+    if not needed.issubset(status.get('renderers',[])):
+        raise RuntimeError('打印导出组件缺少所选输出能力，请检查更新。')
+    timeout=float(request.get('timeout_seconds',120))
+    if not 0<timeout<=120: raise ValueError('导出超时应为 0–120 秒')
+    with tempfile.TemporaryDirectory(prefix='tidoc-print-ipc-') as tmp:
+        inp=Path(tmp)/'input.json';result=Path(tmp)/'result.json';cancel=Path(tmp)/'cancel'
+        payload=json.loads(json.dumps(request,ensure_ascii=False,allow_nan=False))
+        payload['cancel_file']=str(cancel)
+        inp.write_text(json.dumps(payload,ensure_ascii=False),'utf-8')
+        proc=subprocess.Popen(_command(status.get('path'))+['--input',str(inp),'--result',str(result),'--timeout',str(timeout),'--cancel-file',str(cancel)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        started=time.monotonic()
+        try:
+            while True:
+                if cancel_check and cancel_check():
+                    cancel.touch();proc.terminate()
+                    raise RuntimeError('导出任务已取消')
+                if time.monotonic()-started>timeout:
+                    proc.terminate()
+                    raise TimeoutError('导出任务超时')
+                try:
+                    stdout,stderr=proc.communicate(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if not result.exists():
+                raise RuntimeError('打印组件未返回结果。')
+            response=json.loads(result.read_text('utf-8'))
+            if proc.returncode or not response.get('ok'):
+                error=RuntimeError(response.get('error') or '打印组件执行失败。')
+                error.diagnostics=response.get('diagnostics',[])
+                raise error
+            return response['data']
+        finally:
+            if proc.poll() is None:
+                proc.kill();proc.communicate()
 
 
-def _entry_to_print(entry: dict, attachments_dir: Path, profile: dict):
-    """把核心条目 dict 转成组件的 PrintEntry。"""
-    from tidoc_print import PrintEntry, PrintItem
-
-    payload = _entry_to_print_payload(entry, attachments_dir, profile)
-    items = [PrintItem(
-        actual_name=it["actual_name"],
-        product_name=it["product_name"],
-        unit=it["unit"],
-        quantity=_to_decimal(it["quantity"]) if it["quantity"] else None,
-        total=_to_decimal(it["total"]),
-        seller=it["seller"],
-        invoice_no=it["invoice_no"],
-    ) for it in payload["items"]]
-    payload["items"] = items
-    payload["total"] = _to_decimal(payload["total"])
-    return PrintEntry(**payload)
-
-
-def _entry_to_print_payload(entry: dict, attachments_dir: Path, profile: dict) -> dict:
-    """把核心条目 dict 转成外部组件可读的 JSON payload。"""
-    def abs_paths(att_type):
-        return [str(attachments_dir / a["stored_path"])
-                for a in entry.get("attachments", []) if a["type"] == att_type]
-
-    fields = entry.get("fields", {})
-    actual_name = (fields.get("actual_item_name", {}).get("current") or "").strip()
-    source_items = list(entry.get("items") or [])
-    if not source_items:
-        invoice_paths = abs_paths(TYPE_INVOICE_PDF)
-        if invoice_paths:
-            try:
-                from ..engine import parse_pdf
-
-                reparsed = parse_pdf(invoice_paths[0])
-                if (
-                    reparsed.items
-                    and (not reparsed.invoice_no or reparsed.invoice_no == entry.get("invoice_no", ""))
-                ):
-                    source_items = [item.to_dict() for item in reparsed.items]
-            except Exception:
-                # 历史附件可能损坏或来自不支持的版式；继续使用用户核对过的
-                # 条目级名称，不能让打印被一次补识别失败阻断。
-                pass
-    items = []
-    for index, it in enumerate(source_items):
-        product_name = it.get("actual_name") or it.get("name", "")
-        items.append({
-            "actual_name": actual_name if index == 0 and actual_name else product_name,
-            "product_name": product_name,
-            "unit": it.get("unit") or "个",
-            "quantity": it.get("quantity") or "",
-            "total": it.get("total") or "0",
-            "seller": entry.get("seller", ""),
-            "invoice_no": entry.get("invoice_no", ""),
-        })
-    if not items:
-        # PDF 识别不到明细时，条目级“实际物资名称”仍是用户已经核对过的
-        # 权威值。打印时带上它，不能退回成没有信息量的“发票物资”。
-        fallback_name = actual_name or "未填写品名"
-        items.append({
-            "actual_name": fallback_name,
-            "product_name": fallback_name,
-            "unit": "个",
-            "quantity": "1",
-            "total": entry.get("total") or "0",
-            "seller": entry.get("seller", ""),
-            "invoice_no": entry.get("invoice_no", ""),
-        })
-    return {
-        "entry_id": entry["id"],
-        "title": entry.get("title", ""),
-        "invoice_no": entry.get("invoice_no", ""),
-        "invoice_date": entry.get("invoice_date", ""),
-        "seller": entry.get("seller", ""),
-        "total": entry.get("total") or "0",
-        "paid_amount": fields.get("paid_amount", {}).get("current", ""),
-        "profile_name": profile.get("name", ""),
-        "reviewer": profile.get("reviewer", ""),
-        "items": items,
-        "invoice_pdfs": abs_paths(TYPE_INVOICE_PDF),
-        "payment_images": abs_paths(TYPE_PAYMENT),
-        "inspection_pdfs": abs_paths(TYPE_INSPECTION),
-    }
+def _entry_to_print_payload(entry,attachments_dir,profile):
+    """Legacy compatibility projection; new plans use export_context directly."""
+    def paths(kind):
+        return [str(Path(attachments_dir)/att['stored_path']) for att in entry.get('attachments',[]) if att.get('type')==kind]
+    fields=entry.get('fields') or {}
+    actual=(fields.get('actual_item_name',{}).get('current') or '').strip()
+    items=list(entry.get('items') or [])
+    if not items and paths('invoice_pdf'):
+        try:
+            from ..engine import parse_pdf
+            parsed=parse_pdf(paths('invoice_pdf')[0])
+            if parsed.items and (not parsed.invoice_no or parsed.invoice_no==entry.get('invoice_no','')):
+                items=[item.to_dict() for item in parsed.items]
+        except Exception:
+            pass
+    rendered=[]
+    for index,item in enumerate(items):
+        product=item.get('actual_name') or item.get('name','')
+        rendered.append({'actual_name':actual if index==0 and actual else product,'product_name':product,'unit':item.get('unit') or '个','quantity':item.get('quantity') if item.get('quantity') not in (None,'') else '', 'total':item.get('total'),'seller':entry.get('seller',''),'invoice_no':entry.get('invoice_no','')})
+    if not rendered:
+        name=actual or '未填写品名'
+        rendered=[{'actual_name':name,'product_name':name,'unit':'个','quantity':'1','total':entry.get('total'),'seller':entry.get('seller',''),'invoice_no':entry.get('invoice_no','')}]
+    return {'entry_id':entry['id'],'title':entry.get('title',''),'invoice_no':entry.get('invoice_no',''),'invoice_date':entry.get('invoice_date',''),'seller':entry.get('seller',''),'total':entry.get('total'),'paid_amount':fields.get('paid_amount',{}).get('current'),'profile_name':profile.get('name',''),'reviewer':profile.get('reviewer',''),'items':rendered,'invoice_pdfs':paths('invoice_pdf'),'payment_images':paths('payment_screenshot'),'inspection_pdfs':paths('inspection_pdf')}
 
 
-def build_prints(
-    entries_repo: EntryRepo,
-    profiles_repo: ProfileRepo,
-    attachments_dir: Path,
-    entry_ids: list[str],
-    out_dir: str | Path,
-    options: dict | None = None,
-    components_dir: str | Path | None = None,
-) -> dict:
-    """核心调用入口：生成打印件。返回按抬头分组的结果。"""
-    status = component_status(components_dir)
-    if not status["available"]:
-        raise RuntimeError(
-            f"打印导出组件未安装或缺少依赖：{', '.join(status['missing'])}。"
-        )
-
-    options = dict(options or {})
-    operator_profile = options.pop("operator_profile", {}) or {}
-    profiles = {p["id"]: p for p in profiles_repo.list()}
-    print_entries = []
-    person_profiles: dict[str, dict] = {}
+def build_prints(entries_repo,profiles_repo,attachments_dir,entry_ids,out_dir,options=None,components_dir=None,adapters=None):
+    if adapters is not None:
+        from .export_plan import ExportPlanner
+        planner=ExportPlanner(entries_repo.db,adapters.data_root if hasattr(adapters,'data_root') else adapters.root,adapters)
+        plan=planner.preview(entry_ids,options=(options or {}))
+        job=planner.run(plan['plan_id'],out_dir)
+        if job['status']!='completed': raise RuntimeError('打印导出失败：'+ '；'.join(d['message'] for d in job['diagnostics']))
+        return {'results':job.get('results',[]),'job_id':job['job_id'],'files':job['files']}
+    profiles={p['id']:p for p in profiles_repo.list()}
+    options=dict(options or {})
+    operator=options.pop('operator_profile',None)
+    payloads=[];persons={}
     for eid in entry_ids:
-        entry = entries_repo.get(eid)
-        if not entry:
-            continue
-        prof = profiles.get(entry.get("profile_id"), {})
-        pe = (
-            _entry_to_print_payload(entry, Path(attachments_dir), prof)
-            if status.get("mode") == "external"
-            else _entry_to_print(entry, Path(attachments_dir), prof)
-        )
-        print_entries.append(pe)
-        entry_key = pe["entry_id"] if isinstance(pe, dict) else pe.entry_id
-        print_person = {
-            "person_name": operator_profile.get("person_name") or prof.get("name", ""),
-            "student_id": operator_profile.get("student_id") or prof.get("student_id", ""),
-            "contact": operator_profile.get("contact") or prof.get("contact", ""),
-            "bank_name": operator_profile.get("bank_name") or prof.get("bank_name", ""),
-            "bank_card": operator_profile.get("bank_card") or prof.get("bank_card", ""),
-        }
-        person_profiles[entry_key] = print_person
-
-    if not print_entries:
-        raise RuntimeError("没有可打印的条目。")
-
-    if status.get("mode") == "external":
-        return _build_prints_external(status["path"], print_entries, out_dir, options, person_profiles)
-
-    from tidoc_print import PersonProfile, PrintOptions, build_print_package
-
-    opts = PrintOptions(**(options or {}))
-    typed_profiles = {k: PersonProfile(**v) for k, v in person_profiles.items()}
-    results = build_print_package(print_entries, out_dir, opts, typed_profiles)
-    return {"results": [{"title": r.title, "files": r.files} for r in results]}
+        entry=entries_repo.get(eid)
+        if not entry: raise ValueError('选中条目不存在')
+        profile=profiles.get(entry.get('profile_id'),{})
+        payloads.append(_entry_to_print_payload(entry,Path(attachments_dir),profile))
+        # Whole object selection: explicit operator OR one profile, never mixed fields.
+        person=operator if operator is not None else {'person_name':profile.get('name',''),'student_id':profile.get('student_id',''),'contact':profile.get('contact',''),'bank_name':profile.get('bank_name',''),'bank_card':profile.get('bank_card','')}
+        persons[eid]=person
+    from tidoc_print.protocol import convert_v1_request
+    request=convert_v1_request({'entries':payloads,'profiles':persons,'options':options,'out_dir':str(out_dir)})
+    return execute_print_request(request,components_dir)
 
 
-def _build_prints_external(executable: str, entries: list, out_dir: str | Path,
-                           options: dict | None, profiles: dict) -> dict:
-    payload = {
-        "entries": [_jsonable(e) for e in entries],
-        "out_dir": str(out_dir),
-        "options": options or {},
-        "profiles": {k: _jsonable(v) for k, v in profiles.items()},
-    }
-    with tempfile.TemporaryDirectory(prefix="tidoc-print-") as tmp:
-        in_path = Path(tmp) / "input.json"
-        out_path = Path(tmp) / "result.json"
-        in_path.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
-        cmd = [executable, "--input", str(in_path), "--result", str(out_path)]
-        if sys.platform == "darwin" and executable.endswith(".app"):
-            cmd = ["open", "-W", "-a", executable, "--args", "--input", str(in_path), "--result", str(out_path)]
-        proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()
-            raise RuntimeError(f"打印组件执行失败：{detail or proc.returncode}")
-        if not out_path.exists():
-            raise RuntimeError("打印组件未返回结果。")
-        result = json.loads(out_path.read_text("utf-8"))
-        if not result.get("ok"):
-            raise RuntimeError(result.get("error") or "打印组件执行失败。")
-        return result["data"]
+def _build_prints_external(executable,entries,out_dir,options,profiles):
+    from tidoc_print.protocol import convert_v1_request
+    request=convert_v1_request({'entries':[_jsonable(e) for e in entries],'profiles':{k:_jsonable(v) for k,v in profiles.items()},'options':options or {},'out_dir':str(out_dir)})
+    # Retained helper uses the same serialized request and executable entrypoint.
+    with tempfile.TemporaryDirectory() as tmp:
+        inp=Path(tmp)/'input.json';res=Path(tmp)/'result.json'
+        inp.write_text(json.dumps(request,ensure_ascii=False),'utf-8')
+        proc=subprocess.run(_command(executable)+['--input',str(inp),'--result',str(res)],capture_output=True,text=True,timeout=120)
+        if proc.returncode or not res.exists(): raise RuntimeError('打印组件执行失败')
+        result=json.loads(res.read_text('utf-8'))
+        if not result['ok']:raise RuntimeError(result['error'])
+        return result['data']
 
 
 def _jsonable(value):
-    if is_dataclass(value):
-        return _jsonable(asdict(value))
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, dict):
-        return {k: _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
+    if is_dataclass(value):return _jsonable(asdict(value))
+    if isinstance(value,Decimal):return str(value)
+    if isinstance(value,dict):return {key:_jsonable(val) for key,val in value.items()}
+    if isinstance(value,(list,tuple)):return [_jsonable(val) for val in value]
     return value

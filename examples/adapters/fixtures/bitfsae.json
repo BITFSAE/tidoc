@@ -1,0 +1,60 @@
+{
+  "package_id": "org.bitfsae.reimbursement",
+  "entries": [
+    {
+      "invoice_no": "BIT-001",
+      "buyer_name": "北京理工大学",
+      "buyer_tax_id": "12100000400009127B",
+      "total": "120.00",
+      "paid_amount": "120.00",
+      "items": [
+        {
+          "name": "控制器",
+          "unit": "个",
+          "quantity": "2",
+          "total": "120.00"
+        }
+      ],
+      "fields": {
+        "purchase_purpose": "车队备件",
+        "storage_location": "工训楼"
+      },
+      "invoice_date": "2026-10-05",
+      "seller": "样例供应商",
+      "claimant": {
+        "name": "示例报账人",
+        "reviewer": "示例审核人"
+      },
+      "materials": [
+        "invoice",
+        "payment_screenshot",
+        "inspection_pdf"
+      ]
+    }
+  ],
+  "payee": {
+    "name": "示例收款人",
+    "personnel_id": "000123",
+    "contact": "01000000000",
+    "bank_name": "示例银行",
+    "account_number": "0000000000001234",
+    "account_type": "personal_bank"
+  },
+  "expected": {
+    "entry_count": 1,
+    "invoice_total": "120.00",
+    "paid_total": "120.00",
+    "title_groups": 1,
+    "outputs": [
+      "reimbursement",
+      "acceptance",
+      "materials"
+    ],
+    "required_materials": [
+      "invoice",
+      "payment_screenshot",
+      "inspection_pdf"
+    ]
+  },
+  "schema_version": 1
+}

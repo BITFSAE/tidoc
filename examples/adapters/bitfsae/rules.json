@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "id": "paid_required",
+      "stage": "complete",
+      "when": {
+        "field": "invoice.total",
+        "op": "present"
+      },
+      "require": [
+        {
+          "field": "entry.paid_amount"
+        }
+      ],
+      "message": "请确认实付金额。",
+      "severity": "required"
+    }
+  ]
+}

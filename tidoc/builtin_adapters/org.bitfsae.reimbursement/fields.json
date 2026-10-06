@@ -1,0 +1,30 @@
+{
+  "fields": [
+    {
+      "id": "purchase_purpose",
+      "scope": "entry",
+      "label": "采购用途",
+      "type": "text",
+      "required_at": [
+        "complete"
+      ],
+      "presentation": "visible",
+      "sensitive": false,
+      "transfer": "include",
+      "default": "车队采购"
+    },
+    {
+      "id": "storage_location",
+      "scope": "entry",
+      "label": "存放地点",
+      "type": "text",
+      "required_at": [
+        "complete"
+      ],
+      "presentation": "visible",
+      "sensitive": false,
+      "transfer": "include",
+      "default": "工训楼"
+    }
+  ]
+}

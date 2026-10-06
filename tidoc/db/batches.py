@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import uuid
+import json
 from datetime import datetime
 
 from .database import Database
@@ -31,14 +32,23 @@ class BatchRepo:
         self.db = db
 
     # ------------------------------------------------------------------ 创建 / 改名 / 删除
-    def create(self, name: str, note: str = "", entry_ids: list[str] | None = None) -> dict:
+    def create(self, name: str, note: str = "", entry_ids: list[str] | None = None,
+               *, default_scheme_id: str | None = None,
+               default_revision_id: str | None = None) -> dict:
         if not name.strip():
             raise ValueError("批次名称不能为空。")
         batch_id = uuid.uuid4().hex
         now = _now()
+        if default_scheme_id and not default_revision_id:
+            from .adapters import AdapterRepo
+            default_revision_id = AdapterRepo(self.db).get_scheme(default_scheme_id)["current_revision_id"]
+        if default_revision_id and not default_scheme_id:
+            raise ValueError("批次默认方案和修订必须成对指定。")
+        if not default_scheme_id and getattr(self.db, "adapter_service", None):
+            default_scheme_id, default_revision_id = self.db.adapter_service.default_binding()
         self.db.conn.execute(
-            "INSERT INTO batches(id, name, note, archived, created_at, updated_at) VALUES(?,?,?,0,?,?)",
-            (batch_id, name.strip(), note or "", now, now),
+            "INSERT INTO batches(id, name, note, archived, created_at, updated_at,default_scheme_id,default_revision_id) VALUES(?,?,?,0,?,?,?,?)",
+            (batch_id, name.strip(), note or "", now, now, default_scheme_id, default_revision_id),
         )
         try:
             self._set_entries_batch(entry_ids or [], batch_id, now)
@@ -46,6 +56,16 @@ class BatchRepo:
         except Exception:
             self.db.conn.rollback()
             raise
+        return self.get(batch_id)
+
+    def set_default_binding(self, batch_id: str, scheme_id: str, revision_id: str | None = None) -> dict:
+        if not self._exists(batch_id):
+            raise ValueError("批次不存在。")
+        from .adapters import AdapterRepo
+        revision_id = revision_id or AdapterRepo(self.db).get_scheme(scheme_id)["current_revision_id"]
+        with self.db.transaction():
+            self.db.conn.execute("UPDATE batches SET default_scheme_id=?,default_revision_id=?,updated_at=? WHERE id=?",
+                                 (scheme_id, revision_id, _now(), batch_id))
         return self.get(batch_id)
 
     def update(self, batch_id: str, **fields) -> dict:
@@ -78,6 +98,7 @@ class BatchRepo:
     def delete(self, batch_id: str, *, commit: bool = True) -> None:
         # batch_entries 由外键 ON DELETE CASCADE 清理（数据库已开 foreign_keys=ON）。
         self.db.conn.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
+        self.db.conn.execute("DELETE FROM meta WHERE key=?",(self._output_settings_key(batch_id),))
         if commit:
             self.db.conn.commit()
 
@@ -239,6 +260,12 @@ class BatchRepo:
             return None
         batch = _row_to_dict(row)
         batch["archived"] = bool(batch.get("archived"))
+        batch["output_settings"] = self._output_settings(batch_id)
+        batch["payee_mappings"] = {
+            item['scheme_id']:{key:item[key] for key in ('id','name','personnel_id','contact','account_type','bank_name','account_number')}
+            for item in self.db.conn.execute('''SELECT l.scheme_id,p.* FROM batch_payee_links l
+                JOIN payees p ON p.id=l.payee_id WHERE l.batch_id=? ORDER BY l.scheme_id''',(batch_id,)).fetchall()
+        }
         batch["entry_ids"] = self.entry_ids(batch_id)
         batch["entry_notes"] = self._entry_notes(batch_id)
         batch["count"] = len(batch["entry_ids"])
@@ -256,10 +283,47 @@ class BatchRepo:
         for r in rows:
             batch = _row_to_dict(r)
             batch["archived"] = bool(batch.get("archived"))
+            batch["output_settings"] = self._output_settings(batch["id"])
             batch["stats"] = self._stats(batch["id"])
             batch["count"] = batch["stats"]["count"]
             result.append(batch)
         return result
+
+    @staticmethod
+    def _output_settings_key(batch_id: str) -> str:
+        return "tidoc.batch_output_settings." + batch_id
+
+    def _output_settings(self, batch_id: str) -> dict:
+        row=self.db.conn.execute("SELECT value FROM meta WHERE key=?",(self._output_settings_key(batch_id),)).fetchone()
+        if not row: return {}
+        try:
+            value=json.loads(row[0])
+        except (TypeError,ValueError):
+            raise ValueError("批次输出设置存储数据无效。")
+        if not isinstance(value,dict): raise ValueError("批次输出设置存储数据无效。")
+        return value
+
+    def set_output_settings(self, batch_id: str, settings: dict, *, expected_updated_at: str | None = None) -> dict:
+        """Persist batch-scoped registered output-setting overrides atomically."""
+        from ..adapters.registry import SETTINGS
+        from ..adapters.resolver import _valid_setting
+        if not self._exists(batch_id): raise ValueError("批次不存在。")
+        if not isinstance(settings,dict): raise ValueError("批次输出设置必须是对象。")
+        allowed={key for key,spec in SETTINGS.items() if 'batch' in spec.get('scopes',[])}
+        unknown=set(settings)-allowed
+        if unknown: raise ValueError("设置不适用于批次："+', '.join(sorted(unknown)))
+        for key,value in settings.items():
+            if not _valid_setting(key,value): raise ValueError("设置值无效："+key)
+        with self.db.transaction():
+            row=self.db.conn.execute("SELECT updated_at FROM batches WHERE id=?",(batch_id,)).fetchone()
+            if not row: raise ValueError("批次不存在。")
+            if expected_updated_at is not None and row['updated_at']!=expected_updated_at:
+                raise ValueError("批次已被其他操作修改，请刷新后保存。")
+            stamp=datetime.now().isoformat(timespec="microseconds")
+            self.db.conn.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (self._output_settings_key(batch_id),json.dumps(settings,ensure_ascii=False,sort_keys=True,separators=(',',':'))))
+            self.db.conn.execute("UPDATE batches SET updated_at=? WHERE id=?",(stamp,batch_id))
+        return self.get(batch_id)
 
     def unbatched_count(self) -> int:
         """统计尚未归入任何批次的条目，供批次栏的快捷入口显示。"""

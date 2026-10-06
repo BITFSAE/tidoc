@@ -7,7 +7,7 @@ const State = {
   currentProfileId: null,
   activeTitle: '',
   titleOptions: [],
-  titleProfiles: [{ name: '北京理工大学' }, { name: '北京理工大学教育基金会' }], // 启动时由后端覆盖
+  titleProfiles: [],
   quickView: 'all',
   entries: [],
   selected: new Set(),
@@ -29,13 +29,7 @@ const State = {
   paymentOcrEnabled: true,
   defaultPaidToInvoice: true,
   defaultEntryTitle: '',
-  materialRequirements: {
-    invoice: true,
-    payment_screenshot: true,
-    physical_image: false,
-    inspection_pdf: true,
-    paid_amount: true,
-  },
+  materialRequirements: {},
   verificationWatchDirectory: '',
   verificationTrashSource: false,
   activeDetailEntryId: null,
@@ -85,9 +79,8 @@ function taskProgress(message) {
   };
 }
 
-const TITLE_CLASS = { '北京理工大学': 'univ', '北京理工大学教育基金会': 'found' };
-const TITLE_SHORT = { '北京理工大学': '北京理工大学', '北京理工大学教育基金会': '教育基金会' };
-const BUILTIN_TITLES = ['北京理工大学', '北京理工大学教育基金会'];
+const TITLE_CLASS = {};
+const TITLE_SHORT = {};
 
 function configuredTitleNames() {
   // 设置里维护的报账抬头（多学校可用）；为空时列表只显示条目里出现过的抬头。
@@ -103,13 +96,6 @@ const PAYMENT_OCR_KEY = 'tidoc.paymentScreenshotOcr';
 const DEFAULT_PAID_TO_INVOICE_KEY = 'tidoc.defaultPaidToInvoiceTotal';
 const DEFAULT_ENTRY_TITLE_KEY = 'tidoc.defaultEntryTitle';
 const THEME_KEY = 'tidoc.themeMode';
-const DEFAULT_MATERIAL_REQUIREMENTS = {
-  invoice: true,
-  payment_screenshot: true,
-  physical_image: false,
-  inspection_pdf: true,
-  paid_amount: true,
-};
 const BINDLE_INCLUDE_NOTES_KEY = 'tidoc.bindle.includeNotes';
 const BINDLE_INCLUDE_TAGS_KEY = 'tidoc.bindle.includeTags';
 const VERIFICATION_WATCH_DIR_KEY = 'tidoc.invoiceVerification.watchDirectory';
@@ -118,13 +104,7 @@ const SHOW_CREATED_AT_KEY = 'tidoc.cards.showCreatedAt';
 const PendingLaunchFiles = [];
 let launchFileCheckRunning = false;
 let launchFileCheckAgain = false;
-const OPERATOR_PREF_KEYS = {
-  name: 'tidoc.operator.name',
-  student_id: 'tidoc.operator.student_id',
-  contact: 'tidoc.operator.contact',
-  bank_name: 'tidoc.operator.bank_name',
-  bank_card: 'tidoc.operator.bank_card',
-};
+
 
 const systemThemeMedia = window.matchMedia('(prefers-color-scheme: dark)');
 
@@ -313,6 +293,8 @@ async function init() {
   let startupUpdate = null;
   try { startupUpdate = await Api.startupUpdateState(); } catch (e) {}
   refreshOcrStatus();
+  await AdapterUI.setup();
+  await AdapterUI.initializeViewPreference();
   await loadWorkflowPreferences();
   await loadProfiles();
   await loadBatches();
@@ -369,7 +351,7 @@ function refreshOcrStatus() {
 }
 
 function applyOcrUiVisibility() {
-  const enabled = !!State.ocrStatus?.available;
+  const enabled = !!State.ocrStatus?.available && AdapterUI.settings()['assist.cloud_ocr_visible'] !== false;
   document.querySelectorAll('[data-ocr-ui]').forEach((el) => {
     el.classList.toggle('hidden', !enabled);
   });
@@ -728,20 +710,10 @@ async function loadWorkflowPreferences() {
       Api.titleProfiles(),
       Api.appPreference(SHOW_CREATED_AT_KEY, '0'),
     ]);
-    State.titleProfiles = Array.isArray(titleProfiles?.profiles) && titleProfiles.profiles.length
-      ? titleProfiles.profiles
-      : [];
     State.multiClaimantMode = multiMode === '1';
-    State.paymentOcrEnabled = paymentOcr !== '0';
-    State.defaultPaidToInvoice = defaultPaidToInvoice !== '0';
-    State.defaultEntryTitle = defaultEntryTitle || localDefaultEntryTitle || '';
     State.showCreatedAt = showCreatedAt === '1';
     applyTheme(themeMode, { persist: true });
-    State.materialRequirements = {
-      ...DEFAULT_MATERIAL_REQUIREMENTS,
-      ...(materialRequirements || {}),
-      invoice: true,
-    };
+    await AdapterUI.refresh();
     State.verificationWatchDirectory = verification.watch_directory || '';
     State.verificationTrashSource = !!verification.trash_source_after_archive;
     if (!State.verificationWatchDirectory && legacyVerificationWatch) {
@@ -908,13 +880,13 @@ function openQuickProfileCreate(onCreated) {
   body.innerHTML = `
     <div class="form-grid">
       <div class="form-row"><label for="quickProfileName">姓名 *</label><input id="quickProfileName" autocomplete="off"/></div>
-      <div class="form-row"><label for="quickProfileReviewer">审核人 *</label><input id="quickProfileReviewer" autocomplete="off"/></div>
+      ${AdapterUI.reviewerControl("quickProfileReviewer")}
     </div>`;
   let m;
   const createBtn = mkBtn('创建并选中', 'primary', async () => {
     const name = body.querySelector('#quickProfileName').value.trim();
     const reviewer = body.querySelector('#quickProfileReviewer').value.trim();
-    if (!name || !reviewer) { toast('姓名与审核人必填', 'err'); return; }
+    if (!name || (AdapterUI.reviewerRequired() && !reviewer)) { toast(AdapterUI.reviewerRequired() ? '请填写姓名与审核人' : '请填写姓名', 'err'); return; }
     createBtn.disabled = true;
     try {
       const profile = await Api.createProfile(name, reviewer, State.profiles.length === 0, {});
@@ -1286,17 +1258,15 @@ function entryCard(e) {
   }
 
   const right = el('div', 'entry-right');
-  const showPhysicalAction = State.materialRequirements.physical_image || e.has_physical;
+  const showPhysicalAction = !e.material_roles?.length && (State.materialRequirements.physical_image || e.has_physical);
   const detailAction = `<button class="entry-detail-action" data-card-action="detail">${showPhysicalAction ? '详情' : '打开详情'}</button>`;
   const paymentCount = Number(e.attachment_types?.payment_screenshot || 0);
   const paymentActionLabel = paymentCount > 1
     ? `付款<span class="payment-count">×${paymentCount}</span>`
     : '付款';
-  const commonActions = `
-      ${actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '左键补充发票 PDF；右键打开已有材料' : '添加发票 PDF')}
-      ${actionBtn('paid', '实付', !!paidCur, paidCur ? '已填写实付金额；点击修改' : '填写实付金额')}
-      ${actionBtn('pay', paymentActionLabel, e.has_payment, e.has_payment ? `已有 ${paymentCount} 张付款截图；左键继续添加，右键打开最近一张` : '添加付款截图')}
-      ${actionBtn('inspect', '查验', e.has_inspection, e.has_inspection ? '左键重新查验或补充；右键打开已有查验单' : '打开官网查验并自动归档 PDF')}`;
+  const commonActions = e.material_roles?.length
+    ? `${actionBtn('paid', '实付', !!paidCur, paidCur ? '修改实付金额' : '填写实付金额')}${AdapterUI.cardActions(e)}`
+    : `${actionBtn('invoice', '发票', e.has_invoice, '添加发票材料')}${actionBtn('paid', '实付', !!paidCur, '填写实付金额')}${actionBtn('pay', paymentActionLabel, e.has_payment, '添加付款截图')}${actionBtn('inspect', '查验', e.has_inspection, '添加查验材料')}`;
   const physicalAction = actionBtn('physical', '实物', e.has_physical, e.has_physical ? '左键继续添加实物图；右键打开已有实物图' : '添加实物图');
   right.innerHTML = `
     <div class="entry-total">${fmtMoney(e.total)}</div>
@@ -1344,6 +1314,7 @@ function entryCard(e) {
     });
   });
 
+  AdapterUI.bindCardActions(right,e);
   card.append(check, stripe, main, right);
   card.onclick = (ev) => {
     if (ev.detail > 1) {
@@ -1917,6 +1888,7 @@ async function renameBatchFlow(b) {
   body.innerHTML = `
     <div class="form-row"><label>批次名称</label><input id="bName" value="${esc(b.name)}"/></div>
     <div class="form-row"><label>批次备注（可选）</label><textarea id="bNote" rows="3" style="width:100%;font-family:inherit;font-size:13px;padding:10px;border-radius:9px;border:1px solid var(--line);resize:vertical">${esc(b.note || '')}</textarea></div>`;
+  body.append(mkBtn('批次报账信息','ghost',() => AdapterUI.batchFields(b.id)));
   const m = modal({
     title: '编辑批次', body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('保存', 'primary', async () => {
@@ -2712,6 +2684,7 @@ function bindEvents() {
   $('#selectAllBtn').onclick = toggleSelectAllVisible;
   $('#addToBatchBtn').onclick = addSelectionToBatch;
   $('#tagBtn').onclick = () => tagSelectionFlow();
+  $('#tagBtn').oncontextmenu = event => { event.preventDefault(); AdapterUI.batchFill([...State.selected]); };
   $('#changeProfileBtn').onclick = () => changeSelectionProfile();
   $('#batchReparseBtn').onclick = batchReparse;
   $('#batchOcrBtn').onclick = () => openOcrDialog([...State.selected]);
@@ -2860,7 +2833,7 @@ function openProfileManager(forceCreate) {
     <h3 class="detail-section" style="margin:18px 0 10px"><span>新增报账人</span><span class="h3-line"></span></h3>
     <div class="form-grid">
       <div class="form-row"><label>姓名 *</label><input id="pfName" placeholder="必填"/></div>
-      <div class="form-row"><label>审核人 *</label><input id="pfReviewer" placeholder="必填"/></div>
+      ${AdapterUI.reviewerControl("pfReviewer")}
     </div>
     `;
 
@@ -2870,7 +2843,7 @@ function openProfileManager(forceCreate) {
   const addBtn = mkBtn('添加报账人', 'primary', async () => {
     const name = form.querySelector('#pfName').value.trim();
     const reviewer = form.querySelector('#pfReviewer').value.trim();
-    if (!name || !reviewer) { toast('姓名与审核人必填', 'err'); return; }
+    if (!name || (AdapterUI.reviewerRequired() && !reviewer)) { toast(AdapterUI.reviewerRequired() ? '请填写姓名与审核人' : '请填写姓名', 'err'); return; }
     try {
       await Api.createProfile(name, reviewer, State.profiles.length === 0, {
       });
@@ -2895,14 +2868,14 @@ function editProfileFlow(p, onDone) {
   body.innerHTML = `
     <div class="form-grid">
       <div class="form-row"><label>姓名 *</label><input id="epName" value="${esc(p.name)}"/></div>
-      <div class="form-row"><label>审核人 *</label><input id="epReviewer" value="${esc(p.reviewer)}"/></div>
+      ${AdapterUI.reviewerControl("epReviewer",p.reviewer)}
     </div>`;
   const m = modal({
     title: '编辑报账人', body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('保存', 'primary', async () => {
       const name = body.querySelector('#epName').value.trim();
       const reviewer = body.querySelector('#epReviewer').value.trim();
-      if (!name || !reviewer) { toast('姓名与审核人必填', 'err'); return; }
+      if (!name || (AdapterUI.reviewerRequired() && !reviewer)) { toast(AdapterUI.reviewerRequired() ? '请填写姓名与审核人' : '请填写姓名', 'err'); return; }
       try {
         await Api.updateProfile(p.id, {
           name, reviewer,
@@ -2916,7 +2889,7 @@ function editProfileFlow(p, onDone) {
 }
 
 async function openSettings() {
-  let paths, printStatus, appInfo, operatorPrefs, multiMode, paymentOcrMode;
+  let paths, printStatus, appInfo, multiMode, paymentOcrMode;
   let defaultPaidMode, defaultEntryTitleMode, materialRequirementsMode, bindleNotesMode, bindleTagsMode;
   let autoUpdateMode, maintenance, verificationPrefs, ocrStatus, showCreatedAtMode;
   const themeMode = State.themeMode;
@@ -2927,11 +2900,6 @@ async function openSettings() {
     appInfo = await Api.appInfo();
     maintenance = await Api.storageMaintenanceStatus();
     const prefValues = await Promise.all([
-      Api.appPreference(OPERATOR_PREF_KEYS.name, ''),
-      Api.appPreference(OPERATOR_PREF_KEYS.student_id, ''),
-      Api.appPreference(OPERATOR_PREF_KEYS.contact, ''),
-      Api.appPreference(OPERATOR_PREF_KEYS.bank_name, ''),
-      Api.appPreference(OPERATOR_PREF_KEYS.bank_card, ''),
       Api.appPreference(MULTI_CLAIMANT_KEY, State.multiClaimantMode ? '1' : '0'),
       Api.appPreference(PAYMENT_OCR_KEY, State.paymentOcrEnabled ? '1' : '0'),
       Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, State.defaultPaidToInvoice ? '1' : '0'),
@@ -2943,23 +2911,16 @@ async function openSettings() {
       Api.invoiceVerificationPreferences(),
       Api.appPreference(SHOW_CREATED_AT_KEY, '0'),
     ]);
-    operatorPrefs = {
-      name: prefValues[0],
-      student_id: prefValues[1],
-      contact: prefValues[2],
-      bank_name: prefValues[3],
-      bank_card: prefValues[4],
-    };
-    multiMode = prefValues[5] === '1';
-    paymentOcrMode = prefValues[6] !== '0';
-    defaultPaidMode = prefValues[7] !== '0';
-    defaultEntryTitleMode = prefValues[8] || '';
-    materialRequirementsMode = { ...DEFAULT_MATERIAL_REQUIREMENTS, ...(prefValues[9] || {}), invoice: true };
-    bindleNotesMode = prefValues[10] !== '0';
-    bindleTagsMode = prefValues[11] !== '0';
-    autoUpdateMode = prefValues[12] === '1';
-    verificationPrefs = prefValues[13];
-    showCreatedAtMode = prefValues[14] === '1';
+    multiMode = prefValues[0] === '1';
+    paymentOcrMode = prefValues[1] !== '0';
+    defaultPaidMode = prefValues[2] !== '0';
+    defaultEntryTitleMode = prefValues[3] || '';
+    materialRequirementsMode = { ...(prefValues[4] || {}) };
+    bindleNotesMode = prefValues[5] !== '0';
+    bindleTagsMode = prefValues[6] !== '0';
+    autoUpdateMode = prefValues[7] === '1';
+    verificationPrefs = prefValues[8];
+    showCreatedAtMode = prefValues[9] === '1';
     State.defaultEntryTitle = defaultEntryTitleMode;
     State.materialRequirements = materialRequirementsMode;
   } catch (e) { toast(e.message, 'err'); return; }
@@ -2979,6 +2940,7 @@ async function openSettings() {
 
   body.innerHTML = `
     <div class="settings-shell">
+      <div class="settings-block"><div class="settings-row"><div class="settings-row-copy"><b>报账方案</b><span>${esc(State.scheme?.name || '')}</span></div><button class="btn small" id="setAdapters">管理</button></div><div class="settings-row"><b>个人收款信息</b><button class="btn small" id="setPayees">填写</button></div><div class="settings-row"><b>导出记录</b><button class="btn small" id="setExportJobs">查看</button></div></div>
       <!-- 报账人 -->
       <div class="settings-block">
         <div class="settings-row" id="setProfiles">
@@ -3152,19 +3114,6 @@ async function openSettings() {
           <button class="btn small ghost" id="setOpenExports">打开导出目录 · ${fmtBytes(maintenance.exports_size || 0)}</button>
           <button class="btn small ghost" id="setCleanup" ${maintenance.files ? '' : 'disabled'}>清理临时文件${maintenance.size ? ` · ${fmtBytes(maintenance.size)}` : ''}</button>
         </div>
-        <details class="settings-advanced" id="paymentInfoFold">
-          <summary>收款信息</summary>
-          <div class="form-grid settings-form-grid">
-            <div class="form-row"><label>姓名</label><input id="opName" value="${esc(operatorPrefs.name)}"/></div>
-            <div class="form-row"><label>学号</label><input id="opStudent" value="${esc(operatorPrefs.student_id)}"/></div>
-            <div class="form-row"><label>电话</label><input id="opContact" value="${esc(operatorPrefs.contact)}"/></div>
-            <div class="form-row"><label>开户行</label><input id="opBank" value="${esc(operatorPrefs.bank_name)}"/></div>
-            <div class="form-row"><label>卡号</label><input id="opCard" value="${esc(operatorPrefs.bank_card)}"/></div>
-          </div>
-          <div class="settings-row-actions">
-            <button class="btn small" id="setSaveOperator">保存身份</button>
-          </div>
-        </details>
         <details class="settings-advanced">
           <summary>高级数据维护</summary>
           <div class="settings-row-actions">
@@ -3548,26 +3497,9 @@ async function openSettings() {
       ev.target.disabled = false;
     }
   };
-  body.querySelector('#setSaveOperator').onclick = async () => {
-    const values = {
-      name: body.querySelector('#opName').value.trim(),
-      student_id: body.querySelector('#opStudent').value.trim(),
-      contact: body.querySelector('#opContact').value.trim(),
-      bank_name: body.querySelector('#opBank').value.trim(),
-      bank_card: body.querySelector('#opCard').value.trim(),
-    };
-    try {
-      await Promise.all([
-        Api.setAppPreference(OPERATOR_PREF_KEYS.name, values.name),
-        Api.setAppPreference(OPERATOR_PREF_KEYS.student_id, values.student_id),
-        Api.setAppPreference(OPERATOR_PREF_KEYS.contact, values.contact),
-        Api.setAppPreference(OPERATOR_PREF_KEYS.bank_name, values.bank_name),
-        Api.setAppPreference(OPERATOR_PREF_KEYS.bank_card, values.bank_card),
-      ]);
-      toast('已保存', 'ok');
-    } catch (e) { toast(e.message, 'err'); }
-  };
-
+  body.querySelector('#setAdapters').onclick = () => { m.close(); AdapterUI.openSettings(); };
+  body.querySelector('#setPayees').onclick = () => { m.close(); AdapterUI.payees(); };
+  body.querySelector('#setExportJobs').onclick = () => { m.close(); AdapterUI.jobs(); };
   body.querySelector('#setProfilesManage').onclick = () => { m.close(); openProfileManager(false); };
   body.querySelector('#setComponentsUpdate').onclick = () => { m.close(); openUpdateDialog(); };
   body.querySelector('#setOcrManage').onclick = () => { m.close(); openUpdateDialog(); };
@@ -3655,7 +3587,7 @@ async function openSettings() {
 const UPDATE_COMPONENTS = {
   print: {
     name: '打印导出组件',
-    description: '负责材料 PDF 拼接、付款截图排版与编号，以及报账说明、验收单 Word；独立版本，只有组件本身变化时才需更新。',
+    description: '负责材料 PDF 拼接、图片排版与编号，以及当前报账方案定义的 Word 文档。',
     busy: '正在下载、校验并安装打印导出组件…',
     install: () => Api.installPrintComponent(),
   },
@@ -3981,7 +3913,7 @@ function openNewEntry() {
     if (!picked.xml && !picked.pdf) return;
     const progress = taskProgress('正在识别发票信息…');
     try {
-      const r = await Api.parseFiles(picked.xml, picked.pdf);
+      const r = await Api.parseFiles(picked.xml, picked.pdf, $('[data-import-scheme]',body)?.value || null);
       const p = r.parsed, c = r.check;
       const prev = body.querySelector('#nePreview');
       prev.innerHTML = `
@@ -4013,6 +3945,8 @@ function openNewEntry() {
         paymentPaths: picked.payments, physicalPaths: picked.physical,
         inspectionPath: picked.inspection,
         status: 'draft',
+        schemeId: $('[data-import-scheme]',body)?.value || null,
+        batchId: actualBatchId() || null,
       });
       m.close();
       await loadBatches();
@@ -4022,6 +3956,8 @@ function openNewEntry() {
     finally { progress.close(); }
   };
 
+  body.insertAdjacentHTML('afterbegin',AdapterUI.chooser());
+  const schemePicker = $('[data-import-scheme]',body); if (schemePicker) schemePicker.onchange = preview;
   const m = modal({
     title: '新建报账条目',
     subhead: '上传后自动识别，发票号、金额等无需手输；状态按材料齐全度自动判定',
@@ -4120,12 +4056,12 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
           </div>`).join('')}
         ${(g.warnings || []).length ? `<div class="bi-warning">${g.warnings.map(esc).join('；')}</div>` : ''}
         ${g.error ? `<div class="bi-error"><b>未创建：</b>${esc(g.error)}</div>` : ''}
-      </div>`).join('') || '<div class="hint">没有找到可导入的发票 PDF。批量导入要求每条至少有一个发票 PDF，XML 可以没有。</div>';
+      </div>`).join('') || '<div class="hint">没有找到可导入的发票 PDF 或有效 XML。可以先导入 XML，打印票面前补充 PDF。</div>';
 
     const ungroupedRows = ungrouped.length ? `
       <div class="detail-section" style="margin-top:16px">
         <h3>未匹配 XML<span class="h3-line"></span></h3>
-        <div class="hint" style="margin-bottom:10px">这些 XML 没有对应发票 PDF，不会单独创建条目。</div>
+        <div class="hint" style="margin-bottom:10px">这些 XML 暂未识别到发票号，请检查文件后重试。有发票号的 XML 可先导入，打印票面前再补 PDF。</div>
         <div class="bi-muted-list">${ungrouped.map((f) => `
           <div class="bi-file">
             <span class="attach-type">${esc(f.type_label || 'XML')}</span>
@@ -4160,6 +4096,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
       </div>` : '';
 
     body.innerHTML = `
+      ${AdapterUI.chooser()}
       <div class="batch-import-summary">
         <div><span>条目</span><b>${scan.invoice_pdf_count || groups.length}</b></div>
         <div><span>XML</span><b>${scan.matched_xml_count || 0}</b></div>
@@ -4289,7 +4226,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         }
         const progress = taskProgress(`正在创建 ${payload.length} 个报账条目…`);
         try {
-          const r = await Api.batchCreateEntries(selectedClaimantId(body), payload, State.defaultEntryTitle);
+          const r = await Api.batchCreateEntries(selectedClaimantId(body), payload, '', $('[data-import-scheme]',body)?.value || null, selectedImportBatchId === NEW_IMPORT_BATCH ? null : selectedImportBatchId || null);
           createdEntries.push(...(r.created_entries || []));
           const failedByKey = new Map((r.failed || []).map((item) => [item.key || item.group, item]));
           const createdKeys = new Set((r.created_entries || []).map((item) => item.group));
@@ -4758,6 +4695,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   });
   State.activeDetailEntryId = entryId;
   State.activeDetailModal = mm;
+  AdapterUI.decorateEntry(body,e,() => reopenEntryDetail(mm,entryId,{affectsStatus:true}));
 
   // ---- 阿里云识别结果（有差异时默认展开）：必须在 modal 创建后再加载，
   // loadOcrDetail 的回调会引用 mm，提前调用会触发 TDZ 错误。
@@ -4779,6 +4717,7 @@ const ATTACHMENT_TYPE_OPTS = [
 
 function classifyAttachmentByName(name) {
   const n = String(name || '').toLowerCase();
+  if (n.endsWith('.tidoc-preset')) return 'adapter_package';
   if (n.endsWith('.tidoc')) return 'bindle_package';
   if (n.endsWith('.xml')) return 'invoice_xml';
   if (/\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(n)) return 'payment_screenshot';
@@ -4807,11 +4746,17 @@ async function materialInfosForPaths(paths) {
   const infos = await Api.classifyMaterialFiles(paths || []);
   return (infos || []).map((info) => ({
     ...info,
-    type: info.type || classifyAttachmentByName(info.path || info.name),
+    type: String(info.path || info.name || '').toLowerCase().endsWith('.tidoc-preset') ? 'adapter_package' : info.type || classifyAttachmentByName(info.path || info.name),
   }));
 }
 
 async function openInboundBindle(infos, cleanupPaths, progress = null) {
+  const adapters = (infos || []).filter(info => info.type === 'adapter_package');
+  if (adapters.length) {
+    if (adapters.length !== 1 || infos.length !== 1) throw new Error('请单独拖入一个报账方案包。');
+    try { await AdapterUI.importPackage(adapters[0].path); } finally { await cleanupDroppedPaths(cleanupPaths || []); }
+    return true;
+  }
   const packages = (infos || []).filter(isBindlePackageInfo);
   if (!packages.length) return false;
   if (packages.length !== 1 || infos.length !== 1) {
@@ -4858,7 +4803,8 @@ async function addMaterialInfosToEntry(entryId, infos) {
           payment_ocr_attempted: State.paymentOcrEnabled,
           recognized_payment_amount: info.paid_amount || '',
         }
-      : null;
+      : {};
+    if(info.role_id)options.role_id=info.role_id;
     const att = await Api.addAttachment(entryId, info.path, info.type, '', options);
     if (info.type === 'payment_screenshot') {
       paymentInfos.push({
@@ -5199,10 +5145,16 @@ async function openAttachDroppedFiles(paths, options = {}) {
         ${ATTACHMENT_TYPE_OPTS.filter(([v]) => ['payment_screenshot', 'physical_image', 'inspection_pdf', 'other'].includes(v))
           .map(([v, l]) => `<option value="${v}"${v === info.type ? ' selected' : ''}>${l}</option>`).join('')}
       </select>
+      <select data-drop-role="${idx}" aria-label="方案材料角色" class="hidden"></select>
     </div>`).join('');
   body.innerHTML = `
     <div class="hint">这些材料无法唯一匹配，请逐份确认要绑定的条目。</div>
     <div class="drop-bind-list">${rows}</div>`;
+  for(const [index,info] of infos.entries()){
+    const entryInput=$(`[data-drop-entry="${index}"]`,body);const typeInput=$(`[data-drop-type="${index}"]`,body);const roleInput=$(`[data-drop-role="${index}"]`,body);
+    entryInput.onchange=()=>{const entry=entries.find(e=>e.id===entryInput.value);const custom=(entry?.material_roles||[]).filter(r=>r.id.startsWith('custom:'));roleInput.classList.toggle('hidden',!custom.length);roleInput.innerHTML='<option value="">按材料类型添加</option>'+custom.map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('');};
+    roleInput.onchange=()=>{if(roleInput.value)typeInput.value='other';};typeInput.onchange=()=>{if(typeInput.value!=='other')roleInput.value='';};
+  }
   const m = modal({
     title: '绑定材料',
     body, wide: true,
@@ -5219,6 +5171,7 @@ async function openAttachDroppedFiles(paths, options = {}) {
             ...info,
             entryId: body.querySelector(`[data-drop-entry="${idx}"]`).value,
             type: body.querySelector(`[data-drop-type="${idx}"]`).value,
+            role_id: body.querySelector(`[data-drop-role="${idx}"]`).value||null,
           }));
           if (selectedInfos.some((info) => !info.entryId)) {
             toast('请为每份材料选择条目', 'err');
@@ -5327,6 +5280,7 @@ async function exportSummary(ids) {
 
 async function doExport(ids) {
   if (!ids || !ids.length) { toast('请先选择要导出的条目', 'err'); return; }
+  const transferPreview = await Api.previewBindleTransfer(ids);
   const body = el('div');
   const defaultName = '报账导出-' + filenameTimestamp();
   body.innerHTML = `
@@ -5348,6 +5302,8 @@ async function doExport(ids) {
         <span><b>规范命名附件包</b><small>按“序号_发票号_销售方_金额”分文件夹整理附件并压缩。</small></span>
       </label>
     </div>
+    ${(transferPreview.ask_fields||[]).map(field=>`<label class="chk"><input type="checkbox" data-transfer-field="${esc(field.key||field.field_key)}"/>包含 ${esc(field.label)}（${field.record_count||field.count||0} 条）</label>`).join('')}
+    <p class="hint">绑定包版本 5 需要接收方使用支持报账方案的新版本。</p>
     <div class="hint" style="margin-top:12px">当前选择 <b>${ids.length}</b> 条。导出的文件会放在设置里的“导出目录”。</div>`;
   const m = modal({
     title: '导出',
@@ -5364,7 +5320,7 @@ async function doExport(ids) {
           const outputs = [];
           if (chosen.includes('bindle')) {
             progress.update('正在生成绑定包…');
-            outputs.push(await Api.exportBindle(ids, name + '-绑定包'));
+            outputs.push(await Api.exportBindle(ids, name + '-绑定包',{include_ask_fields:$$('[data-transfer-field]:checked',body).map(input=>input.dataset.transferField)}));
           }
           if (chosen.includes('excel')) {
             progress.update('正在生成总览 Excel…');
@@ -5567,6 +5523,39 @@ async function openBindleImportPreview(path, insp, options = {}) {
       </div>
     </section>`;
 
+  const identities = insp.profile_mapping_preview || {};
+  for (const row of body.querySelectorAll('[data-bind-profile]')) {
+    const identity = identities[row.dataset.bindProfile];
+    if (!identity || identity.status !== 'ambiguous') continue;
+    const select = el('select'); select.dataset.bindProfileMapping = row.dataset.bindProfile;
+    select.setAttribute('aria-label','选择同名报账人'); select.innerHTML = '<option value="">请选择本机同名报账人</option>' + identity.candidates.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.reviewer||'无审核人')}</option>`).join(''); row.append(select);
+  }
+  const sourceScheme = insp.target_scheme_id || null;
+  let reopening=false;
+  const schemeSelector = el('div'); schemeSelector.innerHTML = AdapterUI.chooser(sourceScheme || State.scheme?.id);
+  if (schemeSelector.firstChild) {
+    body.querySelector('.bindle-import-options').prepend(schemeSelector);
+    $('[data-import-scheme]',schemeSelector).onchange = async event => {
+      try { const updated=await Api.inspectBindle(path,event.target.value); reopening=true; m.close(); await openBindleImportPreview(path,updated,options); } catch(e) { reopening=false; toast(e.message,'err'); }
+    };
+  }
+  const targetScheme = await Api.schemeDetails(sourceScheme);
+  for (const [index, entry] of entries.entries()) {
+    const row = body.querySelector(`[data-bind-entry-index="${index}"]`);
+    if (!row) continue;
+    const mapping = entry.role_mapping_preview;
+    if (mapping?.requires_explicit_mapping?.length) {
+      const panel=el('details','bindle-entry-material-map'); panel.innerHTML='<summary>材料角色对应</summary><p class="hint">保留外部材料时不会计入本机方案的必需材料。明确选择对应角色后才参与计算。</p>';
+      let roles=targetScheme.definition.materials;
+      if(entry.existing_entry_id){const existing=await Api.getEntry(entry.existing_entry_id);roles=existing.material_roles||roles;}
+      for(const role of mapping.requires_explicit_mapping){const label=el('label','form-row');label.append(document.createTextNode(role));const select=el('select');select.dataset.bindRoleSource=role;select.innerHTML='<option value="">保留为外部材料</option>'+roles.filter(r=>r.id!=='invoice').map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('');label.append(select);panel.append(label);}row.append(panel);
+    }
+    const notes=[];
+    if(entry.adapter_compatibility?.missing_capabilities?.length)notes.push('来源方案有未支持的规则，请保留原资料并核对本机要求。');
+    if(entry.extension_merge_preview?.skipped)notes.push('部分附加信息无法对应，保留本机值及外部历史信息。');
+    if(notes.length){const hint=el('p','hint');hint.textContent=notes.join(' ');row.append(hint);}
+  }
+
   const tagInput = body.querySelector('#bindleTagInput');
   const batchSelect = body.querySelector('#bindleBatchSelect');
   const newBatch = body.querySelector('#bindleNewBatch');
@@ -5733,7 +5722,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
     title: '导入绑定包',
     wide: true,
     body,
-    onClose: options.onClose,
+    onClose: () => { if(!reopening&&options.onClose)options.onClose(); },
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
       (importButton = mkBtn('确认导入', 'primary', async () => {
@@ -5752,10 +5741,10 @@ async function openBindleImportPreview(path, insp, options = {}) {
           if (!selected.has(row.dataset.bindProfile)) return;
           const name = row.querySelector('[data-bind-profile-name]').value.trim();
           const reviewer = row.querySelector('[data-bind-profile-reviewer]').value.trim();
-          if (!name || !reviewer) invalidProfile = true;
+          if (!name) invalidProfile = true;
           profileOverrides[row.dataset.bindProfile] = { name, reviewer };
         });
-        if (invalidProfile) { toast('报账人与审核人都必须填写', 'err'); return; }
+        if (invalidProfile) { toast('请填写报账人姓名', 'err'); return; }
         const tag = tagInput.value.trim();
         const batchMode = body.querySelector('[name="bindleBatchMode"]:checked').value;
         const batchId = batchMode === 'existing' ? batchSelect.value : '';
@@ -5797,6 +5786,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
           selected_profile_ids: [...selected],
           selected_entry_indexes: [...selectedIndexes],
           entry_batch_overrides: entryBatchOverrides,
+          scheme_id: sourceScheme || $('[data-import-scheme]',body)?.value || State.scheme?.id,
+          profile_mappings: Object.fromEntries($$('[data-bind-profile-mapping]',body).filter(input=>input.value).map(input=>[input.dataset.bindProfileMapping,input.value])),
+          role_mappings: Object.fromEntries(selectedEntryRows().map(row=>[row.dataset.bindEntryIndex,Object.fromEntries($$('[data-bind-role-source]',row).filter(input=>input.value).map(input=>[input.dataset.bindRoleSource,input.value]))])),
         };
         const progress = taskProgress('正在导入条目和附件…');
         try {
@@ -5870,113 +5862,7 @@ async function doImport() {
 
 // ------------------------------------------------------------------ 打印导出组件
 async function openPrintDialog(ids) {
-  if (!ids || !ids.length) { toast('请先选择要打印的条目', 'err'); return; }
-  const focusedBatch = actualBatchId() ? (State.currentBatch || State.batches.find((item) => item.id === actualBatchId()) || null) : null;
-  let status;
-  try { status = await Api.printComponentStatus(); } catch (e) { toast(e.message, 'err'); return; }
-
-  if (!status.available) {
-    let m;
-    const needsRepair = !!status.needs_repair;
-    m = modal({
-      title: needsRepair ? '打印导出组件需要修复' : '打印导出组件未安装',
-      body: `<div class="hint warn">${needsRepair ? '组件文件缺失或损坏，请重新安装后继续。' : '安装打印导出组件后即可继续。'}</div>`,
-      footer: [
-        mkBtn('取消', 'ghost', () => m.close()),
-        mkBtn(needsRepair ? '修复组件' : '安装组件', 'primary', () => { m.close(); openUpdateDialog(); }),
-      ],
-    });
-    return;
-  }
-
-  const OUTPUTS = [
-    ['make_entry_bundle_pdf', '按条目材料拼接 PDF'],
-    ['make_reimburse_doc', '报账说明 Word'], ['make_acceptance_doc', '验收单 Word'],
-  ];
-  const LEGACY_OUTPUTS = [
-    ['make_invoice_pdf', '发票拼接 PDF'], ['make_payment_pdf', '付款截图拼接 PDF'],
-    ['make_inspection_pdf', '查验单拼接 PDF'],
-  ];
-
-  const body = el('div');
-  body.innerHTML = `
-    <div class="detail-section">
-      <h3>生成内容<span class="h3-line"></span></h3>
-      <div class="check-grid">
-        ${OUTPUTS.map(([k, label]) => `<label class="chk"><input type="checkbox" data-out="${k}" checked/> ${label}</label>`).join('')}
-      </div>
-      <label class="print-annotation-option"><input type="checkbox" id="pAnnotate" checked/><span><b>叠加条目编号与页码</b><small>便于纸质审查时核对材料归属；不需要时可关闭。</small></span></label>
-      <details class="print-legacy-outputs">
-        <summary>按材料类型分别导出（可选）</summary>
-        <div class="check-grid">
-          ${LEGACY_OUTPUTS.map(([k, label]) => `<label class="chk"><input type="checkbox" data-out="${k}"/> ${label}</label>`).join('')}
-        </div>
-      </details>
-    </div>
-    <div class="form-grid">
-      <div class="form-row"><label>文档日期</label><input id="pDate" placeholder="如 2026年7月5日"/></div>
-      <div class="form-row"><label>存放地点</label><input id="pLoc" value="工训楼"/></div>
-      <div class="form-row"><label>批次备注</label><input id="pNote" value="${esc(focusedBatch?.note || '')}" placeholder="可选"/></div>
-    </div>`;
-
-  const genBtn = mkBtn('生成打印件', 'primary', async () => {
-    const options = {};
-    body.querySelectorAll('[data-out]').forEach((c) => { options[c.dataset.out] = c.checked; });
-    options.annotate = body.querySelector('#pAnnotate').checked;
-    const date = body.querySelector('#pDate').value.trim();
-    if (date) options.document_date = date;
-    options.storage_location = body.querySelector('#pLoc').value.trim() || '工训楼';
-    options.batch_note = body.querySelector('#pNote').value.trim();
-
-    genBtn.disabled = true; genBtn.textContent = '生成中…';
-    try {
-      const stamp = new Date().toLocaleString('sv').replace(/[: ]/g, '-').replace('T', '_');
-      const name = '打印件-' + stamp;
-      const r = await Api.buildPrints(ids, options, name);
-      m.close();
-      showPrintResult(r.results);
-    } catch (e) {
-      toast(e.message, 'err');
-      genBtn.disabled = false; genBtn.textContent = '生成打印件';
-    }
-  });
-
-  const m = modal({
-    title: '打印导出',
-    wide: true, body,
-    footer: [mkBtn('取消', 'ghost', () => m.close()), genBtn],
-  });
-}
-
-function showPrintResult(results) {
-  const OUT_LABEL = {
-    entry_bundle_pdf: '按条目材料拼接 PDF',
-    invoice_pdf: '发票拼接 PDF', payment_pdf: '付款截图拼接 PDF', inspection_pdf: '查验单拼接 PDF',
-    reimburse_doc: '报账说明 Word', acceptance_doc: '验收单 Word',
-  };
-  const html = (results || []).map((g) => {
-    const tcls = TITLE_CLASS[g.title] || '';
-    const firstPath = Object.values(g.files || {})[0] || '';
-    const files = Object.entries(g.files).map(([k, v]) =>
-      `<div class="attach-item"><span class="attach-type">${OUT_LABEL[k] || k}</span><span style="flex:1" title="${esc(v)}">${esc(baseName(v))}</span></div>`).join('');
-    return `<div class="detail-section">
-      <h3>${tcls ? `<span class="title-chip ${tcls}">${esc(TITLE_SHORT[g.title] || g.title)}</span>` : esc(g.title || '未标注抬头')}<span class="h3-line"></span>${firstPath ? `<button class="btn small ghost" data-open-print-dir="${esc(dirName(firstPath))}">文件夹</button>` : ''}</h3>
-      <div class="attach-list">${files || '<span style="color:var(--ink-soft)">无文件</span>'}</div>
-    </div>`;
-  }).join('');
-  const m = modal({
-    title: '打印件已生成',
-    subhead: '已按抬头分文件夹保存到导出目录',
-    wide: true,
-    body: html || '<div class="hint">无生成结果。</div>',
-    footer: [mkBtn('完成', 'primary', () => m.close())],
-  });
-  m.body.querySelectorAll('[data-open-print-dir]').forEach((btn) => {
-    btn.onclick = async () => {
-      try { await Api.openPath(btn.dataset.openPrintDir); }
-      catch (e) { toast(e.message, 'err'); }
-    };
-  });
+  return AdapterUI.print(ids);
 }
 
 // ------------------------------------------------------------------ 阿里云 OCR

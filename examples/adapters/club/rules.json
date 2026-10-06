@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "id": "quote_required",
+      "stage": "complete",
+      "when": {
+        "field": "invoice.total",
+        "op": "gte",
+        "value": "500.00"
+      },
+      "require": [
+        {
+          "material": "custom:org.example.club:quote",
+          "min_count": 1
+        }
+      ],
+      "message": "达到社团采购额度，请补充供应商报价。",
+      "severity": "required"
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "roles": [
+    {
+      "id": "invoice",
+      "label": "发票",
+      "extensions": [
+        ".pdf",
+        ".xml"
+      ],
+      "min_count": 1,
+      "max_count": null,
+      "order": 0,
+      "quick_action": true,
+      "reclassifiable": false,
+      "presentation": "visible"
+    },
+    {
+      "id": "payment_screenshot",
+      "label": "付款截图",
+      "extensions": [
+        ".png",
+        ".jpg",
+        ".jpeg"
+      ],
+      "min_count": 0,
+      "max_count": null,
+      "order": 1,
+      "quick_action": true,
+      "reclassifiable": true,
+      "presentation": "visible"
+    },
+    {
+      "id": "physical_image",
+      "label": "实物图",
+      "extensions": [
+        ".png",
+        ".jpg",
+        ".jpeg"
+      ],
+      "min_count": 0,
+      "max_count": null,
+      "order": 2,
+      "quick_action": false,
+      "reclassifiable": true,
+      "presentation": "visible"
+    },
+    {
+      "id": "inspection_pdf",
+      "label": "查验单",
+      "extensions": [
+        ".pdf"
+      ],
+      "min_count": 0,
+      "max_count": null,
+      "order": 3,
+      "quick_action": true,
+      "reclassifiable": true,
+      "presentation": "visible"
+    },
+    {
+      "id": "other",
+      "label": "其他材料",
+      "extensions": [],
+      "min_count": 0,
+      "max_count": null,
+      "order": 4,
+      "quick_action": false,
+      "reclassifiable": true,
+      "presentation": "visible"
+    },
+    {
+      "id": "custom:org.example.club:quote",
+      "label": "供应商报价",
+      "extensions": [
+        ".pdf",
+        ".png",
+        ".jpg",
+        ".jpeg"
+      ],
+      "min_count": 1,
+      "max_count": 20,
+      "order": 5,
+      "quick_action": true,
+      "reclassifiable": true,
+      "presentation": "visible"
+    }
+  ]
+}

@@ -80,6 +80,8 @@ class EntryRepo:
     def __init__(self, db: Database):
         self.db = db
         self._material_requirements = self._read_material_requirements()
+        self._revision_cache = {}
+        self._policy_cache = {}
 
     # ------------------------------------------------------------------ 创建
     def create(
@@ -89,20 +91,42 @@ class EntryRepo:
         parsed: ParsedInvoice | None = None,
         status: str = STATUS_DRAFT,
         default_paid_to_total: bool = True,
+        scheme_id: str | None = None,
+        scheme_revision_id: str | None = None,
+        title_profile_id: str | None = None,
     ) -> str:
         entry_id = uuid.uuid4().hex
         now = _now()
         p = parsed or ParsedInvoice()
+        if not scheme_id and not scheme_revision_id:
+            binding = self.db.conn.execute("SELECT id,current_revision_id FROM schemes WHERE is_default=1 AND disabled=0").fetchone()
+            if binding:
+                scheme_id, scheme_revision_id = binding["id"], binding["current_revision_id"]
+        if bool(scheme_id) != bool(scheme_revision_id):
+            raise ValueError("方案与修订必须同时指定。")
+        definition = self._definition(scheme_revision_id) if scheme_revision_id else None
+        if definition:
+            settings = definition.get("effective_settings", {})
+            default_paid_to_total = settings.get("entry.default_paid_to_invoice", default_paid_to_total)
+            candidates = [t for t in definition.get("scheme", {}).get("titles", [])
+                          if t["name"] == (title or p.buyer_name)
+                          and (not t.get("tax_id") or not p.buyer_tax_id or t.get("tax_id") == p.buyer_tax_id)]
+            if not title_profile_id and len(candidates) == 1:
+                title_profile_id = candidates[0]["id"]
         try:
             self.db.conn.execute(
                 """INSERT INTO entries(id, profile_id, title, invoice_no, invoice_date,
                    seller, total, buyer_name, buyer_tax_id, status, check_status,
-                   source, created_at, updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   source, created_at, updated_at,scheme_id,scheme_revision_id,title_profile_id)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (entry_id, profile_id, title or p.buyer_name, p.invoice_no, p.invoice_date,
-                 p.seller, str(money(p.total)) if p.total else "", p.buyer_name,
-                 p.buyer_tax_id, status, "warning", p.source, now, now),
+                 p.seller, str(p.total) if parsed is not None and p.total_present is not False else "", p.buyer_name,
+                 p.buyer_tax_id, status, "warning", p.source, now, now,
+                 scheme_id,scheme_revision_id,title_profile_id),
             )
+            suggested_tags=(definition or {}).get('effective_settings',{}).get('entry.suggested_tags',[])
+            if suggested_tags:
+                self.db.conn.execute('UPDATE entries SET tags=? WHERE id=?',(json.dumps(suggested_tags,ensure_ascii=False),entry_id))
             # 可改字段初始化：origin = current；实付是否默认按发票总额由应用偏好决定。
             for field in EDITABLE_FIELDS:
                 origin = self._initial_editable(field, p, default_paid_to_total)
@@ -130,7 +154,7 @@ class EntryRepo:
         field: str, p: ParsedInvoice, default_paid_to_total: bool = True
     ) -> str:
         if field == "paid_amount":
-            return str(money(p.total)) if p.total and default_paid_to_total else ""
+            return str(p.total) if p.total_present is not False and (p.source or p.total != 0 or p.total_present is True) and default_paid_to_total else ""
         if field == "actual_item_name":
             return p.items[0].actual_name if p.items else ""
         return ""
@@ -183,7 +207,10 @@ class EntryRepo:
         entry["items"] = self._items(entry_id)
         entry["attachments"] = self._attachments(entry_id)
         entry["batches"] = self._batches(entry_id)
+        entry["batch_id"] = entry["batches"][0]["id"] if entry["batches"] else None
+        entry["batch_name"] = entry["batches"][0]["name"] if entry["batches"] else ""
         entry["history"] = self.history(entry_id)
+        entry['adapter_sources']=[json.loads(r[0]) for r in self.db.conn.execute('SELECT payload_json FROM entry_adapter_sources WHERE entry_id=? ORDER BY received_at,source_digest',(entry_id,))]
         # 按类型汇总附件在场情况，供完整度派生（与 list 保持一致）
         types = {a["type"] for a in entry["attachments"]}
         entry["has_invoice"] = bool({"invoice_pdf", "invoice_xml"} & types)
@@ -191,7 +218,56 @@ class EntryRepo:
         entry["has_physical"] = "physical_image" in types
         entry["has_inspection"] = "inspection_pdf" in types
         entry["completeness"] = self._completeness(entry, entry["fields"])
+        entry['diagnostics']=entry['completeness'].get('diagnostics',[])
+        if entry.get("scheme_revision_id"):
+            self._decorate_policy(entry)
         return entry
+
+    def _definition(self, revision_id):
+        if not revision_id:
+            return None
+        if revision_id not in self._revision_cache:
+            row = self.db.conn.execute("SELECT definition_json FROM scheme_revisions WHERE revision_id=?", (revision_id,)).fetchone()
+            if not row:
+                raise ValueError("条目的方案修订不存在。")
+            self._revision_cache[revision_id] = json.loads(row[0])
+        return self._revision_cache[revision_id]
+
+    def policy_context(self, entry_id):
+        from ..engine.models import PolicyContext
+        row = self.db.conn.execute("SELECT scheme_revision_id FROM entries WHERE id=?", (entry_id,)).fetchone()
+        definition = self._definition(row[0]) if row and row[0] else None
+        if definition is None:
+            from ..engine.validator import title_profiles
+            return PolicyContext(tuple({"name":name,"tax_id":tax} for name,tax in title_profiles()))
+        return PolicyContext.from_definition(definition)
+
+    def recognition_context(self, entry_id):
+        from ..engine.models import RecognitionContext
+        return RecognitionContext(self.policy_context(entry_id).titles)
+
+    def _decorate_policy(self, entry):
+        definition = self._definition(entry.get("scheme_revision_id"))
+        row = self.db.conn.execute("SELECT name FROM schemes WHERE id=?", (entry.get("scheme_id"),)).fetchone()
+        entry["adapter"] = {"scheme_name": row[0] if row else "", "revision_id": entry["scheme_revision_id"], "definition": definition}
+        entry["material_roles"] = definition.get("materials", [])
+        entry["diagnostics"] = entry["completeness"].get("diagnostics", [])
+        entry["extension_history"] = [dict(r) for r in self.db.conn.execute("SELECT * FROM extension_history WHERE scope='entry' AND owner_id=? ORDER BY id", (entry["id"],))]
+
+    def _extensions(self, entry):
+        rows = self.db.conn.execute("SELECT field_id,value_json,package_id,definition_revision_id FROM extension_values WHERE scope='entry' AND owner_id=? AND scheme_id=?", (entry["id"],entry.get("scheme_id"))).fetchall()
+        definition = self._definition(entry.get("scheme_revision_id")) or {}
+        defined = {f["id"]:f for f in definition.get("fields",[]) if f["scope"] == "entry"}
+        values = {f["id"]:f.get("default") for f in defined.values()}
+        history = []
+        for row in rows:
+            source=self._definition(row["definition_revision_id"]) or {}
+            source_field=next((f for f in source.get("fields",[]) if f["scope"]=="entry" and f["id"]==row["field_id"]),None)
+            if row["field_id"] in defined and source_field and source_field["type"]==defined[row["field_id"]]["type"] and row["package_id"] == definition.get("manifest",{}).get("package_id"):
+                values[row["field_id"]] = json.loads(row["value_json"])
+            else:
+                history.append(dict(row))
+        return values, history
 
     def _fields(self, entry_id: str) -> dict:
         rows = self.db.conn.execute(
@@ -247,6 +323,8 @@ class EntryRepo:
         where, params = [], []
         if filters.get("title"):
             where.append("title = ?"); params.append(filters["title"])
+        if filters.get("scheme_id"):
+            where.append("e.scheme_id = ?"); params.append(filters["scheme_id"])
         if filters.get("profile_id"):
             where.append("profile_id = ?"); params.append(filters["profile_id"])
         if filters.get("status"):
@@ -375,9 +453,18 @@ class EntryRepo:
         attachments_by_entry = {entry_id: {} for entry_id in entry_ids}
         fields_by_entry = {entry_id: {} for entry_id in entry_ids}
         batches_by_entry = {entry_id: [] for entry_id in entry_ids}
+        role_counts_by_entry = {entry_id: {} for entry_id in entry_ids}
+        extensions_by_entry = {entry_id: {} for entry_id in entry_ids}
+        sources_by_entry = {entry_id: [] for entry_id in entry_ids}
+        profile_info = {r["id"]:dict(r) for r in self.db.conn.execute("SELECT id,name,reviewer FROM profiles")}
+        revision_ids = {r["scheme_revision_id"] for r in rows if r["scheme_revision_id"]}
+        for revision_id in revision_ids:
+            self._definition(revision_id)
         for offset in range(0, len(entry_ids), QUERY_BATCH_SIZE):
             batch_ids = entry_ids[offset:offset + QUERY_BATCH_SIZE]
             placeholders = ",".join("?" for _ in batch_ids)
+            for source in self.db.conn.execute(f'SELECT entry_id,payload_json FROM entry_adapter_sources WHERE entry_id IN ({placeholders})',batch_ids):
+                sources_by_entry[source['entry_id']].append(json.loads(source['payload_json']))
             modified_rows = self.db.conn.execute(
                 f"SELECT ef.entry_id, ef.field FROM entry_fields ef "
                 f"JOIN entries e ON e.id = ef.entry_id "
@@ -389,12 +476,17 @@ class EntryRepo:
                 modified_by_entry[row["entry_id"]].append(row["field"])
 
             attachment_rows = self.db.conn.execute(
-                f"SELECT entry_id, type, COUNT(*) c FROM attachments "
-                f"WHERE entry_id IN ({placeholders}) GROUP BY entry_id, type",
+                f"SELECT entry_id, type, role_id,role_definition_revision_id, COUNT(*) c FROM attachments "
+                f"WHERE entry_id IN ({placeholders}) GROUP BY entry_id,type,role_id,role_definition_revision_id",
                 batch_ids,
             ).fetchall()
             for row in attachment_rows:
-                attachments_by_entry[row["entry_id"]][row["type"]] = row["c"]
+                by_type = attachments_by_entry[row["entry_id"]]
+                by_type[row["type"]] = by_type.get(row["type"], 0) + row["c"]
+                key = (row["role_id"] or ("invoice" if row["type"] in ("invoice_pdf","invoice_xml") else row["type"]),row["role_definition_revision_id"])
+                role_counts_by_entry[row["entry_id"]][key] = role_counts_by_entry[row["entry_id"]].get(key,0) + row["c"]
+            for value_row in self.db.conn.execute(f"SELECT owner_id,scheme_id,package_id,field_id,value_json FROM extension_values WHERE scope='entry' AND owner_id IN ({placeholders})", batch_ids):
+                extensions_by_entry[value_row["owner_id"]][(value_row["scheme_id"],value_row["package_id"],value_row["field_id"])] = json.loads(value_row["value_json"])
 
             field_rows = self.db.conn.execute(
                 f"SELECT entry_id, field, origin, current, modified, value_source FROM entry_fields "
@@ -441,7 +533,23 @@ class EntryRepo:
             # 列表附上可改字段当前值（备注 / 实付金额 / 实际物资名），供卡片预览
             ef = fields_by_entry[entry["id"]]
             entry["fields"] = ef
+            entry['adapter_sources']=sources_by_entry[entry['id']]
+            entry["_role_counts"] = {}
+            for (role,revision),count in role_counts_by_entry[entry["id"]].items():
+                if not revision or revision == entry.get("scheme_revision_id"):
+                    entry["_role_counts"][role] = entry["_role_counts"].get(role,0)+count
+            definition = self._definition(entry.get("scheme_revision_id")) or {}
+            entry["extension_values"] = {f["id"]:extensions_by_entry[entry["id"]].get((entry.get("scheme_id"),definition.get("manifest",{}).get("package_id"),f["id"]),f.get("default")) for f in definition.get("fields",[]) if f["scope"] == "entry"}
+            entry["_claimant"] = profile_info.get(entry["profile_id"],{})
             entry["completeness"] = self._completeness(entry, ef)
+            entry['diagnostics']=entry['completeness'].get('diagnostics',[])
+            if definition:
+                entry["material_roles"] = definition.get("materials",[])
+                entry["diagnostics"] = entry["completeness"].get("diagnostics",[])
+                matches = [t for t in definition.get("scheme",{}).get("titles",[]) if t.get("id") == entry.get("title_profile_id")]
+                entry["title_profile"] = matches[0] if matches else None
+            entry.pop("_role_counts",None)
+            entry.pop("_claimant",None)
             result.append(entry)
         return result
 
@@ -454,6 +562,50 @@ class EntryRepo:
         - partial：介于两者之间。
         返回 {ready, status, missing:[中文缺项...]}。
         """
+        if not entry.get('scheme_revision_id') and entry.get('adapter_sources'):
+            diagnostic={'code':'EXTERNAL_SCHEME_PENDING','stage':'complete','severity':'required','target':'scheme','message':'来源方案尚未应用，请核对后选择本机报账方案。'}
+            return {'ready':False,'status':'partial' if entry.get('attachments') or entry.get('attachment_count') else 'draft','missing':[diagnostic['message']],'diagnostics':[diagnostic]}
+        if entry.get("scheme_revision_id"):
+            from ..adapters.policy import evaluate_policy
+            definition = self._definition(entry["scheme_revision_id"])
+            if "extension_values" not in entry:
+                entry["extension_values"], entry["historical_extension_values"] = self._extensions(entry)
+            counts = entry.get("_role_counts")
+            if counts is None:
+                counts = {}
+                for att in entry.get("attachments",[]):
+                    if att.get("role_definition_revision_id") and att["role_definition_revision_id"] != entry["scheme_revision_id"]:
+                        continue
+                    role = att.get("role_id") or ("invoice" if att["type"] in ("invoice_pdf","invoice_xml") else att["type"])
+                    counts[role] = counts.get(role,0) + 1
+            claimant = entry.get("_claimant")
+            if claimant is None:
+                row = self.db.conn.execute("SELECT id,name,reviewer FROM profiles WHERE id=?", (entry.get("profile_id"),)).fetchone()
+                claimant = dict(row) if row else {}
+            paid = (fields.get("paid_amount") or {}).get("current")
+            any_material = bool(sum(counts.values()) or entry.get("attachment_count") or entry.get("attachments"))
+            # Policy may only read these bounded business inputs. Reuse equivalent
+            # inputs within a page instead of evaluating every rule on every card.
+            cache_key = (entry["scheme_revision_id"], entry.get("total"), paid,
+                         entry.get("title_profile_id"), entry.get("check_status")=="blocked",
+                         claimant.get("reviewer") if definition.get("effective_settings",{}).get("profile.reviewer_required") else None,
+                         tuple(sorted(counts.items())),
+                         json.dumps(entry["extension_values"],sort_keys=True,separators=(",",":")),any_material)
+            cached = self._policy_cache.get(cache_key)
+            if cached is not None:
+                return {**cached,"missing":list(cached["missing"]),"diagnostics":[dict(d) for d in cached["diagnostics"]]}
+            context = {"invoice":{"total":entry.get("total") or None,"paid_amount":paid,"title_id":entry.get("title_profile_id"),"buyer_name":entry.get("buyer_name"),"buyer_tax_id":entry.get("buyer_tax_id")},
+                       "entry":{**entry,"fields":entry["extension_values"],"paid_amount":paid,"title_id":entry.get("title_profile_id"),"claimant":claimant},
+                       "title":{"id":entry.get("title_profile_id")}}
+            diagnostics = evaluate_policy(definition,context,counts,stage="complete")
+            if entry.get("check_status") == "blocked":
+                diagnostics.append({"code":"INVOICE_BLOCKED","severity":"required","stage":"complete","target":"invoice","message":"校验未通过"})
+            missing = [d["message"] for d in diagnostics if d.get("severity") in ("required","blocked")]
+            result = {"ready":not missing,"status":"complete" if not missing else ("partial" if any_material else "draft"),"missing":missing,"diagnostics":diagnostics}
+            if len(self._policy_cache)>=512:
+                self._policy_cache.clear()
+            self._policy_cache[cache_key]=result
+            return {**result,"missing":list(missing),"diagnostics":[dict(d) for d in diagnostics]}
         requirements = self.material_requirements()
         missing = []
         if requirements["invoice"] and not entry.get("has_invoice"):
@@ -525,7 +677,7 @@ class EntryRepo:
         return self._fields(entry_id)
 
     def restore_paid_amount_after_last_payment(
-        self, entry_id: str, removed_attachment_added_at: str = ""
+        self, entry_id: str, removed_attachment_added_at: str = "", *, commit: bool = True
     ) -> dict:
         """最后一张付款截图移除后，仅撤销仍由付款 OCR 控制的实付金额。"""
         has_payment = self.db.conn.execute(
@@ -587,7 +739,8 @@ class EntryRepo:
         if restored != old_value:
             self._log_history(entry_id, "paid_amount", old_value, restored, "")
             self._touch(entry_id)
-        self.db.conn.commit()
+        if commit:
+            self.db.conn.commit()
         return {"reset": restored != old_value, "value": restored}
 
     def correct_locked_field(self, entry_id: str, field: str, value: str, profile_id: str = "") -> dict:
@@ -777,30 +930,15 @@ class EntryRepo:
         self._touch(entry_id)
         self.db.conn.commit()
 
-    def recompute_status(self, entry_id: str) -> str:
-        """按附件齐全 + 实付已填 + 校验通过自动推导并持久化 status。
-
-        附件或可改字段变化后调用，使列表筛选、导航分区与卡片徽标保持一致。
-        """
-        entry = self.db.conn.execute(
-            "SELECT check_status FROM entries WHERE id = ?", (entry_id,)
-        ).fetchone()
+    def recompute_status(self, entry_id: str, *, commit: bool = True) -> str:
+        """Only this entry's frozen revision participates in status updates."""
+        entry = self.get(entry_id)
         if not entry:
             return ""
-        type_rows = self.db.conn.execute(
-            "SELECT DISTINCT type FROM attachments WHERE entry_id = ?", (entry_id,)
-        ).fetchall()
-        types = {r["type"] for r in type_rows}
-        stub = {
-            "check_status": entry["check_status"],
-            "has_invoice": bool({"invoice_pdf", "invoice_xml"} & types),
-            "has_payment": "payment_screenshot" in types,
-            "has_physical": "physical_image" in types,
-            "has_inspection": "inspection_pdf" in types,
-        }
-        status = self._completeness(stub, self._fields(entry_id))["status"]
-        self.db.conn.execute("UPDATE entries SET status = ? WHERE id = ?", (status, entry_id))
-        self.db.conn.commit()
+        status = entry["completeness"]["status"]
+        self.db.conn.execute("UPDATE entries SET status=?,status_engine_version=? WHERE id=?", (status,"adapter-policy-1",entry_id))
+        if commit:
+            self.db.conn.commit()
         return status
 
     def set_check(self, entry_id: str, check_status: str, message: str = "") -> None:
@@ -892,7 +1030,7 @@ class EntryRepo:
                 ORDER BY type, sha256""",
             (entry_id,),
         ).fetchall()
-        return "|".join(f"{row['type']}:{row['sha256'] or ''}" for row in rows)
+        return self.recognition_context(entry_id).fingerprint + "|" + "|".join(f"{row['type']}:{row['sha256'] or ''}" for row in rows)
 
     def mark_invoice_recognized(self, entry_id: str) -> None:
         self.db.conn.execute(
@@ -924,7 +1062,7 @@ class EntryRepo:
             and row["recognition_fingerprint"] == self.invoice_recognition_fingerprint(entry_id)
         )
 
-    def refresh_payment_check(self, entry_id: str) -> None:
+    def refresh_payment_check(self, entry_id: str, *, commit: bool = True) -> None:
         """把当前规则的付款截图识别结果合并进条目识别提醒。"""
         entry = self.db.conn.execute(
             "SELECT total, check_status, check_message FROM entries WHERE id = ?",
@@ -986,8 +1124,9 @@ class EntryRepo:
             "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
             (status, message, entry_id),
         )
-        self.db.conn.commit()
-        self.recompute_status(entry_id)
+        if commit:
+            self.db.conn.commit()
+        self.recompute_status(entry_id,commit=commit)
 
     def clear_payment_check(self, entry_id: str) -> None:
         """材料集合无法完整识别时移除旧的付款金额结论，保留发票校验结果。"""

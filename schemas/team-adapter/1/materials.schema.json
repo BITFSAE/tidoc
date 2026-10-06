@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tidoc.app/schemas/team-adapter/1/materials.schema.json",
+  "type": "object",
+  "properties": {
+    "roles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^(invoice|payment_screenshot|physical_image|inspection_pdf|other|custom:[a-z0-9.-]+:[a-z][a-z0-9_]{0,63})$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "extensions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^\\.[a-z0-9]{1,10}$"
+            },
+            "maxItems": 20
+          },
+          "min_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "max_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "quick_action": {
+            "type": "boolean"
+          },
+          "reclassifiable": {
+            "type": "boolean"
+          },
+          "presentation": {
+            "enum": [
+              "visible",
+              "advanced",
+              "hidden"
+            ]
+          },
+          "x_metadata": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "extensions",
+          "min_count",
+          "max_count",
+          "order",
+          "quick_action",
+          "reclassifiable",
+          "presentation"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 25
+    }
+  },
+  "required": [
+    "roles"
+  ],
+  "additionalProperties": false
+}

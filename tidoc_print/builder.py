@@ -30,7 +30,7 @@ _ANNOTATION_LABEL = {
 @dataclass
 class PrintOptions:
     document_date: str = ""                       # 默认取今天
-    storage_location: str = "工训楼"
+    storage_location: str = ""
     annotate: bool = True                         # 拼接页是否叠加信息
     annotation_fields: tuple[str, ...] = ("invoice_no", "person_name", "paid_amount")
     batch_note: str = ""
@@ -81,108 +81,34 @@ def build_print_package(
     profiles: dict[str, PersonProfile] | None = None,
 ) -> list[PrintResult]:
     """按抬头强隔离，为每个抬头生成一套打印件。返回每个抬头的结果。"""
-    options = options or PrintOptions()
-    profiles = profiles or {}
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 按抬头分组——强隔离的核心：两个抬头永不进同一份文件
-    by_title: dict[str, list[PrintEntry]] = {}
-    for e in entries:
-        by_title.setdefault(e.title or "未标注抬头", []).append(e)
-
-    results: list[PrintResult] = []
-    for title, group in by_title.items():
-        title_dir = out_dir / _safe_name(title)
-        title_dir.mkdir(parents=True, exist_ok=True)
-        res = PrintResult(title=title)
-
-        # 1. 默认打印件：每个条目的发票、付款截图、查验单连续排列。
-        if options.make_entry_bundle_pdf:
-            with TemporaryDirectory(prefix="tidoc-entry-materials-") as tmp:
-                groups: list[list[str | Path]] = []
-                for entry_idx, e in enumerate(group, start=1):
-                    parts: list[str | Path] = list(e.invoice_pdfs)
-                    if e.payment_images:
-                        payment_pdf = Path(tmp) / f"payment-{entry_idx}.pdf"
-                        images_to_pdf(
-                            e.payment_images,
-                            payment_pdf,
-                            show_page_footer=False,
-                        )
-                        parts.append(payment_pdf)
-                    parts.extend(e.inspection_pdfs)
-                    if parts:
-                        groups.append(parts)
-                if groups:
-                    out = merge_pdf_groups(
-                        groups,
-                        title_dir / "按条目材料拼接.pdf",
-                        numbered=options.annotate,
-                        batch_note=options.batch_note,
-                    )
-                    res.files["entry_bundle_pdf"] = str(out)
-
-        # 2. 兼容导出：按材料类型分别拼接。
-        if options.make_invoice_pdf:
-            paths, annos = [], []
-            for e in group:
-                for pdf in e.invoice_pdfs:
-                    paths.append(pdf)
-                    annos.append(_annotation_for(e, options.annotation_fields) if options.annotate else "")
-            if paths:
-                out = merge_pdfs(
-                    paths,
-                    title_dir / "发票拼接.pdf",
-                    annos if options.annotate else None,
-                    numbered=options.annotate,
-                    batch_note=options.batch_note,
-                )
-                res.files["invoice_pdf"] = str(out)
-
-        # 3. 付款截图拼接 PDF
-        if options.make_payment_pdf:
-            imgs, annos = [], []
-            for entry_idx, e in enumerate(group, start=1):
-                total_images = len(e.payment_images)
-                for img_idx, img in enumerate(e.payment_images, start=1):
-                    imgs.append(img)
-                    annos.append(f"No.{entry_idx}-{img_idx}/{total_images}" if options.annotate else "")
-            if imgs:
-                out = images_to_pdf(
-                    imgs,
-                    title_dir / "付款截图拼接.pdf",
-                    annos if options.annotate else None,
-                    batch_note=options.batch_note,
-                    show_page_footer=options.annotate,
-                )
-                res.files["payment_pdf"] = str(out)
-
-        # 4. 查验单拼接 PDF
-        if options.make_inspection_pdf:
-            paths = [p for e in group for p in e.inspection_pdfs]
-            if paths:
-                out = merge_pdfs(
-                    paths,
-                    title_dir / "查验单拼接.pdf",
-                    numbered=options.annotate,
-                    batch_note=options.batch_note,
-                )
-                res.files["inspection_pdf"] = str(out)
-
-        # 5. 报账说明 Word（按报账人分别出，因抬头段是个人信息）
-        if options.make_reimburse_doc:
-            # 同一抬头下可能跨人；报账说明抬头段取该组第一个报账人
-            first = group[0]
-            profile = profiles.get(first.entry_id) or profiles.get(first.profile_name) or PersonProfile(person_name=first.profile_name)
-            out = generate_reimburse_doc(group, title_dir / "报账说明.docx", options.document_date, profile)
-            res.files["reimburse_doc"] = str(out)
-
-        # 6. 验收单 Word
-        if options.make_acceptance_doc:
-            out = generate_acceptance_doc(group, title_dir / "验收单.docx", options.document_date, options.storage_location)
-            res.files["acceptance_doc"] = str(out)
-
-        results.append(res)
-
-    return results
+    from dataclasses import asdict
+    from .context import json_data
+    from .protocol import convert_v1_request, render_request
+    request = convert_v1_request({
+        "entries": [json_data(asdict(entry)) for entry in entries],
+        "profiles": {key: json_data(asdict(value)) for key, value in (profiles or {}).items()},
+        "options": json_data(asdict(options or PrintOptions())),
+        "out_dir": str(out_dir),
+    })
+    # Old callers passed an already-created parent directory. Publish only fresh
+    # subject directories after one v2 job has rendered every selected file.
+    target = Path(out_dir)
+    if target.exists():
+        import shutil
+        import uuid
+        request['output_dir'] = str(target.parent / ('.tidoc-legacy-' + uuid.uuid4().hex))
+        result = render_request(request)
+        staging = Path(request['output_dir'])
+        try:
+            for child in staging.iterdir():
+                if (target / child.name).exists():
+                    raise ValueError('输出目录已存在，不能覆盖交付文件')
+            for child in list(staging.iterdir()):
+                child.rename(target / child.name)
+            for row in result['results']:
+                row['files'] = {key: str(target / Path(value).relative_to(staging)) for key,value in row['files'].items()}
+        finally:
+            shutil.rmtree(staging,ignore_errors=True)
+    else:
+        result = render_request(request)
+    return [PrintResult(title=row["title"], files=row["files"]) for row in result["results"]]

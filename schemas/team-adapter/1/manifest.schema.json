@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tidoc.app/schemas/team-adapter/1/manifest.schema.json",
+  "type": "object",
+  "properties": {
+    "format": {
+      "const": "tidoc-team-adapter"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "package_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+      "maxLength": 100
+    },
+    "package_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "author": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "requires": {
+      "type": "object",
+      "properties": {
+        "adapter_api": {
+          "const": 1
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9.-]*\\.v[1-9][0-9]*$"
+          },
+          "maxItems": 16
+        }
+      },
+      "required": [
+        "adapter_api"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "package_id": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "package_version": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "x_metadata": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "format",
+    "schema_version",
+    "package_id",
+    "package_version",
+    "name",
+    "requires"
+  ],
+  "additionalProperties": false
+}

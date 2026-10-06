@@ -1,0 +1,19 @@
+{
+  "organization": {
+    "name": "示例实验室",
+    "department": "",
+    "purpose": "物资采购",
+    "storage_location": ""
+  },
+  "titles": [],
+  "settings": {
+    "print.payee_mode": {
+      "default": "by_claimant",
+      "editable": true,
+      "presentation": "visible"
+    }
+  },
+  "default_outputs": [
+    "cost_settlement"
+  ]
+}

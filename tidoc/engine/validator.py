@@ -1,52 +1,42 @@
-"""发票校验：金额闭合 + 抬头一致性。移植自 invoice2docx/engine.py 的 validate_invoices。
-
-设计文档第 7 节：两个抬头强隔离。这里的抬头一致性校验用于提示"这张发票的抬头
-和它所属分区不符"。
-"""
+"""发票金额闭合与抬头一致性校验。应用路径显式传入条目修订上下文。"""
 
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 from decimal import Decimal
 
 from .models import CHECK_BLOCKED, CHECK_PASS, CHECK_WARNING, CheckResult, ParsedInvoice
 from .money import fmt_money, money
 
-# 设计文档第 7 节：默认受支持的两个抬头（北理工 / 教育基金会）。抬头与税号
-# 可以在设置里按学校 / 单位维护，识别（parser）与校验（check_invoice）都按
-# 当前生效的配置执行；这里的常量是未配置时的默认值。
-TITLE_UNIVERSITY = "北京理工大学"
-TITLE_FOUNDATION = "北京理工大学教育基金会"
-SUPPORTED_TITLES = (TITLE_UNIVERSITY, TITLE_FOUNDATION)
+# Legacy standalone callers retain the old exported names. Their defaults come
+# from the same bundled resource as migration and IPC v1, never a second catalog.
+def _legacy_default_profiles():
+    import json
+    from tidoc_print.context import component_resource_path
+    path = component_resource_path('builtin_adapters/org.bitfsae.reimbursement/scheme.json', package='tidoc')
+    titles = {title['id']: title for title in json.loads(path.read_text('utf-8'))['titles']}
+    return tuple((titles[key]['name'], titles[key].get('tax_id') or '')
+                 for key in ('bit_university', 'bit_foundation'))
 
-# 购买方统一社会信用代码 / 纳税人识别号。发票抬头与税号共同确定报账主体；
-# 名称识别正确但税号缺失或串到另一主体时，也必须留在“识别提醒”中供人工核对。
-TAX_ID_UNIVERSITY = "12100000400009127B"
-TAX_ID_FOUNDATION = "53100000500021676K"
-EXPECTED_BUYER_TAX_IDS = {
-    TITLE_UNIVERSITY: TAX_ID_UNIVERSITY,
-    TITLE_FOUNDATION: TAX_ID_FOUNDATION,
-}
 
-# 生效配置：(抬头名称, 购买方税号)；税号允许为空，为空时只按抬头名称提示。
-DEFAULT_TITLE_PROFILES = (
-    (TITLE_UNIVERSITY, TAX_ID_UNIVERSITY),
-    (TITLE_FOUNDATION, TAX_ID_FOUNDATION),
-)
-_title_profiles: tuple[tuple[str, str], ...] = DEFAULT_TITLE_PROFILES
+DEFAULT_TITLE_PROFILES = _legacy_default_profiles()
+(TITLE_UNIVERSITY, TAX_ID_UNIVERSITY), (TITLE_FOUNDATION, TAX_ID_FOUNDATION) = DEFAULT_TITLE_PROFILES
+SUPPORTED_TITLES = tuple(name for name, _ in DEFAULT_TITLE_PROFILES)
+EXPECTED_BUYER_TAX_IDS = dict(DEFAULT_TITLE_PROFILES)
+_legacy_titles = ContextVar("legacy_invoice_titles", default=DEFAULT_TITLE_PROFILES)
 
 
 def set_title_profiles(profiles=None) -> tuple[tuple[str, str], ...]:
-    """覆盖进程内生效的抬头配置，返回规范化后的配置。
+    """兼容旧独立调用者，仅修改当前执行上下文的抬头配置。
 
     profiles 接受 [{"name", "tax_id"}] 或 (名称, 税号) 序列；名称去重、去空白，
     税号按标准形态归一化。传 None 表示恢复内置默认；传空序列表示清空配置
     （清空后不做抬头范围提醒）。
     """
-    global _title_profiles
     if profiles is None:
-        _title_profiles = DEFAULT_TITLE_PROFILES
-        return _title_profiles
+        _legacy_titles.set(DEFAULT_TITLE_PROFILES)
+        return DEFAULT_TITLE_PROFILES
     normalized: list[tuple[str, str]] = []
     seen: set[str] = set()
     for profile in profiles:
@@ -61,24 +51,29 @@ def set_title_profiles(profiles=None) -> tuple[tuple[str, str], ...]:
             continue
         seen.add(name)
         normalized.append((name, normalize_tax_id(tax_id)))
-    _title_profiles = tuple(normalized)
-    return _title_profiles
+    _legacy_titles.set(tuple(normalized))
+    return tuple(normalized)
 
 
-def title_profiles() -> tuple[tuple[str, str], ...]:
-    return _title_profiles
+def title_profiles(context=None) -> tuple[tuple[str, str], ...]:
+    if context is None:
+        # Compatibility for standalone callers. Application paths always supply context.
+        return _legacy_titles.get()
+    values = context.titles if hasattr(context, "titles") else context.get("scheme", {}).get("titles", [])
+    return tuple((str(t.get("name", "")).strip(), normalize_tax_id(t.get("tax_id", "")))
+                 if isinstance(t, dict) else (str(t[0]), normalize_tax_id(t[1])) for t in values)
 
 
-def supported_titles() -> tuple[str, ...]:
-    return tuple(name for name, _ in _title_profiles)
+def supported_titles(context=None) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(name for name, _ in title_profiles(context)))
 
 
-def expected_tax_ids() -> dict[str, str]:
-    return {name: tax_id for name, tax_id in _title_profiles if tax_id}
+def expected_tax_ids(context=None) -> dict[str, str]:
+    return {name: tax_id for name, tax_id in title_profiles(context) if tax_id}
 
 
-def _title_by_tax_id() -> dict[str, str]:
-    return {tax_id: name for name, tax_id in expected_tax_ids().items()}
+def _title_by_tax_id(context=None) -> dict[str, str]:
+    return {tax_id: name for name, tax_id in title_profiles(context) if tax_id}
 
 
 def normalize_tax_id(value: str) -> str:
@@ -86,7 +81,7 @@ def normalize_tax_id(value: str) -> str:
     return re.sub(r"[^0-9A-Z]", "", str(value or "").upper())
 
 
-def check_invoice(invoice: ParsedInvoice, expected_title: str = "") -> CheckResult:
+def check_invoice(invoice: ParsedInvoice, expected_title: str = "", context=None) -> CheckResult:
     """对单张发票做金额闭合与抬头校验，返回 pass / warning / blocked。
 
     - blocked：抬头与所属分区不一致（会造成串账）。
@@ -112,7 +107,7 @@ def check_invoice(invoice: ParsedInvoice, expected_title: str = "") -> CheckResu
 
     # 抬头与购买方税号识别。税号不参与材料齐备度，但会形成可恢复、可重识别的
     # 识别提醒，避免只凭名称把主体判断错。未配置任何抬头时不做抬头范围提醒。
-    titles = supported_titles()
+    titles = supported_titles(context)
     if not invoice.buyer_name:
         problems_warning.append("未能识别购买方抬头。")
     elif titles and invoice.buyer_name not in titles:
@@ -121,21 +116,24 @@ def check_invoice(invoice: ParsedInvoice, expected_title: str = "") -> CheckResu
         )
 
     buyer_tax_id = normalize_tax_id(invoice.buyer_tax_id)
-    expected_tax_id = expected_tax_ids().get(invoice.buyer_name)
+    expected_tax_id = expected_tax_ids(context).get(invoice.buyer_name)
+    candidates = {tax for name, tax in title_profiles(context) if name == invoice.buyer_name and tax}
+    if buyer_tax_id in candidates:
+        expected_tax_id = buyer_tax_id
     if expected_tax_id:
         if not buyer_tax_id:
             problems_warning.append(
                 f"未能识别「{invoice.buyer_name}」的购买方税号，应为 {expected_tax_id}，请核对。"
             )
         elif buyer_tax_id != expected_tax_id:
-            recognized_title = _title_by_tax_id().get(buyer_tax_id)
+            recognized_title = _title_by_tax_id(context).get(buyer_tax_id)
             belongs_to = f"（该税号属于「{recognized_title}」）" if recognized_title else ""
             problems_warning.append(
                 f"购买方税号「{invoice.buyer_tax_id}」与「{invoice.buyer_name}」不一致，"
                 f"应为 {expected_tax_id}{belongs_to}，请核对。"
             )
-    elif buyer_tax_id in _title_by_tax_id():
-        tax_title = _title_by_tax_id()[buyer_tax_id]
+    elif buyer_tax_id in _title_by_tax_id(context):
+        tax_title = _title_by_tax_id(context)[buyer_tax_id]
         if invoice.buyer_name:
             problems_warning.append(
                 f"购买方税号 {buyer_tax_id} 属于「{tax_title}」，"

@@ -12,10 +12,11 @@ DEFAULT_PROFILES = [
 ]
 
 
-def test_title_profiles_default_to_builtin_without_saved_config():
+def test_title_profiles_are_neutral_until_first_scheme_choice():
     api = Api(tempfile.mkdtemp())
 
-    assert api.title_profiles()["data"]["profiles"] == DEFAULT_PROFILES
+    assert api.title_profiles()["data"]["profiles"] == []
+    assert api.adapter_setup_state()["data"]["needs_selection"] is True
 
 
 def test_set_title_profiles_persists_and_applies_to_new_api():
@@ -24,7 +25,7 @@ def test_set_title_profiles_persists_and_applies_to_new_api():
 
     saved = api.set_title_profiles([
         {"name": " 复旦大学 ", "tax_id": "1210 0000-4000 0000 0a"},
-        {"name": "复旦大学", "tax_id": "重复项"},
+        {"name": "复旦大学", "tax_id": "12100000400000000A"},
         {"name": "", "tax_id": "x"},
         {"name": "无税号大学"},
     ])

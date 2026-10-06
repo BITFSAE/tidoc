@@ -133,7 +133,7 @@ def test_batch_reparse_replaces_items_and_preserves_user_fields(api, tmp_path, m
             total=Decimal("84.00"),
         )],
     )
-    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args: reparsed)
+    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args, **_kwargs: reparsed)
 
     response = api.reparse_entries([entry_id])
 
@@ -175,7 +175,7 @@ def test_batch_reparse_corrects_misassigned_buyer_tax_id(api, tmp_path, monkeypa
         total=Decimal("855.00"),
         source="pdf",
     )
-    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args: reparsed)
+    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args, **_kwargs: reparsed)
 
     response = api.reparse_entries([entry_id])
 
@@ -217,7 +217,7 @@ def test_batch_reparse_preserves_manually_corrected_buyer_tax_id(api, tmp_path, 
         total=Decimal("84.00"),
         source="pdf",
     )
-    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args: reparsed)
+    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args, **_kwargs: reparsed)
 
     api.reparse_entries([entry_id])
 
@@ -860,7 +860,7 @@ def test_bindle_restores_claimants_and_respects_optional_notes_and_tags(repos, t
 
     with zipfile.ZipFile(package) as archive:
         payload = json.loads(archive.read("entries.json"))
-    assert payload["bindle_version"] == 4
+    assert payload["bindle_version"] == 5
 
 
 def test_bindle_round_trip_preserves_ocr_result_and_badge_state(repos, tmp_path):

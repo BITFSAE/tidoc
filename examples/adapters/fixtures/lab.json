@@ -1,0 +1,79 @@
+{
+  "package_id": "org.example.lab",
+  "entries": [
+    {
+      "invoice_no": "LAB-001",
+      "buyer_name": "实验室示例单位",
+      "buyer_tax_id": "100000000000000001",
+      "total": "1500.00",
+      "paid_amount": "1500.00",
+      "items": [
+        {
+          "name": "光学平台",
+          "unit": "台",
+          "quantity": "1",
+          "total": "1500.00"
+        }
+      ],
+      "fields": {
+        "purpose": "equipment"
+      },
+      "materials": [
+        "invoice",
+        "payment_screenshot",
+        "custom:org.example.lab:approval"
+      ],
+      "claimant": {
+        "name": "实验员甲",
+        "reviewer": "审核员甲"
+      },
+      "payee_id": "payee-1"
+    },
+    {
+      "invoice_no": "LAB-002",
+      "buyer_name": "实验室示例单位",
+      "buyer_tax_id": "100000000000000001",
+      "total": "50.00",
+      "paid_amount": "50.00",
+      "items": [
+        {
+          "name": "镜头纸",
+          "unit": "包",
+          "quantity": "2",
+          "total": "50.00"
+        }
+      ],
+      "fields": {
+        "purpose": "consumable"
+      },
+      "materials": [
+        "invoice"
+      ],
+      "claimant": {
+        "name": "实验员乙",
+        "reviewer": "审核员乙"
+      },
+      "payee_id": "payee-2"
+    }
+  ],
+  "payees": [
+    {
+      "id": "payee-1",
+      "name": "收款人甲"
+    },
+    {
+      "id": "payee-2",
+      "name": "收款人乙"
+    }
+  ],
+  "expected": {
+    "entry_count": 2,
+    "invoice_total": "1550.00",
+    "title_groups": 1,
+    "by_claimant_groups": 2,
+    "outputs": [
+      "cost_settlement"
+    ]
+  },
+  "schema_version": 1
+}

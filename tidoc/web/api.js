@@ -36,12 +36,52 @@ const Api = (() => {
     const fn = window.pywebview.api[method];
     if (!fn) throw new Error(`后端方法不存在：${method}`);
     const res = await fn(...args);
-    if (res && res.ok === false) throw new Error(res.error || '未知错误');
+    if (res && res.ok === false) { const error = new Error(res.error || '未知错误'); error.diagnostics = res.diagnostics || []; error.code = res.code; throw error; }
     return res && 'data' in res ? res.data : res;
   }
 
   return {
     ready: waitReady,
+    listSchemes: (includeDisabled=false) => call('list_schemes',includeDisabled),
+    schemeDetails: (id=null) => call('scheme_details',id),
+    schemeRevisionHistory: (id) => call('scheme_revision_history',id),
+    adapterSetupState: () => call('adapter_setup_state'),
+    completeAdapterSetup: (id=null,preferences=null) => call('complete_adapter_setup',id,preferences),
+    inspectAdapter: (path,operation=null) => call('inspect_adapter',path,operation),
+    chooseAdapterFile: (operation=null) => call('choose_adapter_file',operation),
+    installAdapter: (id,options,operation=null) => call('install_adapter',id,options||{},operation),
+    adapterOperationStatus: (id) => call('adapter_operation_status',id),
+    cancelAdapterOperation: (id) => call('cancel_adapter_operation',id),
+    setDefaultScheme: (id) => call('set_default_scheme',id),
+    copyScheme: (id,name) => call('copy_scheme',id,name),
+    disableScheme: (id) => call('disable_scheme',id),
+    updateSchemeSettings: (id,revision,values) => call('update_scheme_settings',id,revision,values),
+    restoreSchemeDefaults: (id,revision,keys=null) => call('restore_scheme_defaults',id,revision,keys),
+    rollbackScheme: (id,revision,expected) => call('rollback_scheme',id,revision,expected),
+    exportAdapter: (id,options) => call('export_adapter',id,options||{}),
+    getFormDescription: (scope,id,scheme=null,revision=null) => call('get_form_description',scope,id,scheme,revision),
+    previewFormDescription: (scope,id,values,scheme=null,revision=null) => call('preview_form_description',scope,id,values,scheme,revision),
+    updateBatchOutputSettings: (id,values,updatedAt=null) => call('update_batch_output_settings',id,values,updatedAt),
+    saveExtensionValues: (scope,id,values,scheme=null,version=null,revision=null) => call('save_extension_values',scope,id,values,scheme,version,revision),
+    batchSaveExtensionValues: (ids,field,value) => call('batch_save_extension_values',ids,field,value),
+    listPayees: () => call('list_payees'),
+    savePayee: (id,values) => call('save_payee',id,values),
+    deletePayee: (id) => call('delete_payee',id),
+    setPayeeMapping: (scheme,profile,payee) => call('set_payee_mapping',scheme,profile,payee),
+    setSchemePayee: (scheme,payee) => call('set_scheme_payee',scheme,payee),
+    setBatchPayee: (batch,scheme,payee) => call('set_batch_payee',batch,scheme,payee),
+    previewRebind: (ids,scheme,revision=null,mappings=null) => call('preview_rebind',ids,scheme,revision,mappings),
+    applyRebind: (id,operation=null) => call('apply_rebind',id,operation),
+    previewExport: (ids,outputs,options) => call('preview_export',ids,outputs,options||{}),
+    runExport: (id,dir=null) => call('run_export',id,dir),
+    cancelExport: (id) => call('cancel_export',id),
+    listExportJobs: () => call('list_export_jobs'),
+    getExportJob: (id) => call('get_export_job',id),
+    getExportProgress: (id) => call('get_export_progress',id),
+    regenerateExport: (id) => call('regenerate_export',id),
+    deleteExportJob: (id,files=false) => call('delete_export_job',id,files),
+    reclassifyAttachment: (id,role) => call('reclassify_attachment',id,role),
+
     listProfiles: () => call('list_profiles'),
     createProfile: (name, reviewer, isDefault, opt) => call('create_profile', name, reviewer, isDefault, opt || {}),
     updateProfile: (id, fields) => call('update_profile', id, fields || {}),
@@ -60,14 +100,14 @@ const Api = (() => {
     startupUpdateState: () => call('startup_update_state'),
     markFrontendReady: () => call('mark_frontend_ready'),
 
-    parseFiles: (xml, pdf) => call('parse_files', xml, pdf),
+    parseFiles: (xml, pdf,scheme=null) => call('parse_files', xml, pdf,scheme),
     reparseEntries: (ids) => call('reparse_entries', ids || []),
     recognitionPreview: (ids) => call('recognition_preview', ids || []),
     rerecognizeMaterials: (ids, kinds) => call('rerecognize_materials', ids || [], kinds || []),
     createEntry: (args) => call('create_entry',
       args.profileId, args.title || '', args.xmlPath || null, args.pdfPath || null,
       args.paymentPaths || [], args.inspectionPath || null, args.status || 'draft',
-      args.physicalPaths || []),
+      args.physicalPaths || [],args.schemeId||null,args.batchId||null),
 
     listEntries: (filters) => call('list_entries', filters || {}),
     listTitles: () => call('list_titles'),
@@ -138,10 +178,11 @@ const Api = (() => {
     installOcrComponent: () => call('install_ocr_component'),
 
     buildSummary: (ids) => call('build_summary', ids),
-    exportBindle: (ids, name) => call('export_bindle', ids, name),
+    previewBindleTransfer: (ids) => call('preview_bindle_transfer',ids),
+    exportBindle: (ids, name,options=null) => call('export_bindle', ids, name,options),
     exportOverviewExcel: (ids, name) => call('export_overview_excel', ids, name),
     exportAttachmentArchive: (ids, name) => call('export_attachment_archive', ids, name),
-    inspectBindle: (path) => call('inspect_bindle', path),
+    inspectBindle: (path,scheme=null) => call('inspect_bindle', path,scheme),
     importBindle: (path, pid, allowTampered, options) => call('import_bindle', path, pid, !!allowTampered, options || null),
 
     pickFiles: (multiple, fileTypes) => call('pick_files', multiple !== false, fileTypes || null),
@@ -152,7 +193,7 @@ const Api = (() => {
     suggestMaterialBindings: (infos, candidateEntryIds) => call('suggest_material_bindings', infos || [], candidateEntryIds || []),
     saveDroppedFiles: (files) => call('save_dropped_files', files || []),
     cleanupDroppedFiles: (paths) => call('cleanup_dropped_files', paths || []),
-    batchCreateEntries: (profileId, groups, title) => call('batch_create_entries', profileId, groups, title || ''),
+    batchCreateEntries: (profileId, groups, title,scheme=null,batch=null) => call('batch_create_entries', profileId, groups, title || '',scheme,batch),
     dataRoot: () => call('data_root_path'),
     chooseAndMigrateDataRoot: () => call('choose_and_migrate_data_root'),
     resetDataRootToDefault: () => call('reset_data_root_to_default'),

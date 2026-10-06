@@ -1,9 +1,9 @@
-"""文件夹批量导入：扫描一个目录，把一批发票 PDF 快速拆成待创建条目。
+"""文件夹批量导入：扫描目录，生成 PDF／XML 发票条目预览。
 
 设计取向：
-- 批量只从发票 PDF 创建条目，可附带匹配到的 XML。
+- 发票 PDF 可附带匹配到的 XML；有效 XML 也可先创建条目。
 - 用户不需要提前重命名。XML 优先按发票号配对，其次按近似文件名配对。
-- PDF 是必需材料；孤立 XML、付款截图、查验单只在预览里提示，不单独创建条目。
+- 未识别到发票号的 XML 留在预览中提示；付款截图和查验单另选绑定条目。
 """
 
 from __future__ import annotations
@@ -792,10 +792,18 @@ def _scan_file_paths(file_paths: list[Path]) -> dict:
             "warnings": warnings,
         })
 
+    xml_only_count=0
     for idx, xml in enumerate(xmls):
         if idx not in used_xml:
-            if not pdfs:
-                ungrouped.append({**xml, "warning": xml.get("warning") or "没有发票 PDF，不能单独批量导入"})
+            if xml.get('invoice_no'):
+                if xml['invoice_no'] in seen_pdf_nos:
+                    ignored.append({**xml,'warning':'同一发票已在本次导入中，请补充到对应条目。'})
+                    continue
+                groups.append({'key':f'xml-{idx}','label':xml['invoice_no'],'invoice_no':xml['invoice_no'],
+                               'selected':True,'files':[xml],
+                               'warnings':[xml.get('warning') or '先导入 XML；打印票面前补充发票 PDF。']})
+                seen_pdf_nos[xml['invoice_no']]=xml['name']
+                xml_only_count+=1
             else:
                 ungrouped.append({**xml, "warning": xml.get("warning") or "未匹配到对应发票 PDF"})
 
@@ -804,7 +812,8 @@ def _scan_file_paths(file_paths: list[Path]) -> dict:
         "ungrouped": ungrouped,
         "ignored": ignored,
         "total_files": total,
-        "invoice_pdf_count": len(groups),
+        "invoice_pdf_count": sum(any(file['type']=='invoice_pdf' for file in group['files']) for group in groups),
+        "invoice_xml_only_count": xml_only_count,
         "matched_xml_count": matched_xml_count,
     }
 

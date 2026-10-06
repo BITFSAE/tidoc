@@ -12,10 +12,10 @@ from __future__ import annotations
 # This version is intentionally independent from the core application.  It
 # starts at the last coupled release so existing v0.1.19 installations are not
 # treated as newer than future component releases.
-__version__ = "0.1.20"
+__version__ = "0.1.21"
 
 # 组件所需的重依赖模块名
-_REQUIRED = ("docx", "pypdf", "PIL", "reportlab")
+_REQUIRED = ("docx", "docxtpl", "jinja2", "pypdf", "PIL", "reportlab", "jsonschema")
 
 
 def missing_dependencies() -> list[str]:

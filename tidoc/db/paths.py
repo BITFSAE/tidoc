@@ -87,6 +87,9 @@ class DataRoot:
         self.dropped_dir.mkdir(parents=True, exist_ok=True)
         self.components_dir.mkdir(parents=True, exist_ok=True)
         self.updates_dir.mkdir(parents=True, exist_ok=True)
+        for path in (self.adapter_packages_dir, self.adapter_staging_dir,
+                     self.adapter_imports_dir, self.export_jobs_dir, self.backups_dir):
+            path.mkdir(parents=True, exist_ok=True)
 
     @property
     def db_path(self) -> Path:
@@ -112,6 +115,40 @@ class DataRoot:
     def updates_dir(self) -> Path:
         return self.root / "updates"
 
+    @property
+    def adapters_dir(self) -> Path:
+        return self.root / "adapters"
+
+    @property
+    def adapter_packages_dir(self) -> Path:
+        return self.adapters_dir / "packages"
+
+    @property
+    def adapter_staging_dir(self) -> Path:
+        return self.adapters_dir / "staging"
+
+    @property
+    def adapter_imports_dir(self) -> Path:
+        return self.adapters_dir / "imports"
+
+    @property
+    def export_jobs_dir(self) -> Path:
+        return self.root / "export_jobs"
+
+    @property
+    def backups_dir(self) -> Path:
+        return self.root / "backups"
+
+    def package_dir(self, content_hash: str) -> Path:
+        if len(content_hash) != 64 or any(c not in "0123456789abcdef" for c in content_hash):
+            raise ValueError("适配包摘要无效。")
+        return self.adapter_packages_dir / content_hash
+
+    def job_dir(self, job_id: str) -> Path:
+        if not job_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in job_id):
+            raise ValueError("导出任务编号无效。")
+        return self.export_jobs_dir / job_id
+
     def entry_dir(self, entry_id: str) -> Path:
         """某个条目的附件目录，按需创建。"""
         path = self.attachments_dir / entry_id
@@ -128,19 +165,29 @@ class DataRoot:
         """
         import shutil
 
-        new_root = Path(new_root).expanduser()
-        if str(new_root) == str(self.root):
+        new_root = Path(new_root).expanduser().resolve()
+        source = self.root.resolve()
+        if new_root == source:
             return self.root
+        if source in new_root.parents or new_root in source.parents:
+            raise ValueError("新旧数据目录不能互相包含。")
         if new_root.exists() and any(p.name != POINTER_NAME for p in new_root.iterdir()):
             raise ValueError("目标位置不是空目录，请选择一个空文件夹，避免覆盖已有文件。")
         new_root.mkdir(parents=True, exist_ok=True)
         if self.manage_pointer:
             # 先确认指针可写，避免数据已搬走但启动指针没更新的半迁移状态。
             ensure_data_root_pointer_writable()
-        for child in self.root.iterdir():
-            if child.name == POINTER_NAME:
-                continue  # 指针文件不搬
-            shutil.move(str(child), str(new_root / child.name))
-        if self.manage_pointer:
-            set_data_root_pointer(new_root)
+        moved = []
+        try:
+            for child in source.iterdir():
+                if child.name == POINTER_NAME:
+                    continue
+                shutil.move(str(child), str(new_root / child.name))
+                moved.append(child.name)
+            if self.manage_pointer:
+                set_data_root_pointer(new_root)
+        except BaseException:
+            for name in reversed(moved):
+                shutil.move(str(new_root / name), str(source / name))
+            raise
         return new_root

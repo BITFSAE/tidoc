@@ -1,0 +1,33 @@
+{
+  "package_id": "org.example.minimal",
+  "entries": [
+    {
+      "invoice_no": "MIN-001",
+      "buyer_name": "",
+      "buyer_tax_id": "",
+      "total": "0.00",
+      "paid_amount": null,
+      "items": [],
+      "invoice_date": "2026-10-05",
+      "seller": "样例供应商",
+      "claimant": {
+        "name": "示例报账人",
+        "reviewer": "示例审核人"
+      },
+      "materials": [
+        "invoice",
+        "payment_screenshot"
+      ]
+    }
+  ],
+  "expected": {
+    "entry_count": 1,
+    "invoice_total": "0.00",
+    "paid_total": null,
+    "summary_row_count": 1,
+    "outputs": [
+      "reimbursement"
+    ]
+  },
+  "schema_version": 1
+}

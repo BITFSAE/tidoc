@@ -27,7 +27,7 @@ import sqlite3
 # v9：云识别改为软件结果优先，并撤回历史上自动覆盖的销售方。
 # v10：OCR 结果记录实际 API 调用页数，多页 PDF 不再按一张误计。
 # v11：报账批次改为单一归属，历史重复归属保留最后一次装入的批次。
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -69,8 +69,15 @@ CREATE TABLE IF NOT EXISTS entries (
     source        TEXT DEFAULT '',            -- 数据来源 xml/pdf/xml+pdf/manual
     recognition_version TEXT DEFAULT '',      -- 本地发票解析规则版本（缓存，不随绑定包迁移）
     recognition_fingerprint TEXT DEFAULT '',  -- 本次解析对应的原发票附件摘要
+    scheme_id TEXT,
+    scheme_revision_id TEXT,
+    title_profile_id TEXT DEFAULT '',
+    status_engine_version TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL,
+    CHECK ((scheme_id IS NULL) = (scheme_revision_id IS NULL)),
+    FOREIGN KEY (scheme_id, scheme_revision_id)
+        REFERENCES scheme_revision_links(scheme_id, revision_id),
     FOREIGN KEY (profile_id) REFERENCES profiles(id)
 );
 
@@ -133,6 +140,8 @@ CREATE TABLE IF NOT EXISTS attachments (
     recognition_status TEXT DEFAULT '',  -- recognized/unrecognized/error
     recognized_value TEXT DEFAULT '',    -- 本地 OCR 识别出的单张付款金额
     recognition_message TEXT DEFAULT '', -- 未识别或失败原因
+    role_id TEXT NOT NULL DEFAULT '',
+    role_definition_revision_id TEXT REFERENCES scheme_revisions(revision_id),
     added_at      TEXT NOT NULL,
     FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
 );
@@ -147,7 +156,12 @@ CREATE TABLE IF NOT EXISTS batches (
     note        TEXT DEFAULT '',            -- 批次说明
     archived    INTEGER NOT NULL DEFAULT 0, -- 归档后批次不占主列表；其条目退出在办
     created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    default_scheme_id TEXT,
+    default_revision_id TEXT,
+    CHECK ((default_scheme_id IS NULL) = (default_revision_id IS NULL)),
+    FOREIGN KEY (default_scheme_id, default_revision_id)
+        REFERENCES scheme_revision_links(scheme_id, revision_id)
 );
 
 -- 批次↔条目单一归属。note 是「批次级」催办备注（如「张三缺查验单」），
@@ -191,23 +205,258 @@ CREATE INDEX IF NOT EXISTS idx_ocr_results_entry ON ocr_results(entry_id);
 """
 
 
-def init_db(conn: sqlite3.Connection) -> None:
-    """建表并写入 / 升级 schema 版本。幂等，可安全升级历史库。
+ADAPTER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS adapter_packages (
+    content_hash TEXT PRIMARY KEY,
+    package_id TEXT NOT NULL,
+    package_version TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    source TEXT NOT NULL,
+    validation_status TEXT NOT NULL DEFAULT 'verified',
+    resource_path TEXT NOT NULL,
+    definition_json TEXT NOT NULL,
+    diagnostics_json TEXT NOT NULL DEFAULT '[]',
+    installed_at TEXT NOT NULL,
+    UNIQUE(package_id, package_version)
+);
+CREATE TABLE IF NOT EXISTS scheme_revisions (
+    revision_id TEXT PRIMARY KEY,
+    content_hash TEXT NOT NULL REFERENCES adapter_packages(content_hash),
+    definition_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS schemes (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+    current_revision_id TEXT NOT NULL REFERENCES scheme_revisions(revision_id),
+    overrides_json TEXT NOT NULL DEFAULT '{}',
+    is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)),
+    disabled INTEGER NOT NULL DEFAULT 0 CHECK(disabled IN (0,1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK(NOT (is_default = 1 AND disabled = 1)),
+    FOREIGN KEY(id,current_revision_id) REFERENCES scheme_revision_links(scheme_id,revision_id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_schemes_default ON schemes(is_default) WHERE is_default=1;
+CREATE TABLE IF NOT EXISTS scheme_revision_links (
+    scheme_id TEXT NOT NULL REFERENCES schemes(id),
+    revision_id TEXT NOT NULL REFERENCES scheme_revisions(revision_id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(scheme_id,revision_id)
+);
+CREATE INDEX IF NOT EXISTS idx_revision_links_revision ON scheme_revision_links(revision_id);
+CREATE TABLE IF NOT EXISTS payees (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    personnel_id TEXT NOT NULL DEFAULT '',
+    contact TEXT NOT NULL DEFAULT '',
+    account_type TEXT NOT NULL DEFAULT 'personal_bank'
+        CHECK(account_type IN ('personal_bank','corporate_bank','none')),
+    bank_name TEXT NOT NULL DEFAULT '',
+    account_number TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scheme_payee_links (
+    scheme_id TEXT NOT NULL REFERENCES schemes(id),
+    profile_id TEXT REFERENCES profiles(id) ON DELETE CASCADE,
+    payee_id TEXT NOT NULL REFERENCES payees(id),
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payee_scheme_default ON scheme_payee_links(scheme_id) WHERE profile_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payee_scheme_profile ON scheme_payee_links(scheme_id,profile_id) WHERE profile_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_scheme_payee_id ON scheme_payee_links(payee_id);
+CREATE TABLE IF NOT EXISTS batch_payee_links (
+    batch_id TEXT NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+    scheme_id TEXT NOT NULL REFERENCES schemes(id),
+    payee_id TEXT NOT NULL REFERENCES payees(id),
+    PRIMARY KEY(batch_id,scheme_id)
+);
+CREATE TABLE IF NOT EXISTS export_jobs (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','running','completed','failed','cancelled')),
+    snapshot_json TEXT NOT NULL DEFAULT '{}',
+    resources_json TEXT NOT NULL DEFAULT '[]',
+    options_json TEXT NOT NULL DEFAULT '{}',
+    files_json TEXT NOT NULL DEFAULT '[]',
+    diagnostics_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_export_jobs_date ON export_jobs(created_at);
+CREATE TABLE IF NOT EXISTS export_job_revisions (
+    job_id TEXT NOT NULL REFERENCES export_jobs(id) ON DELETE CASCADE,
+    revision_id TEXT NOT NULL REFERENCES scheme_revisions(revision_id),
+    PRIMARY KEY(job_id,revision_id)
+);
+CREATE TABLE IF NOT EXISTS extension_values (
+    scope TEXT NOT NULL CHECK(scope IN ('scheme','payee','entry','batch','export')),
+    owner_id TEXT NOT NULL,
+    scheme_id TEXT NOT NULL REFERENCES schemes(id),
+    package_id TEXT NOT NULL,
+    field_id TEXT NOT NULL,
+    definition_revision_id TEXT NOT NULL REFERENCES scheme_revisions(revision_id),
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(scope,owner_id,scheme_id,package_id,field_id),
+    FOREIGN KEY(scheme_id,definition_revision_id) REFERENCES scheme_revision_links(scheme_id,revision_id)
+);
+CREATE INDEX IF NOT EXISTS idx_extension_revision ON extension_values(definition_revision_id);
+CREATE TABLE IF NOT EXISTS extension_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL CHECK(scope IN ('scheme','payee','entry','batch','export')),
+    owner_id TEXT NOT NULL,
+    scheme_id TEXT NOT NULL REFERENCES schemes(id),
+    package_id TEXT NOT NULL DEFAULT '',
+    field_id TEXT NOT NULL DEFAULT '',
+    definition_revision_id TEXT REFERENCES scheme_revisions(revision_id),
+    kind TEXT NOT NULL DEFAULT 'value' CHECK(kind IN ('value','rebind','material')),
+    old_value_json TEXT NOT NULL DEFAULT 'null',
+    new_value_json TEXT NOT NULL DEFAULT 'null',
+    actor_id TEXT NOT NULL DEFAULT '',
+    changed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_extension_history_owner ON extension_history(scope,owner_id,scheme_id,id);
+CREATE TABLE IF NOT EXISTS entry_adapter_sources (
+    entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+    source_digest TEXT NOT NULL,
+    revision_id TEXT NOT NULL REFERENCES scheme_revisions(revision_id),
+    payload_json TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    PRIMARY KEY(entry_id,source_digest)
+);
+-- Print-component validation is mutable local cache, deliberately separate from immutable packages.
+CREATE TABLE IF NOT EXISTS template_validation_cache (
+    content_hash TEXT NOT NULL REFERENCES adapter_packages(content_hash) ON DELETE CASCADE,
+    template_path TEXT NOT NULL,
+    template_hash TEXT NOT NULL,
+    component_fingerprint TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('valid','invalid','pending')),
+    diagnostics_json TEXT NOT NULL DEFAULT '[]',
+    validated_at TEXT NOT NULL,
+    PRIMARY KEY(content_hash,template_path,template_hash,component_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_template_validation_cache_status ON template_validation_cache(status);
+CREATE TRIGGER IF NOT EXISTS immutable_adapter_package BEFORE UPDATE ON adapter_packages
+BEGIN SELECT RAISE(ABORT,'adapter packages are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_revision BEFORE UPDATE ON scheme_revisions
+BEGIN SELECT RAISE(ABORT,'scheme revisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS immutable_export_snapshot BEFORE UPDATE ON export_jobs
+WHEN OLD.status='completed' AND
+    (NEW.snapshot_json != OLD.snapshot_json OR NEW.resources_json != OLD.resources_json OR NEW.options_json != OLD.options_json)
+BEGIN SELECT RAISE(ABORT,'completed export snapshot is immutable'); END;
+"""
 
-    所有表用 CREATE TABLE IF NOT EXISTS，历史 v1 库缺的新表会被补齐，
-    已有表与数据不动。schema_version 记录当前版本，供后续按需迁移列。
-    """
-    conn.executescript(SCHEMA)
-    version_row = conn.execute(
-        "SELECT value FROM meta WHERE key = 'schema_version'"
-    ).fetchone()
-    previous_version = int(version_row[0]) if version_row else SCHEMA_VERSION
-    if version_row is None:
-        conn.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
 
+def schema_version(conn: sqlite3.Connection) -> int | None:
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone():
+        return None
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("数据库版本无效，无法安全升级。") from exc
+
+
+def _execute_schema(conn: sqlite3.Connection, sql: str) -> None:
+    # executescript commits an existing transaction, defeating atomic migration.
+    statement = ''
+    for line in sql.splitlines(True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ''
+    if statement.strip():
+        conn.execute(statement)
+
+
+def _rebuild_bound_table(conn: sqlite3.Connection, name: str) -> None:
+    start = SCHEMA.index('CREATE TABLE IF NOT EXISTS ' + name + ' (')
+    end = SCHEMA.index('\n);', start) + 3
+    definition = SCHEMA[start:end].replace('IF NOT EXISTS ' + name, name + '_v12')
+    conn.execute(definition)
+    old_columns = {r[1] for r in conn.execute('PRAGMA table_info(' + name + ')')}
+    columns = [r[1] for r in conn.execute('PRAGMA table_info(' + name + '_v12)') if r[1] in old_columns]
+    names = ','.join('"' + n + '"' for n in columns)
+    conn.execute('INSERT INTO ' + name + '_v12 (' + names + ') SELECT ' + names + ' FROM ' + name)
+    conn.execute('DROP TABLE ' + name)
+    conn.execute('ALTER TABLE ' + name + '_v12 RENAME TO ' + name)
+
+
+def _migrate_v12(conn: sqlite3.Connection) -> None:
+    for table in ('entries','batches'):
+        fks = list(conn.execute('PRAGMA foreign_key_list(' + table + ')'))
+        if not any(r[2] == 'scheme_revision_links' for r in fks):
+            _rebuild_bound_table(conn, table)
+    columns = {r[1] for r in conn.execute('PRAGMA table_info(attachments)')}
+    if 'role_id' not in columns:
+        conn.execute("ALTER TABLE attachments ADD COLUMN role_id TEXT NOT NULL DEFAULT ''")
+    if 'role_definition_revision_id' not in columns:
+        conn.execute('ALTER TABLE attachments ADD COLUMN role_definition_revision_id TEXT REFERENCES scheme_revisions(revision_id)')
+    conn.execute("UPDATE attachments SET role_id=CASE WHEN type IN ('invoice_pdf','invoice_xml') THEN 'invoice' ELSE type END WHERE role_id=''")
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_entries_scheme_revision ON entries(scheme_id,scheme_revision_id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_attachments_role ON attachments(entry_id,role_id)')
+    # Polymorphic owners: enforce existence even for raw SQL writes and clean up
+    # in the same DELETE transaction, including EntryRepo's existing paths.
+    owners = {'scheme':'schemes','payee':'payees','entry':'entries','batch':'batches','export':'export_jobs'}
+    for scope, table in owners.items():
+        for operation in ('INSERT','UPDATE'):
+            conn.execute(f"""CREATE TRIGGER IF NOT EXISTS extension_owner_{scope}_{operation.lower()}
+                BEFORE {operation} ON extension_values WHEN NEW.scope='{scope}'
+                AND NOT EXISTS(SELECT 1 FROM {table} WHERE id=NEW.owner_id)
+                BEGIN SELECT RAISE(ABORT,'extension owner does not exist'); END""")
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS extension_cleanup_{scope}
+            AFTER DELETE ON {table} BEGIN
+            DELETE FROM extension_values WHERE scope='{scope}' AND owner_id=OLD.id;
+            DELETE FROM extension_history WHERE scope='{scope}' AND owner_id=OLD.id;
+            END""")
+
+
+def init_db(conn: sqlite3.Connection, *, backup_path=None) -> None:
+    """Refuse future versions; back up with SQLite, then migrate atomically."""
+    from pathlib import Path
+    from datetime import datetime
+    previous = schema_version(conn)
+    if previous is not None and previous > SCHEMA_VERSION:
+        raise ValueError(f"数据库版本 {previous} 高于当前支持的 {SCHEMA_VERSION}，拒绝写入。请更新软件。")
+    existing = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='entries'").fetchone())
+    previous_version = previous if previous is not None else (1 if existing else SCHEMA_VERSION)
+    if conn.in_transaction:
+        raise ValueError('数据库迁移需要没有未提交修改的连接。')
+    if existing and previous_version < SCHEMA_VERSION:
+        filename = conn.execute('PRAGMA database_list').fetchone()[2]
+        if filename:
+            target = Path(backup_path) if backup_path else Path(filename).parent / 'backups' / (
+                'tidoc-before-v12-' + datetime.now().strftime('%Y%m%dT%H%M%S%f') + '.sqlite')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            from .database import backup_connection
+            backup_connection(conn, target)
+    foreign_keys = conn.execute('PRAGMA foreign_keys').fetchone()[0]
+    conn.execute('PRAGMA foreign_keys=OFF')
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        _execute_schema(conn, ADAPTER_SCHEMA)
+        # The old v10 schema may have duplicate batch membership; create this
+        # unique index only after the legacy migration has deduplicated rows.
+        _execute_schema(conn, SCHEMA.replace('CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_entries_entry ON batch_entries(entry_id);',''))
+        _legacy_migrations(conn, previous_version)
+        _migrate_v12(conn)
+        _execute_schema(conn, SCHEMA)
+        if list(conn.execute('PRAGMA foreign_key_check')):
+            raise ValueError('数据库存在失效关联，升级已撤回，请检查迁移前备份。')
+        conn.execute("INSERT INTO meta(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(SCHEMA_VERSION),))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute('PRAGMA foreign_keys=' + str(foreign_keys))
+
+
+def _legacy_migrations(conn: sqlite3.Connection, previous_version: int) -> None:
     if previous_version < 3:
         # 历史条目可能仅因明细漏识别而被标成 blocked。抬头分区冲突仍保持
         # blocked；这里只迁移没有分区冲突的纯明细合计问题。
@@ -385,10 +634,3 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE entry_fields ADD COLUMN value_source TEXT DEFAULT ''"
         )
-
-    # 历史库升级：把 schema_version 抬到当前版本（新表已由上面的 executescript 补齐）。
-    conn.execute(
-        "UPDATE meta SET value = ? WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
-        (str(SCHEMA_VERSION), SCHEMA_VERSION),
-    )
-    conn.commit()

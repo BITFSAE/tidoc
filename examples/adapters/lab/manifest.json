@@ -1,0 +1,21 @@
+{
+  "format": "tidoc-team-adapter",
+  "schema_version": "1.0",
+  "package_id": "org.example.lab",
+  "package_version": "1.0.0",
+  "name": "实验室物资报账",
+  "description": "实验室物资报账的材料与输出规则。",
+  "author": "示例实验室",
+  "requires": {
+    "adapter_api": 1,
+    "capabilities": [
+      "fields.v1",
+      "material-roles.v1",
+      "output.attachments.v1",
+      "output.docx.v1",
+      "output.pdf.v1",
+      "output.xlsx.v1",
+      "rules.v1"
+    ]
+  }
+}

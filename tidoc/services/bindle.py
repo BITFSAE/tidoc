@@ -18,6 +18,9 @@ import hashlib
 import shutil
 import uuid
 import zipfile
+import copy
+import re
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -26,7 +29,7 @@ from ..db.entries import EntryRepo
 from .signing import MANIFEST_NAME, sign_bytes, sign_file, verify, verify_stream
 from .summary import build_summary
 
-BINDLE_VERSION = 4
+BINDLE_VERSION = 5
 ENTRIES_NAME = "entries.json"
 SUMMARY_NAME = "summary.json"
 EXCLUSIVE_TAG_GROUPS = (
@@ -57,7 +60,8 @@ def _serialize_entry(
     for attachment in entry.get("attachments", []):
         serialized_attachment = {
             k: attachment.get(k)
-            for k in ("id", "type", "original_name", "stored_path", "sha256", "added_at")
+            for k in ("id", "type", "original_name", "stored_path", "sha256", "added_at",
+                      "role_id", "role_definition_revision_id")
         }
         serialized_attachment["note"] = attachment.get("note", "") if include_notes else ""
         attachments.append(serialized_attachment)
@@ -100,6 +104,7 @@ def _serialize_entry(
             }
             for result in entry.get("_ocr_results", [])
         ],
+        "adapter": entry.get("_adapter"),
     }
 
 
@@ -108,9 +113,134 @@ def _serialize_profile(profile: dict) -> dict:
     return {
         "id": profile.get("id", ""),
         "name": profile.get("name", ""),
-        "reviewer": profile.get("reviewer", ""),
+        "reviewer": profile.get("reviewer") or "",
         "is_default": bool(profile.get("is_default")),
     }
+
+
+def _adapter_service(repo, supplied=None):
+    return supplied or getattr(getattr(repo, "db", None), "adapter_service", None)
+
+
+def _extension_records(service, entry_id: str, revision_id: str):
+    """Read entry extension values/history through the adapter boundary when available."""
+    if not service or not revision_id:
+        return None, [], []
+    definition = service.get_revision(revision_id)
+    repo = getattr(service, "extensions", None)
+    if repo is None:
+        return definition, [], []
+    package_id = definition.get("manifest", {}).get("package_id", "")
+    list_values = getattr(repo, "list_values", None)
+    row = service.db.conn.execute("SELECT scheme_id FROM entries WHERE id=?", (entry_id,)).fetchone()
+    scheme_id = row[0] if row else None
+    if callable(list_values) and scheme_id:
+        values = list_values("entry", entry_id, scheme_id=scheme_id, package_id=package_id,
+                             revision_id=revision_id)
+    else:
+        values = []
+    history_method = getattr(repo, "history", None)
+    history = history_method("entry", entry_id) if callable(history_method) else []
+    return definition, values, history
+
+
+def _resolve_bindle_flag(definition, key, requested):
+    """Resolve a global transfer choice against the entry's pinned revision."""
+    if requested is not None and type(requested) is not bool:
+        raise ValueError(f'{key} 必须是布尔值或未指定。')
+    descriptor=((definition or {}).get('scheme') or {}).get('settings',{}).get(key,{})
+    fixed=descriptor.get('fixed') if isinstance(descriptor,dict) else None
+    if isinstance(descriptor,dict) and 'fixed' in descriptor:
+        if type(fixed) is not bool:
+            raise ValueError(f'{key} 的固定策略无效。')
+        if requested is not None and requested is not fixed:
+            raise ValueError(f'当前方案固定了 {key}，不能使用冲突的导出选项。')
+        return fixed
+    if requested is not None:
+        return requested
+    settings=(definition or {}).get('effective_settings') or {}
+    value=settings.get(key,descriptor.get('default',True) if isinstance(descriptor,dict) else True)
+    if type(value) is not bool:
+        raise ValueError(f'{key} 的有效设置无效。')
+    return value
+
+
+def _archive_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _sanitize_exchange_entry(entry: dict, depth=0) -> None:
+    """Apply transfer allowlists again at the trust boundary before persistence."""
+    adapter = entry.get("adapter")
+    if depth>1:
+        raise ValueError('绑定包来源信息嵌套过深。')
+    if not isinstance(adapter, dict):
+        entry["adapter"] = None
+        return
+    definition = adapter.get("definition")
+    if (not isinstance(definition, dict) or not isinstance(definition.get("manifest"), dict)
+            or not isinstance(definition.get("scheme", {}), dict)):
+        entry["adapter"] = None
+        return
+    from ..adapters.transfer import project_extension_data, public_rule_projection, field_key
+    # A transferred ask value is already an explicit sender choice. Preserve it
+    # on receipt; another export will ask the new sender again.
+    chosen={field_key(field,definition['manifest'].get('package_id','')) for field in definition.get('fields',[])
+            if field.get('scope')=='entry' and field.get('transfer')!='never'
+            and (field.get('transfer')=='ask' or field.get('sensitive'))
+            and any(row.get('field_id')==field.get('id') for row in adapter.get('extension_values',[])+adapter.get('extension_history',[]))}
+    clean = public_rule_projection(definition,include_ask_fields=chosen)
+    package_id = clean.get("manifest", {}).get("package_id", "")
+    digest = str(adapter.get("source_revision_digest") or "")
+    if not package_id or (digest and not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
+        raise ValueError("绑定包中的适配规则来源信息无效。")
+    from ..adapters.registry import LIMITS
+    from ..adapters.resolver import resolve_definition
+    from ..adapters.loader import validate_resolved_definition
+    if any(len(clean.get(key,[]))>LIMITS[limit] for key,limit in [('fields','fields'),('rules','rules'),('materials','files')]):
+        raise ValueError('绑定包中的规则定义数量超限。')
+    from ..adapters.transfer import supported_rule_capabilities
+    _,missing=supported_rule_capabilities(clean)
+    if not missing:
+        validate_resolved_definition(resolve_definition(clean))
+    values, history = project_extension_data(
+        clean, adapter.get("extension_values") or [], adapter.get("extension_history") or [],include_ask_fields=chosen
+    )
+    entry["adapter"] = {
+        "source_revision_id": str(adapter.get("source_revision_id") or ""),
+        "source_revision_digest": digest.lower(),
+        "definition": clean,
+        "extension_values": values,
+        "extension_history": history,
+        "sources": [],
+    }
+    if not isinstance(adapter.get('sources',[]),list) or len(adapter.get('sources',[]))>100:
+        raise ValueError('绑定包来源信息数量超限。')
+    for source in adapter.get('sources',[]):
+        nested={'adapter':source}
+        source=copy.deepcopy(source);source.pop('sources',None);nested['adapter']=source
+        _sanitize_exchange_entry(nested,depth+1)
+        if nested.get('adapter'):entry['adapter']['sources'].append(nested['adapter'])
+
+
+def _local_preview_version(entries_repo: EntryRepo, entry_ids: set[str]) -> str:
+    snapshots = _import_preview_snapshots(entries_repo, entry_ids)
+    material = []
+    for entry_id in sorted(entry_ids):
+        entry = snapshots.get(entry_id)
+        if entry is None:
+            material.append((entry_id, None))
+            continue
+        row = entries_repo.db.conn.execute(
+            "SELECT updated_at, scheme_id, scheme_revision_id FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        material.append((entry_id, dict(row) if row else None, entry))
+    from ..adapters.transfer import content_hash
+    return content_hash(material)
 
 
 def export_bindle(
@@ -120,16 +250,20 @@ def export_bindle(
     out_path: str | Path,
     profile_lookup: dict[str, dict] | None = None,
     *,
-    include_notes: bool = True,
-    include_tags: bool = True,
+    include_notes: bool | None = None,
+    include_tags: bool | None = None,
+    adapter_service=None,
+    include_ask_fields: list[str] | tuple[str, ...] = (),
 ) -> Path:
     """把选定条目连同附件打成一个 .tidoc 包，内嵌 HMAC 签名清单。"""
     out_path = Path(out_path)
     if out_path.suffix != ".tidoc":
         out_path = out_path.with_suffix(".tidoc")
     profile_lookup = profile_lookup or {}
+    adapter_service = _adapter_service(entries_repo, adapter_service)
 
     serialized, signatures = [], {}
+    per_entry_transfer: dict[str,dict[str,bool]] = {}
     referenced_profile_ids: set[str] = set()
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for eid in entry_ids:
@@ -145,6 +279,53 @@ def export_bindle(
                     (eid,),
                 ).fetchall()
             ]
+            revision_id = str(entry.get("scheme_revision_id") or "")
+            definition, values, extension_history = _extension_records(adapter_service, eid, revision_id)
+            entry_include_notes=_resolve_bindle_flag(definition,'transfer.include_notes',include_notes)
+            entry_include_tags=_resolve_bindle_flag(definition,'transfer.include_tags',include_tags)
+            per_entry_transfer[eid]={'include_notes':entry_include_notes,'include_tags':entry_include_tags}
+            retained=entry.get('adapter_sources') or []
+            if definition and retained:
+                from ..adapters.transfer import public_rule_projection
+                retained=[source for source in retained if source.get('definition')!=public_rule_projection(definition)]
+            if definition:
+                from ..adapters.transfer import (
+                    public_rule_projection, project_extension_data, revision_digest,
+                    role_id,
+                )
+                public_values, public_history = project_extension_data(
+                    definition, values, extension_history,
+                    include_ask_fields=include_ask_fields,
+                )
+                entry["_adapter"] = {
+                    "source_revision_id": revision_id,
+                    "source_revision_digest": revision_digest(definition),
+                    "definition": public_rule_projection(
+                        definition, include_ask_fields=include_ask_fields
+                    ),
+                    "extension_values": public_values,
+                    "extension_history": public_history,
+                }
+            else:
+                entry["_adapter"] = None
+            if retained:
+                from ..adapters.transfer import public_rule_projection,project_extension_data
+                projections=[]
+                for source in retained:
+                    values,history=project_extension_data(source['definition'],source.get('extension_values',[]),source.get('extension_history',[]),include_ask_fields=include_ask_fields)
+                    projections.append({**source,'definition':public_rule_projection(source['definition'],include_ask_fields=include_ask_fields),'extension_values':values,'extension_history':history})
+                if entry['_adapter'] is None:
+                    entry['_adapter']=projections[0]
+                    projections=projections[1:]
+                entry['_adapter']['sources']=projections
+            for attachment in entry.get("attachments", []):
+                if attachment.get("role_id"):
+                    continue
+                attachment["role_id"] = {
+                    "invoice_pdf": "invoice", "invoice_xml": "invoice",
+                    "payment_screenshot": "payment_screenshot",
+                    "physical_image": "physical_image", "inspection_pdf": "inspection_pdf",
+                }.get(attachment.get("type"), "other")
             if entry.get("profile_id"):
                 referenced_profile_ids.add(entry["profile_id"])
             referenced_profile_ids.update(
@@ -154,8 +335,8 @@ def export_bindle(
             serialized.append(
                 _serialize_entry(
                     entry,
-                    include_notes=include_notes,
-                    include_tags=include_tags,
+                    include_notes=entry_include_notes,
+                    include_tags=entry_include_tags,
                 )
             )
             # 写附件文件，并对每个文件签名
@@ -173,20 +354,29 @@ def export_bindle(
             if profile_id in profile_lookup
         ]
         profiles.sort(key=lambda p: (not p["is_default"], p["name"], p["reviewer"], p["id"]))
+        def summary_option(name,requested):
+            if requested is not None:
+                return requested
+            values={settings[name] for settings in per_entry_transfer.values()}
+            return next(iter(values)) if len(values)==1 else True if not values else None
+
+        exported_notes=summary_option('include_notes',include_notes)
+        exported_tags=summary_option('include_tags',include_tags)
         entries_payload = {
             "bindle_version": BINDLE_VERSION,
             "profiles": profiles,
             "options": {
-                "include_notes": include_notes,
-                "include_tags": include_tags,
+                "include_notes": exported_notes,
+                "include_tags": exported_tags,
             },
             "entries": serialized,
         }
         entries_bytes = json.dumps(entries_payload, ensure_ascii=False, indent=2).encode("utf-8")
         summary_payload = build_summary(entries_repo, entry_ids)
-        if not include_notes:
-            for record in summary_payload.get("entries", []):
-                record.pop("notes", None)
+        summary_entry_ids=[record['id'] for record in serialized]
+        for eid,record in zip(summary_entry_ids,summary_payload.get('entries',[])):
+            if not per_entry_transfer.get(eid,{}).get('include_notes',True):
+                record.pop('notes',None)
         summary_bytes = json.dumps(summary_payload, ensure_ascii=False, indent=2).encode("utf-8")
 
         zf.writestr(ENTRIES_NAME, entries_bytes)
@@ -196,6 +386,7 @@ def export_bindle(
 
         manifest = {
             "bindle_version": BINDLE_VERSION,
+            "minimum_receiver_capability": "bindle.v5",
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "algorithm": "HMAC-SHA256",
             "signatures": signatures,
@@ -205,20 +396,24 @@ def export_bindle(
     return out_path
 
 
-def inspect_bindle(path: str | Path, entries_repo: EntryRepo | None = None) -> dict:
+def inspect_bindle(path: str | Path, entries_repo: EntryRepo | None = None, *, adapter_service=None,
+                   target_scheme_id: str | None = None, mappings: dict | None = None) -> dict:
     """读取并校验一个 .tidoc 包，返回条目数据 + 篡改检测结果，不写入数据库。
 
     返回 {"entries": [...], "summary": {...}, "tampered": [文件名...], "verified": bool}
     """
     path = Path(path)
+    archive_digest_before = _archive_digest(path)
     with zipfile.ZipFile(path, "r") as zf:
-        names = set(zf.namelist())
+        name_list = zf.namelist()
+        names = set(name_list)
+        duplicate_names = sorted({name for name in name_list if name_list.count(name) > 1})
         if MANIFEST_NAME not in names or ENTRIES_NAME not in names:
             raise ValueError("不是合法的 .tidoc 绑定包（缺少签名清单或条目数据）。")
 
         manifest = json.loads(zf.read(MANIFEST_NAME))
         signatures = manifest.get("signatures", {})
-        tampered: list[str] = []
+        tampered: list[str] = [f"duplicate:{name}" for name in duplicate_names]
 
         verified_payloads: dict[str, bytes] = {}
         for arcname, expected in signatures.items():
@@ -240,10 +435,34 @@ def inspect_bindle(path: str | Path, entries_repo: EntryRepo | None = None) -> d
         if entries_bytes is None:
             entries_bytes = zf.read(ENTRIES_NAME)
         entries_payload = json.loads(entries_bytes)
+        package_version = int(entries_payload.get("bindle_version", manifest.get("bindle_version", 1)))
+        if package_version < 1 or package_version > BINDLE_VERSION:
+            raise ValueError(f"不支持的绑定包版本：{package_version}")
+        if int(manifest.get("bindle_version", package_version)) != package_version:
+            tampered.append("bindle_version")
+        if package_version >= 5:
+            expected_members = names - {MANIFEST_NAME}
+            if set(signatures) != expected_members:
+                tampered.append("signature_coverage")
+            unexpected = {name for name in names
+                          if name not in {MANIFEST_NAME, ENTRIES_NAME, SUMMARY_NAME}
+                          and not name.startswith("attachments/")}
+            if unexpected:
+                tampered.extend(f"unexpected:{name}" for name in sorted(unexpected))
+            if not isinstance(entries_payload.get("entries", []), list):
+                raise ValueError("绑定包条目结构无效。")
+            for item in entries_payload.get("entries", []):
+                if not isinstance(item, dict):
+                    raise ValueError("绑定包条目结构无效。")
+                _sanitize_exchange_entry(item)
         summary_bytes = verified_payloads.get(SUMMARY_NAME)
         if summary_bytes is None and SUMMARY_NAME in names:
             summary_bytes = zf.read(SUMMARY_NAME)
         summary = json.loads(summary_bytes) if summary_bytes else {}
+
+    archive_digest_after = _archive_digest(path)
+    if archive_digest_after != archive_digest_before:
+        raise ValueError("绑定包在检查期间发生了变化，请重新检查。")
 
     result = {
         "entries": entries_payload.get("entries", []),
@@ -252,9 +471,17 @@ def inspect_bindle(path: str | Path, entries_repo: EntryRepo | None = None) -> d
         "summary": summary,
         "tampered": tampered,
         "verified": not tampered,
+        "bindle_version": package_version,
+        "required_capability": manifest.get("minimum_receiver_capability", ""),
+        "archive_digest": archive_digest_after,
     }
     if entries_repo is not None:
-        _annotate_import_actions(entries_repo, result)
+        result["target_scheme_id"] = target_scheme_id or ""
+        result["mappings"] = copy.deepcopy(mappings or {})
+        _annotate_import_actions(entries_repo, result, adapter_service=adapter_service,
+                                 target_scheme_id=target_scheme_id)
+        matched = {e.get("existing_entry_id") for e in result["entries"] if e.get("existing_entry_id")}
+        result["local_version"] = _local_preview_version(entries_repo, matched)
     return result
 
 
@@ -489,7 +716,8 @@ def _import_preview_snapshots(entries_repo: EntryRepo, entry_ids: set[str]) -> d
     return snapshots
 
 
-def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict) -> None:
+def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapter_service=None,
+                             target_scheme_id: str | None = None) -> None:
     by_number, by_hash = _entry_identity_maps(entries_repo.db.conn)
     counts = {"new": 0, "merge": 0, "unchanged": 0}
     entries = inspected.get("entries") or []
@@ -501,6 +729,23 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict) -> None:
         entries_repo, {entry_id for entry_id in matches if entry_id}
     )
     for entry, existing_id in zip(entries, matches):
+        source_adapter = entry.get("adapter") or {}
+        entry["adapter_compatibility"] = {"available": bool(source_adapter.get("definition")),
+                                          "source_revision_digest": source_adapter.get("source_revision_digest", ""),
+                                          "required_capabilities": [], "missing_capabilities": []}
+        if source_adapter.get("definition"):
+            try:
+                from ..adapters.transfer import supported_rule_capabilities
+                required, missing = supported_rule_capabilities(source_adapter["definition"])
+                entry["adapter_compatibility"].update(required_capabilities=required,
+                                                     missing_capabilities=missing,
+                                                     available=not missing)
+            except Exception as exc:
+                entry["adapter_compatibility"].update(available=False, missing_capabilities=[str(exc)])
+        if source_adapter:
+            public_package = source_adapter.get("definition", {}).get("manifest", {}).get("package_id", "")
+            entry["extension_merge_preview"] = _extension_merge_preview(entries_repo, existing_id,
+                                                                           source_adapter, public_package)
         if not existing_id:
             entry["import_action"] = "new"
             counts["new"] += 1
@@ -511,8 +756,258 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict) -> None:
         entry["existing_batches"] = existing.get("batches") or []
         entry["merge_preview"] = preview
         entry["import_action"] = "merge" if preview["has_changes"] else "unchanged"
+        entry["role_mapping_preview"] = _role_mapping_preview(entries_repo, existing_id, entry,
+                                                                 adapter_service=adapter_service,
+                                                                 target_scheme_id=target_scheme_id)
         counts[entry["import_action"]] += 1
     inspected["import_plan"] = counts
+
+    profiles = [dict(row) for row in entries_repo.db.conn.execute("SELECT id,name,reviewer FROM profiles").fetchall()]
+    by_name = defaultdict(list)
+    for profile in profiles:
+        by_name[str(profile.get("name") or "").strip()].append(profile)
+    profile_choices = {}
+    source_profiles = {str(row.get("id") or ""): dict(row)
+                       for row in inspected.get("profiles", []) if row.get("id")}
+    for source_entry in entries:
+        source_id = str(source_entry.get("profile_id") or "")
+        if source_id and source_id not in source_profiles and (source_entry.get("profile_name") or source_entry.get("reviewer")):
+            source_profiles[source_id] = {"id": source_id, "name": source_entry.get("profile_name", ""),
+                                          "reviewer": source_entry.get("reviewer") or ""}
+    if not source_profiles and any(e.get("profile_name") or e.get("reviewer") for e in entries):
+        first = next(e for e in entries if e.get("profile_name") or e.get("reviewer"))
+        source_profiles["__fallback__"] = {"id": "__fallback__", "name": first.get("profile_name", ""),
+                                            "reviewer": first.get("reviewer") or ""}
+    for source_profile in source_profiles.values():
+        source_id = str(source_profile.get("id") or "")
+        if not source_id or str(source_profile.get("reviewer") or "").strip():
+            continue
+        candidates = by_name.get(str(source_profile.get("name") or "").strip(), [])
+        if len(candidates) > 1:
+            profile_choices[source_id] = {"status": "ambiguous", "candidates": candidates}
+        elif len(candidates) == 1:
+            profile_choices[source_id] = {"status": "unique", "candidates": candidates}
+    inspected["profile_mapping_preview"] = profile_choices
+
+
+def _extension_merge_preview(entries_repo, existing_id, source_adapter, package_id):
+    incoming = source_adapter.get("extension_values") or []
+    if not existing_id or not incoming:
+        return {"eligible": [], "skipped": len(incoming)}
+    conn = entries_repo.db.conn
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(extension_values)")}
+    if not columns:
+        return {"eligible": [], "skipped": len(incoming)}
+    entry = conn.execute("SELECT scheme_id,scheme_revision_id FROM entries WHERE id=?", (existing_id,)).fetchone()
+    if not entry or not entry["scheme_id"] or not entry["scheme_revision_id"]:
+        return {"eligible": [], "skipped": len(incoming)}
+    from ..db.adapters import AdapterRepo
+    try:
+        target_definition = AdapterRepo(entries_repo.db).get_revision(entry["scheme_revision_id"])
+    except Exception:
+        return {"eligible": [], "skipped": len(incoming)}
+    if target_definition.get("manifest", {}).get("package_id") != package_id:
+        return {"eligible": [], "skipped": len(incoming)}
+    source_fields = {f.get("id"): f for f in (source_adapter.get("definition", {}).get("fields") or [])
+                     if f.get("scope") == "entry"}
+    target_fields = {f.get("id"): f for f in (target_definition.get("fields") or [])
+                     if f.get("scope") == "entry"}
+    local = {r[1]: json.loads(r[2]) for r in conn.execute(
+        "SELECT package_id,field_id,value_json FROM extension_values WHERE scope='entry' AND owner_id=? AND scheme_id=?",
+        (existing_id, entry["scheme_id"]),
+    ).fetchall() if r[0] == package_id}
+    eligible = []
+    for record in incoming:
+        if record.get("scope", "entry") != "entry" or record.get("package_id", package_id) != package_id:
+            continue
+        field_id = record.get("field_id")
+        if (field_id in source_fields and field_id in target_fields
+                and source_fields[field_id].get("type") == target_fields[field_id].get("type")
+                and (field_id not in local or local[field_id] in (None, ""))):
+            eligible.append(field_id)
+    return {"eligible": sorted(set(eligible)), "skipped": max(0, len(incoming)-len(eligible))}
+
+
+def _merge_extension_data(entries_repo, entry_id, source_adapter):
+    """Merge only same-package, same-id, same-type entry fields; local non-empty wins."""
+    if not source_adapter:
+        return []
+    conn = entries_repo.db.conn
+    row = conn.execute("SELECT scheme_id,scheme_revision_id FROM entries WHERE id=?", (entry_id,)).fetchone()
+    if not row or not row["scheme_id"] or not row["scheme_revision_id"]:
+        return []
+    from ..db.adapters import AdapterRepo, encode
+    from ..adapters.policy import validate_field_value
+    repo = AdapterRepo(entries_repo.db)
+    package_id = (source_adapter.get("definition", {}).get("manifest") or {}).get("package_id", "")
+    try:
+        target = repo.get_revision(row["scheme_revision_id"])
+    except Exception:
+        return []
+    if target.get("manifest", {}).get("package_id") != package_id:
+        return []
+    source_fields = {f.get("id"): f for f in source_adapter.get("definition", {}).get("fields", [])
+                     if f.get("scope") == "entry"}
+    target_fields = {f.get("id"): f for f in target.get("fields", []) if f.get("scope") == "entry"}
+    values = source_adapter.get("extension_values") or []
+    changed = []
+    for record in values:
+        field_id = record.get("field_id")
+        if (record.get("scope", "entry") != "entry" or record.get("package_id", package_id) != package_id
+                or field_id not in source_fields or field_id not in target_fields
+                or source_fields[field_id].get("type") != target_fields[field_id].get("type")):
+            continue
+        value = record.get("value")
+        try:
+            value = validate_field_value(target_fields[field_id], value)
+        except (ValueError, TypeError):
+            continue
+        local = conn.execute("""SELECT value_json FROM extension_values
+            WHERE scope='entry' AND owner_id=? AND scheme_id=? AND package_id=? AND field_id=?""",
+            (entry_id, row["scheme_id"], package_id, field_id)).fetchone()
+        if local and json.loads(local[0]) not in (None, ""):
+            continue
+        if local and json.loads(local[0]) == value:
+            continue
+        changed_at = datetime.now().isoformat(timespec="microseconds")
+        conn.execute("""INSERT INTO extension_values(scope,owner_id,scheme_id,package_id,field_id,
+            definition_revision_id,value_json,updated_at) VALUES('entry',?,?,?,?,?,?,?)
+            ON CONFLICT(scope,owner_id,scheme_id,package_id,field_id) DO UPDATE SET
+            definition_revision_id=excluded.definition_revision_id,value_json=excluded.value_json,
+            updated_at=excluded.updated_at""",
+            (entry_id, row["scheme_id"], package_id, field_id, row["scheme_revision_id"], encode(value), changed_at))
+        changed.append(field_id)
+    # Preserve each transferred event. Stable source event identity makes repeat imports idempotent.
+    history = source_adapter.get("extension_history") or []
+    for ordinal, record in enumerate(history):
+        field_id = record.get("field_id")
+        if (record.get("scope", "entry") != "entry" or record.get("package_id", package_id) != package_id
+                or field_id not in source_fields or field_id not in target_fields
+                or source_fields[field_id].get("type") != target_fields[field_id].get("type")):
+            continue
+        source_event = str(record.get("id") or ordinal)
+        actor = json.dumps({"source_revision": source_adapter.get("source_revision_digest", ""),
+                            "source_actor": record.get("actor_id", record.get("profile_id", "")),
+                            "source_event": source_event}, ensure_ascii=False, sort_keys=True)
+        changed_on = str(record.get("changed_at") or datetime.now().isoformat(timespec="seconds"))
+        exists = conn.execute("""SELECT 1 FROM extension_history WHERE scope='entry' AND owner_id=? AND scheme_id=?
+            AND package_id=? AND field_id=? AND actor_id=? AND changed_at=? LIMIT 1""",
+            (entry_id, row["scheme_id"], package_id, field_id, actor, changed_on)).fetchone()
+        if exists:
+            continue
+        conn.execute("""INSERT INTO extension_history(scope,owner_id,scheme_id,package_id,field_id,
+            definition_revision_id,kind,old_value_json,new_value_json,actor_id,changed_at)
+            VALUES('entry',?,?,?,?,?,?,?,?,?,?)""",
+            (entry_id, row["scheme_id"], package_id, field_id, row["scheme_revision_id"],
+             str(record.get("kind") or "value"), encode(record.get("old_value")),
+             encode(record.get("new_value")), actor, changed_on))
+    return changed
+
+
+def _role_mapping_preview(entries_repo, existing_id, entry, *, adapter_service=None, target_scheme_id=None):
+    incoming = entry.get("attachments") or []
+    roles = sorted({str(a.get("role_id") or "other") for a in incoming})
+    local = (entries_repo.db.conn.execute(
+        "SELECT scheme_id,scheme_revision_id FROM entries WHERE id=?", (existing_id,)
+    ).fetchone() if existing_id else None)
+    revision_id = (local["scheme_revision_id"] or "") if local else ""
+    if target_scheme_id and adapter_service:
+        try:
+            target = adapter_service.get_scheme(target_scheme_id)
+            revision_id = target.get("current_revision_id") or target.get("revision_id") or revision_id
+        except Exception:
+            pass
+    target_roles = []
+    if revision_id:
+        try:
+            from ..db.adapters import AdapterRepo
+            definition = AdapterRepo(entries_repo.db).get_revision(revision_id)
+            material = definition.get("materials", [])
+            target_roles = [r.get("id") for r in (material.get("roles", []) if isinstance(material, dict) else material)]
+        except Exception:
+            target_roles = []
+    return {"source_roles": roles, "target_roles": target_roles,
+            # Names and IDs are not proof of semantic equivalence across revisions.
+            "requires_explicit_mapping": [role for role in roles if role != "invoice"]}
+
+
+def preview_bindle_transfer(entries_repo: EntryRepo, entry_ids: list[str], adapter_service=None) -> dict:
+    """Summarize per-field ask choices before v5 export without exposing field values."""
+    from ..adapters.transfer import ask_field_preview
+    adapter_service = _adapter_service(entries_repo, adapter_service)
+    pairs = []
+    for entry_id in dict.fromkeys(str(value) for value in entry_ids):
+        entry = entries_repo.get(entry_id)
+        if not entry:
+            continue
+        revision_id = str(entry.get("scheme_revision_id") or "")
+        if revision_id and adapter_service:
+            definition, values, _history = _extension_records(adapter_service, entry_id, revision_id)
+            if definition:
+                for value in values:value.setdefault('owner_id',entry_id)
+                pairs.append((definition,values))
+        for source in entry.get('adapter_sources') or []:
+            values=copy.deepcopy(source.get('extension_values',[]))
+            for value in values:value.setdefault('owner_id',entry_id)
+            pairs.append((source['definition'],values))
+    return {"ask_fields": ask_field_preview(pairs), "entry_count": len(pairs),
+            "requires_explicit_choice": bool(ask_field_preview(pairs))}
+
+
+def _external_revision_id(entries_repo, adapter_payload):
+    definition = (adapter_payload or {}).get("definition")
+    if not definition:
+        return ""
+    from ..adapters.transfer import content_hash, revision_digest
+    from ..db.adapters import encode, now
+    digest=content_hash(definition)
+    revision=revision_digest(definition)
+    # Public exchange definitions are immutable, stored for provenance, and never linked
+    # to a local scheme or activated as a package.
+    # Exchange snapshots can contain unsupported capabilities and have no
+    # templates. Keep them immutable without activating or revalidating them as
+    # an installable local package. Their storage identity avoids a collision
+    # with an installed package sharing the author's ID/version.
+    conn=entries_repo.db.conn
+    conn.execute('''INSERT OR IGNORE INTO adapter_packages(content_hash,package_id,package_version,schema_version,source,resource_path,definition_json,diagnostics_json,installed_at) VALUES(?,?,?,?,?,?,?,?,?)''',
+        (digest,'org.tidoc.exchange.'+digest,'1.0.0','1.0','exchange','',encode(definition),'[]',now()))
+    conn.execute('INSERT OR IGNORE INTO scheme_revisions VALUES(?,?,?,?)',(revision,digest,encode(definition),now()))
+    return revision
+
+
+def _retain_adapter_source(entries_repo,entry_id,adapter):
+    if not adapter or not adapter.get('definition'):return False
+    from ..adapters.transfer import content_hash
+    from ..db.adapters import encode, now
+    payload=copy.deepcopy(adapter);sources=payload.pop('sources',[])
+    revision=_external_revision_id(entries_repo,payload)
+    digest=content_hash(payload)
+    cursor=entries_repo.db.conn.execute('INSERT OR IGNORE INTO entry_adapter_sources VALUES(?,?,?,?,?)',
+        (entry_id,digest,revision,encode(payload),now()))
+    for source in sources:_retain_adapter_source(entries_repo,entry_id,source)
+    return bool(cursor.rowcount)
+
+
+def _validated_material_mapping(entries_repo, entry_id, revision_id, source_role, target_role, att_type, filename):
+    """Resolve an explicit role without granting it invoice/OCR semantics."""
+    from ..db.adapters import AdapterRepo
+    definition=AdapterRepo(entries_repo.db).get_revision(revision_id)
+    roles=definition.get('materials',[])
+    roles=roles.get('roles',[]) if isinstance(roles,dict) else roles
+    role=next((role for role in roles if role['id']==target_role),None)
+    if not role:
+        raise ValueError(f'材料角色映射目标不存在：{target_role}')
+    invoice=att_type in ('invoice_pdf','invoice_xml')
+    if invoice != (target_role=='invoice') or (source_role=='invoice') != invoice:
+        raise ValueError('自定义或其他材料不能替代发票。')
+    if role.get('extensions') and Path(filename).suffix.lower() not in role['extensions']:
+        raise ValueError('映射材料格式不符合目标角色要求。')
+    limit=role.get('max_count')
+    if limit is not None:
+        count=entries_repo.db.conn.execute('SELECT COUNT(*) FROM attachments WHERE entry_id=? AND role_id=? AND (role_definition_revision_id IS NULL OR role_definition_revision_id=?)',(entry_id,target_role,revision_id)).fetchone()[0]
+        if count>=limit:
+            raise ValueError('材料数量达到目标方案上限。')
+    return att_type if invoice else 'other' if target_role.startswith('custom:') else target_role
 
 
 def _merge_text(local: str, incoming: str) -> str:
@@ -547,6 +1042,7 @@ def _merge_existing_entry(
     now: str,
     created_files: list[Path],
     tampered: bool = False,
+    *, role_mappings: dict | None = None,
 ) -> list[str]:
     """Add package-only material and metadata without overwriting local work."""
     changes: list[str] = []
@@ -648,6 +1144,26 @@ def _merge_existing_entry(
             str(attachment.get("original_name") or "") or stored_path
         ).suffix
         att_type = str(attachment.get("type") or "other")
+        from ..adapters.transfer import role_id as get_role_id
+        incoming_role = get_role_id(attachment)
+        mapped_role = (role_mappings or {}).get(incoming_role)
+        if incoming_role=='invoice' and existing.get('scheme_revision_id'):
+            mapped_role='invoice'
+        if mapped_role:
+            target_revision = str(existing.get("scheme_revision_id") or "")
+            target_definition = None
+            if target_revision:
+                from ..db.adapters import AdapterRepo
+                target_definition = AdapterRepo(entries_repo.db).get_revision(target_revision)
+            roles = (target_definition or {}).get("materials", [])
+            roles = roles.get("roles", []) if isinstance(roles, dict) else roles
+            if mapped_role not in {r.get("id") for r in roles}:
+                raise ValueError(f"材料角色映射目标不存在：{mapped_role}")
+            final_role, role_revision = mapped_role, target_revision or None
+            att_type=_validated_material_mapping(entries_repo,entry_id,target_revision,incoming_role,mapped_role,att_type,attachment.get('original_name') or stored_path)
+        else:
+            final_role = incoming_role
+            role_revision = _external_revision_id(entries_repo, incoming.get("adapter")) or None
         dest_dir = attachments_repo.data_root.entry_dir(entry_id)
         stored_name = attachments_repo._unique_name(dest_dir, entry_id, att_type, suffix)
         dest = dest_dir / stored_name
@@ -658,18 +1174,24 @@ def _merge_existing_entry(
             raise ValueError(f"附件 {attachment.get('original_name') or stored_name} 校验失败。")
         conn.execute(
             """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
-               sha256, note, added_at) VALUES(?,?,?,?,?,?,?,?)""",
+               sha256, note, added_at, role_id, role_definition_revision_id) VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (
                 uuid.uuid4().hex, entry_id, att_type,
                 str(attachment.get("original_name") or stored_name),
                 f"{entry_id}/{stored_name}", actual_digest, incoming_note,
-                str(attachment.get("added_at") or now),
+                str(attachment.get("added_at") or now), final_role, role_revision,
             ),
         )
         by_hash[actual_digest] = {"id": "", "sha256": actual_digest, "note": incoming_note}
         attachment_added += 1
     if attachment_added:
         changes.append(f"材料 {attachment_added}")
+
+    extension_fields = _merge_extension_data(entries_repo, entry_id, incoming.get("adapter") or {})
+    if extension_fields:
+        changes.append(f"附加信息 {len(extension_fields)}")
+    if _retain_adapter_source(entries_repo,entry_id,incoming.get('adapter')):
+        changes.append('来源方案信息')
 
     item_count = conn.execute(
         "SELECT COUNT(*) FROM items WHERE entry_id = ?", (entry_id,)
@@ -779,6 +1301,7 @@ def import_bindle(
     options: dict | None = None,
     *,
     inspected: dict | None = None,
+    adapter_service=None,
 ) -> dict:
     """把一个 .tidoc 包导入到当前库，附件落地到指定条目目录。
 
@@ -788,7 +1311,10 @@ def import_bindle(
     返回 {"imported": n, "tampered": [...], "entry_ids": [...]}。
     """
     options = dict(options or {})
+    adapter_service = _adapter_service(entries_repo, adapter_service)
     profile_overrides = options.get("profile_overrides") or {}
+    profile_mappings = options.get("profile_mappings") or {}
+    role_mappings_by_entry = options.get("role_mappings") or {}
     selection_supplied = "selected_profile_ids" in options
     selected_profile_ids = {
         str(value or "") for value in (options.get("selected_profile_ids") or [])
@@ -797,6 +1323,7 @@ def import_bindle(
         str(tag).strip() for tag in (options.get("tags") or []) if str(tag).strip()
     ))
     target_batch_id = str(options.get("batch_id") or "").strip()
+    requested_scheme_id = str(options.get("scheme_id") or "").strip()
     new_batch_name = str(options.get("batch_name") or "").strip()
     if target_batch_id and new_batch_name:
         raise ValueError("已有批次和新建批次只能选择一个。")
@@ -831,6 +1358,26 @@ def import_bindle(
         entry_batch_overrides[entry_index] = normalized
 
     inspected = inspected if inspected is not None else inspect_bindle(path)
+    if inspected:
+        preview_scheme = str(inspected.get("target_scheme_id") or "")
+        if preview_scheme and requested_scheme_id and preview_scheme != requested_scheme_id:
+            raise ValueError("导入目标方案与预览不一致，请重新打开导入预览。")
+        expected_digest = inspected.get("archive_digest")
+        if not expected_digest or _archive_digest(Path(path)) != expected_digest:
+            raise ValueError("预览后绑定包或本地条目已变化，请重新打开导入预览。")
+        current = copy.deepcopy(inspected)
+        for entry in current.get("entries", []):
+            for key in ("import_action", "existing_entry_id", "existing_batches", "merge_preview",
+                        "adapter_compatibility", "extension_merge_preview", "role_mapping_preview"):
+                entry.pop(key, None)
+        _annotate_import_actions(entries_repo, current, adapter_service=adapter_service,
+                                 target_scheme_id=inspected.get("target_scheme_id"))
+        matched = {e.get("existing_entry_id") for e in current["entries"] if e.get("existing_entry_id")}
+        current_version = _local_preview_version(entries_repo, matched)
+        if (inspected.get("local_version") is not None
+                and current_version != inspected.get("local_version")):
+            raise ValueError("预览后绑定包或本地条目已变化，请重新打开导入预览。")
+        inspected = current
     if inspected["tampered"] and not allow_tampered:
         return {
             "imported": 0,
@@ -878,8 +1425,11 @@ def import_bindle(
     profile_count_before = len(existing_profiles)
     profile_by_identity = {
         (str(profile.get("name") or "").strip(), str(profile.get("reviewer") or "").strip()): profile["id"]
-        for profile in existing_profiles
+        for profile in existing_profiles if str(profile.get("reviewer") or "").strip()
     }
+    profile_by_name: dict[str, list[str]] = defaultdict(list)
+    for profile in existing_profiles:
+        profile_by_name[str(profile.get("name") or "").strip()].append(profile["id"])
     source_profile_map: dict[str, str] = {}
     created_profile_ids: list[str] = []
     batch_created = False
@@ -893,9 +1443,16 @@ def import_bindle(
         if source_id and source_id in source_profile_map:
             return source_profile_map[source_id]
         profile = profile or {}
+        explicit = str(profile_mappings.get(source_id) or "").strip() if source_id else ""
+        if explicit:
+            if not conn.execute("SELECT 1 FROM profiles WHERE id=?", (explicit,)).fetchone():
+                raise ValueError("所选报账人映射已不存在，请重新打开导入预览。")
+            if source_id:
+                source_profile_map[source_id] = explicit
+            return explicit
         name = str(profile.get("name") or "").strip()
         reviewer = str(profile.get("reviewer") or "").strip()
-        if not name or not reviewer:
+        if not name:
             if not profile_id:
                 raise ValueError("绑定包缺少可用的报账人信息，且未指定导入归属。")
             if source_id:
@@ -903,7 +1460,13 @@ def import_bindle(
             return profile_id
 
         identity = (name, reviewer)
-        destination_id = profile_by_identity.get(identity)
+        if reviewer:
+            destination_id = profile_by_identity.get(identity)
+        else:
+            candidates = profile_by_name.get(name, [])
+            if len(candidates) > 1:
+                raise ValueError(f"报账人“{name}”存在多个匹配项，请在预览中明确选择。")
+            destination_id = candidates[0] if candidates else None
         if not destination_id:
             destination_id = uuid.uuid4().hex
             is_default = int(
@@ -917,6 +1480,7 @@ def import_bindle(
                 (destination_id, name, reviewer, is_default, now),
             )
             profile_by_identity[identity] = destination_id
+            profile_by_name[name].append(destination_id)
             created_profile_ids.append(destination_id)
         if source_id:
             source_profile_map[source_id] = destination_id
@@ -949,6 +1513,7 @@ def import_bindle(
                     changes = _merge_existing_entry(
                         conn, entries_repo, attachments_repo, zf, existing_id, e,
                         import_tags, now, created_files, bool(inspected["tampered"]),
+                        role_mappings=role_mappings_by_entry.get(str(entry_index), role_mappings_by_entry),
                     )
                     if changes:
                         if existing_id not in updated_ids:
@@ -987,6 +1552,23 @@ def import_bindle(
                 check_status = e.get("check_status", "warning")
                 check_message = e.get("check_message", "")
                 status = e.get("status", "draft")
+                source_adapter = e.get("adapter") or {}
+                exchange_revision_id = _external_revision_id(entries_repo, source_adapter)
+                target_scheme_id = ""
+                target_revision_id = ""
+                if requested_scheme_id and adapter_service:
+                    target_scheme = adapter_service.get_scheme(requested_scheme_id)
+                    target_scheme_id = target_scheme.get("id") or target_scheme.get("scheme_id") or ""
+                    target_revision_id = target_scheme.get("current_revision_id") or target_scheme.get("revision_id") or ""
+                elif not source_adapter and adapter_service:
+                    try:
+                        target_scheme_id, target_revision_id = adapter_service.default_binding()
+                    except Exception:
+                        pass
+                if source_adapter and not e.get("scheme_revision_id"):
+                    status = "partial" if status == "complete" else status
+                    check_status = "warning" if check_status not in {"blocked", "fail"} else check_status
+                    check_message = _merge_text(check_message, "来自其他报账方案的材料；本机尚未绑定该方案规则。")
                 if inspected["tampered"]:
                     check_status = "blocked"
                     status = "partial"
@@ -997,8 +1579,8 @@ def import_bindle(
                 conn.execute(
                     """INSERT INTO entries(id, profile_id, title, invoice_no, invoice_date,
                        seller, total, buyer_name, buyer_tax_id, category, tags, status,
-                       check_status, check_message, source, created_at, updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       check_status, check_message, source, created_at, updated_at,scheme_id,scheme_revision_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (new_id, destination_profile_id, e.get("title", ""), invoice_no,
                      e.get("invoice_date", ""), e.get("seller", ""), e.get("total", ""),
                      e.get("buyer_name", ""), e.get("buyer_tax_id", ""), e.get("category", ""),
@@ -1010,7 +1592,7 @@ def import_bindle(
                          ensure_ascii=False,
                      ), status,
                      check_status, check_message, e.get("source", "imported"),
-                     e.get("created_at") or now, now),
+                     e.get("created_at") or now, now, target_scheme_id or None, target_revision_id or None),
                 )
                 for field, fv in e.get("fields", {}).items():
                     conn.execute(
@@ -1098,14 +1680,36 @@ def import_bindle(
                         raise ValueError(
                             f"附件 {att.get('original_name') or stored_name} 校验失败。"
                         )
+                    from ..adapters.transfer import role_id as get_role_id
+                    source_role = get_role_id(att)
+                    mapping = role_mappings_by_entry.get(str(entry_index), role_mappings_by_entry)
+                    mapped_role = mapping.get(source_role) if isinstance(mapping, dict) else None
+                    if source_role=='invoice' and target_revision_id:
+                        mapped_role='invoice'
+                    target_revision = ""
+                    mapped_type=att.get('type','other')
+                    if mapped_role and target_revision_id:
+                        from ..db.adapters import AdapterRepo
+                        target_definition = AdapterRepo(entries_repo.db).get_revision(target_revision_id)
+                        role_rows = target_definition.get("materials", [])
+                        role_rows = role_rows.get("roles", []) if isinstance(role_rows, dict) else role_rows
+                        if mapped_role not in {r.get("id") for r in role_rows}:
+                            raise ValueError(f"材料角色映射目标不存在：{mapped_role}")
+                        stored_role, role_revision = mapped_role, target_revision_id
+                        mapped_type=_validated_material_mapping(entries_repo,new_id,target_revision_id,source_role,mapped_role,mapped_type,att.get('original_name') or stored_name)
+                    else:
+                        stored_role = source_role
+                        role_revision = exchange_revision_id or None
                     conn.execute(
                         """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
-                           sha256, note, added_at) VALUES(?,?,?,?,?,?,?,?)""",
-                        (uuid.uuid4().hex, new_id, att.get("type", "other"),
+                           sha256, note, added_at, role_id, role_definition_revision_id) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (uuid.uuid4().hex, new_id, mapped_type,
                          att.get("original_name", ""), f"{new_id}/{stored_name}",
-                         actual_digest, att.get("note", ""), att.get("added_at", now)),
+                         actual_digest, att.get("note", ""), att.get("added_at", now), stored_role, role_revision),
                     )
                 imported_ids.append(new_id)
+                _retain_adapter_source(entries_repo,new_id,source_adapter)
+                _merge_extension_data(entries_repo,new_id,source_adapter)
                 destination_by_entry_index[entry_index] = new_id
                 affected_entry_indexes.add(entry_index)
                 if invoice_no:
@@ -1210,6 +1814,8 @@ def import_bindle(
                         """INSERT INTO meta(key, value) VALUES('tidoc.multiClaimantMode', '1')
                            ON CONFLICT(key) DO UPDATE SET value = excluded.value"""
                     )
+            for affected_id in affected_ids:
+                entries_repo.recompute_status(affected_id,commit=False)
             conn.commit()
     except Exception as exc:
         conn.rollback()

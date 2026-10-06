@@ -42,6 +42,7 @@ def parse_xml(path: str | Path) -> ParsedInvoice:
         buyer_name=_child_text(root, "BuyerName"),
         buyer_tax_id=_child_text(root, "BuyerIdNum"),
         total=d(_child_text(root, "TotalTax-includedAmount")),
+        total_present=bool(_child_text(root, "TotalTax-includedAmount")),
         source="xml",
     )
 
@@ -287,11 +288,11 @@ def _looks_like_invoice_meta(line: str) -> bool:
     ))
 
 
-def _split_combined_party_names(line: str) -> list[str]:
+def _split_combined_party_names(line: str, context=None) -> list[str]:
     """拆分同一行里连写的销售方/购买方名称。"""
     from .validator import supported_titles
 
-    titles = supported_titles()
+    titles = supported_titles(context)
     if line in titles:
         return [line]
     for title in sorted(titles, key=len, reverse=True):
@@ -354,7 +355,7 @@ def _extract_explicit_role_parties(lines: list[str]) -> tuple[str, str, str, str
     return None
 
 
-def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
+def _extract_parties(lines: list[str], context=None) -> tuple[str, str, str, str]:
     """从文本行里抽销售方与购买方：名称 + 税号。
 
     兼容三种版面：
@@ -396,7 +397,7 @@ def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
             # 抬头名候选：跳过空行、税号行（"统一社会信用..."）、竖排单字残留
             if _looks_like_invoice_meta(line):
                 continue
-            for name in _split_combined_party_names(line):
+            for name in _split_combined_party_names(line, context):
                 if pending <= 0:
                     break
                 if _looks_like_invoice_meta(name):
@@ -427,7 +428,7 @@ def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
         # 有时购买方在前；用已配置抬头直接识别本校抬头作为购买方，更稳。
         from .validator import supported_titles
 
-        titles = supported_titles()
+        titles = supported_titles(context)
         first, second = parties[0], parties[1]
         if any(t and t in first[0] for t in titles):
             buyer_name, buyer_tax_id = first
@@ -443,16 +444,16 @@ def _extract_parties(lines: list[str]) -> tuple[str, str, str, str]:
         from .validator import supported_titles
 
         only_name, only_tax = parties[0]
-        if any(t and t in only_name for t in supported_titles()):
+        if any(t and t in only_name for t in supported_titles(context)):
             buyer_name, buyer_tax_id = only_name, only_tax
         else:
             seller_name, seller_tax_id = only_name, only_tax
     return seller_name, seller_tax_id, buyer_name, buyer_tax_id
 
 
-def _extract_pdf_buyer(lines: list[str]) -> tuple[str, str]:
+def _extract_pdf_buyer(lines: list[str], context=None) -> tuple[str, str]:
     # 旧路径兼容：只返回购买方
-    _, _, buyer_name, buyer_tax_id = _extract_parties(lines)
+    _, _, buyer_name, buyer_tax_id = _extract_parties(lines, context)
     if buyer_name:
         return buyer_name, buyer_tax_id
     # 兜底：用日期行的下一两行
@@ -466,8 +467,8 @@ def _extract_pdf_buyer(lines: list[str]) -> tuple[str, str]:
     return "", ""
 
 
-def _extract_pdf_seller(lines: list[str], buyer_tax_id: str, buyer_name: str) -> str:
-    seller_name, *_ = _extract_parties(lines)
+def _extract_pdf_seller(lines: list[str], buyer_tax_id: str, buyer_name: str, context=None) -> str:
+    seller_name, *_ = _extract_parties(lines, context)
     if seller_name:
         return seller_name
     # 旧路径兜底
@@ -1014,13 +1015,13 @@ def _parse_columnar_pdf_items(lines: list[str]) -> list[ParsedItem]:
     return []
 
 
-def parse_pdf(path: str | Path) -> ParsedInvoice:
+def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
     path = Path(path)
     text = _pdf_text(path)
-    invoice = _parse_invoice_text(text, source="pdf")
+    invoice = _parse_invoice_text(text, source="pdf", context=context)
     try:
         layout_text = _pdf_layout_text(path)
-        layout_invoice = _parse_invoice_text(layout_text, source="pdf-layout")
+        layout_invoice = _parse_invoice_text(layout_text, source="pdf-layout", context=context)
         if not invoice.invoice_no:
             invoice.invoice_no = layout_invoice.invoice_no
         if not invoice.invoice_date:
@@ -1039,18 +1040,18 @@ def parse_pdf(path: str | Path) -> ParsedInvoice:
     return invoice
 
 
-def _parse_invoice_text(text: str, source: str = "pdf") -> ParsedInvoice:
+def _parse_invoice_text(text: str, source: str = "pdf", context=None) -> ParsedInvoice:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     lines = _normalize_party_lines(lines)
 
     invoice_no = _extract_invoice_no(text)
     invoice_date = _extract_invoice_date(text)
 
-    seller_name, seller_tax_id, buyer_name, buyer_tax_id = _extract_parties(lines)
+    seller_name, seller_tax_id, buyer_name, buyer_tax_id = _extract_parties(lines, context)
     if not seller_name:
         # 兜底走旧的「日期行下两行就是购买方」启发式
-        buyer_name, buyer_tax_id = _extract_pdf_buyer(lines)
-        seller_name = _extract_pdf_seller(lines, buyer_tax_id, buyer_name)
+        buyer_name, buyer_tax_id = _extract_pdf_buyer(lines, context)
+        seller_name = _extract_pdf_seller(lines, buyer_tax_id, buyer_name, context)
 
     # Only allow horizontal spacing after the currency sign.  ``\s*`` also crosses a
     # newline, so a trailing ``¥`` in the tax line could consume a bank/account number
@@ -1072,6 +1073,7 @@ def _parse_invoice_text(text: str, source: str = "pdf") -> ParsedInvoice:
         buyer_name=buyer_name,
         buyer_tax_id=buyer_tax_id,
         total=total,
+        total_present=bool(amounts),
         source=source,
     )
     items = _parse_pdf_items(lines)
@@ -1137,17 +1139,17 @@ def _aspose_text(path: Path) -> str:
     return "\n".join(lines)
 
 
-def parse_aspose_xml(path: str | Path) -> ParsedInvoice:
+def parse_aspose_xml(path: str | Path, context=None) -> ParsedInvoice:
     """解析 Aspose PDF-转-XML 的版面 XML（Glyphs/Text 流）。
 
     把 Glyphs 按 PDF 坐标重排成行，再走与 PDF 相同的 `_parse_invoice_text` 启发式，
     用来兜底那些 pypdf 抽取破碎、但 Aspose 能拿到完整版面文字的发票。
     """
     path = Path(path)
-    return _parse_invoice_text(_aspose_text(path), source="aspose-xml")
+    return _parse_invoice_text(_aspose_text(path), source="aspose-xml", context=context)
 
 
-def parse_invoice_files(xml_path: str | Path | None = None, pdf_path: str | Path | None = None) -> ParsedInvoice:
+def parse_invoice_files(xml_path: str | Path | None = None, pdf_path: str | Path | None = None, context=None) -> ParsedInvoice:
     """给定 XML / PDF 路径（可只给其一），返回最优解析结果。
 
     两类 XML：
@@ -1163,10 +1165,10 @@ def parse_invoice_files(xml_path: str | Path | None = None, pdf_path: str | Path
                 invoice.source = "xml+pdf"
             return invoice
         # 否则当作 Aspose 版面 XML
-        invoice = parse_aspose_xml(xml_path)
+        invoice = parse_aspose_xml(xml_path, context=context)
         if pdf_path:
             invoice.source = "aspose-xml+pdf"
         return invoice
     if pdf_path:
-        return parse_pdf(pdf_path)
+        return parse_pdf(pdf_path, context=context)
     raise ValueError("至少需要提供 XML 或 PDF 之一。")

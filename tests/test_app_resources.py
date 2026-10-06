@@ -213,7 +213,9 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "batchNoteFlow" in source
     assert "batch-folder-note" in source
     assert "批次备注：" in source
-    assert "focusedBatch?.note" in source
+    adapter_source = (web / "adapter-ui.js").read_text("utf-8")
+    assert "AdapterUI.print(ids)" in source
+    assert "batchFields" in adapter_source
     assert "批次备注" in source
     assert "批次备注已保存" in source
     assert "批次备注（可选）" in source

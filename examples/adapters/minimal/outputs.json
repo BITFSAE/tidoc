@@ -1,0 +1,18 @@
+{
+  "outputs": [
+    {
+      "id": "reimbursement",
+      "label": "简洁报账单",
+      "type": "docx",
+      "template": "templates/reimbursement.docx",
+      "default_selected": true,
+      "payee_mode": "none",
+      "group_by": [
+        "title"
+      ],
+      "rows": "invoice_summary",
+      "amount_basis": "invoice",
+      "filename": "{title.short_name}_报账单.docx"
+    }
+  ]
+}

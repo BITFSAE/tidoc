@@ -37,7 +37,9 @@ def test_component_self_test_imports_full_print_stack():
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout)["ok"] is True
+    result=json.loads(proc.stdout)
+    assert result["ok"] is True
+    assert result["smoke_outputs"]==["docx","pdf_bundle"]
 
 
 def test_merge_pdfs(tmp_path):

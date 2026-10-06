@@ -1,0 +1,54 @@
+{
+  "organization": {
+    "name": "BITFSAE",
+    "department": "机械与车辆学院",
+    "purpose": "方程式车队比赛物资采买",
+    "storage_location": "工训楼"
+  },
+  "titles": [
+    {
+      "id": "bit_university",
+      "name": "北京理工大学",
+      "tax_id": "12100000400009127B",
+      "short_name": "北京理工大学",
+      "color": "neutral"
+    },
+    {
+      "id": "bit_foundation",
+      "name": "北京理工大学教育基金会",
+      "tax_id": "53100000500021676K",
+      "short_name": "北京理工大学教育基金会",
+      "color": "neutral"
+    }
+  ],
+  "settings": {
+    "profile.reviewer_required": {
+      "fixed": true,
+      "editable": false,
+      "presentation": "visible"
+    },
+    "entry.default_paid_to_invoice": {
+      "default": true,
+      "editable": true,
+      "presentation": "advanced"
+    },
+    "print.numbering": {
+      "default": true,
+      "editable": true,
+      "presentation": "visible"
+    },
+    "print.image_layout": {
+      "default": "a4_landscape_2",
+      "editable": true,
+      "presentation": "visible"
+    },
+    "payee.personnel_number_label": {
+      "default": "学号",
+      "editable": true,
+      "presentation": "advanced"
+    }
+  },
+  "default_outputs": [
+    "reimbursement"
+  ]
+}

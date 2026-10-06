@@ -2,6 +2,7 @@
 pywebview==6.2.1   # Native window using the system WebView
 pypdf==6.14.2      # PDF text extraction
 Send2Trash==2.1.0  # Recoverable cleanup after verification PDF archival
+jsonschema==4.26.0  # JSON Schema Draft 2020-12 validation for team adapter packages
 
 # Standard-library modules need no installation: xml, sqlite3, hashlib, hmac, zipfile
 

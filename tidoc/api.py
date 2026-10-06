@@ -99,7 +99,7 @@ def _guard(func):
                 return result
             return {"ok": True, "data": result}
         except Exception as exc:  # noqa: BLE001 — 桥不能抛，统一转错误
-            return {"ok": False, "error": str(exc)}
+            return {"ok":False,"error":str(exc),**({"diagnostics":exc.diagnostics} if getattr(exc,"diagnostics",None) else {})}
     return wrapper
 
 
@@ -118,13 +118,17 @@ class Api:
         self.attachments = AttachmentRepo(self.db, self.data_root)
         self.batches = BatchRepo(self.db)
         self.ocr = OcrRepo(self.db)
+        from .adapters.service import AdapterService
+        self.adapters = AdapterService(self.db,self.data_root)
+        self.adapters.bootstrap()
+        self.db.adapter_service = self.adapters
+        self._export_planner_instance = None
         self._window = None
         self._update_health_path = Path(update_health_path) if update_health_path else None
         self._verification_sessions: dict[str, dict] = {}
         self._bindle_inspection_cache: dict | None = None
         self._launch_files = [launch_file] if launch_file else []
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
-        self._apply_title_profiles()
         self._sync_entry_statuses()
         from .services.updater import CoreUpdateManager
         self._core_updater = CoreUpdateManager(self.data_root.updates_dir)
@@ -188,11 +192,16 @@ class Api:
 
     @_guard
     def create_profile(self, name, reviewer, is_default=False, optional=None):
+        if self.adapters.get_scheme()["definition"].get("effective_settings",{}).get("profile.reviewer_required") and not str(reviewer or "").strip():
+            raise ValueError("当前报账方案要求填写审核人。")
         return self.profiles.create(name, reviewer, is_default, **(optional or {}))
 
     @_guard
     def update_profile(self, profile_id, fields=None):
-        return self.profiles.update(profile_id, **(fields or {}))
+        result=self.profiles.update(profile_id, **(fields or {}))
+        for row in self.db.conn.execute("SELECT id FROM entries WHERE profile_id=?",(profile_id,)).fetchall():
+            self.entries.recompute_status(row["id"])
+        return result
 
     @_guard
     def set_default_profile(self, profile_id):
@@ -207,67 +216,244 @@ class Api:
     # ------------------------------------------------------------ 应用偏好
     @_guard
     def app_preference(self, key, default=""):
+        scheme=self.adapters.get_scheme()
+        setting_aliases={DEFAULT_PAID_TO_INVOICE_PREF_KEY:"entry.default_paid_to_invoice",PAYMENT_OCR_PREF_KEY:"assist.payment_ocr",BINDLE_INCLUDE_NOTES_PREF_KEY:"transfer.include_notes",BINDLE_INCLUDE_TAGS_PREF_KEY:"transfer.include_tags"}
+        if str(key) in setting_aliases:
+            result=scheme["definition"]["effective_settings"].get(setting_aliases[str(key)])
+            return "1" if (result is True or key==PAYMENT_OCR_PREF_KEY and result!="manual") else "0"
+        if str(key)==DEFAULT_ENTRY_TITLE_PREF_KEY:
+            return self._default_entry_title()
+        if str(key).startswith("tidoc.operator."):
+            selected=self.adapters.payees.get_default(scheme["id"]) or {}
+            field={"name":"name","student_id":"personnel_id","contact":"contact","bank_name":"bank_name","bank_card":"account_number"}.get(str(key).split(".")[-1])
+            return selected.get(field,"") if field else ""
         return self._preference_value(str(key), str(default))
 
     @_guard
     def set_app_preference(self, key, value):
+        from .adapters.service import LEGACY_KEYS
+        if str(key) in LEGACY_KEYS:
+            self.adapters.update_legacy_preference(str(key),str(value))
         self._set_preference_value(str(key), str(value))
         return {"key": str(key), "value": str(value)}
 
     @_guard
     def material_requirements(self):
-        return self.entries.material_requirements()
+        return self.adapters.material_requirements()
 
     @_guard
     def set_material_requirements(self, requirements=None):
-        values = self.entries.set_material_requirements(requirements or {})
-        self._sync_entry_statuses()
+        values = self.adapters.update_material_requirements(requirements or {})
         return values
 
     # ------------------------------------------------------------ 抬头与税号
-    def _apply_title_profiles(self):
-        """把持久化的抬头配置应用到识别引擎；没有保存过时恢复内置默认。"""
-        from .engine import set_title_profiles
+    def _recognition_context(self, scheme_id=None, entry_id=None):
+        from .engine import RecognitionContext
+        if entry_id:
+            return self.entries.recognition_context(entry_id)
+        return RecognitionContext.from_definition(self.adapters.get_scheme(scheme_id)["definition"])
 
-        raw = self._preference_value(TITLE_PROFILES_PREF_KEY)
-        if not raw:
-            set_title_profiles(None)
-            return
-        try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return
-        if isinstance(parsed, list):
-            set_title_profiles([item for item in parsed if isinstance(item, dict)])
+    def _policy_context(self, scheme_id=None, entry_id=None):
+        from .engine import PolicyContext
+        if entry_id:
+            return self.entries.policy_context(entry_id)
+        return PolicyContext.from_definition(self.adapters.get_scheme(scheme_id)["definition"])
+
+    def _require_adapter_ready(self):
+        if not self.adapters.setup_state().get("ready"):
+            raise ValueError("请先完成报账方案选择或原有设置迁移。")
 
     @_guard
     def title_profiles(self):
-        from .engine import title_profiles as current_profiles
-
-        return {
-            "profiles": [
-                {"name": name, "tax_id": tax_id}
-                for name, tax_id in current_profiles()
-            ]
-        }
+        titles = self.adapters.get_scheme()["definition"].get("scheme",{}).get("titles",[])
+        return {"profiles":[{"name":t["name"],"tax_id":t.get("tax_id","")} for t in titles],"titles":titles}
 
     @_guard
     def set_title_profiles(self, profiles=None):
-        """保存抬头与购买方税号配置，并让识别、校验立即按新配置执行。"""
-        from .engine import set_title_profiles
+        self.adapters.update_titles([p for p in (profiles or []) if str(p.get("name","")).strip()])
+        return self.title_profiles()["data"]
 
-        normalized = set_title_profiles(profiles or [])
-        value = json.dumps(
-            [{"name": name, "tax_id": tax_id} for name, tax_id in normalized],
-            ensure_ascii=False,
-        )
-        self._set_preference_value(TITLE_PROFILES_PREF_KEY, value)
-        return {
-            "profiles": [
-                {"name": name, "tax_id": tax_id}
-                for name, tax_id in normalized
-            ]
-        }
+    @_guard
+    def list_schemes(self, include_disabled=False):
+        return self.adapters.list_schemes(include_disabled)
+
+    @_guard
+    def scheme_details(self, scheme_id=None):
+        return self.adapters.get_scheme(scheme_id)
+
+    @_guard
+    def adapter_setup_state(self):
+        return self.adapters.setup_state()
+
+    @_guard
+    def complete_adapter_setup(self, scheme_id=None, legacy_preferences=None):
+        result = self.adapters.complete_adapter_setup(scheme_id,legacy_preferences)
+        self._sync_entry_statuses()
+        return result
+
+    @_guard
+    def inspect_adapter(self,path,operation_id=None):
+        return self.adapters.inspect_adapter(path,operation_id=operation_id)
+
+    @_guard
+    def choose_adapter_file(self,operation_id=None):
+        paths = self.pick_files(False,["报账方案 (*.tidoc-preset)"])
+        if not paths.get("ok"):
+            return paths
+        selected = paths.get("paths") or []
+        return self.adapters.inspect_adapter(selected[0],operation_id=operation_id) if selected else None
+
+    @_guard
+    def install_adapter(self,preview_id,options=None,operation_id=None):
+        return self.adapters.install_adapter(preview_id,options,operation_id=operation_id)
+
+    def adapter_operation_status(self,operation_id):
+        # Progress must remain readable while the mutation holds the API lock.
+        try:
+            return {"ok":True,"data":self.adapters.operation_status(operation_id)}
+        except Exception as exc:
+            return {"ok":False,"error":str(exc)}
+
+    def cancel_adapter_operation(self,operation_id):
+        try:
+            return {"ok":True,"data":self.adapters.cancel_operation(operation_id)}
+        except Exception as exc:
+            return {"ok":False,"error":str(exc)}
+
+    @_guard
+    def set_default_scheme(self,scheme_id):
+        return self.adapters.set_default_scheme(scheme_id)
+
+    @_guard
+    def copy_scheme(self,scheme_id,name):
+        return self.adapters.copy_scheme(scheme_id,name)
+
+    @_guard
+    def disable_scheme(self,scheme_id):
+        return self.adapters.disable_scheme(scheme_id)
+
+    @_guard
+    def update_scheme_settings(self,scheme_id,expected_revision,values):
+        return self.adapters.update_scheme_settings(scheme_id,expected_revision,values)
+
+    @_guard
+    def restore_scheme_defaults(self,scheme_id,expected_revision,keys=None):
+        return self.adapters.restore_setting_defaults(scheme_id,expected_revision,keys)
+
+    @_guard
+    def scheme_revision_history(self,scheme_id):
+        return self.adapters.revision_history(scheme_id)
+
+    @_guard
+    def rollback_scheme(self,scheme_id,revision_id,expected_revision=None):
+        return self.adapters.rollback_scheme(scheme_id,revision_id,expected_revision)
+
+    @_guard
+    def export_adapter(self,scheme_id,options=None):
+        return self.adapters.export_adapter(scheme_id,options or {})
+
+    @_guard
+    def preview_rebind(self,entry_ids,scheme_id,revision_id=None,mappings=None):
+        return self.adapters.preview_rebind(entry_ids,scheme_id,revision_id,mappings)
+
+    @_guard
+    def apply_rebind(self,preview_id,operation_id=None):
+        return self.adapters.apply_rebind(preview_id,operation_id=operation_id)
+
+    @_guard
+    def get_form_description(self,scope,owner_id,scheme_id=None,revision_id=None):
+        return self.adapters.get_form_description(scope,owner_id,scheme_id,revision_id)
+
+    @_guard
+    def preview_form_description(self,scope,owner_id,values,scheme_id=None,revision_id=None):
+        return self.adapters.preview_form_description(scope,owner_id,values,scheme_id,revision_id)
+
+    @_guard
+    def update_batch_output_settings(self,batch_id,values,expected_updated_at=None):
+        return self.adapters.update_batch_output_settings(batch_id,values,expected_updated_at)
+
+    @_guard
+    def save_extension_values(self,scope,owner_id,values,scheme_id=None,expected_version=None,revision_id=None):
+        return self.adapters.save_extension_values(scope,owner_id,values,scheme_id,expected_version,revision_id)
+
+    @_guard
+    def batch_save_extension_values(self,entry_ids,field_id,value):
+        forms = [self.adapters.get_form_description("entry",eid) for eid in dict.fromkeys(entry_ids or [])]
+        definitions = [next((f for f in form["fields"] if f["id"]==field_id),None) for form in forms]
+        if not definitions or any(f is None for f in definitions) or any((f["type"],f.get("options"),form["package_id"]) != (definitions[0]["type"],definitions[0].get("options"),forms[0]["package_id"]) for f,form in zip(definitions,forms)):
+            raise ValueError("所选条目的字段定义不兼容，请按方案分别填写。")
+        with self.db.transaction():
+            for form in forms:
+                self.adapters.extensions.save_values("entry",form["owner_id"],form["scheme_id"],form["revision_id"],{field_id:value},commit=False)
+                self.entries.recompute_status(form["owner_id"],commit=False)
+        return {"changed":len(forms)}
+
+    @_guard
+    def list_payees(self):
+        return self.adapters.list_payees()
+
+    @_guard
+    def save_payee(self,payee_id=None,values=None):
+        return self.adapters.save_payee(payee_id,values)
+
+    @_guard
+    def delete_payee(self,payee_id):
+        return self.adapters.payees.delete(payee_id)
+
+    @_guard
+    def set_payee_mapping(self,scheme_id,profile_id,payee_id):
+        return self.adapters.set_payee_mapping(scheme_id,profile_id,payee_id)
+
+    @_guard
+    def set_scheme_payee(self,scheme_id,payee_id):
+        return self.adapters.set_scheme_payee(scheme_id,payee_id)
+
+    @_guard
+    def set_batch_payee(self,batch_id,scheme_id,payee_id):
+        return self.adapters.payees.set_batch(batch_id,scheme_id,payee_id)
+
+    def _export_planner(self):
+        if self._export_planner_instance is None:
+            from .services.export_plan import ExportPlanner
+            self._export_planner_instance = ExportPlanner(self.db,self.data_root,self.adapters)
+            self._export_planner_instance.recover_jobs()
+        return self._export_planner_instance
+
+    @_guard
+    def preview_export(self,entry_ids,output_ids=None,options=None):
+        self._require_adapter_ready()
+        return self._export_planner().preview(entry_ids,output_ids,options)
+
+    @_guard
+    def run_export(self,plan_id,output_dir=None):
+        self._require_adapter_ready()
+        return self._export_planner().run(plan_id,output_dir)
+
+    def cancel_export(self,plan_id):
+        # Cancellation may run while the guarded rendering request is in progress.
+        try:
+            return {"ok":True,"data":self._export_planner().cancel(plan_id)}
+        except Exception as exc:
+            return {"ok":False,"error":str(exc)}
+
+    def get_export_progress(self,job_id):
+        try:
+            planner=self._export_planner_instance
+            return {"ok":True,"data":planner.get_progress(job_id) if planner else None}
+        except Exception as exc:
+            return {"ok":False,"error":str(exc)}
+
+    @_guard
+    def list_export_jobs(self):
+        return self._export_planner().list_jobs()
+
+    @_guard
+    def get_export_job(self,job_id):
+        return self._export_planner().get_job(job_id)
+
+    @_guard
+    def regenerate_export(self,job_id):
+        return self._export_planner().regenerate(job_id)
 
     @_guard
     def take_launch_file(self):
@@ -350,12 +536,12 @@ class Api:
 
     # ------------------------------------------------------------ 录入 / 识别
     @_guard
-    def parse_files(self, xml_path=None, pdf_path=None):
+    def parse_files(self, xml_path=None, pdf_path=None, scheme_id=None):
         """先解析、不落库，供前端预览识别结果与校验。"""
         from .engine import check_invoice, parse_invoice_files
 
-        parsed = parse_invoice_files(xml_path, pdf_path)
-        check = check_invoice(parsed)
+        parsed = parse_invoice_files(xml_path, pdf_path,context=self._recognition_context(scheme_id))
+        check = check_invoice(parsed,context=self._policy_context(scheme_id))
         return {"parsed": parsed.to_dict(), "check": check.to_dict()}
 
     @_guard
@@ -395,7 +581,7 @@ class Api:
                     self.data_root.attachments_dir / pdf_attachment["stored_path"]
                     if pdf_attachment else None
                 )
-                parsed = parse_invoice_files(xml_path, pdf_path)
+                parsed = parse_invoice_files(xml_path, pdf_path,context=self._recognition_context(entry_id=entry_id))
                 if (
                     entry.get("invoice_no")
                     and parsed.invoice_no
@@ -413,7 +599,7 @@ class Api:
                     self.entries.update_recognized_buyer_tax_id(
                         entry_id, parsed.buyer_tax_id
                     )
-                check = check_invoice(parsed, expected_title=entry.get("title", ""))
+                check = check_invoice(parsed, expected_title=entry.get("title", ""),context=self._policy_context(entry_id=entry_id))
                 self.entries.replace_recognized_items(
                     entry_id,
                     parsed.items,
@@ -445,28 +631,42 @@ class Api:
     @_guard
     def create_entry(self, profile_id, title="", xml_path=None, pdf_path=None,
                      payment_paths=None, inspection_path=None, status="draft",
-                     physical_paths=None):
+                     physical_paths=None,scheme_id=None,batch_id=None):
         """从上传文件创建条目：解析 → 校验 → 落库 → 复制附件。"""
         from .engine import check_invoice, parse_invoice_files
 
+        self._require_adapter_ready()
+        scheme = self.adapters.get_scheme(scheme_id)
+        if batch_id:
+            batch = self.batches.get(batch_id)
+            if not scheme_id and batch and batch.get("default_scheme_id"):
+                scheme = self.adapters.get_scheme(batch["default_scheme_id"])
+                scheme["current_revision_id"] = batch["default_revision_id"]
+                scheme["definition"] = self.adapters.get_revision(batch["default_revision_id"])
+        from .engine import RecognitionContext, PolicyContext
+        recognition = RecognitionContext.from_definition(scheme["definition"])
+        policy = PolicyContext.from_definition(scheme["definition"])
         parsed = None
         if xml_path or pdf_path:
-            parsed = parse_invoice_files(xml_path, pdf_path)
+            parsed = parse_invoice_files(xml_path, pdf_path,context=recognition)
             self._ensure_invoice_not_duplicate(parsed, [xml_path, pdf_path])
 
         entry_id = None
-        title = title or self._default_entry_title()
+        settings=scheme["definition"].get("effective_settings",{})
+        default_title_id=settings.get("entry.default_title_id")
+        title = title or next((item["name"] for item in scheme["definition"]["scheme"].get("titles",[]) if item["id"]==default_title_id),"")
         try:
             entry_id = self.entries.create(
                 profile_id,
                 title=title,
                 parsed=parsed,
                 status=status,
-                default_paid_to_total=self._default_paid_to_invoice(),
+                default_paid_to_total=settings.get("entry.default_paid_to_invoice",True),
+                scheme_id=scheme["id"],scheme_revision_id=scheme["current_revision_id"],
             )
 
             if parsed:
-                check = check_invoice(parsed, expected_title=title)
+                check = check_invoice(parsed, expected_title=title,context=policy)
                 self.entries.set_check(entry_id, check.status, check.message)
 
             from .db import (
@@ -491,6 +691,8 @@ class Api:
             if inspection_path:
                 self.attachments.add(entry_id, inspection_path, TYPE_INSPECTION)
 
+            if batch_id:
+                self.batches.add_entries(batch_id,[entry_id])
             self.entries.recompute_status(entry_id)
             return self.entries.get(entry_id)
         except Exception as exc:
@@ -581,7 +783,9 @@ class Api:
             paid_amount = ""
             warning = ""
             try:
-                if suffix == ".tidoc":
+                if suffix == ".tidoc-preset":
+                    att_type = "adapter_package"
+                elif suffix == ".tidoc":
                     att_type = "bindle_package"
                 elif suffix == ".xml":
                     att_type = TYPE_INVOICE_XML
@@ -631,7 +835,7 @@ class Api:
         )
 
     @_guard
-    def batch_create_entries(self, profile_id, groups, title=""):
+    def batch_create_entries(self, profile_id, groups, title="",scheme_id=None,batch_id=None):
         """按前端确认后的分组批量创建条目。
 
         groups: [{"files": [{"path", "type"}...]}...]
@@ -641,7 +845,20 @@ class Api:
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
 
         created, created_entries, failed = [], [], []
-        title = title or self._default_entry_title()
+        self._require_adapter_ready()
+        scheme = self.adapters.get_scheme(scheme_id)
+        if batch_id and not scheme_id:
+            batch = self.batches.get(batch_id)
+            if batch and batch.get("default_scheme_id"):
+                scheme = self.adapters.get_scheme(batch["default_scheme_id"])
+                scheme["current_revision_id"] = batch["default_revision_id"]
+                scheme["definition"] = self.adapters.get_revision(batch["default_revision_id"])
+        from .engine import RecognitionContext,PolicyContext
+        recognition = RecognitionContext.from_definition(scheme["definition"])
+        policy = PolicyContext.from_definition(scheme["definition"])
+        settings=scheme["definition"].get("effective_settings",{})
+        default_title_id=settings.get("entry.default_title_id")
+        title = title or next((item["name"] for item in scheme["definition"]["scheme"].get("titles",[]) if item["id"]==default_title_id),"")
         for g in (groups or []):
             files = g.get("files") or []
             invoice_files = [f for f in files if f.get("type") == TYPE_INVOICE_PDF]
@@ -650,24 +867,27 @@ class Api:
             xml_path = next((f["path"] for f in xml_files), None)
             entry_id = None
             try:
-                if not pdf_path:
-                    raise ValueError("缺少发票 PDF")
-                parsed = parse_invoice_files(xml_path, pdf_path)
+                if not pdf_path and not xml_path:
+                    raise ValueError("缺少发票 PDF 或 XML")
+                parsed = parse_invoice_files(xml_path, pdf_path,context=recognition)
                 self._ensure_invoice_not_duplicate(parsed, [xml_path, pdf_path])
                 entry_id = self.entries.create(
                     profile_id,
                     title=title,
                     parsed=parsed,
                     status="draft",
-                    default_paid_to_total=self._default_paid_to_invoice(),
+                    default_paid_to_total=settings.get("entry.default_paid_to_invoice",True),
+                    scheme_id=scheme["id"],scheme_revision_id=scheme["current_revision_id"],
                 )
-                check = check_invoice(parsed, expected_title=title)
+                check = check_invoice(parsed, expected_title=title,context=policy)
                 self.entries.set_check(entry_id, check.status, check.message)
                 for f in invoice_files:
                     self.attachments.add(entry_id, f["path"], TYPE_INVOICE_PDF)
                 for f in xml_files:
                     self.attachments.add(entry_id, f["path"], TYPE_INVOICE_XML)
                 self.entries.mark_invoice_recognized(entry_id)
+                if batch_id:
+                    self.batches.add_entries(batch_id,[entry_id])
                 self.entries.recompute_status(entry_id)
                 created.append(entry_id)
                 created_entries.append({
@@ -904,12 +1124,12 @@ class Api:
 
     # ------------------------------------------------------------ 附件
     @_guard
-    def add_attachment(self, entry_id, src_path, att_type, note="", options=None):
+    def add_attachment(self, entry_id, src_path, att_type, note="", options=None,role_id=None):
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
 
         options = options or {}
         self._validate_attachment_for_entry(entry_id, src_path, att_type)
-        att = self.attachments.add(entry_id, src_path, att_type, note)
+        att = self.attachments.add(entry_id, src_path, att_type, note,role_id=role_id or options.get("role_id"))
         if att_type in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}:
             self.entries.clear_invoice_recognition(entry_id)
         if att_type == TYPE_PAYMENT and not options.get("skip_payment_ocr", False):
@@ -936,6 +1156,16 @@ class Api:
             self.entries.clear_payment_check(entry_id)
         self.entries.recompute_status(entry_id)
         return att
+
+    @_guard
+    def reclassify_attachment(self,attachment_id,role_id,actor_id=""):
+        previous = self.attachments.get(attachment_id)
+        result = self.attachments.reclassify(attachment_id,role_id,actor_id)
+        if previous.get("type") == "payment_screenshot" and result.get("type") != "payment_screenshot":
+            self.entries.restore_paid_amount_after_last_payment(result["entry_id"],previous.get("added_at") or "")
+            self.entries.refresh_payment_check(result["entry_id"])
+        self.entries.recompute_status(result["entry_id"])
+        return result
 
     @_guard
     def delete_attachment(self, att_id):
@@ -1018,7 +1248,7 @@ class Api:
         if att_type == TYPE_INVOICE_XML:
             if suffix != ".xml":
                 raise ValueError("发票 XML 只能添加 .xml 文件。")
-            parsed = parse_invoice_files(xml_path=path)
+            parsed = parse_invoice_files(xml_path=path,context=self._recognition_context(entry_id=entry_id))
             if not parsed.invoice_no or not (parsed.seller or parsed.buyer_name):
                 raise ValueError("这个 XML 不是可识别的官方电子发票 XML。")
             _validate_same_invoice(entry, parsed.invoice_no, path.name)
@@ -1030,7 +1260,7 @@ class Api:
             detected = classify_pdf_attachment_type(path)
             if detected == TYPE_INSPECTION:
                 raise ValueError("这个 PDF 像是发票查验单，请作为“查验单 PDF”添加。")
-            parsed = parse_invoice_files(pdf_path=path)
+            parsed = parse_invoice_files(pdf_path=path,context=self._recognition_context(entry_id=entry_id))
             if not parsed.invoice_no:
                 raise ValueError("无法从这个 PDF 识别发票号，请确认它是原始发票 PDF。")
             _validate_same_invoice(entry, parsed.invoice_no, path.name)
@@ -1042,7 +1272,7 @@ class Api:
             detected = classify_pdf_attachment_type(path)
             if detected != TYPE_INSPECTION:
                 try:
-                    parsed = parse_invoice_files(pdf_path=path)
+                    parsed = parse_invoice_files(pdf_path=path,context=self._recognition_context(entry_id=entry_id))
                 except Exception:
                     parsed = None
                 if parsed and parsed.invoice_no:
@@ -1056,7 +1286,7 @@ class Api:
         from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION, VALUE_SOURCE_PAYMENT_OCR
         from .services.folder_import import extract_payment_image_amount
 
-        if not self._payment_ocr_enabled():
+        if not self._payment_ocr_enabled(entry_id):
             self.entries.clear_payment_check(entry_id)
             return "", False
         att = attachment if isinstance(attachment, dict) else None
@@ -1109,6 +1339,7 @@ class Api:
         from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION
 
         invoice_total = invoice_pending = payment_total = payment_pending = 0
+        payment_enabled = False
         seen = set()
         for entry_id in entry_ids or []:
             if not entry_id or entry_id in seen:
@@ -1117,6 +1348,7 @@ class Api:
             entry = self.entries.get(entry_id)
             if not entry:
                 continue
+            payment_enabled = payment_enabled or self._payment_ocr_enabled(entry_id)
             attachments = entry.get("attachments") or []
             if any(a["type"] in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML} for a in attachments):
                 invoice_total += 1
@@ -1134,7 +1366,7 @@ class Api:
                 "total": payment_total,
                 "pending": payment_pending,
                 "current": payment_total - payment_pending,
-                "enabled": self._payment_ocr_enabled(),
+                "enabled": payment_enabled,
             },
         }
 
@@ -1162,7 +1394,7 @@ class Api:
             invoice_result["skipped_current"] = len(candidates) - len(targets)
             result["invoice"] = invoice_result
         if "payment" in requested:
-            if not self._payment_ocr_enabled():
+            if not any(self._payment_ocr_enabled(eid) for eid in ids):
                 result["payment"] = {
                     "processed": 0, "recognized": 0, "unrecognized": 0,
                     "failed": 0, "skipped_current": 0, "disabled": True,
@@ -1173,6 +1405,8 @@ class Api:
             for entry_id in ids:
                 entry = self.entries.get(entry_id)
                 if not entry:
+                    continue
+                if not self._payment_ocr_enabled(entry_id):
                     continue
                 for att in entry.get("attachments") or []:
                     if att.get("type") != TYPE_PAYMENT:
@@ -1560,7 +1794,12 @@ class Api:
         return build_summary(self.entries, entry_ids)
 
     @_guard
-    def export_bindle(self, entry_ids, out_name=None):
+    def preview_bindle_transfer(self,entry_ids):
+        from .services.bindle import preview_bindle_transfer
+        return preview_bindle_transfer(self.entries,entry_ids,self.adapters)
+
+    @_guard
+    def export_bindle(self, entry_ids, out_name=None,options=None):
         from .services.bindle import export_bindle
 
         name = out_name or "绑定包"
@@ -1572,8 +1811,9 @@ class Api:
             entry_ids,
             out_path,
             lookup,
-            include_notes=self._preference_value(BINDLE_INCLUDE_NOTES_PREF_KEY, "1") != "0",
-            include_tags=self._preference_value(BINDLE_INCLUDE_TAGS_PREF_KEY, "1") != "0",
+            include_notes=(options or {}).get('include_notes'),
+            include_tags=(options or {}).get('include_tags'),
+            adapter_service=self.adapters,include_ask_fields=(options or {}).get("include_ask_fields",[]),
         )
         return {"path": str(result), "count": len(entry_ids)}
 
@@ -1600,12 +1840,12 @@ class Api:
         return {"path": str(result), "count": len(entry_ids)}
 
     @_guard
-    def inspect_bindle(self, path):
+    def inspect_bindle(self, path, scheme_id=None):
         from .services.bindle import inspect_bindle
 
         package = Path(path).resolve()
         before = package.stat()
-        result = inspect_bindle(package, self.entries)
+        result = inspect_bindle(package, self.entries,adapter_service=self.adapters,target_scheme_id=scheme_id)
         after = package.stat()
         before_fingerprint = (before.st_size, before.st_mtime_ns)
         after_fingerprint = (after.st_size, after.st_mtime_ns)
@@ -1656,16 +1896,46 @@ class Api:
         return component_status(self.data_root.components_dir)
 
     @_guard
-    def build_prints(self, entry_ids, options=None, out_name=None):
-        """生成打印件（默认按条目拼接材料；可选按材料分开、Word 文档）。
-        按抬头强隔离，输出到 exports/<out_name>/<抬头>/。"""
-        from .services.printing import build_prints as _build
-        name = out_name or "打印件"
-        out_dir = self.data_root.exports_dir / name
-        options = dict(options or {})
-        options["operator_profile"] = self._operator_profile_for_print()
-        return _build(self.entries, self.profiles, self.data_root.attachments_dir,
-                      entry_ids, out_dir, options, self.data_root.components_dir)
+    def delete_export_job(self,job_id,delete_files=False):
+        job=self.adapters.jobs.get(job_id)
+        if job["status"] in ("running","planned"):
+            raise ValueError("请先取消正在执行的任务。")
+        directories=[]
+        if delete_files:
+            from .services.exports import resource_digest
+            verified=[]
+            for result in job["files"]:
+                if not isinstance(result,dict) or not result.get("path") or not result.get("sha256"):
+                    raise ValueError("导出记录缺少文件校验信息，无法删除实际文件。")
+                path=Path(result["path"]).resolve()
+                if path.parent.name!=job_id or path.name!=result.get("filename"):
+                    raise ValueError("导出记录的文件位置无效。")
+                if path.is_file():
+                    if resource_digest(path)!=result["sha256"]:
+                        raise ValueError("导出文件已被修改，请手动处理后再删除记录。")
+                    verified.append(path)
+            for path in verified:
+                path.unlink()
+                directories.append(path.parent)
+        self.adapters.jobs.delete(job_id)
+        if delete_files:
+            shutil.rmtree(self.data_root.job_dir(job_id),ignore_errors=True)
+        for directory in set(directories):
+            try: directory.rmdir()
+            except OSError: pass
+        return {"deleted":job_id,"files_deleted":bool(delete_files)}
+
+    @_guard
+    def build_prints(self,entry_ids,options=None,out_name=None):
+        self._require_adapter_ready()
+        options=dict(options or {})
+        legacy={"make_entry_bundle_pdf":"materials","make_reimburse_doc":"reimbursement","make_acceptance_doc":"acceptance"}
+        selected=[oid for flag,oid in legacy.items() if options.get(flag)]
+        plan=self._export_planner().preview(entry_ids,selected or None,options)
+        if not plan["ok"]:
+            from .services.export_plan import ExportPreflightError
+            raise ExportPreflightError(plan["diagnostics"])
+        return self._export_planner().run(plan["plan_id"])
 
     # ------------------------------------------------------------ OCR 识别组件（可选）
     def _ocr_status_data(self) -> dict:
@@ -1961,7 +2231,13 @@ class Api:
         result = install_print_component(
             manifest, self.data_root.components_dir, self.data_root.updates_dir
         )
-        return result.to_dict()
+        data=result.to_dict()
+        data["template_validation"]=self.adapters.revalidate_templates()
+        return data
+
+    @_guard
+    def revalidate_adapter_templates(self,component_fingerprint=None):
+        return self.adapters.revalidate_templates(component_fingerprint or '')
 
     # ------------------------------------------------------------ 临时文件维护
     @_guard
@@ -2073,13 +2349,18 @@ class Api:
         self.attachments = AttachmentRepo(self.db, self.data_root)
         self.batches = BatchRepo(self.db)
         self.ocr = OcrRepo(self.db)
+        from .adapters.service import AdapterService
+        self.adapters = AdapterService(self.db,self.data_root)
+        self.adapters.bootstrap()
+        self.db.adapter_service = self.adapters
+        self._export_planner_instance = None
         from .services.updater import CoreUpdateManager
         self._core_updater = CoreUpdateManager(self.data_root.updates_dir)
         self._sync_entry_statuses()
 
     def _sync_entry_statuses(self) -> None:
-        """材料要求变化后让持久化状态与当前设置保持一致。"""
-        rows = self.db.conn.execute("SELECT id FROM entries").fetchall()
+        """Recompute only outdated engine caches, always using the bound revision."""
+        rows = self.db.conn.execute("SELECT id FROM entries WHERE status_engine_version<>?", ("adapter-policy-1",)).fetchall()
         for row in rows:
             self.entries.recompute_status(row["id"])
 
@@ -2094,31 +2375,25 @@ class Api:
         }
 
     def _operator_profile_for_print(self) -> dict:
-        keys = {
-            "person_name": "tidoc.operator.name",
-            "student_id": "tidoc.operator.student_id",
-            "contact": "tidoc.operator.contact",
-            "bank_name": "tidoc.operator.bank_name",
-            "bank_card": "tidoc.operator.bank_card",
-        }
-        profile = {}
-        for out_key, pref_key in keys.items():
-            row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (pref_key,)).fetchone()
-            profile[out_key] = row["value"] if row else ""
-        return profile
+        selected=self.adapters.payees.get_default(self.adapters.default_binding()[0]) or {}
+        return {"person_name":selected.get("name",""),"student_id":selected.get("personnel_id",""),"contact":selected.get("contact",""),"bank_name":selected.get("bank_name",""),"bank_card":selected.get("account_number","")}
 
     def _preference_value(self, key: str, default: str = "") -> str:
         row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
 
-    def _payment_ocr_enabled(self) -> bool:
-        return self._preference_value(PAYMENT_OCR_PREF_KEY, "1") != "0"
+    def _payment_ocr_enabled(self,entry_id=None) -> bool:
+        entry=self.entries.get(entry_id) if entry_id else None
+        definition=self.adapters.context_for_entry(entry) if entry else self.adapters.get_scheme()["definition"]
+        return definition["effective_settings"].get("assist.payment_ocr") != "manual"
 
-    def _default_paid_to_invoice(self) -> bool:
-        return self._preference_value(DEFAULT_PAID_TO_INVOICE_PREF_KEY, "1") != "0"
+    def _default_paid_to_invoice(self,scheme_id=None) -> bool:
+        return self.adapters.get_scheme(scheme_id)["definition"].get("effective_settings",{}).get("entry.default_paid_to_invoice",True)
 
-    def _default_entry_title(self) -> str:
-        return self._preference_value(DEFAULT_ENTRY_TITLE_PREF_KEY, "").strip()
+    def _default_entry_title(self,scheme_id=None) -> str:
+        definition = self.adapters.get_scheme(scheme_id)["definition"]
+        title_id = definition.get("effective_settings",{}).get("entry.default_title_id")
+        return next((t["name"] for t in definition.get("scheme",{}).get("titles",[]) if t["id"]==title_id),"")
 
     def _ensure_invoice_not_duplicate(self, parsed, source_paths) -> None:
         """按发票号优先、文件摘要兜底，在全库阻止同一发票重复建条目。"""

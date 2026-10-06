@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import hashlib
 import shutil
 import uuid
@@ -50,10 +51,11 @@ class AttachmentRepo:
         self.db = db
         self.data_root = data_root
 
-    def add(self, entry_id: str, src_path: str | Path, att_type: str, note: str = "") -> dict:
+    def add(self, entry_id: str, src_path: str | Path, att_type: str, note: str = "", *, role_id: str | None = None) -> dict:
         src = Path(src_path)
         if not src.exists():
             raise FileNotFoundError(f"文件不存在：{src}")
+        role_id = self.validate_role(entry_id,role_id,att_type,src)
         sha = _sha256(src)
         existing = self.db.conn.execute(
             "SELECT original_name FROM attachments WHERE entry_id = ? AND sha256 = ? LIMIT 1",
@@ -70,9 +72,10 @@ class AttachmentRepo:
             rel = f"{entry_id}/{stored_name}"
             self.db.conn.execute(
                 """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
-                   sha256, note, added_at) VALUES(?,?,?,?,?,?,?,?)""",
-                (att_id, entry_id, att_type, src.name, rel, sha, note, _now()),
+                   sha256, note, added_at,role_id) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (att_id, entry_id, att_type, src.name, rel, sha, note, _now(),role_id),
             )
+            self._touch_entry(entry_id)
             self.db.conn.commit()
         except Exception:
             self.db.conn.rollback()
@@ -80,6 +83,66 @@ class AttachmentRepo:
                 dest.unlink()
             _remove_empty_dir(dest_dir)
             raise
+        return self.get(att_id)
+
+    def validate_role(self,entry_id,role_id,att_type,path,ignore_id=None):
+        if att_type not in _NAME_PREFIX:
+            raise ValueError("材料处理类型不存在。")
+        natural = "invoice" if att_type in (TYPE_INVOICE_PDF,TYPE_INVOICE_XML) else att_type
+        role_id = role_id or natural
+        row = self.db.conn.execute("SELECT scheme_revision_id FROM entries WHERE id=?", (entry_id,)).fetchone()
+        if row is None:
+            raise ValueError("条目不存在。")
+        if not row[0]:
+            if role_id != natural:
+                raise ValueError("请先为条目选择报账方案。")
+            return natural
+        revision = self.db.conn.execute("SELECT definition_json FROM scheme_revisions WHERE revision_id=?", (row[0],)).fetchone()
+        definition = json.loads(revision[0])
+        role = next((r for r in definition.get("materials",[]) if r["id"]==role_id),None)
+        if role is None:
+            raise ValueError("当前方案没有此材料角色。")
+        expected_type = TYPE_OTHER if role_id.startswith("custom:") else (att_type if role_id=="invoice" else role_id)
+        if (role_id=="invoice" and att_type not in (TYPE_INVOICE_PDF,TYPE_INVOICE_XML)) or att_type!=expected_type:
+            raise ValueError("材料角色与文件处理类别不一致。")
+        allowed = role.get("extensions") or []
+        if allowed and Path(path).suffix.lower() not in allowed:
+            raise ValueError("这类材料支持的文件格式："+"、".join(allowed))
+        limit = role.get("max_count")
+        if limit is not None:
+            count = self.db.conn.execute("SELECT COUNT(*) FROM attachments WHERE entry_id=? AND role_id=? AND id<>? AND (role_definition_revision_id IS NULL OR role_definition_revision_id=?)",(entry_id,role_id,ignore_id or "",row[0])).fetchone()[0]
+            if count >= limit:
+                raise ValueError("材料数量达到方案上限。")
+        return role_id
+
+    def _touch_entry(self,entry_id):
+        self.db.conn.execute("UPDATE entries SET updated_at=?,status_engine_version='' WHERE id=?",(_now(),entry_id))
+
+    def reclassify(self,att_id,role_id,actor_id=""):
+        att = self.get(att_id)
+        if not att:
+            raise ValueError("附件不存在。")
+        entry = self.db.conn.execute("SELECT scheme_id,scheme_revision_id FROM entries WHERE id=?",(att["entry_id"],)).fetchone()
+        if not entry["scheme_id"]:
+            raise ValueError("请先选择报账方案。")
+        definition = json.loads(self.db.conn.execute("SELECT definition_json FROM scheme_revisions WHERE revision_id=?",(entry["scheme_revision_id"],)).fetchone()[0])
+        roles = {r["id"]:r for r in definition.get("materials",[])}
+        natural = "invoice" if att["type"] in (TYPE_INVOICE_PDF,TYPE_INVOICE_XML) else att["type"]
+        old_role = att.get("role_id") or natural
+        if natural=="invoice" or role_id=="invoice":
+            raise ValueError("发票材料不能改为其他角色。")
+        for candidate in (old_role,role_id):
+            if candidate in roles and not roles[candidate].get("reclassifiable",True):
+                raise ValueError("方案不允许调整此材料的角色。")
+        new_type = TYPE_OTHER if role_id.startswith("custom:") else role_id
+        self.validate_role(att["entry_id"],role_id,new_type,att["abs_path"],ignore_id=att_id)
+        from .extensions import ExtensionRepo
+        with self.db.transaction():
+            self.db.conn.execute("UPDATE attachments SET type=?,role_id=?,role_definition_revision_id=NULL,recognition_version='',recognition_status='',recognized_value='',recognition_message='' WHERE id=?",(new_type,role_id,att_id))
+            ExtensionRepo(self.db).record_history("entry",att["entry_id"],entry["scheme_id"],att_id,{"role_id":old_role,"source_revision":att.get("role_definition_revision_id")},{"role_id":role_id},entry["scheme_revision_id"],definition["manifest"]["package_id"],kind="material",actor_id=actor_id)
+            self._touch_entry(att["entry_id"])
+            from .entries import EntryRepo
+            EntryRepo(self.db).recompute_status(att["entry_id"],commit=False)
         return self.get(att_id)
 
     def _unique_name(self, dest_dir: Path, entry_id: str, att_type: str, suffix: str) -> str:
@@ -126,6 +189,7 @@ class AttachmentRepo:
             moved = True
         try:
             self.db.conn.execute("DELETE FROM attachments WHERE id = ?", (att_id,))
+            self._touch_entry(att["entry_id"])
             self.db.conn.commit()
         except Exception:
             self.db.conn.rollback()
@@ -172,6 +236,9 @@ class AttachmentRepo:
             raise FileNotFoundError(f"附件不存在：{att_id}")
 
         new_type = att_type or att["type"]
+        new_role = att.get("role_id") if new_type == att["type"] else None
+        if src_path or att_type:
+            new_role = self.validate_role(att["entry_id"],new_role,new_type,src_path or att["abs_path"],ignore_id=att_id)
         original_name = att["original_name"]
         stored_path = att["stored_path"]
         sha = att["sha256"]
@@ -218,7 +285,7 @@ class AttachmentRepo:
         try:
             self.db.conn.execute(
                 """UPDATE attachments
-                   SET type = ?, original_name = ?, stored_path = ?, sha256 = ?,
+                   SET type = ?, role_id = ?, original_name = ?, stored_path = ?, sha256 = ?,
                        note = COALESCE(?, note),
                        recognition_version = CASE WHEN ? THEN '' ELSE recognition_version END,
                        recognition_status = CASE WHEN ? THEN '' ELSE recognition_status END,
@@ -226,11 +293,12 @@ class AttachmentRepo:
                        recognition_message = CASE WHEN ? THEN '' ELSE recognition_message END
                    WHERE id = ?""",
                 (
-                    new_type, original_name, stored_path, sha, note,
+                    new_type, new_role, original_name, stored_path, sha, note,
                     recognition_changed, recognition_changed,
                     recognition_changed, recognition_changed, att_id,
                 ),
             )
+            self._touch_entry(att["entry_id"])
             self.db.conn.commit()
         except Exception:
             self.db.conn.rollback()

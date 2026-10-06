@@ -86,6 +86,9 @@ def self_test() -> None:
     index = web_dir() / "index.html"
     if not index.is_file():
         raise RuntimeError(f"missing frontend entrypoint: {index}")
+    from .adapters.resources import verify_core_resources
+
+    verify_core_resources()
 
 
 def _configure_webview_settings() -> None:

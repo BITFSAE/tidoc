@@ -1974,3 +1974,22 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
   html, body { overflow: visible; background: #ffffff !important; color: #000000 !important; }
   body { background-image: none !important; }
 }
+
+/* Adapter controls keep the existing dense work surface. */
+.adapter-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+.adapter-choice { display:block; width:100%; margin-top:10px; text-align:left; }
+.schema-form { display:grid; gap:10px; }
+.schema-form .form-row { margin:0; }
+.schema-form select[multiple] { min-height:100px; }
+.schema-errors { padding:12px; border:1px solid var(--danger, #ba4444); border-radius:8px; margin-bottom:12px; }
+.schema-errors a { display:block; color:inherit; text-decoration:underline; }
+.field-error { color:var(--danger,#ba4444); min-height:1em; }
+.adapter-entry .btn { margin:0 8px 8px 0; }
+.adapter-materials { display:grid; gap:10px; margin-top:12px; }
+.adapter-materials .attach-item { flex-wrap:wrap; gap:8px; }
+.title-blue { --title-color:var(--blue, #3c68af); }
+.title-green { --title-color:var(--green, #407453); }
+.title-amber { --title-color:var(--amber, #97702f); }
+.title-purple { --title-color:var(--purple, #7953a4); }
+.title-red { --title-color:var(--danger, #b34b4b); }
+.title-teal { --title-color:var(--teal, #327972); }

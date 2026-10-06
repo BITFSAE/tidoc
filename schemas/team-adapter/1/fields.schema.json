@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tidoc.app/schemas/team-adapter/1/fields.schema.json",
+  "type": "object",
+  "properties": {
+    "fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "scope": {
+            "enum": [
+              "scheme",
+              "payee",
+              "entry",
+              "batch",
+              "export"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "type": {
+            "enum": [
+              "text",
+              "multiline",
+              "integer",
+              "decimal",
+              "money",
+              "date",
+              "boolean",
+              "select",
+              "multiselect"
+            ]
+          },
+          "required_at": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "complete",
+                "export"
+              ]
+            },
+            "maxItems": 2
+          },
+          "presentation": {
+            "enum": [
+              "visible",
+              "advanced",
+              "hidden"
+            ]
+          },
+          "sensitive": {
+            "type": "boolean"
+          },
+          "transfer": {
+            "enum": [
+              "include",
+              "ask",
+              "never"
+            ]
+          },
+          "max_length": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "min_length": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "minimum": {
+            "type": [
+              "number",
+              "string"
+            ],
+            "maxLength": 64
+          },
+          "maximum": {
+            "type": [
+              "number",
+              "string"
+            ],
+            "maxLength": 64
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                }
+              },
+              "required": [
+                "value",
+                "label"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 200
+          },
+          "help": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "default": {},
+          "visible_when": {
+            "$ref": "#/$defs/condition"
+          },
+          "x_metadata": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "label",
+          "type",
+          "required_at",
+          "presentation",
+          "sensitive",
+          "transfer"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 100
+    }
+  },
+  "required": [
+    "fields"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "all": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/condition"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "all"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "any": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/condition"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "any"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/condition"
+            }
+          },
+          "required": [
+            "not"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "maxLength": 160
+            },
+            "op": {
+              "enum": [
+                "eq",
+                "ne",
+                "in",
+                "gt",
+                "gte",
+                "lt",
+                "lte",
+                "present"
+              ]
+            },
+            "value": {}
+          },
+          "required": [
+            "field",
+            "op"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

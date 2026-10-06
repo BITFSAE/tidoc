@@ -279,7 +279,10 @@ class Api:
 
     @_guard
     def scheme_details(self, scheme_id=None):
-        return self.adapters.get_scheme(scheme_id)
+        scheme = self.adapters.get_scheme(scheme_id)
+        # 方案包自身给出的设置值（不含本地覆盖）：界面据此标出已自定义的项，并只保存真正改动的项。
+        scheme["settings_baseline"] = self.adapters.setting_baseline(scheme)
+        return scheme
 
     @_guard
     def adapter_setup_state(self):
@@ -325,6 +328,10 @@ class Api:
         return self.adapters.set_default_scheme(scheme_id)
 
     @_guard
+    def enable_scheme(self,scheme_id):
+        return self.adapters.enable_scheme(scheme_id)
+
+    @_guard
     def copy_scheme(self,scheme_id,name):
         return self.adapters.copy_scheme(scheme_id,name)
 
@@ -333,8 +340,8 @@ class Api:
         return self.adapters.disable_scheme(scheme_id)
 
     @_guard
-    def update_scheme_settings(self,scheme_id,expected_revision,values):
-        return self.adapters.update_scheme_settings(scheme_id,expected_revision,values)
+    def update_scheme_settings(self,scheme_id,expected_revision,values,clear=None):
+        return self.adapters.update_scheme_settings(scheme_id,expected_revision,values,clear)
 
     @_guard
     def restore_scheme_defaults(self,scheme_id,expected_revision,keys=None):
@@ -2242,12 +2249,24 @@ class Api:
     # ------------------------------------------------------------ 临时文件维护
     @_guard
     def storage_maintenance_status(self):
+        from .db.backups import BACKUP_KEEP, list_backups
         files = self._cache_cleanup_candidates()
+        backups = list_backups(self.data_root.backups_dir)
+        older = backups[BACKUP_KEEP:]
         return {
             "files": len(files),
             "size": sum(path.stat().st_size for path in files if path.exists()),
             "exports_size": _directory_size(self.data_root.exports_dir),
+            "backups": len(backups),
+            "old_backups": len(older),
+            "old_backups_size": sum(item["size"] for item in older),
         }
+
+    @_guard
+    def cleanup_old_backups(self):
+        """删除较早的升级前数据库备份，保留最近几份（用户在设置里确认后才调用）。"""
+        from .db.backups import prune_backups
+        return prune_backups(self.data_root.backups_dir)
 
     @_guard
     def cleanup_app_cache(self):

@@ -96,8 +96,6 @@ const PAYMENT_OCR_KEY = 'tidoc.paymentScreenshotOcr';
 const DEFAULT_PAID_TO_INVOICE_KEY = 'tidoc.defaultPaidToInvoiceTotal';
 const DEFAULT_ENTRY_TITLE_KEY = 'tidoc.defaultEntryTitle';
 const THEME_KEY = 'tidoc.themeMode';
-const BINDLE_INCLUDE_NOTES_KEY = 'tidoc.bindle.includeNotes';
-const BINDLE_INCLUDE_TAGS_KEY = 'tidoc.bindle.includeTags';
 const VERIFICATION_WATCH_DIR_KEY = 'tidoc.invoiceVerification.watchDirectory';
 const AUTO_UPDATE_KEY = 'tidoc.update.autoCheck';
 const SHOW_CREATED_AT_KEY = 'tidoc.cards.showCreatedAt';
@@ -2719,6 +2717,8 @@ function bindEvents() {
         return;
       }
     }
+    // 弹窗打开时，列表快捷键（/、n、t、Cmd+A）不应作用到后面的页面。
+    if ($('#modalRoot').lastChild) return;
     if (e.target.matches('input, textarea, select')) {
       if (e.key === 'Escape') e.target.blur();
       return;
@@ -2749,18 +2749,60 @@ function clearAllFilters() {
 }
 
 // ------------------------------------------------------------------ 通用弹层
-function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose }) {
-  const mask = el('div', 'modal-mask');
+let modalSequence = 0;
+const MODAL_FOCUSABLE = 'button, [href], input, select, textarea, summary, [tabindex]';
+const openingModals = new Set();
+
+const isFocusable = (node) => !node.disabled && node.tabIndex >= 0
+  && !node.closest('[hidden], [inert]') && node.getClientRects().length > 0;
+const findModalByKey = (key) => $(`#modalRoot [data-modal-key="${key}"]`);
+
+// 只有最上层弹窗可交互：下层弹窗和主界面设为 inert，键盘焦点和点击都不会漏到后面。
+function syncModalLayers() {
+  const masks = [...$('#modalRoot').children];
+  masks.forEach((mask, index) => {
+    mask.inert = index < masks.length - 1;
+    mask.style.zIndex = String(51 + index);
+  });
+  const app = $('#app');
+  if (app) app.inert = masks.length > 0;
+}
+
+/*
+ * 选项：
+ * - key：同一 key 的弹窗同时只开一个，重复打开时聚焦已有的并返回它。
+ * - guard：用户主动关闭（关闭按钮、点遮罩、Esc）前的确认，返回 false 则不关；程序调用 close() 不受影响。
+ * - transient：临时确认类弹窗，关闭后不触发下层弹窗的 _onResume。
+ * - replace：就地替换同类弹窗（刷新用），跳过入场动画并沿用原弹窗的焦点归还目标。
+ * 下层弹窗可设置 mask._onResume，在上层弹窗关闭、它重新成为最上层时被调用。
+ */
+function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose, key, guard, transient, replace }) {
+  const existing = key && !replace ? findModalByKey(key) : null;
+  if (existing) {
+    $('.modal', existing)?.focus({ preventScroll: true });
+    return existing._api;
+  }
+  const mask = el('div', 'modal-mask' + (replace ? ' no-anim' : ''));
   const box = el('div', 'modal' + (wide ? ' wide' : compact ? ' compact' : ''));
+  const titleId = 'modal-title-' + (++modalSequence);
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-modal', 'true');
+  box.setAttribute('aria-labelledby', titleId);
+  box.tabIndex = -1;
+  if (key) mask.dataset.modalKey = key;
   const head = el('div', 'modal-head');
   const titleRow = el('div', 'modal-title-row');
   if (titleChip) titleRow.appendChild(el('span', 'title-chip lg ' + titleChip.cls, esc(titleChip.text)));
   const titleCopy = el('div', 'modal-title-copy');
-  titleCopy.appendChild(el('h2', null, esc(title)));
+  const heading = el('h2', null, esc(title));
+  heading.id = titleId;
+  titleCopy.appendChild(heading);
   if (subhead) titleCopy.appendChild(el('div', 'modal-subhead', esc(subhead)));
   titleRow.appendChild(titleCopy);
   head.appendChild(titleRow);
   const closeBtn = el('button', 'modal-close', CLOSE_ICON);
+  closeBtn.type = 'button';
+  closeBtn.setAttribute('aria-label', '关闭');
   head.appendChild(closeBtn);
   const bodyEl = el('div', 'modal-body');
   if (typeof body === 'string') bodyEl.innerHTML = body; else bodyEl.appendChild(body);
@@ -2769,24 +2811,99 @@ function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose
 
   box.append(head, bodyEl, foot);
   mask.appendChild(box);
-  $('#modalRoot').appendChild(mask);
-  mask.style.zIndex = String(50 + $('#modalRoot').children.length);
+  // 记住打开前的焦点位置，关闭后归还；就地替换时沿用原弹窗的归还目标。
+  const active = document.activeElement;
+  const opener = replace?._opener || (active instanceof HTMLElement && active !== document.body ? active : null);
+  mask._opener = opener;
+  // 就地替换时插回原来的层级位置，不能盖到之后才打开的子页面上面。
+  if (replace?.isConnected) replace.after(mask); else $('#modalRoot').appendChild(mask);
+  syncModalLayers();
 
   let closed = false;
+  let asking = false;
   const close = () => {
     if (closed) return;
     closed = true;
+    const root = $('#modalRoot');
+    const wasTop = root.lastChild === mask;
     if (onClose) onClose();
     mask.remove();
-    if (!$('#modalRoot').lastChild) setTimeout(() => handleSecondaryLaunch(), 0);
+    syncModalLayers();
+    const top = root.lastChild;
+    if (wasTop) {
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+      if (top && !transient) top._onResume?.();
+    }
+    if (!top) setTimeout(() => handleSecondaryLaunch(), 0);
   };
-  mask._closeModal = close;
-  closeBtn.onclick = close;
-  mask.onclick = (e) => { if (e.target === mask) close(); };
+  const requestClose = async () => {
+    if (closed || asking) return;
+    asking = true;
+    try { if (guard && !(await guard())) return; } finally { asking = false; }
+    close();
+  };
+  mask._closeModal = requestClose;
+  closeBtn.onclick = requestClose;
+  // 只有按下和松开都落在遮罩上才算"点遮罩关闭"；在弹窗里选文字拖到遮罩上松手不应关闭。
+  let pressedOnMask = false;
+  mask.addEventListener('mousedown', (e) => { pressedOnMask = e.target === mask; });
+  mask.addEventListener('click', (e) => {
+    const direct = pressedOnMask && e.target === mask;
+    pressedOnMask = false;
+    if (direct) requestClose();
+  });
+  // 焦点留在最上层弹窗内循环。
+  mask.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    const items = [...box.querySelectorAll(MODAL_FOCUSABLE)].filter(isFocusable);
+    if (!items.length) { e.preventDefault(); box.focus(); return; }
+    const first = items[0], last = items[items.length - 1], current = document.activeElement;
+    if (e.shiftKey && (current === first || current === box)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && current === last) { e.preventDefault(); first.focus(); }
+  });
   // 弹窗里的下拉是 innerHTML 直接生成的，创建后统一接入自绘组件
   enhanceNativeSelects(bodyEl);
   setupInlineProfileCreation(bodyEl);
-  return { mask, body: bodyEl, close, foot };
+  box.focus({ preventScroll: true });
+  const api = { mask, body: bodyEl, close, requestClose, foot };
+  mask._api = api;
+  return api;
+}
+
+// 确认弹窗：代替原生 confirm()，样式与键盘行为和其他弹窗一致。危险操作默认聚焦"取消"，避免回车误确认。
+function confirmDialog({ title, message, confirmText = '确定', cancelText = '取消', danger = false }) {
+  return new Promise((resolve) => {
+    let decided = false;
+    let dialog;
+    const finish = (value) => {
+      if (decided) return;
+      decided = true;
+      dialog.close();
+      resolve(value);
+    };
+    const body = el('p', 'confirm-message');
+    body.textContent = message;
+    const cancelBtn = mkBtn(cancelText, 'ghost', () => finish(false));
+    const okBtn = mkBtn(confirmText, danger ? 'danger' : 'primary', () => finish(true));
+    dialog = modal({ title, compact: true, body, transient: true, onClose: () => finish(false), footer: [cancelBtn, okBtn] });
+    (danger ? cancelBtn : okBtn).focus();
+  });
+}
+
+// 同一类弹窗在加载期间或已打开时不再重复打开（连点按钮、快捷键重复触发）。
+async function openOnce(key, open) {
+  const existing = findModalByKey(key);
+  if (existing) { $('.modal', existing)?.focus({ preventScroll: true }); return undefined; }
+  if (openingModals.has(key)) return undefined;
+  openingModals.add(key);
+  try { return await open(); } finally { openingModals.delete(key); }
+}
+
+// 加载超过一瞬间才给提示，避免快速打开时闪一下；后端被长任务占用时用户能看到正在处理。
+async function withLoading(message, work, delay = 250) {
+  let progress = null;
+  const timer = setTimeout(() => { progress = taskProgress(message); }, delay);
+  try { return await work(); } finally { clearTimeout(timer); progress?.close(); }
 }
 
 function mkBtn(text, cls, onClick) {
@@ -2856,6 +2973,7 @@ function openProfileManager(forceCreate) {
 
   const m = modal({
     title: '报账人管理',
+    key: 'profiles',
     wide: true,
     body: wrap,
     footer: [addBtn, mkBtn('关闭', 'ghost', () => m.close())],
@@ -2888,9 +3006,26 @@ function editProfileFlow(p, onDone) {
   });
 }
 
-async function openSettings() {
-  let paths, printStatus, appInfo, multiMode, paymentOcrMode;
-  let defaultPaidMode, defaultEntryTitleMode, materialRequirementsMode, bindleNotesMode, bindleTagsMode;
+// 设置页：同一时间只开一个；子页面叠在它上面，关闭后设置页按最新数据就地刷新。
+let settingsLoading = false;
+async function openSettings(options = {}) {
+  if (!options.replace) {
+    const existing = findModalByKey('settings');
+    if (existing) { $('.modal', existing)?.focus({ preventScroll: true }); return; }
+    if (settingsLoading) return;
+  }
+  settingsLoading = true;
+  try {
+    if (options.replace) await buildSettings(options);
+    else await withLoading('正在打开设置…', () => buildSettings(options));
+  } finally {
+    settingsLoading = false;
+  }
+}
+
+async function buildSettings(options = {}) {
+  let paths, printStatus, appInfo, multiMode;
+  let materialRequirementsMode;
   let autoUpdateMode, maintenance, verificationPrefs, ocrStatus, showCreatedAtMode;
   const themeMode = State.themeMode;
   try {
@@ -2901,27 +3036,16 @@ async function openSettings() {
     maintenance = await Api.storageMaintenanceStatus();
     const prefValues = await Promise.all([
       Api.appPreference(MULTI_CLAIMANT_KEY, State.multiClaimantMode ? '1' : '0'),
-      Api.appPreference(PAYMENT_OCR_KEY, State.paymentOcrEnabled ? '1' : '0'),
-      Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, State.defaultPaidToInvoice ? '1' : '0'),
-      Api.appPreference(DEFAULT_ENTRY_TITLE_KEY, State.defaultEntryTitle || ''),
       Api.materialRequirements(),
-      Api.appPreference(BINDLE_INCLUDE_NOTES_KEY, '1'),
-      Api.appPreference(BINDLE_INCLUDE_TAGS_KEY, '1'),
       Api.appPreference(AUTO_UPDATE_KEY, '1'),
       Api.invoiceVerificationPreferences(),
       Api.appPreference(SHOW_CREATED_AT_KEY, '0'),
     ]);
     multiMode = prefValues[0] === '1';
-    paymentOcrMode = prefValues[1] !== '0';
-    defaultPaidMode = prefValues[2] !== '0';
-    defaultEntryTitleMode = prefValues[3] || '';
-    materialRequirementsMode = { ...(prefValues[4] || {}) };
-    bindleNotesMode = prefValues[5] !== '0';
-    bindleTagsMode = prefValues[6] !== '0';
-    autoUpdateMode = prefValues[7] === '1';
-    verificationPrefs = prefValues[8];
-    showCreatedAtMode = prefValues[9] === '1';
-    State.defaultEntryTitle = defaultEntryTitleMode;
+    materialRequirementsMode = { ...(prefValues[1] || {}) };
+    autoUpdateMode = prefValues[2] === '1';
+    verificationPrefs = prefValues[3];
+    showCreatedAtMode = prefValues[4] === '1';
     State.materialRequirements = materialRequirementsMode;
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
@@ -2940,7 +3064,29 @@ async function openSettings() {
 
   body.innerHTML = `
     <div class="settings-shell">
-      <div class="settings-block"><div class="settings-row"><div class="settings-row-copy"><b>报账方案</b><span>${esc(State.scheme?.name || '')}</span></div><button class="btn small" id="setAdapters">管理</button></div><div class="settings-row"><b>个人收款信息</b><button class="btn small" id="setPayees">填写</button></div><div class="settings-row"><b>导出记录</b><button class="btn small" id="setExportJobs">查看</button></div></div>
+      <div class="settings-block">
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>报账方案</b>
+            <span>当前使用「${esc(State.scheme?.name || '未选择')}」。新建默认抬头、实付初值、付款识别、绑定包内容和输出默认值都在这里设置</span>
+          </div>
+          <button class="btn small" id="setAdapters">管理</button>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>个人收款信息</b>
+            <span>收款对象与默认收款人，只保存在本机</span>
+          </div>
+          <button class="btn small" id="setPayees">填写</button>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>导出记录</b>
+            <span>查看历史导出，或按原数据重新生成</span>
+          </div>
+          <button class="btn small" id="setExportJobs">查看</button>
+        </div>
+      </div>
       <!-- 报账人 -->
       <div class="settings-block">
         <div class="settings-row" id="setProfiles">
@@ -2995,38 +3141,10 @@ async function openSettings() {
         </div>
         <div class="settings-row">
           <div class="settings-row-copy">
-            <b>付款截图 OCR</b>
-            <span>关闭后不识别截图金额，单独拖入截图时直接手动选择条目</span>
-          </div>
-          <label class="switch-line"><input type="checkbox" id="setPaymentOcr" ${paymentOcrMode ? 'checked' : ''}/><span>${paymentOcrMode ? '已开启' : '已关闭'}</span></label>
-        </div>
-        <div class="settings-row">
-          <div class="settings-row-copy">
-            <b>实付默认等于发票金额</b>
-            <span>开启后，新建或批量导入条目时自动填写；关闭后留空待确认</span>
-          </div>
-          <label class="switch-line"><input type="checkbox" id="setDefaultPaidInvoice" ${defaultPaidMode ? 'checked' : ''}/><span>${defaultPaidMode ? '已开启' : '已关闭'}</span></label>
-        </div>
-        <div class="settings-row">
-          <div class="settings-row-copy">
             <b>卡片显示创建时间</b>
             <span>精确到分钟</span>
           </div>
           <label class="switch-line"><input type="checkbox" id="setShowCreatedAt" ${showCreatedAtMode ? 'checked' : ''}/><span>${showCreatedAtMode ? '已开启' : '已关闭'}</span></label>
-        </div>
-        <div class="settings-row">
-          <div class="settings-row-copy">
-            <b>绑定包包含备注</b>
-            <span>导出条目备注、附件备注及备注修改记录</span>
-          </div>
-          <label class="switch-line"><input type="checkbox" id="setBindleNotes" ${bindleNotesMode ? 'checked' : ''}/><span>${bindleNotesMode ? '已开启' : '已关闭'}</span></label>
-        </div>
-        <div class="settings-row">
-          <div class="settings-row-copy">
-            <b>绑定包包含标签</b>
-            <span>关闭后，导出的绑定包不会带出条目标签</span>
-          </div>
-          <label class="switch-line"><input type="checkbox" id="setBindleTags" ${bindleTagsMode ? 'checked' : ''}/><span>${bindleTagsMode ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
 
@@ -3042,15 +3160,6 @@ async function openSettings() {
         <div id="setTitleProfiles" class="settings-titleprofile-list"></div>
         <div class="settings-row-actions">
           <button class="btn small ghost" id="setTpAdd">添加抬头</button>
-        </div>
-        <div class="settings-row">
-          <div class="settings-row-copy">
-            <b>新建默认抬头</b>
-            <span>新建或批量导入时自动带入，可在当前弹窗中修改</span>
-          </div>
-          <select id="setDefaultEntryTitle" class="settings-select">
-            ${titleChoiceOptions(defaultEntryTitleMode, '跟随发票识别')}
-          </select>
         </div>
         <div class="settings-requirements-head">
           <div class="settings-row-copy">
@@ -3113,6 +3222,7 @@ async function openSettings() {
           <button class="btn small ghost" id="setOpenData">打开文件夹</button>
           <button class="btn small ghost" id="setOpenExports">打开导出目录 · ${fmtBytes(maintenance.exports_size || 0)}</button>
           <button class="btn small ghost" id="setCleanup" ${maintenance.files ? '' : 'disabled'}>清理临时文件${maintenance.size ? ` · ${fmtBytes(maintenance.size)}` : ''}</button>
+          ${maintenance.old_backups ? `<button class="btn small ghost" id="setCleanupBackups">清理旧备份 · ${maintenance.old_backups} 份 · ${fmtBytes(maintenance.old_backups_size)}</button>` : ''}
         </div>
         <details class="settings-advanced">
           <summary>高级数据维护</summary>
@@ -3226,22 +3336,6 @@ async function openSettings() {
       themeSelect.disabled = false;
     }
   };
-  body.querySelector('#setDefaultEntryTitle').onchange = async (ev) => {
-    const value = ev.target.value;
-    ev.target.disabled = true;
-    try {
-      await Api.setAppPreference(DEFAULT_ENTRY_TITLE_KEY, value);
-      State.defaultEntryTitle = value;
-      if (value) localStorage.setItem(DEFAULT_ENTRY_TITLE_KEY, value);
-      else localStorage.removeItem(DEFAULT_ENTRY_TITLE_KEY);
-      toast(value ? `新建默认抬头已设为「${value}」` : '新建默认抬头已改为跟随发票识别', 'ok');
-    } catch (e) {
-      ev.target.value = State.defaultEntryTitle || '';
-      toast(e.message, 'err');
-    } finally {
-      ev.target.disabled = false;
-    }
-  };
   body.querySelectorAll('[data-material-requirement]').forEach((input) => {
     input.onchange = async () => {
       const key = input.dataset.materialRequirement;
@@ -3288,8 +3382,6 @@ async function openSettings() {
       defSel.value = '';
       State.activeTitle = '';
     }
-    const entrySel = body.querySelector('#setDefaultEntryTitle');
-    if (entrySel) entrySel.innerHTML = titleChoiceOptions(State.defaultEntryTitle, '跟随发票识别');
   };
   const saveTitleProfiles = async () => {
     const profiles = [...tpList.querySelectorAll('.settings-titleprofile-row')].map((row) => ({
@@ -3297,8 +3389,9 @@ async function openSettings() {
       tax_id: row.querySelector('[data-tp-tax]').value.trim(),
     })).filter((profile) => profile.name || profile.tax_id);
     try {
-      const r = await Api.setTitleProfiles(profiles);
-      State.titleProfiles = r.profiles || [];
+      await Api.setTitleProfiles(profiles);
+      // 方案会在抬头被移除时清掉失效的默认抬头；统一从方案重新读取，抬头、颜色和默认值保持一致。
+      await AdapterUI.refresh();
       renderTitleProfileRows();
       await refreshTitleOptions();
       refillSettingsTitleSelects();
@@ -3340,38 +3433,6 @@ async function openSettings() {
       ev.target.disabled = false;
     }
   };
-  body.querySelector('#setPaymentOcr').onchange = async (ev) => {
-    const enabled = ev.target.checked;
-    const label = ev.target.nextElementSibling;
-    ev.target.disabled = true;
-    try {
-      await Api.setAppPreference(PAYMENT_OCR_KEY, enabled ? '1' : '0');
-      State.paymentOcrEnabled = enabled;
-      label.textContent = enabled ? '已开启' : '已关闭';
-      toast(enabled ? '已开启付款截图金额识别' : '已关闭付款截图金额识别', 'ok');
-    } catch (e) {
-      ev.target.checked = !enabled;
-      toast(e.message, 'err');
-    } finally {
-      ev.target.disabled = false;
-    }
-  };
-  body.querySelector('#setDefaultPaidInvoice').onchange = async (ev) => {
-    const enabled = ev.target.checked;
-    const label = ev.target.nextElementSibling;
-    ev.target.disabled = true;
-    try {
-      await Api.setAppPreference(DEFAULT_PAID_TO_INVOICE_KEY, enabled ? '1' : '0');
-      State.defaultPaidToInvoice = enabled;
-      label.textContent = enabled ? '已开启' : '已关闭';
-      toast(enabled ? '新条目将默认填写发票金额' : '新条目实付金额将默认留空', 'ok');
-    } catch (e) {
-      ev.target.checked = !enabled;
-      toast(e.message, 'err');
-    } finally {
-      ev.target.disabled = false;
-    }
-  };
   body.querySelector('#setShowCreatedAt').onchange = async (ev) => {
     const enabled = ev.target.checked;
     const label = ev.target.nextElementSibling;
@@ -3389,31 +3450,6 @@ async function openSettings() {
       ev.target.disabled = false;
     }
   };
-  const bindlePreferenceHandler = (key, enabledText, disabledText) => async (ev) => {
-    const enabled = ev.target.checked;
-    const label = ev.target.nextElementSibling;
-    ev.target.disabled = true;
-    try {
-      await Api.setAppPreference(key, enabled ? '1' : '0');
-      label.textContent = enabled ? '已开启' : '已关闭';
-      toast(enabled ? enabledText : disabledText, 'ok');
-    } catch (e) {
-      ev.target.checked = !enabled;
-      toast(e.message, 'err');
-    } finally {
-      ev.target.disabled = false;
-    }
-  };
-  body.querySelector('#setBindleNotes').onchange = bindlePreferenceHandler(
-    BINDLE_INCLUDE_NOTES_KEY,
-    '绑定包将包含备注',
-    '绑定包将不包含备注',
-  );
-  body.querySelector('#setBindleTags').onchange = bindlePreferenceHandler(
-    BINDLE_INCLUDE_TAGS_KEY,
-    '绑定包将包含标签',
-    '绑定包将不包含标签',
-  );
   const renderVerificationWatchDirectory = (path) => {
     const pathNode = body.querySelector('#setVerificationWatchPath');
     const clearBtn = body.querySelector('#setVerificationWatchClear');
@@ -3497,12 +3533,13 @@ async function openSettings() {
       ev.target.disabled = false;
     }
   };
-  body.querySelector('#setAdapters').onclick = () => { m.close(); AdapterUI.openSettings(); };
-  body.querySelector('#setPayees').onclick = () => { m.close(); AdapterUI.payees(); };
-  body.querySelector('#setExportJobs').onclick = () => { m.close(); AdapterUI.jobs(); };
-  body.querySelector('#setProfilesManage').onclick = () => { m.close(); openProfileManager(false); };
-  body.querySelector('#setComponentsUpdate').onclick = () => { m.close(); openUpdateDialog(); };
-  body.querySelector('#setOcrManage').onclick = () => { m.close(); openUpdateDialog(); };
+  // 子页面叠在设置页上面；关闭后设置页重新成为最上层，并按最新数据刷新（见文末 _onResume）。
+  body.querySelector('#setAdapters').onclick = () => AdapterUI.openSettings();
+  body.querySelector('#setPayees').onclick = () => AdapterUI.payees();
+  body.querySelector('#setExportJobs').onclick = () => AdapterUI.jobs();
+  body.querySelector('#setProfilesManage').onclick = () => openProfileManager(false);
+  body.querySelector('#setComponentsUpdate').onclick = () => openUpdateDialog();
+  body.querySelector('#setOcrManage').onclick = () => openUpdateDialog();
   body.querySelector('#setOcrConsole').onclick = () => Api.openExternalUrl(OCR_CONSOLE_URL).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOcrSaveKey').onclick = async (ev) => {
     const keyId = body.querySelector('#setOcrKeyId').value.trim();
@@ -3526,7 +3563,8 @@ async function openSettings() {
     }
   };
   body.querySelector('#setOcrClearKey').onclick = async (ev) => {
-    if (!confirm('清除已保存的阿里云密钥？清除后云识别不可用，直到重新填写。')) return;
+    const ok = await confirmDialog({ title: '清除阿里云密钥？', message: '清除后云识别不可用，直到重新填写密钥。', confirmText: '清除密钥', danger: true });
+    if (!ok) return;
     ev.target.disabled = true;
     try {
       await Api.clearOcrCredentials();
@@ -3549,7 +3587,8 @@ async function openSettings() {
   body.querySelector('#setOpenData').onclick = () => Api.openPath(paths.root).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenExports').onclick = () => Api.openPath(paths.exports).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setMigrate').onclick = async () => {
-    if (!confirm('迁移数据到新位置？请选择一个空文件夹。迁移过程中请勿关闭软件。')) return;
+    const ok = await confirmDialog({ title: '迁移数据到新位置？', message: '接下来请选择一个空文件夹。迁移过程中请勿关闭软件。', confirmText: '选择文件夹' });
+    if (!ok) return;
     try {
       const r = await Api.chooseAndMigrateDataRoot();
       if (r && r.changed) { m.close(); toast('数据已迁移到新位置', 'ok'); openSettings(); }
@@ -3557,7 +3596,8 @@ async function openSettings() {
   };
   const resetBtn = body.querySelector('#setResetData');
   if (resetBtn) resetBtn.onclick = async () => {
-    if (!confirm('把数据迁回系统默认位置？')) return;
+    const ok = await confirmDialog({ title: '迁回系统默认位置？', message: '数据会从当前位置迁回系统默认位置。迁移过程中请勿关闭软件。', confirmText: '开始迁移' });
+    if (!ok) return;
     try {
       const r = await Api.resetDataRootToDefault();
       if (r && r.changed) { m.close(); toast('已恢复默认位置', 'ok'); openSettings(); }
@@ -3575,12 +3615,54 @@ async function openSettings() {
     }
   };
 
+  // 只有备份超过保留份数时才出现；删除较早的升级前数据库副本，需要确认。
+  const cleanupBackups = body.querySelector('#setCleanupBackups');
+  if (cleanupBackups) cleanupBackups.onclick = async () => {
+    const ok = await confirmDialog({
+      title: '清理旧备份？',
+      message: `升级软件时会先保存一份数据库副本，需要回到升级前的状态时可以用它恢复。\n将删除较早的 ${maintenance.old_backups} 份（共 ${fmtBytes(maintenance.old_backups_size)}），保留最近 2 份。删除后不能恢复。`,
+      confirmText: '清理旧备份',
+      danger: true,
+    });
+    if (!ok) return;
+    cleanupBackups.disabled = true;
+    try {
+      const r = await Api.cleanupOldBackups();
+      cleanupBackups.remove();
+      toast(r.count ? `已清理 ${r.count} 份备份，释放 ${fmtBytes(r.size)}` : '没有需要清理的备份', 'ok');
+    } catch (e) {
+      cleanupBackups.disabled = false;
+      toast(e.message, 'err');
+    }
+  };
+
+  const previous = options.replace || null;
+  if (previous && !previous.mask.isConnected) return;   // 刷新期间用户已经关掉了设置页
   const m = modal({
     title: '设置',
     body,
     wide: true,
+    key: 'settings',
+    replace: previous?.mask,
     footer: [mkBtn('关闭', 'ghost', () => m.close())],
   });
+  let refreshing = false;
+  m.mask._onResume = async () => {
+    if (refreshing) return;
+    refreshing = true;
+    try { await openSettings({ replace: m }); } finally { refreshing = false; }
+  };
+  if (previous) {
+    // 刷新时保留滚动位置、已展开的折叠区和尚未保存的密钥输入。
+    const opened = [...previous.body.querySelectorAll('details')];
+    body.querySelectorAll('details').forEach((node, index) => { node.open = !!opened[index]?.open; });
+    for (const id of ['#setOcrKeyId', '#setOcrKeySecret']) {
+      const from = previous.body.querySelector(id), to = body.querySelector(id);
+      if (from && to) to.value = from.value;
+    }
+    m.body.scrollTop = previous.body.scrollTop;
+    previous.close();
+  }
 }
 
 // 更新对话框里的可选组件：安装/修复走同一套流程，只差名称与安装入口
@@ -3599,7 +3681,9 @@ const UPDATE_COMPONENTS = {
   },
 };
 
-async function openUpdateDialog() {
+function openUpdateDialog() { return openOnce('update', openUpdateDialogImpl); }
+
+async function openUpdateDialogImpl() {
   const body = el('div', 'update-shell', `
     <div class="update-loading">
       <div class="update-progress"><span></span></div>
@@ -3609,6 +3693,7 @@ async function openUpdateDialog() {
   try { appInfo = await Api.appInfo(); } catch (e) {}
   const m = modal({
     title: '软件更新',
+    key: 'update',
     body,
     wide: true,
     footer: [mkBtn('关闭', 'ghost', () => m.close())],
@@ -3833,6 +3918,7 @@ function openUsageGuide(firstRun) {
   };
   m = modal({
     title: firstRun ? '开始使用' : '使用提示',
+    transient: true,
     body,
     footer: [mkBtn('知道了', 'primary', close)],
     onClose: () => {

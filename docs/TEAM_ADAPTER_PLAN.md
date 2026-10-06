@@ -770,7 +770,7 @@ Tidoc 定义其受限子集：变量、指定集合的 `for`、`if/elif/else`、
 | `inspect_adapter` | 文件选择产生的本地路径 | 已验证预览 ID、摘要及差异 |
 | `install_adapter` | 预览 ID、更新／复制选择、冲突解决 | 方案 ID 和修订 ID |
 | `set_default_scheme` | 方案 ID | 新建默认值，影响范围说明 |
-| `update_scheme_settings` | 方案 ID、原修订 ID、允许修改的设置 | 新修订和差异 |
+| `update_scheme_settings` | 方案 ID、原修订 ID、允许修改的设置、可选的恢复默认设置名列表 | 新修订和差异 |
 | `preview_rebind` | 条目 ID、目标修订、映射 | 缺项变化与冲突 |
 | `apply_rebind` | 预览 ID、确认版本 | 原子应用结果 |
 | `get_form_description` | 作用域及所属记录 | 已解析的字段、值与展示规则 |

@@ -279,6 +279,54 @@ def test_setting_validation_and_head_optimism(storage):
     assert service.restore_setting_defaults(scheme['id'],changed['current_revision_id'])['definition']['effective_settings']['print.numbering'] is True
 
 
+def test_default_title_can_be_explicitly_empty_and_restored(tmp_path):
+    root=DataRoot(tmp_path/'data')
+    db=Database(root.db_path)
+    service=AdapterService(db,root)
+    source=write_package(tmp_path/'source')
+    scheme_file=source/'scheme.json'
+    definition=json.loads(scheme_file.read_text(encoding='utf-8'))
+    definition['titles']=[{'id':'t1','name':'Campus','tax_id':'','short_name':'Campus','color':'blue'}]
+    definition['import_defaults']={'entry.default_title_id':'t1'}
+    scheme_file.write_text(json.dumps(definition,ensure_ascii=False),encoding='utf-8')
+    package=load_package(source)
+    prepared=service._prepare_package(package,'test')
+    with db.transaction():
+        service._record_package(package,prepared,'test')
+        revision=service.packages.store_revision(resolve_definition(package.definition),package.content_hash,commit=False)
+        scheme=service.packages.create_scheme('Test',revision,is_default=True,commit=False)
+    service._finish_operation(prepared)
+    key='entry.default_title_id'
+    effective=lambda item:item['definition']['effective_settings']
+    assert effective(scheme)[key]=='t1'
+    # None is a real value for a nullable setting: "no default title" even though the package has one.
+    emptied=service.update_scheme_settings(scheme['id'],scheme['current_revision_id'],{key:None})
+    assert effective(emptied)[key] is None
+    assert emptied['overrides']['settings'][key] is None
+    assert service.setting_baseline(emptied)[key]=='t1'
+    # `clear` reverts to the package default and drops the local override.
+    restored=service.update_scheme_settings(emptied['id'],emptied['current_revision_id'],{},clear=[key])
+    assert effective(restored)[key]=='t1'
+    assert key not in restored['overrides'].get('settings',{})
+    # restoring every default also removes an explicit empty value.
+    emptied=service.update_scheme_settings(restored['id'],restored['current_revision_id'],{key:None})
+    assert effective(service.restore_setting_defaults(emptied['id'],emptied['current_revision_id']))[key]=='t1'
+    db.close()
+
+
+def test_none_still_reverts_non_nullable_settings_and_clear_is_validated(storage):
+    _,_,service,scheme,_=storage
+    changed=service.update_scheme_settings(scheme['id'],scheme['current_revision_id'],{'print.numbering':False})
+    assert changed['overrides']['settings']['print.numbering'] is False
+    reverted=service.update_scheme_settings(changed['id'],changed['current_revision_id'],{'print.numbering':None})
+    assert 'print.numbering' not in reverted['overrides'].get('settings',{})
+    for bad in ('print.numbering',[1],5):
+        with pytest.raises(ValueError,match='名称列表'):
+            service.update_scheme_settings(reverted['id'],reverted['current_revision_id'],{},clear=bad)
+    with pytest.raises(ValueError,match='同时'):
+        service.update_scheme_settings(reverted['id'],reverted['current_revision_id'],{'print.numbering':False},clear=['print.numbering'])
+
+
 def test_copy_default_disable_preserves_old_references(storage):
     _,db,service,scheme,_=storage
     invoice=entry(db,scheme)
@@ -292,6 +340,20 @@ def test_copy_default_disable_preserves_old_references(storage):
     assert service.context_for_entry(invoice)['manifest']['package_id']=='org.test.storage'
     with pytest.raises(ValueError,match='默认'):
         service.disable_scheme(copy['id'])
+
+
+def test_disabled_scheme_can_be_enabled_again(storage):
+    _,db,service,scheme,_=storage
+    copy=service.copy_scheme(scheme['id'],'Local copy')
+    service.set_default_scheme(copy['id'])
+    assert service.disable_scheme(scheme['id'])['disabled']
+    assert scheme['id'] not in {item['id'] for item in service.list_schemes()}
+    restored=service.enable_scheme(scheme['id'])
+    assert not restored['disabled']
+    assert scheme['id'] in {item['id'] for item in service.list_schemes()}
+    assert service.enable_scheme(scheme['id'])['id']==scheme['id']  # idempotent
+    with pytest.raises(ValueError,match='不存在'):
+        service.enable_scheme('missing')
 
 
 def test_payee_whole_objects_and_leading_zero(storage):
@@ -403,8 +465,11 @@ def test_local_template_validation_cache_is_separate_from_immutable_package(stor
     service._finish_operation(prepared)
     result=service.revalidate_templates('print-component-fixture')
     assert len(result['templates'])==1
+    # The resource path is relative to the data root; resolving it against the cwd marked every template missing.
+    assert result['invalid']==0,result['templates']
+    assert result['valid']+result['pending']==1
     row=db.conn.execute('SELECT status,component_fingerprint FROM template_validation_cache').fetchone()
-    assert row['status'] in ('valid','invalid','pending')
+    assert row['status'] in ('valid','pending')
     assert row['component_fingerprint']=='print-component-fixture'
     with pytest.raises(sqlite3.IntegrityError,match='immutable'):
         db.conn.execute("UPDATE adapter_packages SET diagnostics_json='[]'")
@@ -574,7 +639,7 @@ def test_cancelled_install_rolls_back_database_and_staged_resources(storage,tmp_
     _,db,service,_,_=storage
     path=write_package(tmp_path/'cancel-install','2.0.0')
     preview=service.inspect_adapter(path)
-    package=service._previews[preview['preview_id']]['package']
+    package=load_package(path)
     real=service._record_package
     def cancel_after_record(*args,**kwargs):
         result=real(*args,**kwargs)
@@ -592,7 +657,7 @@ def test_install_resource_progress_and_cancellation_use_requested_operation(stor
     _,db,service,_,_=storage
     path=write_package(tmp_path/'cancel-resources','2.0.0')
     preview=service.inspect_adapter(path)
-    package=service._previews[preview['preview_id']]['package']
+    package=load_package(path)
     before=db.conn.execute('SELECT COUNT(*) FROM schemes').fetchone()[0]
     checkpoint=service._operation_checkpoint
     observed=[]

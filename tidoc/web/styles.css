@@ -1108,6 +1108,9 @@ input[type="date"] { color: var(--ink-soft); }
   display: flex; flex-direction: column; box-shadow: var(--shadow-lg);
   animation: pop .18s ease;
 }
+.modal:focus { outline: none; }
+.modal-mask.no-anim, .modal-mask.no-anim .modal { animation: none; }
+.confirm-message { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--ink-soft); white-space: pre-line; }
 .modal.wide { width: min(880px, 95vw); }
 .modal.compact { width: min(460px, calc(100vw - 32px)); }
 .modal.compact .modal-head { padding: 14px 16px; }
@@ -1976,14 +1979,68 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 }
 
 /* Adapter controls keep the existing dense work surface. */
-.adapter-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
-.adapter-choice { display:block; width:100%; margin-top:10px; text-align:left; }
+/* .form-row 自带 display:flex，会盖过 hidden 属性；条件字段与"仅在更新时出现"的行都靠 hidden 控制。 */
+.form-row[hidden], .settings-row[hidden] { display:none; }
+.form-row textarea { font-family:inherit; font-size:13px; line-height:1.55; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--panel-raised); color:var(--ink); outline:none; resize:vertical; transition:.15s; }
+.form-row textarea:focus { border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-ring); }
+.adapter-choice { display:flex; flex-direction:column; align-items:flex-start; gap:3px; width:100%; margin-top:10px; padding:12px 14px; text-align:left; }
+.adapter-choice b { font-size:14px; }
+.adapter-choice-about { font-size:12.5px; font-weight:400; color:var(--ink-soft); line-height:1.5; }
 .schema-form { display:grid; gap:10px; }
 .schema-form .form-row { margin:0; }
 .schema-form select[multiple] { min-height:100px; }
 .schema-errors { padding:12px; border:1px solid var(--danger, #ba4444); border-radius:8px; margin-bottom:12px; }
 .schema-errors a { display:block; color:inherit; text-decoration:underline; }
-.field-error { color:var(--danger,#ba4444); min-height:1em; }
+.field-help { font-size:12px; line-height:1.5; color:var(--ink-soft); }
+.field-help:empty { display:none; }
+.field-error { color:var(--danger,#ba4444); font-size:12px; }
+.field-error:empty { display:none; }
+
+/* 报账方案管理页：沿用设置页的 settings-block / settings-row 语言。 */
+.scheme-page { gap:14px; }
+.scheme-summary { display:grid; gap:12px; padding:16px; }
+.scheme-summary-top { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; }
+.scheme-picker { display:flex; flex-direction:column; gap:6px; flex:1 1 260px; min-width:0; }
+.scheme-picker > label { font-size:12px; font-weight:600; color:var(--ink-soft); }
+.scheme-desc { margin:0; font-size:12.5px; line-height:1.55; color:var(--ink-soft); }
+.modal-body > .scheme-desc { margin:0 0 12px; }
+.modal-body > .scheme-desc:last-child { margin-bottom:0; }
+.scheme-meta { display:flex; flex-wrap:wrap; gap:6px; }
+.scheme-chip { padding:2px 9px; border:1px solid var(--line-soft); border-radius:999px; background:var(--paper-2); color:var(--ink-soft); font-size:11.5px; line-height:1.6; white-space:nowrap; }
+.scheme-actions { display:flex; flex-wrap:wrap; gap:8px; padding-top:12px; border-top:1px solid var(--line-soft); }
+.scheme-actions .push-right { margin-left:auto; }
+.setting-flag { padding:1px 7px; border-radius:6px; background:var(--paper-2); color:var(--ink-soft); font-size:10.5px; font-weight:600; line-height:1.6; white-space:nowrap; }
+.setting-flag.is-changed { background:var(--primary-soft); color:var(--univ-ink); }
+.scheme-page .settings-row { position:relative; }
+.scheme-page .settings-row.is-dirty::before { content:""; position:absolute; left:-16px; top:10px; bottom:10px; width:3px; border-radius:2px; background:var(--primary); }
+.settings-row.is-stacked { flex-direction:column; align-items:stretch; gap:10px; }
+.settings-row-copy .link-btn { font-weight:500; }
+.settings-row.is-locked .settings-row-copy b { color:var(--ink-soft); }
+.settings-row-control { display:flex; flex:0 0 auto; align-items:center; gap:10px; }
+.settings-input { width:240px; max-width:100%; padding:7px 10px; border-radius:8px; font-size:13px; }
+.settings-input.wide { width:100%; }
+.settings-row-control .select-field, .settings-row-control .settings-select { min-width:180px; }
+.chip-group { display:flex; flex-wrap:wrap; gap:8px; }
+.chip-check { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border:1px solid var(--line); border-radius:999px; background:var(--panel-raised); font-size:12.5px; cursor:pointer; transition:.15s; }
+.chip-check input { width:14px; height:14px; margin:0; padding:0; accent-color:var(--primary); }
+.chip-check.is-on { border-color:var(--primary-line); background:var(--primary-soft); color:var(--univ-ink); }
+.chip-check.is-disabled { opacity:.6; cursor:default; }
+.scheme-contents summary + * { margin-top:2px; }
+.scheme-contents-section { padding:8px 0 10px; border-top:1px solid var(--line-soft); }
+.scheme-contents-section:first-of-type { border-top:none; }
+.scheme-contents-section h4 { margin:0 0 6px; font-size:12px; font-weight:600; color:var(--ink-soft); }
+.scheme-contents-section ul { margin:0; padding:0; list-style:none; display:grid; gap:4px; font-size:12.5px; line-height:1.5; }
+.scheme-contents-section li span { color:var(--ink-soft); }
+.settings-list-empty { padding:14px 0; font-size:12.5px; color:var(--ink-soft); }
+.job-card.is-focus { border-color:var(--primary-line); box-shadow:0 0 0 3px var(--primary-ring); }
+.job-files { border-top:1px solid var(--line-soft); }
+.job-files .settings-row { padding:9px 0; }
+.job-files .settings-row-copy b { font-size:13px; font-weight:500; }
+.job-diagnostics { padding:0 0 12px; display:grid; gap:6px; }
+.job-diagnostics .hint { margin:0; }
+.revision-badge { font-variant-numeric:tabular-nums; }
+.modal-foot-note { margin-right:auto; align-self:center; font-size:12.5px; color:var(--ink-soft); }
+.modal-foot-note.is-dirty { color:var(--univ-ink); font-weight:600; }
 .adapter-entry .btn { margin:0 8px 8px 0; }
 .adapter-materials { display:grid; gap:10px; margin-top:12px; }
 .adapter-materials .attach-item { flex-wrap:wrap; gap:8px; }

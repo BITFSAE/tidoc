@@ -17,6 +17,7 @@ from ..db.payees import PayeeRepo
 from ..db.extensions import ExtensionRepo
 from ..db.export_jobs import ExportJobRepo
 from ..db.paths import DataRoot
+from .cache import PreviewCache
 
 LEGACY_KEYS = (
     'tidoc.titleProfiles','tidoc.materialRequirements','tidoc.defaultEntryTitle',
@@ -87,9 +88,10 @@ class AdapterService:
         self.payees=PayeeRepo(db)
         self.extensions=ExtensionRepo(db)
         self.jobs=ExportJobRepo(db)
-        self._previews={}
-        self._rebind_previews={}
-        self._resource_gc_previews={}
+        # Previews are short-lived and bounded; an expired one is reported as needing a new preview.
+        self._previews=PreviewCache()
+        self._rebind_previews=PreviewCache()
+        self._resource_gc_previews=PreviewCache()
         self._operation_lock=threading.RLock()
         self._operations={}
         db.adapter_service=self
@@ -310,13 +312,15 @@ class AdapterService:
         if not {'org.tidoc.generic','org.bitfsae.reimbursement'} <= set(builtin):
             raise ValueError('内置通用或兼容方案缺失。')
         initialized=self._meta('adapter.bootstrap.complete')=='1'
-        if not initialized and self.db.db_path != ':memory:':
+        # The schema upgrade of this start already saved the same data; an empty database has nothing to restore.
+        if (not initialized and self.db.db_path != ':memory:' and not self.db.migration_backup
+                and self._has_legacy_data()):
             self.db.backup(self.data_root.backups_dir/('tidoc-before-adapters-'+uuid.uuid4().hex+'.sqlite'))
         with self.db.transaction():
             for package,resource in prepared:
                 self._record_package(package,resource,'builtin')
             if not initialized:
-                legacy=bool(self._preferences()) or any(self.db.conn.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() for table in ('entries','profiles','batches'))
+                legacy=self._has_legacy_data()
                 schemes={}
                 for package_id in ('org.tidoc.generic','org.bitfsae.reimbursement'):
                     package=builtin[package_id]
@@ -340,6 +344,11 @@ class AdapterService:
         for _,resource in prepared:
             self._finish_operation(resource)
         return self.setup_state()
+
+    def _has_legacy_data(self):
+        return bool(self._preferences()) or any(
+            self.db.conn.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone()
+            for table in ('entries','profiles','batches'))
 
     def _legacy_overrides(self,base,prefs):
         overrides={'settings':{}}
@@ -517,6 +526,13 @@ class AdapterService:
         result['revision_history']=self.revision_history(result['id'])
         return result
 
+    def setting_baseline(self,scheme):
+        """Effective settings as the package alone defines them, without local overrides."""
+        from .resolver import resolve_definition
+        record=self.packages.revision_record(scheme['current_revision_id'])
+        base=self.packages.get_package(record['content_hash'])['definition']
+        return resolve_definition(base)['effective_settings']
+
     def get_revision(self,revision_id):
         return self.packages.get_revision(revision_id)
 
@@ -539,6 +555,11 @@ class AdapterService:
     def disable_scheme(self,scheme_id):
         with self.db.transaction():
             self.packages.disable(scheme_id,commit=False)
+        return self.get_scheme(scheme_id)
+
+    def enable_scheme(self,scheme_id):
+        with self.db.transaction():
+            self.packages.enable(scheme_id,commit=False)
         return self.get_scheme(scheme_id)
 
     def copy_scheme(self,scheme_id,name):
@@ -586,14 +607,27 @@ class AdapterService:
             self.packages.set_current_revision(scheme_id,revision,overrides=overrides,expected_revision=expected_revision,commit=False)
         return self.get_scheme(scheme_id)
 
-    def update_scheme_settings(self,scheme_id,expected_revision,values):
+    def update_scheme_settings(self,scheme_id,expected_revision,values,clear=()):
+        """Save changed settings; keys listed in `clear` revert to the package default.
+
+        None is an explicit empty value only for nullable settings (the default title). For every
+        other setting None keeps its older meaning of "revert to the default".
+        """
+        from .registry import SETTINGS
         if not isinstance(values,dict):
             raise ValueError('设置必须是对象。')
+        clear=() if clear is None else clear
+        if not isinstance(clear,(list,tuple,set)) or any(not isinstance(key,str) for key in clear):
+            raise ValueError('恢复默认的设置必须是名称列表。')
+        if set(values)&set(clear):
+            raise ValueError('同一项设置不能同时修改和恢复默认。')
         scheme=self.get_scheme(scheme_id)
         overrides=deepcopy(scheme['overrides'])
         settings=overrides.setdefault('settings',{})
+        for key in clear:
+            settings.pop(key,None)
         for key,value in values.items():
-            if value is None:
+            if value is None and not SETTINGS.get(key,{}).get('nullable'):
                 settings.pop(key,None)
             else:
                 settings[key]=value
@@ -601,7 +635,7 @@ class AdapterService:
 
     def restore_setting_defaults(self,scheme_id,expected_revision,keys=None):
         overrides=self.get_scheme(scheme_id)['overrides'].get('settings',{})
-        return self.update_scheme_settings(scheme_id,expected_revision,{key:None for key in (keys if keys is not None else overrides)})
+        return self.update_scheme_settings(scheme_id,expected_revision,{},clear=list(keys if keys is not None else overrides))
 
     @staticmethod
     def _normalize_titles(titles,original=None):
@@ -784,7 +818,7 @@ class AdapterService:
             'schemes':schemes,'changes':changes,'conflicts':conflicts,'diagnostics':package.diagnostics,
             'materials':deepcopy(package.definition['materials']),'outputs':deepcopy(package.definition['outputs']),
             'ok':True}
-        self._previews[preview_id]={'path':str(Path(path).resolve()),'package':package,'preview':preview,
+        self._previews[preview_id]={'path':str(Path(path).resolve()),'content_hash':package.content_hash,'preview':preview,
             'heads':{s['id']:s['current_revision_id'] for s in schemes}}
         return deepcopy(preview)
 
@@ -798,7 +832,7 @@ class AdapterService:
             raise ValueError('安装预览已失效，请重新选择适配包。')
         package=load_package(saved['path'])
         self._operation_checkpoint(operation_id,'resolve_definition')
-        if package.content_hash!=saved['package'].content_hash:
+        if package.content_hash!=saved['content_hash']:
             raise ValueError('预览后适配包内容已经变化，请重新预览。')
         mode=options.get('mode','install')
         if mode not in ('install','update','copy'):
@@ -948,10 +982,7 @@ class AdapterService:
         elif scope=='export' and allow_preview:
             if scheme_id is None:
                 scheme_id=self.default_binding()[0]
-        if scope not in ('export',) or not allow_preview:
-            scheme=self.get_scheme(scheme_id)
-        else:
-            scheme=self.get_scheme(scheme_id)
+        scheme=self.get_scheme(scheme_id)
         revision_id=revision_id or scheme['current_revision_id']
         if not self.db.conn.execute('SELECT 1 FROM scheme_revision_links WHERE scheme_id=? AND revision_id=?',(scheme['id'],revision_id)).fetchone():
             raise ValueError('修订不属于指定方案。')
@@ -1005,7 +1036,6 @@ class AdapterService:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='entry_adapter_sources'").fetchone():
             source_rows=self.db.conn.execute('''SELECT source_digest,revision_id,payload_json,received_at
                 FROM entry_adapter_sources WHERE entry_id=? ORDER BY received_at,source_digest''',(owner_id,)).fetchall()
-            from ..adapters.policy import validate_field_value
             for source_row in source_rows:
                 try:
                     payload=json.loads(source_row['payload_json'])
@@ -1033,14 +1063,14 @@ class AdapterService:
                         continue
                     value=source_value.get('value')
                     active=current_fields.get(field_id)
-                    compatible=bool(active and active.get('type')==field.get('type') and
-                                    source_package==package_id)
-                    if compatible:
+                    usable=bool(active and active.get('type')==field.get('type') and
+                                source_package==package_id)
+                    if usable:
                         try:
                             validate_field_value(active,value)
                         except (ValueError,TypeError):
-                            compatible=False
-                    if compatible:
+                            usable=False
+                    if usable:
                         continue
                     historical.append({'field_id':field_id,'value':value,'package_id':source_package,
                         'definition_revision_id':payload.get('source_revision_id') or source_row['revision_id'] or source_value.get('definition_revision_id',''),
@@ -1200,7 +1230,8 @@ class AdapterService:
         reports=[]
         for row in self.db.conn.execute('SELECT content_hash,resource_path,definition_json FROM adapter_packages ORDER BY package_id,package_version'):
             definition=json.loads(row['definition_json'])
-            root=Path(row['resource_path'])
+            # resource_path is stored relative to the data root, never to the process cwd.
+            root=self.data_root.root/row['resource_path']
             for output in definition.get('outputs',[]):
                 name=output.get('template')
                 if output.get('type')!='docx' or not name:
@@ -1479,8 +1510,6 @@ class AdapterService:
         if key=='tidoc.materialRequirements':
             return self.update_material_requirements(json.loads(value) if isinstance(value,str) else value)
         prefs={key:value}
-        record=self.packages.revision_record(scheme['current_revision_id'])
-        base=self.packages.get_package(record['content_hash'])['definition']
         changes=self._legacy_overrides(scheme['definition'],prefs)
         overrides=deepcopy(scheme['overrides'])
         overrides.setdefault('settings',{}).update(changes.get('settings',{}))

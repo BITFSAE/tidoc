@@ -177,6 +177,17 @@ def test_export_progress_and_cancel_remain_available_during_api_render(planner_s
     api.db.close()
 
 
+def test_cancellation_events_are_bounded_and_released_after_the_job(planner_setup):
+    planner,entries,attachments,adapters,eid,root=planner_setup
+    for index in range(300):
+        planner.cancel(f'preview-{index}')   # cancelled previews never run
+    assert len(planner._cancellations)<=256
+    plan=planner.preview([eid],['generic_overview'],{'date':'2026-10-06'})
+    job=planner.run(plan['plan_id'])
+    assert job['status']=='completed'
+    assert job['id'] not in planner._cancellations
+
+
 def test_initial_export_record_failure_is_recoverable_without_publishing(planner_setup,monkeypatch):
     from tidoc.services.export_plan import ExportPreflightError
     planner,entries,attachments,adapters,eid,root=planner_setup

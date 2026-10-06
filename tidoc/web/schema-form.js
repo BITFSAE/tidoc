@@ -28,7 +28,8 @@ const SchemaForm = (() => {
         if (field.max_length) input.maxLength = field.max_length;
       }
       input.id = id; input.disabled = field.editable === false; row.append(input);
-      const help = el('small', 'hint'); help.id = id + '-help'; help.textContent = field.help || ''; row.append(help);
+      // 说明与错误是辅助文字，不用 .hint 的提示框样式；没有内容时 :empty 规则会把它们收起。
+      const help = el('small', 'field-help'); help.id = id + '-help'; help.textContent = field.help || ''; row.append(help);
       const error = el('small', 'field-error'); error.id = id + '-error'; row.append(error);
       input.setAttribute('aria-describedby', help.id + ' ' + error.id);
       if(field.presentation==='advanced'){

@@ -35,6 +35,8 @@ class Database:
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
         self.adapter_service = None
+        # Backup written by this start's schema upgrade, if any.
+        self.migration_backup = None
         self._lock = threading.RLock()
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -42,7 +44,7 @@ class Database:
         self.conn.execute('PRAGMA busy_timeout=5000')
         try:
             # Version refusal happens before journal mode or any schema write.
-            init_db(self.conn)
+            self.migration_backup = init_db(self.conn)
             self.conn.execute('PRAGMA journal_mode=WAL')
             self.conn.execute('PRAGMA synchronous=NORMAL')
         except BaseException:

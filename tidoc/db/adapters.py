@@ -144,6 +144,13 @@ class AdapterRepo:
             self.db.conn.commit()
         return self.get_scheme(scheme_id)
 
+    def enable(self, scheme_id, commit=True):
+        self.get_scheme(scheme_id)
+        self.db.conn.execute('UPDATE schemes SET disabled=0,updated_at=? WHERE id=?', (now(),scheme_id))
+        if commit:
+            self.db.conn.commit()
+        return self.get_scheme(scheme_id)
+
     def revision_history(self, scheme_id):
         return [dict(r) for r in self.db.conn.execute('''SELECT r.revision_id,r.content_hash,r.created_at
             FROM scheme_revisions r JOIN scheme_revision_links l ON l.revision_id=r.revision_id

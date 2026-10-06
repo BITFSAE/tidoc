@@ -157,7 +157,9 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
 
     assert "tidoc.paymentScreenshotOcr" in source
     assert "tidoc.defaultPaidToInvoiceTotal" in source
-    assert "setDefaultPaidInvoice" in source
+    # 这些项属于报账方案设置，只在「报账方案」页维护；设置页不再放第二个入口。
+    for duplicated in ("setPaymentOcr", "setDefaultPaidInvoice", "setBindleNotes", "setBindleTags", "setDefaultEntryTitle"):
+        assert duplicated not in source
     assert 'id="searchClear"' in html
     assert ".search-clear" in css
     assert 'class="topbar-search"' not in html
@@ -166,10 +168,6 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "toolbar-view-row" in html
     assert "toolbar-query-row" in html
     assert 'class="view-presets"' in html
-    assert "tidoc.bindle.includeNotes" in source
-    assert "tidoc.bindle.includeTags" in source
-    assert "setBindleNotes" in source
-    assert "setBindleTags" in source
     assert "已自动开启代填模式" in source
     assert 'id="setComponentsUpdate"' in source
     assert 'id="setPrintComponent"' not in source

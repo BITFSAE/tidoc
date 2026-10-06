@@ -45,6 +45,51 @@ def test_forms_have_labels_and_focusable_linked_errors():
     assert "type === 'integer'" in source
 
 
+def test_hidden_rows_are_hidden_and_help_text_is_not_a_callout_box():
+    css=(WEB/'styles.css').read_text()
+    # .form-row 自带 display:flex，会盖过 hidden 属性；条件字段和账户类型联动都靠 hidden。
+    assert '.form-row[hidden]' in css
+    source=(WEB/'schema-form.js').read_text()
+    assert "el('small', 'field-help')" in source
+    assert "el('small', 'hint')" not in source
+
+
+def test_scheme_details_reports_package_baseline_apart_from_local_overrides(api):
+    scheme=api.scheme_details()['data']
+    baseline=scheme['settings_baseline']
+    # 默认输出的包默认值来自 scheme.default_outputs，而不是注册表里的空列表。
+    assert baseline['print.default_outputs']==scheme['definition']['scheme']['default_outputs']
+    api.update_scheme_settings(scheme['id'],scheme['current_revision_id'],{'print.numbering':False})
+    changed=api.scheme_details(scheme['id'])['data']
+    assert changed['definition']['effective_settings']['print.numbering'] is False
+    assert changed['settings_baseline']['print.numbering'] is True
+
+
+def test_scheme_page_saves_only_changed_settings_against_package_baseline():
+    adapter=(WEB/'adapter-ui.js').read_text()
+    assert 'settings_baseline' in adapter
+    assert 'filter((row) => row.isDirty())' in adapter
+    assert 'confirmLeave' in adapter
+
+
+def test_dialog_open_close_rules_live_in_the_shared_modal():
+    source=(WEB/'app.js').read_text()
+    modal=source.split('function modal(',1)[1].split('function confirmDialog',1)[0]
+    # 语义、焦点归还、仅最上层可交互、点遮罩必须"按下和松开都在遮罩上"、关闭前确认、子页面关闭后的回调。
+    for needle in ("setAttribute('aria-modal', 'true')","opener.focus","syncModalLayers()","pressedOnMask","guard","_onResume","key &&"):
+        assert needle in modal,needle
+    # 弹窗打开时列表快捷键（/、n、t、Cmd+A）不作用到后面的页面。
+    assert "if ($('#modalRoot').lastChild) return;" in source
+    settings=source.split('async function buildSettings',1)[1].split('// 更新对话框里的可选组件',1)[0]
+    assert 'confirm(' not in settings
+    assert "key: 'settings'" in settings and '_onResume' in settings
+    # 设置页的子页面叠在上面，不再先关掉设置页。
+    assert 'm.close(); AdapterUI' not in settings
+    adapter=(WEB/'adapter-ui.js').read_text()
+    assert 'guard: confirmLeave' in adapter
+    assert 'mask.onclick' not in adapter and '_closeModal =' not in adapter
+
+
 def test_javascript_parses_in_node_if_available():
     node=shutil.which('node')
     if node:

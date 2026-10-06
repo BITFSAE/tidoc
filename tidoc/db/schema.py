@@ -415,8 +415,11 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
             END""")
 
 
-def init_db(conn: sqlite3.Connection, *, backup_path=None) -> None:
-    """Refuse future versions; back up with SQLite, then migrate atomically."""
+def init_db(conn: sqlite3.Connection, *, backup_path=None):
+    """Refuse future versions; back up with SQLite, then migrate atomically.
+
+    Returns the path of the backup written before an upgrade, or None when none was needed.
+    """
     from pathlib import Path
     from datetime import datetime
     previous = schema_version(conn)
@@ -424,6 +427,7 @@ def init_db(conn: sqlite3.Connection, *, backup_path=None) -> None:
         raise ValueError(f"数据库版本 {previous} 高于当前支持的 {SCHEMA_VERSION}，拒绝写入。请更新软件。")
     existing = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='entries'").fetchone())
     previous_version = previous if previous is not None else (1 if existing else SCHEMA_VERSION)
+    backup = None
     if conn.in_transaction:
         raise ValueError('数据库迁移需要没有未提交修改的连接。')
     if existing and previous_version < SCHEMA_VERSION:
@@ -433,7 +437,7 @@ def init_db(conn: sqlite3.Connection, *, backup_path=None) -> None:
                 'tidoc-before-v12-' + datetime.now().strftime('%Y%m%dT%H%M%S%f') + '.sqlite')
             target.parent.mkdir(parents=True, exist_ok=True)
             from .database import backup_connection
-            backup_connection(conn, target)
+            backup = backup_connection(conn, target)
     foreign_keys = conn.execute('PRAGMA foreign_keys').fetchone()[0]
     conn.execute('PRAGMA foreign_keys=OFF')
     conn.execute('BEGIN IMMEDIATE')
@@ -454,6 +458,7 @@ def init_db(conn: sqlite3.Connection, *, backup_path=None) -> None:
         raise
     finally:
         conn.execute('PRAGMA foreign_keys=' + str(foreign_keys))
+    return backup
 
 
 def _legacy_migrations(conn: sqlite3.Connection, previous_version: int) -> None:

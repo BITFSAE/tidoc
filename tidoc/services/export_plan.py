@@ -6,6 +6,7 @@ import shutil
 import threading
 import uuid
 import zipfile
+from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from ..db.entries import EntryRepo
 from ..db.profiles import ProfileRepo
 from ..db.batches import BatchRepo
 from ..db.export_jobs import ExportJobRepo
+from ..adapters.cache import PreviewCache
 from .export_context import (ROLE_TYPES, build_export_context, digest_data, filename_for,
                              get_path, json_data, project_entry, safe_name, title_key)
 from .exports import (GENERIC_ATTACHMENTS, GENERIC_OVERVIEW, GENERIC_MATERIALS, confined_path,
@@ -35,7 +37,18 @@ class ExportPlanner:
         self.root=Path(getattr(data_root,'root',data_root)).resolve()
         self.entries=EntryRepo(db);self.profiles=ProfileRepo(db);self.batches=BatchRepo(db)
         self.jobs=getattr(adapters,'jobs',None) or ExportJobRepo(db)
-        self._plans={};self._cancellations={};self._progress={};self._lock=threading.RLock()
+        # Plans hold full render contexts: keep few, drop idle ones. An expired plan must be previewed again.
+        self._plans=PreviewCache();self._cancellations=OrderedDict();self._progress={};self._lock=threading.RLock()
+
+    def _cancellation(self,job_id):
+        # One event per job; the oldest are dropped so cancelled previews cannot accumulate.
+        with self._lock:
+            event=self._cancellations.get(job_id)
+            if event is None:
+                event=self._cancellations[job_id]=threading.Event()
+                while len(self._cancellations)>256:
+                    self._cancellations.popitem(last=False)
+            return event
 
     def _set_progress(self,job_id,phase,completed=0,total=0):
         messages={'verifying_resources':'正在核对原始材料',
@@ -503,7 +516,7 @@ class ExportPlanner:
         return self._execute(job,output_dir)
 
     def _execute(self,job,output_dir=None):
-        job_id=job['id'];event=self._cancellations.setdefault(job_id,threading.Event())
+        job_id=job['id'];event=self._cancellation(job_id)
         directory=self._job_dir(job_id)
         staging=directory/'staging';rendered=directory/'rendered'
         destination=(Path(output_dir).expanduser().resolve() if output_dir else self.data_root.exports_dir)/job_id
@@ -580,6 +593,7 @@ class ExportPlanner:
         finally:
             shutil.rmtree(staging,ignore_errors=True);shutil.rmtree(rendered,ignore_errors=True)
             for abandoned in directory.glob('.tidoc-print-*'):shutil.rmtree(abandoned,ignore_errors=True)
+            with self._lock:self._cancellations.pop(job_id,None)
 
     def list_jobs(self):
         return self.jobs.list()
@@ -595,7 +609,7 @@ class ExportPlanner:
         return self._execute(job,output_dir)
 
     def cancel(self,job_id):
-        self._cancellations.setdefault(job_id,threading.Event()).set()
+        self._cancellation(job_id).set()
         with self._lock:
             if job_id in self._plans:
                 self._plans.pop(job_id)

@@ -828,6 +828,8 @@ async function loadProfiles() {
     toast('已自动开启代填模式', 'ok');
   }
   renderProfileSelects();
+  // 卡片上的报账人徽标只在有多个报账人时显示；人数跨过 1 个与多个的界线时，已显示的卡片要跟着刷新。
+  if (hadLoaded && State.entries.length && (previousCount > 1) !== (State.profiles.length > 1)) renderEntries();
   if (!State.profiles.length) {
     openProfileManager(true);
     return;
@@ -2784,7 +2786,7 @@ function bindEvents() {
     }
     // 弹窗打开时，列表快捷键（/、n、t、Cmd+A）不应作用到后面的页面。
     if ($('#modalRoot').lastChild) return;
-    if (e.target.matches('input, textarea, select')) {
+    if (e.target.matches?.('input, textarea, select')) {   // 事件目标可能是 document（脚本派发的事件），没有 matches
       if (e.key === 'Escape') e.target.blur();
       return;
     }
@@ -3460,6 +3462,7 @@ async function buildSettings(options = {}) {
       renderTitleProfileRows();
       await refreshTitleOptions();
       refillSettingsTitleSelects();
+      renderEntries();   // 卡片色条和分组标题的颜色随抬头列表变化
       toast('抬头与税号已保存', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   };

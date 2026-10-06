@@ -631,7 +631,7 @@ const AdapterUI = (() => {
   function roleAttachments(entry,roleId) {
     return (entry.attachments||[]).filter(a=>(a.role_id||(['invoice_pdf','invoice_xml'].includes(a.type)?'invoice':a.type))===roleId&&(!a.role_definition_revision_id||a.role_definition_revision_id===entry.scheme_revision_id));
   }
-  // 详情页的材料分组由 app.js 渲染（与改动前一致）；这里只补方案信息：报账字段、规则提示、来源方案和变更记录。
+  // 详情页的材料分组由 app.js 渲染（与改动前一致）；这里只补一个折叠的方案信息区：报账字段、规则提示、来源方案和变更记录。
   function decorateEntry(body,entry,refreshDetail) {
     const definition=entry.adapter?.definition;
     const hasFields=(definition?.fields||[]).some(f=>f.scope==='entry');
@@ -639,8 +639,8 @@ const AdapterUI = (() => {
     const notices=(entry.diagnostics||[]).filter(d=>!materialCodes.has(d.code));
     const sources=entry.adapter_sources||[];
     const history=entry.extension_history||[];
+    // 放在详情页最末且默认折叠；有待处理的字段或提示时，标题上的「待处理」标记仍然可见。
     const section=el('details','detail-section minor-section adapter-entry');
-    section.open=hasFields||notices.length>0;
     section.innerHTML=`<summary>报账方案 · ${esc(entry.adapter?.scheme_name||'未选择')}${notices.length?' <span class="badge warning">待处理</span>':''}</summary><p class="scheme-desc">修订 ${esc(entry.scheme_revision_id?.slice(0,8)||'')}</p>`;
     const actions=el('div');
     if(hasFields)actions.append(mkBtn('填写报账信息','small ghost',()=>editFields('entry',entry.id,null,null,refreshDetail)));
@@ -649,8 +649,7 @@ const AdapterUI = (() => {
     section.insertAdjacentHTML('beforeend',diagnosticsMarkup(notices));
     for(const source of sources){const historical=el('details');historical.innerHTML=`<summary>来源报账信息 · ${esc(source.definition?.manifest?.name||'外部方案')}</summary>`;const fields=source.definition?.fields||[];for(const record of source.extension_values||[]){const field=fields.find(f=>f.id===record.field_id);const row=el('p','hint');row.textContent=(field?.label||record.field_id)+'：'+JSON.stringify(record.value);historical.append(row);}section.append(historical);}
     for(const item of history){const row=el('p','hint');row.textContent=(item.kind==='rebind'?'规则变更':item.kind==='material'?'材料角色变更':'附加信息变更')+' · '+item.changed_at;section.append(row);}
-    const anchor=body.querySelector('details.minor-section');
-    if(anchor)anchor.before(section);else body.append(section);
+    body.append(section);
   }
   function chooser(selected='') { if(schemes.length<=1)return '';return `<label class="form-row">报账方案<select data-import-scheme>${schemes.map(s=>`<option value="${esc(s.id)}"${s.id===(selected||current?.id)?' selected':''}>${esc(s.name)}</option>`).join('')}</select></label>`; }
   async function batchFields(batchId) {

@@ -111,6 +111,8 @@ def test_card_and_detail_keep_the_original_material_workflow():
     # 详情页的材料分组由 app.js 渲染；方案信息只是附加的折叠区，不能隐藏或搬走原来的材料区与拖放区。
     decorate=adapter.split('function decorateEntry(',1)[1].split('function chooser(',1)[0]
     assert 'hidden=true' not in decorate and 'materialDrop' not in decorate
+    # 方案信息区放在详情页最末，且不自动展开。
+    assert 'body.append(section)' in decorate and 'section.open' not in decorate and 'before(' not in decorate
     assert 'data-add-att-role' in source and 'data-online-verification' in source
 
 

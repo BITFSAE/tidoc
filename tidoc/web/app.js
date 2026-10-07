@@ -2946,7 +2946,17 @@ function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose
     $('.modal', existing)?.focus({ preventScroll: true });
     return existing._api;
   }
-  const mask = el('div', 'modal-mask');
+  // 替换已显示的加载窗口时，新窗口从它当前的高度和透明度接着过渡，而不是先消失再弹出。
+  const replacedBox = replace?.isConnected && !replace.classList.contains('is-deferred') ? $('.modal', replace) : null;
+  const from = replacedBox ? {
+    // 布局尺寸不受入场缩放影响，宽度比较和高度过渡都按它计算。
+    width: replacedBox.offsetWidth,
+    height: replacedBox.offsetHeight,
+    opacity: Number(getComputedStyle(replacedBox).opacity),
+    transform: getComputedStyle(replacedBox).transform,
+    scrim: Number(getComputedStyle(replace).opacity),
+  } : null;
+  const mask = el('div', 'modal-mask' + (from ? ' is-replacing' : ''));
   const box = el('div', 'modal' + (wide ? ' wide' : compact ? ' compact' : ''));
   const titleId = 'modal-title-' + (++modalSequence);
   box.setAttribute('role', 'dialog');
@@ -2980,8 +2990,13 @@ function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose
   const opener = replace?._opener || (active instanceof HTMLElement && active !== document.body ? active : null);
   mask._opener = opener;
   // 就地替换时插回原来的层级位置，不能盖到之后才打开的子页面上面。
-  if (replace?.isConnected) replace.after(mask); else $('#modalRoot').appendChild(mask);
+  if (replace?.isConnected) {
+    replace.after(mask);
+    // 被替换的窗口在关闭前不再参与绘制，避免两层遮罩叠在一起变暗。
+    replace.classList.add('is-replaced');
+  } else $('#modalRoot').appendChild(mask);
   syncModalLayers();
+  if (from) continueModalTransition(mask, box, bodyEl, from);
 
   let closed = false;
   let asking = false;
@@ -2990,6 +3005,7 @@ function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose
     closed = true;
     const root = $('#modalRoot');
     const wasTop = root.lastChild === mask;
+    if (wasTop) fadeOutModal(mask);
     mask.remove();
     window.TidocSelect?.prune();
     syncModalLayers();
@@ -3015,7 +3031,8 @@ function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose
   let pressedOnMask = false;
   mask.addEventListener('mousedown', (e) => { pressedOnMask = e.target === mask; });
   mask.addEventListener('click', (e) => {
-    const direct = pressedOnMask && e.target === mask;
+    // 尚未显示的加载窗口是透明的，误点不应取消正在进行的打开。
+    const direct = pressedOnMask && e.target === mask && !mask.classList.contains('is-deferred');
     pressedOnMask = false;
     if (direct) requestClose();
   });
@@ -3058,20 +3075,82 @@ function confirmDialog({ title, message, confirmText = '确定', cancelText = '�
 }
 
 // 同一类弹窗在加载期间或已打开时不再重复打开（连点按钮、快捷键重复触发）。
-async function openOnce(key, open, title = '正在打开…') {
+// 加载窗口先以透明状态占住层级（防止重复打开、挡住背后的误操作），100 ms 内加载完成就直接显示
+// 最终窗口；更慢时才显示与最终窗口同宽的加载窗口，内容到达后由 modal() 平滑过渡过去。
+const MODAL_LOADING_DELAY = 100;
+async function openOnce(key, open, title = '正在打开…', { wide = false, compact = false } = {}) {
   const existing = findModalByKey(key);
   if (existing) { $('.modal', existing)?.focus({ preventScroll: true }); return undefined; }
-  const body = el('p', 'hint', '正在读取，请稍候…');
+  const body = el('div', 'modal-loading' + (wide ? ' wide' : ''), `
+    <span class="modal-loading-line"></span>
+    <span class="modal-loading-line"></span>
+    <span class="modal-loading-line short"></span>
+    <span class="sr-only">正在读取，请稍候…</span>`);
   body.setAttribute('role', 'status');
-  const pending = modal({ title, key, body, footer: [mkBtn('关闭', 'ghost', () => pending.close())] });
-  try { return await open(pending); } finally { pending.close(); }
+  const pending = modal({ title, key, body, wide, compact, footer: [mkBtn('关闭', 'ghost', () => pending.close())] });
+  pending.mask.classList.add('is-deferred');
+  const reveal = setTimeout(() => pending.mask.classList.remove('is-deferred'), MODAL_LOADING_DELAY);
+  try { return await open(pending); } finally { clearTimeout(reveal); pending.close(); }
 }
 
-// 加载超过一瞬间才给提示，避免快速打开时闪一下；后端被长任务占用时用户能看到正在处理。
-async function withLoading(message, work, delay = 250) {
-  let progress = null;
-  const timer = setTimeout(() => { progress = taskProgress(message); }, delay);
-  try { return await work(); } finally { clearTimeout(timer); progress?.close(); }
+const prefersReducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+const MODAL_EASE = 'cubic-bezier(.2, .8, .2, 1)';
+
+// 新窗口接替加载窗口：遮罩保持当前深浅，窗口从加载窗口的高度、透明度和位移过渡到最终状态；
+// 宽度不同时只过渡透明度，避免逐帧重新排版正文。
+function continueModalTransition(mask, box, bodyEl, from) {
+  if (prefersReducedMotion() || !box.animate) return;
+  const to = { width: box.offsetWidth, height: box.offsetHeight };
+  const sameWidth = Math.abs(to.width - from.width) < 2;
+  const start = { opacity: from.opacity, transform: from.transform === 'none' ? 'none' : from.transform };
+  const end = { opacity: 1, transform: 'none' };
+  if (sameWidth && Math.abs(to.height - from.height) > 2) {
+    start.height = `${from.height}px`;
+    end.height = `${to.height}px`;
+  }
+  box.animate([start, end], { duration: 200, easing: MODAL_EASE });
+  bodyEl.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay: 40, easing: 'ease-out', fill: 'backwards' });
+  if (from.scrim < 1) mask.animate([{ opacity: from.scrim }, { opacity: 1 }], { duration: 120, easing: 'ease-out' });
+}
+
+// 关闭时留一个不可交互的快照淡出，原窗口立即移除，焦点和下层窗口的恢复逻辑不受影响。
+function fadeOutModal(mask) {
+  if (prefersReducedMotion() || mask.classList.contains('is-deferred') || mask.classList.contains('is-replaced')) return;
+  const ghost = mask.cloneNode(true);
+  if (!ghost.animate) return;
+  const sources = mask.querySelectorAll('input, textarea, select');
+  ghost.querySelectorAll('input, textarea, select').forEach((node, index) => {
+    const source = sources[index];
+    if (!source) return;
+    if (node.type === 'checkbox' || node.type === 'radio') node.checked = source.checked;
+    else node.value = source.value;
+  });
+  ghost.querySelectorAll('[id]').forEach((node) => node.removeAttribute('id'));
+  ghost.removeAttribute('data-modal-key');
+  ghost.classList.add('is-leaving');
+  ghost.setAttribute('aria-hidden', 'true');
+  ghost.inert = true;
+  ghost.style.zIndex = mask.style.zIndex;
+  document.body.appendChild(ghost);
+  const sourceBody = $('.modal-body', mask), ghostBody = $('.modal-body', ghost);
+  if (sourceBody && ghostBody) ghostBody.scrollTop = sourceBody.scrollTop;
+  const remove = () => ghost.remove();
+  ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 130, easing: 'ease-in' }).finished.then(remove, remove);
+  // 窗口隐藏或最小化时动画可能暂停，快照不能因此一直留着。
+  setTimeout(remove, 400);
+  $('.modal', ghost)?.animate([{ transform: 'none' }, { transform: 'translateY(4px) scale(.985)' }], { duration: 130, easing: 'ease-in' });
+}
+
+// 已打开的窗口内容大幅变化（加载完成、切换步骤）时，窗口高度平滑过渡到新内容。
+function morphModalHeight(dialog, update) {
+  const box = dialog?.mask ? $('.modal', dialog.mask) : null;
+  const before = box?.offsetHeight;
+  update();
+  if (!box || !box.animate || prefersReducedMotion() || !box.isConnected) return;
+  const after = box.offsetHeight;
+  if (Math.abs(after - before) < 4) return;
+  box.animate([{ height: `${before}px` }, { height: `${after}px` }], { duration: 200, easing: MODAL_EASE });
+  dialog.body.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: 'ease-out' });
 }
 
 function mkBtn(text, cls, onClick) {
@@ -3176,7 +3255,7 @@ function editProfileFlow(p, onDone) {
 
 // 设置先显示可关闭的窗口；数据加载完成后在原层级替换，关闭后的响应不会重新打开它。
 function openSettings() {
-  return openOnce('settings', (pending) => buildSettings({ replace: pending }), '设置');
+  return openOnce('settings', (pending) => buildSettings({ replace: pending }), '设置', { wide: true });
 }
 
 async function buildSettings(options = {}) {
@@ -3773,7 +3852,7 @@ const UPDATE_COMPONENTS = {
   },
 };
 
-function openUpdateDialog() { return openOnce('update', openUpdateDialogImpl, '软件更新'); }
+function openUpdateDialog() { return openOnce('update', openUpdateDialogImpl, '软件更新', { wide: true }); }
 
 async function openUpdateDialogImpl(pending) {
   const body = el('div', 'update-shell', `
@@ -3800,13 +3879,14 @@ async function openUpdateDialogImpl(pending) {
   };
   const openReleases = () => Api.openExternalUrl(appInfo.releases).catch((e) => toast(e.message, 'err'));
   const renderError = (message) => {
-    body.innerHTML = `
+    const html = `
       <div class="update-summary is-error">
         <span class="update-summary-icon">!</span>
         <div><b>暂时无法检查更新</b><span>${esc(message)}</span></div>
       </div>
       <div class="update-fallback"><button class="github-release-btn" data-open-release>${wrapSvg(I.github, 18)}<span>GitHub Releases</span></button></div>
       <div class="update-inline-actions"><button class="btn small" data-refresh-update>重新检查</button></div>`;
+    morphModalHeight(m, () => { body.innerHTML = html; });
     body.querySelector('[data-open-release]').onclick = openReleases;
     body.querySelector('[data-refresh-update]').onclick = () => render();
   };
@@ -3878,7 +3958,7 @@ async function openUpdateDialogImpl(pending) {
         ${available && notes.length ? `<ul class="update-notes">${notes.slice(0, 3).map((note) => `<li>${esc(note)}</li>`).join('')}</ul>` : ''}
       </div>`;
     }).join('');
-    body.innerHTML = `
+    const html = `
       <div class="update-summary ${availableItems.length ? 'has-update' : 'is-current'}">
         <span class="update-summary-icon">${availableItems.length ? '↓' : '✓'}</span>
         <div>
@@ -3893,6 +3973,8 @@ async function openUpdateDialogImpl(pending) {
       </div>
       <div id="updateOperation">${message ? `<div class="hint ok">${esc(message)}</div>` : ''}</div>
       <div class="update-fallback"><button class="github-release-btn" data-open-release>${wrapSvg(I.github, 18)}<span>GitHub Releases</span></button></div>`;
+    // 检查结果替换加载动画时窗口高度平滑展开；之后的重新检查也一样。
+    morphModalHeight(m, () => { body.innerHTML = html; });
     body.querySelector('[data-refresh-update]').onclick = async () => {
       setBusy('正在重新检查版本…');
       try { await render(); } catch (e) { renderError(e.message); }

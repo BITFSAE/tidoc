@@ -109,3 +109,28 @@ def test_print_capabilities_persist_across_launches_but_timeouts_do_not(tmp_path
     printing._CAPABILITIES_CACHE.clear()
     assert printing._query_capabilities(exe, cache) == {}
     assert len(runs) == 3
+
+
+def test_loading_dialogs_defer_and_hand_off_smoothly():
+    from pathlib import Path
+    web = Path(__file__).resolve().parents[1] / 'tidoc/web'
+    app = (web / 'app.js').read_text('utf-8')
+    adapter = (web / 'adapter-ui.js').read_text('utf-8')
+    css = (web / 'styles.css').read_text('utf-8')
+    once = app.split('async function openOnce(', 1)[1].split('\n}\n', 1)[0]
+    # The placeholder holds the layer at once but only becomes visible after a short delay.
+    assert "pending.mask.classList.add('is-deferred')" in once and 'MODAL_LOADING_DELAY' in once
+    assert '.modal-mask.is-deferred { opacity: 0; }' in css
+    # A visible placeholder hands its height, opacity and scrim to the final dialog.
+    assert 'continueModalTransition(mask, box, bodyEl, from)' in app
+    assert "replace.classList.add('is-replaced')" in app and '.modal-mask.is-replaced { visibility: hidden; }' in css
+    # Closing leaves a non-interactive snapshot that is always cleaned up.
+    assert 'if (wasTop) fadeOutModal(mask);' in app and 'setTimeout(remove, 400)' in app
+    # Motion is opt-out and limited to opacity/transform/height.
+    assert app.count('prefersReducedMotion()') >= 3
+    # Placeholders match the final width, and the print dialog is deduplicated like the others.
+    for call in ("'设置', { wide: true }", "'软件更新', { wide: true }"):
+        assert call in app, call
+    for call in ("'报账方案', { wide: true }", "'导出记录', { wide: true }", "openOnce('print'"):
+        assert call in adapter, call
+    assert 'withLoading' not in app

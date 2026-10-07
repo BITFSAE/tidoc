@@ -474,7 +474,7 @@ const AdapterUI = (() => {
     return block;
   }
 
-  function openSettings() { return openOnce('scheme-page', openSchemePage, '报账方案'); }
+  function openSettings() { return openOnce('scheme-page', openSchemePage, '报账方案', { wide: true }); }
   async function openSchemePage(pending) {
     await refresh();
     const body = el('div');
@@ -937,11 +937,17 @@ const AdapterUI = (() => {
     const list = groupedDiagnostics(candidate?.diagnostics);
     return { blocking: list.filter(d => d.level === 'blocked'), warnings: list.filter(d => d.level !== 'blocked') };
   }
-  async function print(ids) {
-    if (!ids?.length) { toast('请先选择条目', 'err'); return; }
+  function print(ids) {
+    if (!ids?.length) { toast('请先选择条目', 'err'); return undefined; }
+    return openOnce('print', pending => printDialog(ids, pending), '打印导出', { wide: true });
+  }
+  async function printDialog(ids, pending) {
     try {
-      const entries = await Promise.all(ids.map(id => Api.getEntry(id)));
-      let people = await Api.listPayees(); const component = await Api.printComponentStatus();
+      // 条目、收款对象和组件状态互不依赖，一起读取。
+      const [entries, initialPeople, component] = await Promise.all([
+        Promise.all(ids.map(id => Api.getEntry(id))), Api.listPayees(), Api.printComponentStatus(),
+      ]);
+      let people = initialPeople;
       const canRender = type => !['docx', 'pdf_bundle'].includes(type) || !!(component.available && component.ipc_versions?.includes(2) && component.renderers?.includes(type));
       const bindings = new Map(); let missingDefinition = false;
       for (const entry of entries) {
@@ -1085,11 +1091,12 @@ const AdapterUI = (() => {
       };
       const showStatus = candidate => {
         const { blocking, warnings } = splitDiagnostics(candidate);
-        status.innerHTML = diagnosticsMarkup([...blocking, ...warnings], entries, '无法生成，请先处理') + exportPreviewMarkup(candidate);
+        // 检查结果出现时窗口高度平滑展开，而不是突然撑高。
+        morphModalHeight(m, () => { status.innerHTML = diagnosticsMarkup([...blocking, ...warnings], entries, '无法生成，请先处理') + exportPreviewMarkup(candidate); });
         if (blocking.length) status.focus({ preventScroll: true });
         status.scrollIntoView({ block: 'nearest' });
       };
-      const invalidate = () => { formVersion++; const previous = plan; plan = null; warned = false; run.textContent = '生成'; status.replaceChildren(); if (previous) Api.cancelExport(previous.plan_id).catch(() => {}); sync(); };
+      const invalidate = () => { formVersion++; const previous = plan; plan = null; warned = false; run.textContent = '生成'; if (status.childElementCount) morphModalHeight(m, () => status.replaceChildren()); if (previous) Api.cancelExport(previous.plan_id).catch(() => {}); sync(); };
       body.addEventListener('change', invalidate);
       const check = async () => {
         const version = formVersion; checking = true; sync(); run.textContent = '检查中…';
@@ -1137,10 +1144,11 @@ const AdapterUI = (() => {
       const cancel = mkBtn('取消', 'ghost', async () => { if (plan) await Api.cancelExport(plan.plan_id); if (generating) { cancel.disabled = true; cancel.textContent = '正在取消…'; } else m.close(); });
       const manage = mkBtn('管理收款信息', 'small ghost', () => payees(entries[0]?.scheme_id, async () => { people = await Api.listPayees(); fillPayees(); payeeNote(); enhanceNativeSelects(payeeRow); invalidate(); }));
       payeeControl.append(payeeHolder, manage);
-      m = modal({ title: '打印导出', subhead: `已选 ${entries.length} 条发票`, wide: true, body, footer: [note, cancel, run], onClose: () => { if (plan) Api.cancelExport(plan.plan_id).catch(() => {}); } });
+      if (!pending.mask.isConnected) return;
+      m = modal({ title: '打印导出', subhead: `已选 ${entries.length} 条发票`, key: 'print', replace: pending.mask, wide: true, body, footer: [note, cancel, run], onClose: () => { if (plan) Api.cancelExport(plan.plan_id).catch(() => {}); } });
       enhanceNativeSelects(body); sync();
       if (!run.disabled) run.focus({ preventScroll: true }); // 回车即按默认选择生成
-    } catch (e) { toast(e.message, 'err'); }
+    } catch (e) { if (pending.mask.isConnected) toast(e.message, 'err'); }
   }
   async function batchFill(ids) {
     if(!ids.length)return;
@@ -1175,7 +1183,7 @@ const AdapterUI = (() => {
       button.ondblclick=event=>{event.preventDefault();event.stopPropagation();};
     }
   }
-  function jobs(focusId=null) { return openOnce('export-jobs', (pending) => jobsPage(focusId,pending), '导出记录'); }
+  function jobs(focusId=null) { return openOnce('export-jobs', (pending) => jobsPage(focusId,pending), '导出记录', { wide: true }); }
   async function jobsPage(focusId=null,pending) {
     const records = await Api.listExportJobs();
     const body = el('div', 'settings-shell');

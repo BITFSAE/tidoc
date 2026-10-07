@@ -1297,8 +1297,12 @@ function entryCard(e) {
   card.setAttribute('aria-label', `${itemCardLabel(e)}，${e.title ? e.title + '，' : ''}${fmtMoney(e.total)}`);
   card.setAttribute('aria-keyshortcuts', 'Enter Space ArrowUp ArrowDown Home End');
 
-  // 抬头用淡色卡片背景区分；悬浮和键盘聚焦时仍可读取完整名称。
+  // 抬头用淡色卡片背景区分，物资名称前再点一个抬头色的小圆点；悬浮和键盘聚焦时可读取完整名称。
   card.dataset.tooltip = entryTitleTooltip(e);
+  // 按抬头分组或已筛选到某个抬头时，整页都是同一个抬头，圆点是重复信息，不再显示。
+  // 其余情况没有抬头的卡片也留出圆点的位置，物资名称才能上下对齐。
+  const titleDot = (State.groupBy !== 'title' && !$('#filterTitle')?.value)
+    ? `<i class="entry-title-dot${e.title ? '' : ' empty'}" aria-hidden="true"></i>` : '';
 
   // 校验状态：仅在 warning/blocked 时突出显示（pass 不占视觉）
   const checkBadge = (e.check_status && e.check_status !== 'pass')
@@ -1340,7 +1344,7 @@ function entryCard(e) {
 
   const main = el('div', 'entry-main', `
     <div class="entry-line1">
-      <span class="entry-item-title" data-tooltip-overflow="${esc(itemTitle)}">${esc(itemTitle)}</span>
+      <span class="entry-title-wrap">${titleDot}<span class="entry-item-title" data-tooltip-overflow="${esc(itemTitle)}">${esc(itemTitle)}</span></span>
       ${ownerBadge}
       ${batchBadges}
       ${checkBadge}

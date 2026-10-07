@@ -847,13 +847,25 @@ body {
   box-shadow: 0 0 0 3px var(--primary-soft), var(--shadow);
 }
 .entry-card.card-dragging { border-color: var(--primary); background: var(--primary-soft); }
-/* 选中：在抬头底色上叠一层淡淡的主色，边框换成柔和的主色线；不加粗外框、不加额外标记，
-   与键盘焦点（外圈光晕）区分开，抬头底色仍隐约可见。 */
+/* 选中：在抬头底色上叠一层淡淡的主色，边框换成柔和的主色线，左缘内侧多出一条短竖线。
+   竖线的有无是形状线索，不依赖底色差异；不加粗外框，与键盘焦点（外圈光晕）区分开。 */
 .entry-card.selected {
   border-color: var(--primary-line);
   background-image: linear-gradient(var(--card-selected-wash), var(--card-selected-wash));
 }
 .entry-card.selected:focus-visible { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft), var(--shadow); }
+.entry-card.selected::before {
+  content: ""; position: absolute; left: 0; top: 13px; bottom: 13px; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--primary);
+}
+/* 抬头色点：在物资名称前，与名称垂直居中；未配置的抬头没有抬头色，退为灰点，没有抬头的留空位保持对齐。
+   圆点和名称包成一项一起换行，名称很长时圆点不会单独留在上一行。 */
+.entry-title-wrap { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.entry-title-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--dot, var(--ink-faint));
+}
+.entry-title-dot.empty { background: none; }
 .entry-main { min-width: 0; }
 .entry-line1 { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .entry-seller {
@@ -2082,6 +2094,19 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 .title-purple { --tc:var(--purple); --tc-soft:var(--purple-soft); --tc-line:var(--purple-line); --tc-card:var(--card-purple); }
 .title-teal { --tc:var(--teal); --tc-soft:var(--teal-soft); --tc-line:var(--teal-line); --tc-card:var(--card-teal); }
 .title-red { --tc:var(--blocked); --tc-soft:var(--blocked-soft); --tc-line:var(--blocked-line); --tc-card:var(--card-red); }
+/* 色点单独取一组饱和、色相拉开的颜色：底色和文字色都偏淡偏近，不足以一眼分出六个抬头。 */
+.title-blue { --dot:#2563eb; }
+.title-green { --dot:#16a34a; }
+.title-amber { --dot:#f59e0b; }
+.title-purple { --dot:#9333ea; }
+.title-teal { --dot:#06b6d4; }
+.title-red { --dot:#ef4444; }
+:root[data-theme="dark"] .title-blue { --dot:#60a5fa; }
+:root[data-theme="dark"] .title-green { --dot:#4ade80; }
+:root[data-theme="dark"] .title-amber { --dot:#fbbf24; }
+:root[data-theme="dark"] .title-purple { --dot:#c084fc; }
+:root[data-theme="dark"] .title-teal { --dot:#22d3ee; }
+:root[data-theme="dark"] .title-red { --dot:#f87171; }
 
 /* 原生 details 保留键盘交互；所有折叠标题共用固定尺寸与位置的三角箭头。 */
 details > summary {

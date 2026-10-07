@@ -380,5 +380,21 @@ def test_selected_cards_use_a_quiet_wash_not_a_heavy_ring():
     selected=css.split('.entry-card.selected {',1)[1].split('}',1)[0]
     assert 'var(--card-selected-wash)' in selected and 'border-color: var(--primary-line);' in selected
     assert 'box-shadow' not in selected  # the old 2px outer ring
-    assert '.entry-card.selected::before' not in css
     assert css.count('--card-selected-wash: rgba(') == 2  # light and dark themes
+    # 选中另有一条左缘短竖线作形状线索，键盘焦点的光晕规则不能丢。
+    bar=css.split('.entry-card.selected::before {',1)[1].split('}',1)[0]
+    assert 'width: 3px' in bar and 'var(--primary)' in bar
+    assert '.entry-card.selected:focus-visible {' in css
+
+
+def test_card_title_dot_has_distinct_colours_in_both_themes():
+    css=(WEB/'styles.css').read_text('utf-8')
+    app=(WEB/'app.js').read_text('utf-8')
+    colours=['blue','green','amber','purple','teal','red']
+    light=[css.split(f'.title-{name} {{ --dot:',1)[1].split(';',1)[0] for name in colours]
+    dark=[css.split(f':root[data-theme="dark"] .title-{name} {{ --dot:',1)[1].split(';',1)[0] for name in colours]
+    assert len(set(light))==6 and len(set(dark))==6
+    # 圆点和名称同属一项，名称过长换行时不会把圆点单独留在上一行。
+    assert 'class="entry-title-wrap">${titleDot}<span class="entry-item-title"' in app
+    # 按抬头分组或已筛选到某个抬头时整页同一个抬头，不画圆点。
+    assert "State.groupBy !== 'title' && !$('#filterTitle')?.value" in app

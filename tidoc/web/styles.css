@@ -37,6 +37,7 @@
   --primary-ring-strong: rgba(43, 95, 209, .32);
   --primary-tint: rgba(43, 95, 209, .10);
   --primary-tint-strong: rgba(43, 95, 209, .16);
+  --card-selected-wash: rgba(43, 95, 209, .10);
   --primary-shadow: rgba(43, 95, 209, .25);
   --selection-hover: rgba(255, 255, 255, .72);
   --selection-divider: #cbd7e8;
@@ -135,6 +136,7 @@
   --primary-ring-strong: rgba(89, 166, 248, .38);
   --primary-tint: rgba(89, 166, 248, .13);
   --primary-tint-strong: rgba(89, 166, 248, .20);
+  --card-selected-wash: rgba(89, 166, 248, .13);
   --primary-shadow: rgba(14, 36, 60, .55);
   --selection-hover: rgba(255, 255, 255, .08);
   --selection-divider: #3b5268;
@@ -845,11 +847,13 @@ body {
   box-shadow: 0 0 0 3px var(--primary-soft), var(--shadow);
 }
 .entry-card.card-dragging { border-color: var(--primary); background: var(--primary-soft); }
-/* 选中后保留原底色，以加粗蓝色边框明确选择状态。 */
+/* 选中：在抬头底色上叠一层淡淡的主色，边框换成柔和的主色线；不加粗外框、不加额外标记，
+   与键盘焦点（外圈光晕）区分开，抬头底色仍隐约可见。 */
 .entry-card.selected {
-  border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary);
+  border-color: var(--primary-line);
+  background-image: linear-gradient(var(--card-selected-wash), var(--card-selected-wash));
 }
-.entry-card.selected:focus-visible { box-shadow: 0 0 0 1px var(--primary), 0 0 0 4px var(--primary-soft); }
+.entry-card.selected:focus-visible { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft), var(--shadow); }
 .entry-main { min-width: 0; }
 .entry-line1 { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .entry-seller {

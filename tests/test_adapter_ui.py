@@ -373,3 +373,12 @@ console.log(JSON.stringify(A.diagnosticsMarkup(diagnostics)));
     assert out.count('收款信息缺项')==1
     assert '需补充：开户行、账号' in out
     assert 'payee.' not in out
+
+
+def test_selected_cards_use_a_quiet_wash_not_a_heavy_ring():
+    css=(WEB/'styles.css').read_text('utf-8')
+    selected=css.split('.entry-card.selected {',1)[1].split('}',1)[0]
+    assert 'var(--card-selected-wash)' in selected and 'border-color: var(--primary-line);' in selected
+    assert 'box-shadow' not in selected  # the old 2px outer ring
+    assert '.entry-card.selected::before' not in css
+    assert css.count('--card-selected-wash: rgba(') == 2  # light and dark themes

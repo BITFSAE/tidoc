@@ -36,7 +36,7 @@ const document = {documentElement: {dataset: {}}, querySelector(selector) {
   if (!controls.has(selector)) controls.set(selector, makeNode());
   return controls.get(selector);
 }};
-const sandbox = {document, assert, makeNode,
+const sandbox = {document, assert, makeNode, setTimeout, console, process,
   resetReads: () => { selectionReads = 0; }, readCount: () => selectionReads,
   window: {matchMedia: () => ({}), addEventListener() {}},
 };
@@ -53,8 +53,9 @@ vm.runInContext(`
 `, sandbox);
 vm.runInContext(process.argv[2], sandbox);
 """
-    subprocess.run([node, "-e", harness, str(SOURCE), script], check=True,
-                   capture_output=True, text=True, encoding="utf-8")
+    result = subprocess.run([node, "-e", harness, str(SOURCE), script],
+                            capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
 
 
 def test_clear_selection_scales_with_selected_cards_and_drops_hidden_selections():
@@ -124,4 +125,28 @@ visible.forEach((id, index) => {
 selectEntryFromCard('entry-0', false);
 selectEntryFromCard('entry-5', true);
 assert.deepEqual([...State.selected].sort(), ['entry-0', 'entry-5']);
+""")
+
+
+def test_a_slower_earlier_list_refresh_does_not_overwrite_the_latest_one():
+    run_selection(r"""
+const pending = [];
+globalThis.Api = { listEntries: () => new Promise((resolve) => pending.push(resolve)), getBatch: async () => null };
+refreshTitleOptions = async () => {};
+currentFilters = () => ({});
+let renders = 0;
+renderEntries = () => { renders++; };
+syncFilterControlStates = () => {};
+(async () => {
+  const first = refreshEntries();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const second = refreshEntries();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  pending[1]([{id: 'new'}]);
+  await second;
+  pending[0]([{id: 'old'}]);
+  await first;
+  assert.deepEqual(State.entries.map((entry) => entry.id), ['new']);
+  assert.equal(renders, 1);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
 """)

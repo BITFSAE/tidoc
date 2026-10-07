@@ -1025,18 +1025,32 @@ function currentFilters() {
   return f;
 }
 
+// 连续筛选、输入搜索词时只采用最后一次请求的结果，较早的慢响应不覆盖新列表。
+let entryRefreshSequence = 0;
 async function refreshEntries() {
+  const sequence = ++entryRefreshSequence;
+  let currentBatch = null, entries = [];
   try {
     await refreshTitleOptions();
-    State.currentBatch = actualBatchId() ? await Api.getBatch(actualBatchId()) : null;
-    State.entries = await Api.listEntries(currentFilters());
+    if (sequence !== entryRefreshSequence) return;
+    // 抬头选项可能重置筛选里的抬头，之后再按最终筛选并行读取批次和条目。
+    const batchId = actualBatchId();
+    [currentBatch, entries] = await Promise.all([
+      batchId ? Api.getBatch(batchId) : null,
+      Api.listEntries(currentFilters()),
+    ]);
     if (State.quickView === 'incomplete') {
-      State.entries = State.entries.filter((e) => (e.completeness?.status || e.status) !== 'complete');
+      entries = entries.filter((e) => (e.completeness?.status || e.status) !== 'complete');
     }
   } catch (e) {
+    if (sequence !== entryRefreshSequence) return;
     toast(e.message, 'err');
-    State.entries = [];
+    currentBatch = null;
+    entries = [];
   }
+  if (sequence !== entryRefreshSequence) return;
+  State.currentBatch = currentBatch;
+  State.entries = entries;
   renderEntries();
   syncFilterControlStates();
 }
@@ -1205,8 +1219,15 @@ async function refreshEntryCard(entryId, currentDetail = null) {
     return;
   }
   if (State.groupBy !== 'none') {
-    renderEntries();
-    return;
+    // 换了报账人或抬头才需要重新分组；否则就地替换卡片，只更新所在组的合计。
+    const group = entrySelectionGroups.get(entryId);
+    const position = group ? group.items.findIndex((item) => item.id === entryId) : -1;
+    if (!group || position < 0 || group.key !== entryGroupKey(entry)) {
+      renderEntries();
+      return;
+    }
+    group.items[position] = entry;
+    group.meta.innerHTML = entryGroupMeta(group.items);
   }
 
   const current = entryCardNodes.get(entryId);
@@ -1583,20 +1604,27 @@ function entryModifiedTooltip(entry) {
 }
 
 // 按报账人 / 抬头分组渲染，每组头显示条数、合计、齐备率，可整组选中
+function entryGroupKey(entry) {
+  return State.groupBy === 'profile'
+    ? (State.profileById[entry.profile_id]?.name || '未知报账人')
+    : (entry.title || '未标注抬头');
+}
+
+function entryGroupMeta(items) {
+  const total = items.reduce((s, e) => s + (Number(e.total) || 0), 0);
+  const ready = items.filter((e) => (e.completeness?.ready)).length;
+  return `<b>${items.length}</b> 条 · 合计 <b>${fmtMoney(total)}</b> · 齐备 ${ready}/${items.length}`;
+}
+
 function renderGroupedEntries(list) {
-  const keyOf = (e) => State.groupBy === 'profile'
-    ? (State.profileById[e.profile_id]?.name || '未知报账人')
-    : (e.title || '未标注抬头');
   const groups = new Map();
   State.entries.forEach((e) => {
-    const k = keyOf(e);
+    const k = entryGroupKey(e);
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(e);
   });
 
   [...groups.entries()].forEach(([name, items]) => {
-    const total = items.reduce((s, e) => s + (Number(e.total) || 0), 0);
-    const ready = items.filter((e) => (e.completeness?.ready)).length;
     const selectedCount = items.filter((e) => State.selected.has(e.id)).length;
     const tcls = State.groupBy === 'title' ? (TITLE_CLASS[name] || '') : '';
 
@@ -1604,8 +1632,10 @@ function renderGroupedEntries(list) {
     head.innerHTML = `
       <button class="group-sel" title="选中/取消这组">${selectedCount === items.length ? '✓' : ''}</button>
       <span class="group-name">${esc(name)}</span>
-      <span class="group-meta"><b>${items.length}</b> 条 · 合计 <b>${fmtMoney(total)}</b> · 齐备 ${ready}/${items.length}</span>`;
-    const group = { button: head.querySelector('.group-sel'), size: items.length, selectedCount };
+      <span class="group-meta">${entryGroupMeta(items)}</span>`;
+    // items 与单卡刷新共用：分组不变时只替换卡片并更新这一组的合计。
+    const group = { key: name, items, meta: head.querySelector('.group-meta'),
+      button: head.querySelector('.group-sel'), size: items.length, selectedCount };
     items.forEach((e) => entrySelectionGroups.set(e.id, group));
     group.button.onclick = () => {
       if (group.selectedCount === group.size) items.forEach((e) => State.selected.delete(e.id));

@@ -9,7 +9,7 @@ import sys
 import unicodedata
 from copy import deepcopy
 from datetime import date
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from functools import lru_cache
 
 CONTEXT_VERSION = 1
@@ -238,13 +238,27 @@ def rows_for_entries(entries, output):
             quantity = decimal_value(item.get("quantity"))
             amount = decimal_value(item.get("total"))
             if quantity is not None and quantity != 0 and amount is not None:
-                with localcontext() as ctx:
-                    ctx.prec = 220
-                    item["unit_price"] = format(amount / quantity, "f")
+                item["unit_price"] = _unit_price_text(amount, quantity)
             row = deepcopy(item)
             row.update({"id": entry["id"] + "-" + str(item_index), "invoice_date": entry["invoice_date"], "is_first": item_index == 0, "reviewer": entry["claimant"]["reviewer"], "tax_id": entry["title"]["tax_id"], "index": len(rows) + 1, "entry_id": entry["id"], "entry": deepcopy(entry), "claimant": entry["claimant"]["name"], "title": entry["title"]["name"], "invoice": deepcopy(entry["invoice"]), "seller": entry["seller"], "invoice_no": entry["invoice_no"], "paid_amount": entry["paid_amount"] if item_index == 0 else None, "invoice_total": entry["total"] if item_index == 0 else None, "amount": entry["paid_amount"] if output.get("amount_basis") == "paid" and item_index == 0 else (None if output.get("amount_basis") == "paid" else item.get("total")), "storage_location": defaults.get("storage_location", ""), "first_for_invoice": item_index == 0})
             rows.append(row)
     return rows
+
+
+def _unit_price_text(amount: Decimal, quantity: Decimal) -> str:
+    """Exact quotient when it terminates; otherwise 8 decimals.
+
+    A non-terminating quotient (100.00 / 3) would otherwise be hundreds of digits long and
+    exceed the public context schema's string limit, blocking the whole export.
+    """
+    with localcontext() as ctx:
+        ctx.prec = 220
+        exact = amount / quantity
+        text = format(exact, "f")
+        if len(text) <= 40:
+            return text
+        text = format(exact.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def build_export_context(entries, definition=None, output=None, profiles=None, payee=None, batch=None, scheme=None, options=None):

@@ -1620,6 +1620,7 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .update-badge.available { color: var(--primary); background: var(--primary-soft); }
 .update-badge.current { color: var(--pass); background: var(--pass-soft); }
 .update-badge.pending { color: var(--warn); background: var(--warn-soft); }
+.update-badge.beta { color: var(--teal); background: var(--teal-soft); }
 .update-notes { margin: 10px 0 0 18px; padding: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.55; }
 .update-fallback {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -2057,3 +2058,41 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 .title-purple { --tc:var(--purple); --tc-soft:var(--purple-soft); --tc-line:var(--purple-line); }
 .title-teal { --tc:var(--teal); --tc-soft:var(--teal-soft); --tc-line:var(--teal-line); }
 .title-red { --tc:var(--blocked); --tc-soft:var(--blocked-soft); --tc-line:var(--blocked-line); }
+
+/* ------------------------------------------------------------------ 打印导出弹窗 */
+/* 沿用设置页的 settings-block / settings-row：每个输出一行，勾选框在左，折叠区放次要内容。 */
+.export-dialog { gap: 14px; }
+.export-dialog .settings-block { padding-top: 0; padding-bottom: 0; }
+.export-dialog .settings-row[hidden], .export-dialog .settings-block[hidden], .export-dialog .export-more > div[hidden] { display: none; }
+.export-dialog .settings-row-control { min-width: 0; }
+.export-dialog .settings-row select, .export-dialog .settings-row input[type="date"] { min-width: 190px; max-width: 280px; }
+.export-output { justify-content: flex-start; gap: 12px; padding: 10px 0; cursor: pointer; }
+.export-output .export-kind { margin-left: auto; padding-left: 12px; color: var(--ink-faint); font-size: 12px; white-space: nowrap; }
+.export-output input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
+.export-output .settings-row-copy { flex: 1 1 auto; }
+.export-output:hover .settings-row-copy b { color: var(--primary); }
+.export-output.is-disabled { cursor: default; }
+.export-output.is-disabled:hover .settings-row-copy b { color: inherit; }
+.export-output.is-disabled .settings-row-copy b { color: var(--ink-faint); }
+.export-warn, .settings-row-copy .export-warn { color: var(--warn) !important; }
+.export-more > summary {
+  display: flex; align-items: baseline; gap: 10px; padding: 12px 0; list-style: none; cursor: pointer;
+  color: var(--ink); font-size: 13px; font-weight: 600;
+}
+.export-more > summary::-webkit-details-marker { display: none; }
+.export-more > summary::before { content: "▸"; flex: 0 0 auto; color: var(--ink-faint); font-size: 11px; transition: transform .15s; }
+.export-more[open] > summary::before { transform: rotate(90deg); }
+.export-more > summary span { color: var(--ink-faint); font-size: 12px; font-weight: 400; }
+.export-more[open] > summary { border-bottom: 1px solid var(--line-soft); }
+.export-dialog .export-fields .form-row { padding: 10px 0; }
+.export-dialog .export-fields > .btn { margin: 4px 8px 12px 0; }
+.export-dialog .export-fields .hint { margin: 10px 0 0; }
+.export-status:empty { display: none; }
+.export-status .hint { margin: 0 0 6px; }
+@media (max-width: 640px) {
+  .export-dialog .settings-row { flex-wrap: wrap; }
+  .export-dialog .settings-row select, .export-dialog .settings-row input[type="date"] { min-width: 0; width: 100%; max-width: none; }
+}
+.export-status-title { margin: 2px 0 6px; color: var(--ink-soft); font-size: 12px; font-weight: 600; }
+.export-status .hint { padding: 7px 10px; }
+.export-status .hint + .export-status-title { margin-top: 10px; }

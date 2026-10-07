@@ -296,7 +296,9 @@ def test_uninstalled_source_preserves_values_and_history_without_activating(tmp_
     values={r['field_id']:r['value'] for r in entry['adapter_sources'][0]['extension_values']}
     assert values=={'public':'项目甲','phone':'001234'}
     assert target.entries.list()[0]['completeness']==entry['completeness']
-    preview=target.preview_export([entry_id],['reimbursement'])
+    response=target.preview_export([entry_id],['reimbursement'])
+    assert response['ok']  # 调用成功；阻断项在计划里
+    preview=response['data']
     assert not preview['ok']
     assert any(d['code']=='EXTERNAL_SCHEME_PENDING' for d in preview['diagnostics'])
     for choice,expected in [([],{'public'}),(['org.tidoc.generic:entry:phone'],{'public','phone'})]:

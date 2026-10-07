@@ -664,3 +664,55 @@ def test_load_manifest_reports_certificate_fallback_failure(monkeypatch):
 
     with pytest.raises(RuntimeError, match="系统信任链"):
         load_manifest("https://img.bitfsae.com/tidoc/manifest.json")
+
+
+# ------------------------------------------------------------------ 测试版（beta）通道
+def _core_manifest(version, platform='windows'):
+    return {'components': {'core': {'latest': version, 'notes': [], 'platforms': {platform: {
+        'filename': f'tidoc-core-{platform}-v{version}.exe', 'url': f'https://example.test/{version}.exe',
+        'sha256': 'x', 'size': 1, 'format': 'exe'}}}}}
+
+
+def test_prerelease_versions_follow_semver_precedence():
+    from tidoc.services.updater import is_prerelease
+
+    assert version_gt('0.1.39', '0.1.39-beta.1')           # 正式版高于它的测试版
+    assert not version_gt('0.1.39-beta.1', '0.1.39')
+    assert version_gt('0.1.39-beta.2', '0.1.39-beta.1')
+    assert version_gt('0.1.39-beta.10', '0.1.39-beta.9')   # 数字标识符按数值比较
+    assert version_gt('0.1.39-rc.1', '0.1.39-beta.9')
+    assert version_gt('0.1.40-beta.1', '0.1.39')            # 下一版的测试版高于当前正式版
+    assert version_gt('0.1.39-beta.1', '0.1.38')
+    assert not version_gt('0.1.39', '0.1.39.0')
+    assert parse_version('0.1.39-beta.1') == (0, 1, 39)
+    assert is_prerelease('0.1.39-beta.1') and not is_prerelease('0.1.39')
+
+
+def test_beta_channel_uses_the_newer_of_stable_and_beta_per_component(monkeypatch):
+    from tidoc.services import updater
+
+    manifests = {updater.MANIFEST_URL: _core_manifest('0.1.38'), updater.BETA_MANIFEST_URL: _core_manifest('0.1.39-beta.1')}
+    monkeypatch.setattr(updater, 'load_manifest', lambda url=updater.MANIFEST_URL, timeout=12: manifests[url])
+
+    assert updater.load_update_manifest('stable')['components']['core']['latest'] == '0.1.38'
+    assert updater.load_update_manifest('beta')['components']['core']['latest'] == '0.1.39-beta.1'
+    # 正式版发布后，测试版用户收到的是更高的正式版，而不是停在旧的测试版上。
+    manifests[updater.MANIFEST_URL] = _core_manifest('0.1.39')
+    assert updater.load_update_manifest('beta')['components']['core']['latest'] == '0.1.39'
+    # 测试版清单读不到时退回稳定版清单；稳定版用户永远不读测试版清单。
+    monkeypatch.setattr(updater, 'load_manifest', lambda url=updater.MANIFEST_URL, timeout=12: (
+        _core_manifest('0.1.39') if url == updater.MANIFEST_URL else (_ for _ in ()).throw(RuntimeError('404'))))
+    assert updater.load_update_manifest('beta')['components']['core']['latest'] == '0.1.39'
+
+
+def test_check_updates_offers_a_beta_only_on_the_beta_channel(monkeypatch, tmp_path):
+    from tidoc import __version__ as CORE_VERSION
+    from tidoc.services import updater
+
+    manifests = {updater.MANIFEST_URL: _core_manifest(CORE_VERSION), updater.BETA_MANIFEST_URL: _core_manifest('99.0.0-beta.1')}
+    monkeypatch.setattr(updater, 'load_manifest', lambda url=updater.MANIFEST_URL, timeout=12: manifests[url])
+    stable = check_updates(tmp_path / 'components', plat='windows')
+    beta = check_updates(tmp_path / 'components', plat='windows', channel='beta')
+    core = lambda status: next(item for item in status['updates'] if item['component'] == 'core')
+    assert stable['channel'] == 'stable' and not core(stable)['available']
+    assert beta['channel'] == 'beta' and core(beta)['available'] and core(beta)['latest_version'] == '99.0.0-beta.1'

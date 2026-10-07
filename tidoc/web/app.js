@@ -98,6 +98,8 @@ const DEFAULT_ENTRY_TITLE_KEY = 'tidoc.defaultEntryTitle';
 const THEME_KEY = 'tidoc.themeMode';
 const VERIFICATION_WATCH_DIR_KEY = 'tidoc.invoiceVerification.watchDirectory';
 const AUTO_UPDATE_KEY = 'tidoc.update.autoCheck';
+// 带 -beta.1 之类后缀的是测试版（预发布）。
+const isPrerelease = (version) => String(version || '').replace(/^v/, '').split('+')[0].includes('-');
 const SHOW_CREATED_AT_KEY = 'tidoc.cards.showCreatedAt';
 const PendingLaunchFiles = [];
 let launchFileCheckRunning = false;
@@ -3092,7 +3094,7 @@ async function openSettings(options = {}) {
 
 async function buildSettings(options = {}) {
   let paths, printStatus, appInfo, multiMode;
-  let autoUpdateMode, maintenance, verificationPrefs, ocrStatus, showCreatedAtMode;
+  let autoUpdateMode, betaChannel, maintenance, verificationPrefs, ocrStatus, showCreatedAtMode;
   const themeMode = State.themeMode;
   try {
     paths = await Api.dataRoot();
@@ -3105,11 +3107,13 @@ async function buildSettings(options = {}) {
       Api.appPreference(AUTO_UPDATE_KEY, '1'),
       Api.invoiceVerificationPreferences(),
       Api.appPreference(SHOW_CREATED_AT_KEY, '0'),
+      Api.updateChannel(),
     ]);
     multiMode = prefValues[0] === '1';
     autoUpdateMode = prefValues[1] === '1';
     verificationPrefs = prefValues[2];
     showCreatedAtMode = prefValues[3] === '1';
+    betaChannel = prefValues[4]?.channel === 'beta';
   } catch (e) { toast(e.message, 'err'); return; }
   const body = el('div');
 
@@ -3131,17 +3135,17 @@ async function buildSettings(options = {}) {
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>报账方案</b>
-            <span>当前使用「${esc(State.scheme?.name || '未选择')}」。抬头与税号、材料要求、新建默认值、付款识别、绑定包内容和输出默认值都在这里设置</span>
+            <span>当前使用「${esc(State.scheme?.name || '未选择')}」</span>
           </div>
           <button class="btn small" id="setAdapters">管理</button>
         </div>
-        <div class="settings-row">
+        ${AdapterUI.usesPayee() ? `<div class="settings-row">
           <div class="settings-row-copy">
             <b>个人收款信息</b>
-            <span>收款对象与默认收款人，只保存在本机</span>
+            <span>只保存在本机</span>
           </div>
           <button class="btn small" id="setPayees">填写</button>
-        </div>
+        </div>` : ''}
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>导出记录</b>
@@ -3307,6 +3311,13 @@ async function buildSettings(options = {}) {
           </div>
           <label class="switch-line"><input type="checkbox" id="setAutoUpdate" ${autoUpdateMode ? 'checked' : ''}/><span>${autoUpdateMode ? '已开启' : '已关闭'}</span></label>
         </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>接收测试版更新</b>
+            <span>提前体验新功能，稳定性较低</span>
+          </div>
+          <label class="switch-line"><input type="checkbox" id="setBetaChannel" ${betaChannel ? 'checked' : ''}/><span>${betaChannel ? '已开启' : '已关闭'}</span></label>
+        </div>
       </div>
 
       <!-- 关于 -->
@@ -3458,6 +3469,24 @@ async function buildSettings(options = {}) {
       ev.target.disabled = false;
     }
   };
+  body.querySelector('#setBetaChannel').onchange = async (ev) => {
+    const enabled = ev.target.checked;
+    const label = ev.target.nextElementSibling;
+    ev.target.disabled = true;
+    try {
+      await Api.setUpdateChannel(enabled ? 'beta' : 'stable');
+      label.textContent = enabled ? '已开启' : '已关闭';
+      setUpdateNotice(null);
+      toast(enabled ? '已开启测试版更新' : '已改为只接收正式版', 'ok');
+      // 立即按新通道检查一次（自动检查关闭时只等下次手动检查）。
+      if (body.querySelector('#setAutoUpdate').checked) maybeAutoCheckUpdates(true);
+    } catch (e) {
+      ev.target.checked = !enabled;
+      toast(e.message, 'err');
+    } finally {
+      ev.target.disabled = false;
+    }
+  };
   body.querySelector('#setAutoUpdate').onchange = async (ev) => {
     const enabled = ev.target.checked;
     const label = ev.target.nextElementSibling;
@@ -3482,7 +3511,8 @@ async function buildSettings(options = {}) {
   };
   // 子页面叠在设置页上面；关闭后设置页重新成为最上层，并按最新数据刷新（见文末 _onResume）。
   body.querySelector('#setAdapters').onclick = () => AdapterUI.openSettings();
-  body.querySelector('#setPayees').onclick = () => AdapterUI.payees();
+  const payeesButton = body.querySelector('#setPayees');
+  if (payeesButton) payeesButton.onclick = () => AdapterUI.payees();
   body.querySelector('#setExportJobs').onclick = () => AdapterUI.jobs();
   body.querySelector('#setProfilesManage').onclick = () => openProfileManager(false);
   body.querySelector('#setComponentsUpdate').onclick = () => openUpdateDialog();
@@ -3721,7 +3751,7 @@ async function openUpdateDialogImpl() {
       return `<div class="update-component">
         <div class="update-component-main">
           <div class="update-component-copy">
-            <div class="update-component-title"><b>${esc(u.name || u.component)}</b>${state}</div>
+            <div class="update-component-title"><b>${esc(u.name || u.component)}</b>${state}${available && isPrerelease(u.latest_version) ? '<span class="update-badge beta">测试版</span>' : ''}</div>
             <span>${meta}</span>
             ${responsibility}
           </div>

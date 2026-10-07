@@ -541,3 +541,14 @@ def test_declared_but_missing_runtime_field_still_uses_strict_undefined(tmp_path
     assert validate_template(template,definition=definition)==[]
     with pytest.raises(UndefinedError):render_template(template,context(),tmp_path/'never.docx',definition=definition)
     assert not (tmp_path/'never.docx').exists()
+
+
+def test_unit_price_of_a_non_terminating_quotient_stays_within_the_context_schema():
+    from decimal import Decimal
+    from tidoc_print.context import _unit_price_text
+
+    assert _unit_price_text(Decimal('100.00'), Decimal('3')) == '33.33333333'
+    assert _unit_price_text(Decimal('356.50'), Decimal('3')) == '118.83333333'
+    assert _unit_price_text(Decimal('988.00'), Decimal('2')) == '494.00'
+    assert _unit_price_text(Decimal('1.00'), Decimal('8')) == '0.125'
+    assert len(_unit_price_text(Decimal('1.00'), Decimal('7'))) <= 64

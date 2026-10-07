@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import threading
@@ -319,6 +320,8 @@ class AdapterService:
         with self.db.transaction():
             for package,resource in prepared:
                 self._record_package(package,resource,'builtin')
+            if initialized:
+                self._sync_builtin_schemes(builtin)
             if not initialized:
                 legacy=self._has_legacy_data()
                 schemes={}
@@ -344,6 +347,46 @@ class AdapterService:
         for _,resource in prepared:
             self._finish_operation(resource)
         return self.setup_state()
+
+    def _sync_builtin_schemes(self,builtin):
+        """软件升级带来新版内置包后，沿用内置包的本地方案也采用新版本。
+
+        用户在本地改过的内容（设置、抬头、材料要求等）保留，没改过的部分采用新的包默认值。
+        只改方案的当前修订；已有条目固定在创建时的修订上，不受影响。"""
+        def version(value):
+            return tuple(int(part) for part in re.findall(r'\d+',str(value)))
+        for scheme in self.packages.list_schemes(include_disabled=True):
+            package=builtin.get(scheme['package_id'])
+            if package is None:
+                continue
+            old=self.packages.get_package(self.packages.revision_record(scheme['current_revision_id'])['content_hash'])
+            if not old or old['source']!='builtin':
+                continue
+            if version(old['package_version'])>=version(package.definition['manifest']['package_version']):
+                continue
+            overrides=self._rebase_overrides(old['definition'],package.definition,scheme['overrides'])
+            try:
+                definition=self._resolve(package.definition,overrides)
+                revision=self.packages.store_revision(definition,package.content_hash,commit=False)
+            except ValueError:
+                # 本地覆盖和新版包对不上时保留这个方案的旧修订，用户仍可在方案页手动处理；
+                # 不能因为一个方案升级失败就让软件启动不了。
+                continue
+            self.packages.set_current_revision(scheme['id'],revision,overrides,commit=False)
+
+    @staticmethod
+    def _rebase_overrides(old_base,new_base,overrides):
+        """材料要求按整张表保存；只保留用户真正改过的角色，其余角色跟随新版包的默认值。"""
+        if 'materials' not in overrides:
+            return overrides
+        before={role['id']:role for role in old_base.get('materials',[])}
+        mine={role['id']:role for role in overrides['materials']}
+        rebased=[mine[role['id']] if role['id'] in mine and mine[role['id']]!=before.get(role['id']) else role
+                 for role in new_base.get('materials',[])]
+        result={key:value for key,value in overrides.items() if key!='materials'}
+        if rebased!=new_base.get('materials',[]):
+            result['materials']=rebased
+        return result
 
     def _has_legacy_data(self):
         return bool(self._preferences()) or any(

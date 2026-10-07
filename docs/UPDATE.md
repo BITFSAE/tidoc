@@ -5,11 +5,12 @@
 - Bucket：`bitfsae-1416420925`
 - 地域：`ap-beijing`
 - 公开地址：`https://img.bitfsae.com/tidoc`
-- 清单：`https://img.bitfsae.com/tidoc/manifest.json`
+- 清单：`https://img.bitfsae.com/tidoc/manifest.json`（正式版）
+- 测试版清单：`https://img.bitfsae.com/tidoc/manifest-beta.json`（仅测试版发布时写入）
 
 CDN 缓存规则：
 
-- `/tidoc/manifest.json` 不缓存
+- `/tidoc/manifest.json` 和 `/tidoc/manifest-beta.json` 不缓存
 - `zip` / `exe` / `dmg` 缓存 30 天
 
 ## 发布
@@ -25,6 +26,21 @@ CDN 缓存规则：
 git tag v0.1.1
 git push origin v0.1.1
 ```
+
+### 测试版（预发布）
+
+版本号带预发布后缀的 tag（如 `v0.1.39-beta.1`、`v0.1.39-rc.1`）走测试版通道：
+
+```bash
+git tag -a v0.1.39-beta.1 -m "Tidoc 0.1.39-beta.1"
+git push origin v0.1.39-beta.1
+```
+
+- 构建、自检和上传与正式版相同；区别是只写入 `manifest-beta.json`，**不会改写 `manifest.json`**，所以没有打开「接收测试版更新」的用户完全不受影响。
+- GitHub Release 标为预发布（Pre-release），不会成为 Latest。
+- 更新说明取 `CHANGELOG.md` 最新一节，测试版发布时可以保留「Unreleased」标题；正式版发布时再改成带版本号的标题。
+- 客户端打开「接收测试版更新」后同时读取两份清单，每个组件取较新的版本。版本按 semver 比较：`0.1.39-beta.1 < 0.1.39-beta.2 < 0.1.39 < 0.1.40-beta.1`，所以同版本的正式版发布后，测试版用户会被提示更新到正式版。
+- Windows 安装器的文件版本信息只能是数字，测试版用其数字部分（`0.1.39`）；安装包文件名和应用内版本仍带完整后缀。
 
 GitHub Actions 会并行打包 macOS / Windows，汇总后运行
 `scripts/build_manifest.py` 生成 `manifest.json` 和 `upload_plan.tsv`，再用腾讯云官方

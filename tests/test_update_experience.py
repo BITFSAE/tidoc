@@ -240,3 +240,24 @@ def test_core_download_reuses_cached_asset(monkeypatch, tmp_path):
 
     assert result["state"] == "downloading"
     assert captured == [asset]
+
+
+def test_update_channel_defaults_to_stable_is_remembered_and_drives_the_check(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    api = Api(tmp_path)
+    channels = []
+
+    def fake_check(*args, **kwargs):
+        channels.append(kwargs.get("channel"))
+        return {"current_core_version": __version__, "updates": []}
+
+    monkeypatch.setattr(updater, "check_updates", fake_check)
+    assert unwrap(api.update_channel())["channel"] == "stable"
+    unwrap(api.auto_check_updates())
+    assert unwrap(api.set_update_channel("beta"))["channel"] == "beta"
+    assert unwrap(api.update_channel())["channel"] == "beta"
+    # 换通道会清掉一小时内的检查缓存，立即按新通道重新检查。
+    again = unwrap(api.auto_check_updates())
+    assert again["checked"] is True and channels == ["stable", "beta"]
+    assert unwrap(api.set_update_channel("whatever"))["channel"] == "stable"  # 只认 beta，其余都是稳定版

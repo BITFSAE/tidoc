@@ -105,3 +105,39 @@ def test_set_version_updates_frontend_asset_cache_keys(tmp_path):
     release_info = (tmp_path / "tidoc" / "release_info.py").read_text("utf-8")
     assert "RELEASE_VERSION = '9.8.7'" in release_info
     assert '"修复更新说明。"' in release_info
+
+
+def test_prerelease_goes_to_the_beta_manifest_and_leaves_the_stable_one_alone(tmp_path):
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "tidoc-core-windows-v0.5.0-beta.1.exe").write_bytes(b"core-win")
+    (release / "tidoc-core-windows-v0.5.0-beta.1-update.zip").write_bytes(b"core-win-update")
+    (release / "tidoc-core-macos-v0.5.0-beta.1.dmg").write_bytes(b"core-mac")
+    (release / "tidoc-core-macos-v0.5.0-beta.1-update.zip").write_bytes(b"core-mac-update")
+    (release / "tidoc-print-windows-v0.2.1.exe").write_bytes(b"print-win")
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "build_manifest.py"
+    subprocess.run(
+        [sys.executable, str(script), "--release-dir", str(release), "--version", "0.5.0-beta.1"],
+        check=True,
+    )
+
+    assert not (release / "manifest.json").exists()      # 稳定版清单只由正式版发布改写
+    manifest = json.loads((release / "manifest-beta.json").read_text("utf-8"))
+    core = manifest["components"]["core"]
+    assert manifest["channel"] == "beta" and core["latest"] == "0.5.0-beta.1"
+    windows = core["platforms"]["windows"]
+    assert windows["filename"] == "tidoc-core-windows-v0.5.0-beta.1.exe"
+    assert windows["auto_update"]["filename"] == "tidoc-core-windows-v0.5.0-beta.1-update.zip"
+    assert core["platforms"]["macos"]["auto_update"]["filename"] == "tidoc-core-macos-v0.5.0-beta.1-update.zip"
+    assert manifest["components"]["print"]["latest"] == "0.2.1"
+
+
+def test_stable_release_still_writes_the_stable_manifest(tmp_path):
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "tidoc-core-windows-v0.5.0.exe").write_bytes(b"core-win")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "build_manifest.py"
+    subprocess.run([sys.executable, str(script), "--release-dir", str(release), "--version", "0.5.0"], check=True)
+    assert json.loads((release / "manifest.json").read_text("utf-8"))["channel"] == "stable"
+    assert not (release / "manifest-beta.json").exists()

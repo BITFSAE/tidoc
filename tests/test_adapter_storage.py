@@ -711,3 +711,86 @@ def test_deleting_export_job_record_leaves_output_files_for_explicit_api_cleanup
     with pytest.raises(ValueError,match='不存在'):
         service.jobs.get(job['id'])
     assert artifact.read_bytes()==b'export'
+
+
+def _simulate_bitfsae_package_1_0_0(api):
+    """把数据库里的内置 BITFSAE 包改回 1.0.0（查验单必需），模拟用旧版软件建出的数据。"""
+    import json as _json
+    conn = api.db.conn
+    scheme = next(s for s in api.adapters.list_schemes() if s['package_id'] == 'org.bitfsae.reimbursement')
+    revision = scheme['current_revision_id']
+    package_hash = conn.execute('SELECT content_hash FROM scheme_revisions WHERE revision_id=?', (revision,)).fetchone()[0]
+    package_def = _json.loads(conn.execute('SELECT definition_json FROM adapter_packages WHERE content_hash=?', (package_hash,)).fetchone()[0])
+    revision_def = _json.loads(conn.execute('SELECT definition_json FROM scheme_revisions WHERE revision_id=?', (revision,)).fetchone()[0])
+    for definition in (package_def, revision_def):
+        definition['manifest']['package_version'] = '1.0.0'
+        for role in definition['materials']:
+            if role['id'] == 'inspection_pdf':
+                role['min_count'] = 1
+    # 包和修订平时不可改；这里是在模拟旧版数据，临时去掉保护（重新启动时会自动重建）。
+    conn.execute('DROP TRIGGER IF EXISTS immutable_adapter_package')
+    conn.execute('DROP TRIGGER IF EXISTS immutable_revision')
+    conn.execute('PRAGMA defer_foreign_keys=ON')
+    conn.execute("UPDATE adapter_packages SET content_hash='old-bitfsae-1.0.0',package_version='1.0.0',definition_json=? WHERE content_hash=?",
+                 (_json.dumps(package_def, ensure_ascii=False), package_hash))
+    from tidoc.adapters.resolver import revision_hash
+    old_revision = revision_hash(revision_def)  # 旧数据里的修订编号是旧内容的摘要
+    conn.execute("UPDATE scheme_revisions SET content_hash='old-bitfsae-1.0.0',definition_json=?,revision_id=? WHERE revision_id=?",
+                 (_json.dumps(revision_def, ensure_ascii=False), old_revision, revision))
+    conn.execute('UPDATE scheme_revision_links SET revision_id=? WHERE revision_id=?', (old_revision, revision))
+    conn.execute('UPDATE schemes SET current_revision_id=? WHERE current_revision_id=?', (old_revision, revision))
+    conn.commit()
+    return scheme['id']
+
+
+def _inspection_min_count(api, scheme_id):
+    scheme = api.adapters.get_scheme(scheme_id)
+    return scheme['package_version'], {r['id']: r['min_count'] for r in scheme['definition']['materials']}
+
+
+def test_existing_builtin_scheme_picks_up_the_new_package_defaults_on_upgrade(tmp_path):
+    from tidoc.api import Api
+    first = Api(tmp_path / 'data')
+    scheme = next(s for s in first.adapters.list_schemes() if s['package_id'] == 'org.bitfsae.reimbursement')
+    first.adapters.complete_adapter_setup(scheme['id'])
+    scheme_id = _simulate_bitfsae_package_1_0_0(first)
+    assert _inspection_min_count(first, scheme_id) == ('1.0.0', {'invoice': 1, 'payment_screenshot': 1, 'physical_image': 0, 'inspection_pdf': 1, 'other': 0})
+    first.db.close()
+    upgraded = Api(tmp_path / 'data')  # 重新启动：内置包已是 1.0.1，查验单不再必需
+    version, minimums = _inspection_min_count(upgraded, scheme_id)
+    assert version == '1.0.1' and minimums['inspection_pdf'] == 0
+    upgraded.db.close()
+
+
+def test_upgrade_keeps_what_the_user_changed_and_only_rebases_the_rest(tmp_path):
+    from tidoc.api import Api
+    first = Api(tmp_path / 'data')
+    scheme = next(s for s in first.adapters.list_schemes() if s['package_id'] == 'org.bitfsae.reimbursement')
+    first.adapters.complete_adapter_setup(scheme['id'])
+    scheme_id = _simulate_bitfsae_package_1_0_0(first)
+    current = first.adapters.get_scheme(scheme_id)
+    first.adapters.update_scheme(scheme_id, current['current_revision_id'], material_requirements={'physical_image': True})
+    assert _inspection_min_count(first, scheme_id)[1]['physical_image'] == 1
+    first.db.close()
+    upgraded = Api(tmp_path / 'data')
+    version, minimums = _inspection_min_count(upgraded, scheme_id)
+    assert version == '1.0.1'
+    assert minimums['physical_image'] == 1      # 用户自己打开的要求保留
+    assert minimums['inspection_pdf'] == 0      # 没动过的跟随新的包默认值
+    upgraded.db.close()
+
+
+def test_a_builtin_scheme_that_cannot_follow_the_new_package_keeps_its_revision_and_the_app_still_starts(tmp_path):
+    import json as _json
+    from tidoc.api import Api
+    first = Api(tmp_path / 'data')
+    scheme = next(s for s in first.adapters.list_schemes() if s['package_id'] == 'org.bitfsae.reimbursement')
+    first.adapters.complete_adapter_setup(scheme['id'])
+    scheme_id = _simulate_bitfsae_package_1_0_0(first)
+    # 本地覆盖里有新版包不认识的设置：这个方案升级不了，但不能影响启动。
+    first.db.conn.execute('UPDATE schemes SET overrides_json=? WHERE id=?', (_json.dumps({'settings': {'removed.setting': 1}}), scheme_id))
+    first.db.conn.commit()
+    first.db.close()
+    restarted = Api(tmp_path / 'data')
+    assert _inspection_min_count(restarted, scheme_id)[0] == '1.0.0'
+    restarted.db.close()

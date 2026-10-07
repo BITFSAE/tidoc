@@ -189,3 +189,42 @@ def test_titles_and_material_requirements_live_in_the_scheme_page():
     # 与普通设置共用未保存提示、恢复默认和一次性保存。
     assert 'titles_baseline' in adapter and 'requirements_baseline' in adapter
     assert "if (changes.titles) { await refreshTitleOptions(); renderEntries(); }" in adapter
+
+
+def test_payee_and_pdf_options_follow_what_the_scheme_actually_does():
+    """收款、材料 PDF、默认抬头相关的入口和设置，只在方案真的有对应功能时出现（用真实的前端源码和内置方案执行）。"""
+    import json
+    import pytest
+
+    node=shutil.which('node')
+    if not node:
+        pytest.skip('需要 Node 执行前端源码')
+
+    def definition(package, effective=None):
+        base=ROOT/'tidoc/builtin_adapters'/package
+        return {'outputs':json.loads((base/'outputs.json').read_text('utf-8'))['outputs'],
+                'scheme':json.loads((base/'scheme.json').read_text('utf-8')),
+                'effective_settings':effective or {}}
+
+    cases={'bitfsae':definition('org.bitfsae.reimbursement'),
+           'bitfsae_by_claimant':definition('org.bitfsae.reimbursement',{'print.payee_mode':'by_claimant'}),
+           'generic':definition('org.tidoc.generic')}
+    script=r"""
+const vm=require('vm'),fs=require('fs');
+const sandbox={console};vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8')+';this.AdapterUI=AdapterUI;',sandbox);
+const A=sandbox.AdapterUI,cases=JSON.parse(process.argv[2]),out={};
+for(const [name,def] of Object.entries(cases))out[name]={uses:A.usesPayee(def),modes:[...A.payeeModes(def)].sort(),
+  payeeKey:A.settingApplies('print.payee_mode',def),pdfKey:A.settingApplies('print.numbering',def),titleKey:A.settingApplies('entry.default_title_id',def)};
+console.log(JSON.stringify(out));
+"""
+    result=subprocess.run([node,'-e',script,str(WEB/'adapter-ui.js'),json.dumps(cases)],capture_output=True,text=True,encoding='utf-8',check=True)
+    found=json.loads(result.stdout)
+    # BITFSAE 默认是统一收款：要收款对象，但不出现「分别收款」。
+    assert found['bitfsae']['uses'] and found['bitfsae']['modes']==['single'] and found['bitfsae']['payeeKey']
+    assert found['bitfsae']['pdfKey'] and found['bitfsae']['titleKey']
+    # 方案设置选了分别收款，才会出现按报账人指定。
+    assert found['bitfsae_by_claimant']['modes']==['by_claimant']
+    # 通用方案没有任何输出要收款对象，也没有配置抬头：这些入口和设置都不出现。
+    assert not found['generic']['uses'] and found['generic']['modes']==[]
+    assert not found['generic']['payeeKey'] and not found['generic']['titleKey'] and found['generic']['pdfKey']

@@ -1,6 +1,10 @@
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
 #endif
+; Windows file version info must be numeric; a pre-release (0.1.39-beta.1) passes its numeric part.
+#ifndef MyAppNumericVersion
+  #define MyAppNumericVersion MyAppVersion
+#endif
 #ifndef SourceDir
   #define SourceDir "..\..\dist\tidoc"
 #endif
@@ -33,7 +37,7 @@ CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\tidoc.exe
 ChangesAssociations=yes
-VersionInfoVersion={#MyAppVersion}.0
+VersionInfoVersion={#MyAppNumericVersion}.0
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："; Flags: unchecked

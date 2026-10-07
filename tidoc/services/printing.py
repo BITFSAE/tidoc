@@ -10,6 +10,8 @@ from dataclasses import asdict, is_dataclass
 from decimal import Decimal
 from pathlib import Path
 
+from .proc import hidden_window_options
+
 from .updater import COMPONENT_PRINT, installed_component_info
 
 _CAPABILITIES_CACHE = {}
@@ -33,7 +35,7 @@ def _query_capabilities(executable):
     if key in _CAPABILITIES_CACHE:
         return _CAPABILITIES_CACHE[key]
     try:
-        proc=subprocess.run(_command(executable)+['--capabilities'],text=True,capture_output=True,timeout=10,check=False)
+        proc=subprocess.run(_command(executable)+['--capabilities'],text=True,capture_output=True,timeout=10,check=False,**hidden_window_options())
         value=json.loads(proc.stdout) if proc.returncode==0 else {}
         if not isinstance(value,dict): value={}
     except (OSError,ValueError,subprocess.TimeoutExpired):
@@ -79,7 +81,7 @@ def execute_print_request(request,components_dir=None,cancel_check=None):
         payload=json.loads(json.dumps(request,ensure_ascii=False,allow_nan=False))
         payload['cancel_file']=str(cancel)
         inp.write_text(json.dumps(payload,ensure_ascii=False),'utf-8')
-        proc=subprocess.Popen(_command(status.get('path'))+['--input',str(inp),'--result',str(result),'--timeout',str(timeout),'--cancel-file',str(cancel)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        proc=subprocess.Popen(_command(status.get('path'))+['--input',str(inp),'--result',str(result),'--timeout',str(timeout),'--cancel-file',str(cancel)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,**hidden_window_options())
         started=time.monotonic()
         try:
             while True:
@@ -164,7 +166,7 @@ def _build_prints_external(executable,entries,out_dir,options,profiles):
     with tempfile.TemporaryDirectory() as tmp:
         inp=Path(tmp)/'input.json';res=Path(tmp)/'result.json'
         inp.write_text(json.dumps(request,ensure_ascii=False),'utf-8')
-        proc=subprocess.run(_command(executable)+['--input',str(inp),'--result',str(res)],capture_output=True,text=True,timeout=120)
+        proc=subprocess.run(_command(executable)+['--input',str(inp),'--result',str(res)],capture_output=True,text=True,timeout=120,**hidden_window_options())
         if proc.returncode or not res.exists(): raise RuntimeError('打印组件执行失败')
         result=json.loads(res.read_text('utf-8'))
         if not result['ok']:raise RuntimeError(result['error'])

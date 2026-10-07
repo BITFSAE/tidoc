@@ -49,6 +49,8 @@
     }
   },
   "default_outputs": [
-    "reimbursement"
+    "reimbursement",
+    "acceptance",
+    "materials"
   ]
 }

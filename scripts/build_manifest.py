@@ -3,6 +3,7 @@
 
 Expected release file names:
 - tidoc-core-windows-v0.1.20.exe
+- tidoc-core-windows-v0.1.21-beta.1.exe  (pre-release: published to manifest-beta.json only)
 - tidoc-core-windows-v0.1.20-update.zip
 - tidoc-core-macos-v0.1.20.dmg
 - tidoc-core-macos-v0.1.20-update.zip
@@ -20,10 +21,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 BASE_URL = "https://img.bitfsae.com/tidoc"
-DEFAULT_OUT = "manifest.json"
+STABLE_OUT = "manifest.json"
+BETA_OUT = "manifest-beta.json"
 DEFAULT_UPLOAD_PLAN = "upload_plan.tsv"
+# 版本可带预发布后缀（0.1.39-beta.1）。预发布部分按「尽量短」匹配，所以稳定版的 "-update.zip" 不会被当成预发布后缀。
 NAME_RE = re.compile(
-    r"^tidoc-(?P<component>core|print|ocr)-(?P<platform>windows|macos)-v(?P<version>\d+\.\d+\.\d+)(?P<suffix>.*)$"
+    r"^tidoc-(?P<component>core|print|ocr)-(?P<platform>windows|macos)-v"
+    r"(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*?)??)"
+    r"(?P<suffix>-update\.zip|\.exe|\.dmg|\.zip)$"
 )
 
 COMPONENT_META = {
@@ -47,7 +52,7 @@ def main() -> int:
     parser.add_argument("--release-dir", default="release", help="directory containing release files")
     parser.add_argument("--version", required=True, help="release version without leading v")
     parser.add_argument("--base-url", default=BASE_URL)
-    parser.add_argument("--out", default=DEFAULT_OUT)
+    parser.add_argument("--out", default=None, help="default: manifest.json, or manifest-beta.json for a pre-release")
     parser.add_argument("--upload-plan", default=DEFAULT_UPLOAD_PLAN)
     parser.add_argument("--notes", default="", help="single line changelog")
     parser.add_argument("--notes-file", default="", help="JSON array of user-facing changelog entries")
@@ -63,6 +68,9 @@ def main() -> int:
     else:
         args.release_notes = [args.notes] if args.notes else []
 
+    prerelease = "-" in args.version
+    if args.out is None:
+        args.out = BETA_OUT if prerelease else STABLE_OUT
     release_dir = Path(args.release_dir)
     components: dict[str, dict] = {}
     upload_rows: list[tuple[Path, str]] = []
@@ -116,7 +124,7 @@ def main() -> int:
     manifest = {
         "schema": 1,
         "app": "tidoc",
-        "channel": "stable",
+        "channel": "beta" if prerelease else "stable",
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "base_url": args.base_url.rstrip("/"),
         "components": components,

@@ -530,7 +530,9 @@ def test_new_imports_in_old_batch_use_frozen_defaults_and_xml_only(tmp_path):
         assert entry['title']=='旧单位'
         assert entry['fields']['paid_amount']['current']==''
         assert api.batches.entry_ids(batch['id']).count(eid)==1
-    plan=api.preview_export(api.batches.entry_ids(batch['id']),['materials'])
+    response=api.preview_export(api.batches.entry_ids(batch['id']),['materials'])
+    assert response['ok'],response  # 调用本身成功；阻断项在计划里，不能当成调用失败
+    plan=response['data']
     assert not plan['ok'],plan
     assert any(d['code']=='MISSING_INVOICE_PDF' for d in plan['diagnostics'])
 
@@ -631,3 +633,51 @@ def test_xml_only_folder_import_and_pinned_suggested_tags(tmp_path):
     result=api.batch_create_entries(person['id'],scanned['groups'])
     assert result['ok'] and result['data']['created']==1,result
     assert api.entries.get(result['data']['entry_ids'][0])['tags']==['经费甲','耗材']
+
+
+def test_guard_hands_blocked_plans_to_the_frontend_as_data():
+    # 预检计划带 ok 字段；有阻断项（ok=False、没有 error）时不能被当成调用失败。
+    from tidoc.api import _guard
+
+    class Bridge:
+        _api_lock = __import__('threading').RLock()
+
+        @_guard
+        def blocked(self):
+            return {'ok': False, 'plan_id': 'p', 'diagnostics': [{'code': 'X', 'severity': 'blocked', 'message': '缺少材料'}]}
+
+        @_guard
+        def passing(self):
+            return {'ok': True, 'plan_id': 'p', 'diagnostics': []}
+
+        @_guard
+        def failing(self):
+            return {'ok': False, 'error': '失败'}
+
+    bridge = Bridge()
+    blocked = bridge.blocked()
+    assert blocked['ok'] is True and blocked['data']['ok'] is False and blocked['data']['diagnostics'][0]['message'] == '缺少材料'
+    assert bridge.passing()['ok'] is True and bridge.passing()['plan_id'] == 'p'
+    assert bridge.failing() == {'ok': False, 'error': '失败'}
+
+
+def test_print_component_processes_never_open_a_console_window_on_windows(monkeypatch, tmp_path):
+    # 打开设置时探测打印组件、以及生成时调用它，都是控制台程序；Windows 上必须隐藏黑色终端。
+    import subprocess
+    from types import SimpleNamespace
+    from tidoc.services import printing
+
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout='{"component": "tidoc_print"}', stderr='')
+
+    exe = tmp_path / 'tidoc_print.exe'
+    exe.write_bytes(b'x')
+    monkeypatch.setattr(printing.sys, 'platform', 'win32')
+    monkeypatch.setattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000, raising=False)
+    monkeypatch.setattr(printing.subprocess, 'run', fake_run)
+    printing._CAPABILITIES_CACHE.clear()
+    printing._query_capabilities(exe)
+    assert seen and seen[0]['creationflags'] == 0x08000000

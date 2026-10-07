@@ -167,6 +167,8 @@ const Api = (() => {
     getOcrResult: (id) => call('get_ocr_result', id),
     applyOcrField: (id, field) => call('apply_ocr_field', id, field),
     applyOcrItems: (id) => call('apply_ocr_items', id),
+    updateChannel: () => call('update_channel'),
+    setUpdateChannel: (channel) => call('set_update_channel', channel),
     checkUpdates: () => call('check_updates'),
     autoCheckUpdates: () => call('auto_check_updates'),
     coreUpdateStatus: () => call('core_update_status'),

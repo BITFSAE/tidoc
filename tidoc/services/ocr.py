@@ -21,6 +21,7 @@ from ..db.attachments import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
 from ..db.entries import EntryRepo
 from ..db.ocr_results import OcrRepo
 from ..engine.money import d, money
+from .proc import hidden_window_options
 from .updater import COMPONENT_OCR, installed_component_info, version_gt
 
 MULTIPAGE_COMPONENT_VERSION = "0.2.1"
@@ -174,11 +175,8 @@ def _invoke_ocr_external(executable: str, tasks: list[dict], credentials: dict) 
         cmd = [executable, "--input", str(in_path), "--result", str(out_path)]
         if sys.platform == "darwin" and executable.endswith(".app"):
             cmd = ["open", "-W", "-a", executable, "--args", "--input", str(in_path), "--result", str(out_path)]
-        run_options = {}
-        if sys.platform.startswith("win"):
-            # The OCR component is a console executable. Launch it without creating a
-            # terminal window so a batch does not flash one black window per invoice.
-            run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        # OCR 组件是控制台程序；不创建终端窗口，批量识别时才不会每张发票闪一个黑窗。
+        run_options = hidden_window_options()
         try:
             timeout_seconds = max(
                 300,

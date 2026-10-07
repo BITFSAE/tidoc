@@ -300,12 +300,21 @@ const AdapterUI = (() => {
   function settingRow(key, spec, scheme, onChange) {
     const policy = scheme.definition.scheme.settings?.[key] || {};
     const locked = 'fixed' in policy || policy.editable === false;
+    // 输出已经声明了收款方式、方案又没有为它设规则时，「不含收款信息」对这些输出不起作用：
+    // 设置里显示实际的收款方式，也不提供这个无效选项。
+    let declaredPayeeMode = null;
+    if (key === 'print.payee_mode' && supportsPayee(scheme.definition) && !scheme.definition.scheme.settings?.[key]) {
+      declaredPayeeMode = scheme.definition.outputs.find(needsPayee).payee_mode;
+      const unset = !spec.value || spec.value === 'none';
+      spec = { ...spec, value: unset ? declaredPayeeMode : spec.value, default: declaredPayeeMode, enum: (spec.enum || []).filter((item) => item !== 'none') };
+    }
+    const baseline = locked ? spec.value : (scheme.settings_baseline?.[key] ?? spec.default ?? null);
     return buildRow({
       key, locked, onChange,
       label: labels[key] || spec.label || key,
       help: settingHelp[key] || '',
       // 基线 = 方案包自身给出的值（后端按包解析，含 import_defaults / default_outputs）；旧后端缺字段时退回注册默认值。
-      baseline: locked ? spec.value : (scheme.settings_baseline?.[key] ?? spec.default ?? null),
+      baseline: declaredPayeeMode && (baseline === 'none' || baseline == null) ? declaredPayeeMode : baseline,
       initial: spec.value,
       makeControl: (notify) => settingControl(key, spec, scheme, notify),
     });
@@ -500,8 +509,8 @@ const AdapterUI = (() => {
           toast('已设为默认，后续新建条目使用此方案', 'ok');
         })));
       }
+      if (usesPayee(scheme.definition)) actions.append(mkBtn('收款信息', 'small ghost', () => payees(scheme.id)));
       actions.append(
-        mkBtn('收款信息', 'small ghost', () => payees(scheme.id)),
         mkBtn('复制方案', 'small ghost', () => copy(scheme, async (copied) => { await refresh(); await render(copied?.id || scheme.id); })),
         mkBtn('导出方案', 'small ghost', () => exportScheme(scheme)),
         mkBtn('历史版本', 'small ghost', () => revisionHistory(scheme, confirmLeave, async () => { await refresh(); await render(scheme.id); })),
@@ -540,12 +549,13 @@ const AdapterUI = (() => {
 
       // 分组渲染：方案声明 hidden 的设置不显示，advanced 的收进「高级设置」，未归组的设置不丢失。
       const policies = scheme.definition.scheme.settings || {};
-      const visibleKeys = Object.keys(descriptions).filter((key) => policies[key]?.presentation !== 'hidden');
+      // 方案没有对应功能（收款、材料 PDF、抬头）时，相关设置不显示。
+      const visibleKeys = Object.keys(descriptions).filter((key) => policies[key]?.presentation !== 'hidden' && settingApplies(key, scheme.definition));
       const grouped = new Set(SETTING_GROUPS.flatMap((g) => g.keys));
       const advancedKeys = visibleKeys.filter((key) => policies[key]?.presentation === 'advanced');
       const mainKeys = (keys) => keys.filter((key) => visibleKeys.includes(key) && !advancedKeys.includes(key));
       const groups = [
-        ...SETTING_GROUPS.map((g) => ({ title: g.title, keys: mainKeys(g.keys) })),
+        ...SETTING_GROUPS.map((g) => ({ title: g.title === '报账人与收款' && !supportsPayee(scheme.definition) ? '报账人' : g.title, keys: mainKeys(g.keys) })),
         { title: '其他设置', keys: mainKeys(visibleKeys.filter((key) => !grouped.has(key))) },
       ];
       const onChange = () => { sync(); };
@@ -661,8 +671,8 @@ const AdapterUI = (() => {
       m=modal({title:'报账信息',body:form.root,footer:[mkBtn('取消','ghost',()=>m.close()),save]});
     }catch(e){toast(e.message,'err');}
   }
-  function payees(schemeId) { return openOnce('payees', () => withLoading('正在打开收款信息…', () => payeesPage(schemeId))); }
-  async function payeesPage(schemeId=current?.id) {
+  function payees(schemeId,onClose) { return openOnce('payees', () => withLoading('正在打开收款信息…', () => payeesPage(schemeId,onClose))); }
+  async function payeesPage(schemeId=current?.id,onClose) {
     let m; const body=el('div','settings-shell');
     const render=async()=>{
       const [people,scheme,claimants]=await Promise.all([Api.listPayees(),Api.schemeDetails(schemeId),Api.listProfiles()]);
@@ -670,11 +680,11 @@ const AdapterUI = (() => {
       const tail=(person)=>person.account_number?'尾号 '+person.account_number.slice(-4):accountTypeLabels[person.account_type]||'';
       const options=(selected)=>'<option value="">未选择</option>'+people.map(p=>`<option value="${esc(p.id)}"${p.id===selected?' selected':''}>${esc(p.name)}${tail(p)?' · '+esc(tail(p)):''}</option>`).join('');
       body.replaceChildren();
-      const intro=el('p','scheme-desc');intro.textContent='收款信息只保存在本机，不会写入绑定包或公共方案包。导出带收款信息的文档时，需要选定一个完整的收款对象。';
+      const intro=el('p','scheme-desc');intro.textContent='只保存在本机，不会写入绑定包。';
       body.append(intro);
 
       const list=el('section','settings-block');list.append(el('div','settings-block-title','收款对象'));
-      if(!people.length)list.append(el('div','settings-list-empty','还没有收款对象。点击下方「新建收款对象」添加。'));
+      if(!people.length)list.append(el('div','settings-list-empty','还没有收款对象'));
       for(const person of people){
         const row=el('div','settings-row'),copy=el('div','settings-row-copy'),name=el('b'),detail=el('span');
         name.textContent=person.name||'（未命名）';
@@ -690,21 +700,22 @@ const AdapterUI = (() => {
       }
       body.append(list);
 
-      const pick=el('section','settings-block');pick.append(el('div','settings-block-title','默认与指定'));
+      const byClaimant=payeeModes(scheme.definition).has('by_claimant');
+      const pick=el('section','settings-block');pick.append(el('div','settings-block-title',byClaimant?'默认与按报账人指定':'导出时使用'));
       const addPicker=(title,help,selected,save)=>{
         const row=el('div','settings-row'),copy=el('div','settings-row-copy'),name=el('b'),detail=el('span');
-        name.textContent=title;detail.textContent=help;copy.append(name,detail);
+        name.textContent=title;copy.append(name);if(help){detail.textContent=help;copy.append(detail);}
         const holder=el('div','settings-row-control'),select=el('select','settings-select');
         select.setAttribute('aria-label',title);select.innerHTML=options(selected);
         select.onchange=async()=>{try{await save(select.value||null);toast('已保存','ok');}catch(e){showErrors(body,e);}};
         holder.append(select);row.append(copy,holder);pick.append(row);
       };
-      addPicker('方案默认收款对象','没有单独指定时使用，输出选择「统一收款」时生效。',scheme.default_payee_id,(id)=>Api.setSchemePayee(schemeId,id));
-      for(const claimant of claimants)addPicker(claimant.name,'按报账人指定；输出选择「分别收款」时使用。',scheme.profile_payee_mappings?.[claimant.id],(id)=>Api.setPayeeMapping(schemeId,claimant.id,id));
+      addPicker('默认收款对象',byClaimant?'没有按报账人指定时使用':'',scheme.default_payee_id,(id)=>Api.setSchemePayee(schemeId,id));
+      if(byClaimant)for(const claimant of claimants)addPicker(claimant.name,'',scheme.profile_payee_mappings?.[claimant.id],(id)=>Api.setPayeeMapping(schemeId,claimant.id,id));
       body.append(pick);
       if(m)enhanceNativeSelects(body);
     };
-    await render();m=modal({title:'个人收款信息',key:'payees',wide:true,body,footer:[mkBtn('新建收款对象','ghost',()=>editPayee(null,schemeId,render)),mkBtn('完成','primary',()=>m.close())]});
+    await render();m=modal({title:'个人收款信息',key:'payees',wide:true,body,onClose,footer:[mkBtn('新建收款对象','ghost',()=>editPayee(null,schemeId,render)),mkBtn('完成','primary',()=>m.close())]});
   }
   async function editPayee(person,schemeId,onSaved) {
     const scheme=await Api.schemeDetails(schemeId);
@@ -798,66 +809,261 @@ const AdapterUI = (() => {
       const scheme=await Api.schemeDetails(id);const example=entries.find(e=>e.scheme_id===id&&e.scheme_revision_id===revision);const definition=example?.adapter?.definition||scheme.definition;definitions.push(definition);
       const section=el('div','detail-section');section.innerHTML=`<h3>${esc(scheme.name)} · ${esc(revision.slice(0,8))}</h3>`;
       if(definition.fields.some(f=>f.scope==='batch'))section.append(mkBtn('填写批次信息','ghost',()=>editFields('batch',batchId,id,revision)));
-      const row=el('label','form-row');row.textContent='本批次收款对象';const select=el('select');select.innerHTML='<option value="">沿用方案选择</option>'+people.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${p.account_number?' · 尾号 '+esc(p.account_number.slice(-4)):''}</option>`).join('');select.value=batch.payee_mappings?.[id]?.id||'';select.onchange=async()=>{try{await Api.setBatchPayee(batchId,id,select.value||null);toast('已保存批次收款对象','ok');}catch(e){showErrors(body,e);}};row.append(select);section.append(row);body.append(section);
+      if(payeeModes(definition).has('single')){const row=el('label','form-row');row.textContent='本批次收款对象';const select=el('select');select.innerHTML='<option value="">沿用方案选择</option>'+people.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${p.account_number?' · 尾号 '+esc(p.account_number.slice(-4)):''}</option>`).join('');select.value=batch.payee_mappings?.[id]?.id||'';select.onchange=async()=>{try{await Api.setBatchPayee(batchId,id,select.value||null);toast('已保存批次收款对象','ok');}catch(e){showErrors(body,e);}};row.append(select);section.append(row);}body.append(section);
     }
     if(definitions.length){
       const scheme=await Api.schemeDetails([...bindings.values()][0].id);const catalog=scheme.settings_catalog||scheme.settings_descriptions;
       const combined={scheme:{settings:{}},effective_settings:{}};for(const definition of definitions){for(const [key,policy] of Object.entries(definition.scheme.settings)){if(!combined.scheme.settings[key]||'fixed' in policy||policy.editable===false){combined.scheme.settings[key]=policy;combined.effective_settings[key]=definition.effective_settings[key];}}}
-      const keys=Object.keys(catalog).filter(key=>catalog[key].scopes.includes('batch'));
+      const keys=Object.keys(catalog).filter(key=>catalog[key].scopes.includes('batch')&&definitions.some(d=>settingApplies(key,d)));
       const form=outputSettingsForm(combined,catalog,keys,batch.output_settings||{});const fold=el('details','schema-advanced');fold.innerHTML='<summary>批次输出设置</summary>';fold.append(form.root);
       fold.append(mkBtn('保存批次输出设置','ghost',async()=>{try{const updated=await Api.updateBatchOutputSettings(batchId,form.values(),batch.updated_at);batch.updated_at=updated.updated_at;toast('已保存','ok');}catch(e){form.errors(e);}}));body.append(fold);
     }
     m=modal({title:'批次报账信息',body,footer:[mkBtn('完成','primary',()=>m.close())]});
   }
+  // ---- 打印导出 -------------------------------------------------------------
+  // 弹窗只放「这次要生成什么」和确实要在这次决定的事；长期默认值在「设置 → 报账方案 → 打印与导出」。
+  const GENERIC_OUTPUTS = [
+    { id: 'generic_overview', label: '总览 Excel', type: 'xlsx', payee_mode: 'none' },
+    { id: 'generic_attachments', label: '附件整理包', type: 'attachment_zip', payee_mode: 'none' },
+    { id: 'generic_materials', label: '材料 PDF', type: 'pdf_bundle', payee_mode: 'none' },
+  ];
+  // 本次可临时覆盖的方案设置，按「哪些输出会用到它」分组；没有对应输出被勾选时整组隐藏。
+  // 收款方式（统一／分别）不在这里改，它是方案设置。
+  const ADJUST_GROUPS = [
+    { id: 'common', keys: ['print.amount_basis', 'print.sort_by'], applies: () => true },
+    { id: 'pdf', keys: ['print.numbering', 'print.image_layout', 'print.content_order'], applies: output => output.type === 'pdf_bundle' },
+  ];
+  // 方案「能不能」收款：看输出声明；「现在」怎么收款：声明的模式再被方案设置 print.payee_mode 改写（与导出预检同一规则）。
+  const needsPayee = output => !!output.payee_mode && output.payee_mode !== 'none';
+  function outputPayeeMode(definition, output) {
+    if (!needsPayee(output)) return 'none';
+    const configured = definition?.effective_settings?.['print.payee_mode'] ?? 'none';
+    const declaredByScheme = !!definition?.scheme?.settings?.['print.payee_mode'];
+    return declaredByScheme || configured !== 'none' ? configured : output.payee_mode;
+  }
+  function payeeModes(definition = current?.definition) {
+    const modes = new Set((definition?.outputs || []).map(output => outputPayeeMode(definition, output)));
+    modes.delete('none'); return modes;
+  }
+  const supportsPayee = (definition = current?.definition) => (definition?.outputs || []).some(needsPayee);
+  // 当前生效的方案里有输出要收款对象；没有时（如通用方案）收款信息的入口整体隐藏。
+  const usesPayee = (definition = current?.definition) => payeeModes(definition).size > 0;
+  // 设置项是否对这个方案有意义：它控制的功能方案根本没有时不显示，避免一屏无关选项。
+  function settingApplies(key, definition) {
+    const outputs = definition?.outputs || [];
+    if (key === 'print.payee_mode' || key === 'payee.personnel_number_label') return supportsPayee(definition);
+    if (['print.numbering', 'print.image_layout', 'print.content_order'].includes(key)) return outputs.some(output => output.type === 'pdf_bundle');
+    if (key === 'entry.default_title_id') return (definition?.scheme?.titles || []).length > 0;
+    return true;
+  }
+  function adjustRow(definition, catalog, key) {
+    const spec = catalog[key]; const policy = definition.scheme.settings[key] || {};
+    if (!spec || !settingApplies(key, definition) || 'fixed' in policy || policy.editable === false) return null; // 方案固定的项不允许改，也不占位置
+    const isBoolean = spec.type === 'boolean';
+    const name = value => value === true || value === 'true' ? '开启' : value === false || value === 'false' ? '关闭' : choiceLabels[value] || value;
+    const row = el('div', 'settings-row'); const copy = el('div', 'settings-row-copy');
+    copy.innerHTML = `<b>${esc(labels[key])}</b>`; row.title = settingHelp[key] || '';
+    const select = el('select'); select.setAttribute('aria-label', labels[key]);
+    select.innerHTML = `<option value="">沿用方案设置：${esc(name(definition.effective_settings?.[key]))}</option>` +
+      (isBoolean ? ['true', 'false'] : spec.enum || []).map(value => `<option value="${esc(value)}">${esc(name(value))}</option>`).join('');
+    const control = el('div', 'settings-row-control'); control.append(select); row.append(copy, control);
+    return { key, row, value: () => select.value === '' ? null : isBoolean ? select.value === 'true' : select.value };
+  }
   async function print(ids) {
-    if(!ids?.length){toast('请先选择条目','err');return;}
-    try{
-      const entries=await Promise.all(ids.map(id=>Api.getEntry(id)));const people=await Api.listPayees();const component=await Api.printComponentStatus();const revisions=new Map(entries.map(e=>[e.scheme_id+':'+e.scheme_revision_id,e.adapter?.definition]));const body=el('div');let m,plan=null;
-      body.innerHTML='<div data-export-outputs></div><label class="form-row">文档日期<input type="date" data-export-date value="'+new Date().toLocaleDateString('sv')+'"/></label><label class="form-row">本次收款对象<select data-export-payee><option value="">使用批次或方案默认选择</option>'+people.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${p.account_number?' · 尾号 '+esc(p.account_number.slice(-4)):''}</option>`).join('')+'</select></label><div data-export-fields></div><div data-export-preflight tabindex="-1"></div>';
-      const outputs=$('[data-export-outputs]',body);const forms=[],outputForms=[],batchForms=[];let generating=false;
-      for(const [binding,definition] of revisions){if(!definition)continue;const [schemeId,revision]=binding.split(':');const example=entries.find(e=>e.scheme_id===schemeId&&e.scheme_revision_id===revision);const section=el('div','detail-section');section.innerHTML=`<h3>${esc(example.adapter?.scheme_name||definition.manifest.name)} · ${esc(revision.slice(0,8))}</h3>`;const defaults=definition.effective_settings?.['print.default_outputs']??definition.scheme.default_outputs;for(const output of definition.outputs||[]){const key=output.id;const label=el('label','chk');const needsPrint=['docx','pdf_bundle'].includes(output.type);const supported=!needsPrint||(component.available&&component.ipc_versions?.includes(2)&&component.renderers?.includes(output.type));label.innerHTML=`<input type="checkbox" data-output-id="${esc(key)}" data-output-binding="${esc(binding)}"${(defaults!=null?defaults.includes(key):output.default_selected)&&supported?' checked':''}${supported?'':' disabled'}/> ${esc(output.label)}${supported?'':' · 需要打印导出组件或更新组件'}`;section.append(label);}outputs.append(section);
-        const scheme=await Api.schemeDetails(schemeId);const catalog=scheme.settings_catalog||scheme.settings_descriptions;
-        const advanced=el('details','schema-advanced');advanced.innerHTML='<summary>本次输出设置</summary>';
-        for(const output of definition.outputs||[]){const keys=['print.amount_basis','print.sort_by'];if(output.payee_mode!=='none')keys.push('print.payee_mode');if(output.type==='pdf_bundle')keys.push('print.numbering','print.image_layout','print.content_order');const form=outputSettingsForm(definition,catalog,keys);const group=el('div','detail-section');group.innerHTML='<h4>'+esc(output.label)+'</h4>';group.append(form.root);advanced.append(group);outputForms.push({binding,id:output.id,form});}section.append(advanced);
-        const fields=definition.fields.filter(f=>f.scope==='export');if(fields.length){const form=SchemaForm.create({fields,values:Object.fromEntries(fields.map(f=>[f.id,f.default??null]))});let visibilityRequest=0;form.root.addEventListener('change',async()=>{const request=++visibilityRequest;try{const next=await Api.previewFormDescription('export','export-preview',form.values(),schemeId,revision);if(request===visibilityRequest)form.refreshVisibility(next);}catch(e){form.errors(e);}});forms.push({binding,form});$('[data-export-fields]',body).append(form.root);}
-        if(definition.fields.some(f=>f.scope==='batch')){const batches=new Map(entries.filter(e=>e.scheme_id===schemeId&&e.scheme_revision_id===revision).flatMap(e=>e.batches||[]).map(b=>[b.id,b]));for(const batch of batches.values())$('[data-export-fields]',body).append(mkBtn('填写 '+batch.name+' 的批次信息','ghost',()=>editFields('batch',batch.id,schemeId,revision)));}
-        if(definition.fields.some(f=>f.scope==='batch')&&entries.some(e=>e.scheme_id===schemeId&&e.scheme_revision_id===revision&&!e.batches?.length)){
-          const fields=definition.fields.filter(f=>f.scope==='batch');const form=SchemaForm.create({fields,values:Object.fromEntries(fields.map(f=>[f.id,f.default??null]))});const holder=el('div','detail-section');holder.innerHTML='<h3>未进批次条目的本次信息</h3><p class="hint">仅用于本次导出，保存在导出记录中。</p>';holder.append(form.root);$('[data-export-fields]',body).append(holder);batchForms.push({binding,form});
-          let visibilityRequest=0;form.root.addEventListener('change',async()=>{const request=++visibilityRequest;try{const next=await Api.previewFormDescription('batch','export-preview',form.values(),schemeId,revision);if(request===visibilityRequest)form.refreshVisibility(next);}catch(e){form.errors(e);}});
+    if (!ids?.length) { toast('请先选择条目', 'err'); return; }
+    try {
+      const entries = await Promise.all(ids.map(id => Api.getEntry(id)));
+      let people = await Api.listPayees(); const component = await Api.printComponentStatus();
+      const canRender = type => !['docx', 'pdf_bundle'].includes(type) || !!(component.available && component.ipc_versions?.includes(2) && component.renderers?.includes(type));
+      const bindings = new Map(); let missingDefinition = false;
+      for (const entry of entries) {
+        const definition = entry.adapter?.definition;
+        if (!definition) { missingDefinition = true; continue; }
+        const binding = entry.scheme_id + ':' + entry.scheme_revision_id;
+        if (!bindings.has(binding)) bindings.set(binding, { binding, schemeId: entry.scheme_id, revision: entry.scheme_revision_id, definition, name: entry.adapter?.scheme_name || definition.manifest.name });
+      }
+      const body = el('div', 'settings-shell export-dialog');
+      const meta = new Map(); // 复选框 → { output, binding }
+      // 记住上次实际生成时的勾选，下次打开直接沿用（没有记录时用方案的默认选择）。
+      const recall = scope => { try { const value = JSON.parse(localStorage.getItem('tidoc.export.outputs.' + scope)); return Array.isArray(value) ? value : null; } catch (_) { return null; } };
+      const remember = () => { for (const scope of new Set([...meta.values()].map(item => item.binding ? item.binding.split(':')[0] : 'generic'))) { const ids = chosen().filter(input => (meta.get(input).binding ? meta.get(input).binding.split(':')[0] : 'generic') === scope).map(input => input.dataset.outputId); if (ids.length) try { localStorage.setItem('tidoc.export.outputs.' + scope, JSON.stringify(ids)); } catch (_) {} } };
+      const outputRow = (output, binding, checked, definition = null) => {
+        const supported = canRender(output.type);
+        const row = el('label', 'settings-row export-output' + (supported ? '' : ' is-disabled'));
+        const note = supported ? (outputPayeeMode(definition, output) !== 'none' ? '含收款信息' : '') : '需要安装或更新打印导出组件';
+        row.innerHTML = `<input type="checkbox" data-output-id="${esc(output.id)}"${binding ? ` data-output-binding="${esc(binding)}"` : ''}${checked && supported ? ' checked' : ''}${supported ? '' : ' disabled'}/><span class="settings-row-copy"><b>${esc(output.label)}</b></span>${note ? `<span class="export-kind${supported ? '' : ' export-warn'}">${esc(note)}</span>` : ''}`;
+        meta.set($('input', row), { output, binding, definition });
+        return row;
+      };
+      // 生成内容：方案声明的输出。
+      for (const { binding, definition, name } of bindings.values()) {
+        const block = el('section', 'settings-block');
+        block.append(el('div', 'settings-block-title', esc(bindings.size > 1 ? name + ' · 生成内容' : '生成内容')));
+        const defaults = recall(binding.split(':')[0]) ?? definition.effective_settings?.['print.default_outputs'] ?? definition.scheme.default_outputs;
+        for (const output of definition.outputs || []) block.append(outputRow(output, binding, defaults != null ? defaults.includes(output.id) : output.default_selected, definition));
+        body.append(block);
+      }
+      // 通用输出：不依赖方案，跨方案或没有安装来源方案时才是主要入口，平时折叠。
+      const generic = el('details', 'settings-block export-more');
+      const lastGeneric = recall('generic') || [];
+      generic.open = missingDefinition || bindings.size !== 1 || lastGeneric.length > 0;
+      generic.innerHTML = '<summary>通用输出<span>不依赖报账方案</span></summary>';
+      for (const output of GENERIC_OUTPUTS) generic.append(outputRow(output, '', lastGeneric.includes(output.id)));
+      body.append(generic);
+      // 本次选项：日期与收款对象，用不到的不出现。
+      const options = el('section', 'settings-block');
+      const dateRow = el('div', 'settings-row');
+      dateRow.innerHTML = `<div class="settings-row-copy"><b>文档日期</b></div><input type="date" data-export-date value="${new Date().toLocaleDateString('sv')}"/>`;
+      const payeeRow = el('div', 'settings-row');
+      const payeeSelect = el('select'); payeeSelect.setAttribute('data-export-payee', ''); payeeSelect.setAttribute('aria-label', '本次收款对象');
+      const fillPayees = () => { const keep = payeeSelect.value; payeeSelect.innerHTML = '<option value="">沿用批次或方案默认</option>' + people.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.account_number ? ' · 尾号 ' + esc(p.account_number.slice(-4)) : ''}</option>`).join(''); payeeSelect.value = people.some(p => p.id === keep) ? keep : ''; };
+      fillPayees();
+      const payeeCopy = el('div', 'settings-row-copy'); const payeeControl = el('div', 'settings-row-control');
+      const payeeHolder = el('div'); payeeHolder.append(payeeSelect);
+      let byClaimantOnly = false;
+      const payeeNote = () => {
+        const text = byClaimantOnly ? '按报账人分别收款' : people.length ? '' : '还没有收款信息，请先填写';
+        payeeCopy.innerHTML = `<b>收款对象</b>${text ? `<span${people.length || byClaimantOnly ? '' : ' class="export-warn"'}>${text}</span>` : ''}`;
+      };
+      payeeNote();
+      payeeRow.append(payeeCopy, payeeControl);
+      options.append(dateRow, payeeRow); body.append(options);
+      // 方案声明的「导出时填写」字段与批次信息。
+      const exportForms = [], batchForms = [];
+      const fieldsBlock = el('section', 'settings-block export-fields'); fieldsBlock.append(el('div', 'settings-block-title', '补充信息'));
+      const bindForm = (form, scope, schemeId, revision) => { let request = 0; form.root.addEventListener('change', async () => { const mine = ++request; try { const next = await Api.previewFormDescription(scope, 'export-preview', form.values(), schemeId, revision); if (mine === request) form.refreshVisibility(next); } catch (e) { form.errors(e); } }); };
+      for (const { binding, schemeId, revision, definition } of bindings.values()) {
+        const fields = definition.fields.filter(f => f.scope === 'export');
+        if (fields.length) { const form = SchemaForm.create({ fields, values: Object.fromEntries(fields.map(f => [f.id, f.default ?? null])) }); bindForm(form, 'export', schemeId, revision); exportForms.push({ binding, form }); fieldsBlock.append(form.root); }
+        const batchFields = definition.fields.filter(f => f.scope === 'batch');
+        if (batchFields.length) {
+          const inScheme = entries.filter(e => e.scheme_id === schemeId && e.scheme_revision_id === revision);
+          const batches = new Map(inScheme.flatMap(e => e.batches || []).map(b => [b.id, b]));
+          for (const batch of batches.values()) fieldsBlock.append(mkBtn('填写「' + batch.name + '」的批次信息', 'ghost small', () => editFields('batch', batch.id, schemeId, revision)));
+          if (inScheme.some(e => !e.batches?.length)) {
+            const form = SchemaForm.create({ fields: batchFields, values: Object.fromEntries(batchFields.map(f => [f.id, f.default ?? null])) });
+            const holder = el('div'); holder.innerHTML = '<p class="hint">未进批次的条目，仅用于本次导出。</p>'; holder.append(form.root); fieldsBlock.append(holder);
+            bindForm(form, 'batch', schemeId, revision); batchForms.push({ binding, form });
+          }
         }
       }
-      outputs.insertAdjacentHTML('beforeend','<label class="chk"><input type="checkbox" data-output-id="generic_overview"/> 通用总览 Excel</label><label class="chk"><input type="checkbox" data-output-id="generic_attachments"/> 通用附件整理包</label>');
-      const supportsPdf=component.available&&component.ipc_versions?.includes(2)&&component.renderers?.includes('pdf_bundle');outputs.insertAdjacentHTML('beforeend',`<label class="chk"><input type="checkbox" data-output-id="generic_materials"${supportsPdf?'':' disabled'}/> 通用材料 PDF${supportsPdf?'':' · 需要打印导出组件'}</label>`);
-      const options=()=>{const outputOptions={};for(const {binding,id,form} of outputForms){const values=form.values();const configured={};for(const [key,value] of Object.entries(values)){const name=key.slice('print.'.length);if(['numbering','image_layout','content_order'].includes(name)){configured.pdf||={};configured.pdf[name]=value;}else configured[name]=value;}(outputOptions[binding]||={})[id]=configured;}return {date:$('[data-export-date]',body).value,payee_id:$('[data-export-payee]',body).value||null,output_options_by_binding:outputOptions,batch_fields_by_binding:Object.fromEntries(batchForms.map(({binding,form})=>[binding,form.values()])),export_fields_by_binding:Object.fromEntries(forms.map(({binding,form})=>[binding,form.values()])),output_ids_by_binding:Object.fromEntries([...revisions.keys()].map(binding=>[binding,$$('[data-output-binding]:checked',body).filter(input=>input.dataset.outputBinding===binding).map(input=>input.dataset.outputId)]))};};
-      let formVersion=0;
-      const invalidate=()=>{formVersion++;const previous=plan;plan=null;run.disabled=true;if(previous)Api.cancelExport(previous.plan_id).catch(()=>{});};body.addEventListener('change',invalidate);
-      const preview=mkBtn('检查生成内容','ghost',async()=>{invalidate();preview.disabled=true;const version=formVersion;try{const chosen=$$('[data-output-id]:checked',body).map(input=>input.dataset.outputId);const candidate=await Api.previewExport(ids,chosen,options());if(version!==formVersion||!body.isConnected){await Api.cancelExport(candidate.plan_id);return;}plan=candidate;const target=$('[data-export-preflight]',body);target.innerHTML=diagnosticsMarkup(plan.diagnostics||[])+(plan.groups||[]).map(group=>`<p class="hint">${esc(group.filename||'')} ${group.payee?' · 收款：'+esc(group.payee.name)+' · 账号尾号 '+esc(group.payee.account_tail||''):''}</p>`).join('');run.disabled=!plan.ok;target.focus();}catch(e){showErrors(body,e);}finally{preview.disabled=false;}});
-      const run=mkBtn('生成选中内容','primary',async()=>{
-        const planId=plan.plan_id;
-        run.disabled=true;preview.disabled=true;generating=true;cancel.textContent='取消生成';
-        const disabledStates=new Map([...body.querySelectorAll('input,select,textarea')].map(control=>[control,control.disabled]));
-        for(const control of disabledStates.keys())control.disabled=true;
-        const progress=taskProgress('正在准备生成材料…');let polling=false;
-        const timer=setInterval(async()=>{
-          if(polling||!generating)return;polling=true;
-          try{const state=await Api.getExportProgress(planId);if(state&&generating)progress.update(cancel.disabled?'正在取消，等待当前步骤结束…':state.message+(state.total?` ${state.completed}/${state.total}`:''));}
-          catch(_){}finally{polling=false;}
-        },400);
-        try{
-          const result=await Api.runExport(planId);
-          if(result.status!=='completed'){
-            showErrors(body,{message:result.status==='cancelled'?'已取消生成。':'生成失败。',diagnostics:result.diagnostics});
-            $('[data-export-preflight]',body).innerHTML=diagnosticsMarkup(result.diagnostics||[]);plan=null;return;
-          }
-          plan=null;m.close();await jobs(result.job_id||result.id);
-        }catch(e){showErrors(body,e);}
-        finally{
-          clearInterval(timer);generating=false;progress.close();preview.disabled=false;cancel.disabled=false;cancel.textContent='取消';
-          if(body.isConnected){for(const [control,disabled] of disabledStates)control.disabled=disabled;run.disabled=true;}
+      if (fieldsBlock.children.length > 1) body.append(fieldsBlock);
+      // 本次调整：把原来「每个输出一组」合并成一组，默认折叠；方案固定的项直接不出现。
+      const adjustForms = []; const adjust = el('details', 'settings-block export-more');
+      adjust.innerHTML = '<summary>本次调整<span>仅本次有效</span></summary>';
+      for (const { binding, schemeId, definition, name } of bindings.values()) {
+        const scheme = await Api.schemeDetails(schemeId); const catalog = scheme.settings_catalog || scheme.settings_descriptions || {};
+        const groups = [];
+        for (const group of ADJUST_GROUPS) {
+          const rows = group.keys.map(key => adjustRow(definition, catalog, key)).filter(Boolean);
+          if (!rows.length) continue;
+          const holder = el('div'); if (bindings.size > 1) holder.append(el('div', 'settings-block-title', esc(name)));
+          rows.forEach(r => holder.append(r.row)); adjust.append(holder); groups.push({ group, rows, holder, binding });
         }
-      });run.disabled=true;
-      const cancel=mkBtn('取消','ghost',async()=>{if(plan)await Api.cancelExport(plan.plan_id);if(generating){cancel.disabled=true;cancel.textContent='正在取消…';}else m.close();});m=modal({title:'打印导出',wide:true,body,footer:[cancel,mkBtn('收款信息','ghost',()=>payees(entries[0]?.scheme_id)),preview,run],onClose:()=>{if(plan)Api.cancelExport(plan.plan_id).catch(()=>{});}});
-    }catch(e){toast(e.message,'err');}
+        adjustForms.push({ binding, definition, groups });
+      }
+      if (adjustForms.some(f => f.groups.length)) body.append(adjust);
+      const status = el('div', 'export-status'); status.dataset.exportStatus = ''; status.setAttribute('role', 'status'); status.tabIndex = -1; body.append(status);
+
+      const note = el('span', 'modal-foot-note');
+      let m, plan = null, checking = false, generating = false, warned = false, formVersion = 0;
+      const chosen = () => $$('[data-output-id]:checked', body);
+      const sync = () => {
+        const on = chosen().map(input => meta.get(input));
+        dateRow.hidden = !on.some(item => item.output.type === 'docx');
+        const modes = on.map(item => outputPayeeMode(item.definition, item.output)).filter(mode => mode !== 'none');
+        payeeRow.hidden = !modes.length;
+        if (byClaimantOnly !== !modes.includes('single')) { byClaimantOnly = !modes.includes('single'); payeeNote(); }
+        payeeHolder.hidden = byClaimantOnly;
+        options.hidden = dateRow.hidden && payeeRow.hidden;
+        for (const { groups } of adjustForms) for (const { group, holder, binding } of groups) holder.hidden = !on.some(item => item.binding === binding && group.applies(item.output));
+        adjust.hidden = !adjustForms.some(f => f.groups.some(g => !g.holder.hidden));
+        run.disabled = !on.length || checking || generating;
+        note.textContent = on.length ? '' : '请先勾选要生成的内容';
+      };
+      const collect = () => {
+        const outputOptions = {};
+        for (const { binding, definition, groups } of adjustForms) {
+          for (const output of definition.outputs || []) {
+            const configured = {};
+            for (const { group, rows } of groups) {
+              if (!group.applies(output)) continue;
+              for (const row of rows) {
+                const value = row.value(); if (value === null) continue;
+                const name = row.key.slice('print.'.length);
+                if (group.id === 'pdf') (configured.pdf ||= {})[name] = value; else configured[name] = value;
+              }
+            }
+            (outputOptions[binding] ||= {})[output.id] = configured;
+          }
+        }
+        return {
+          date: $('[data-export-date]', body).value, payee_id: payeeSelect.value || null, output_options_by_binding: outputOptions,
+          batch_fields_by_binding: Object.fromEntries(batchForms.map(({ binding, form }) => [binding, form.values()])),
+          export_fields_by_binding: Object.fromEntries(exportForms.map(({ binding, form }) => [binding, form.values()])),
+          output_ids_by_binding: Object.fromEntries([...bindings.keys()].map(binding => [binding, chosen().filter(input => input.dataset.outputBinding === binding).map(input => input.dataset.outputId)])),
+        };
+      };
+      const showStatus = candidate => {
+        // 多个文件（如按抬头拆分）会重复报同一条问题，合并后只显示一次。
+        const seen = new Set(); const list = (candidate.diagnostics || []).filter(d => { const key = d.code + '|' + (d.message || ''); if (seen.has(key)) return false; seen.add(key); return true; });
+        const blocking = d => ['required', 'blocked'].includes(d.severity);
+        const part = (title, items) => items.length ? `<div class="export-status-title">${title}</div>${diagnosticsMarkup(items)}` : '';
+        const files = list.some(blocking) ? '' : (candidate.groups || []).map(group => `<p class="hint">${esc(group.filename || '')}${group.payee ? ' · 收款：' + esc(group.payee.name) + ' · 账号尾号 ' + esc(group.payee.account_tail || '') : ''}</p>`).join('');
+        status.innerHTML = part('无法生成，请先处理', list.filter(blocking)) + part('提醒', list.filter(d => !blocking(d))) + files;
+        status.scrollIntoView({ block: 'nearest' });
+      };
+      const invalidate = () => { formVersion++; const previous = plan; plan = null; warned = false; run.textContent = '生成'; status.replaceChildren(); if (previous) Api.cancelExport(previous.plan_id).catch(() => {}); sync(); };
+      body.addEventListener('change', invalidate);
+      const check = async () => {
+        const version = formVersion; checking = true; sync(); run.textContent = '检查中…';
+        try {
+          const candidate = await Api.previewExport(ids, chosen().map(input => input.dataset.outputId), collect());
+          if (version !== formVersion || !body.isConnected) { await Api.cancelExport(candidate.plan_id).catch(() => {}); return null; }
+          plan = candidate; showStatus(candidate); return candidate;
+        } catch (e) { showErrors(body, e); return null; }
+        finally { checking = false; run.textContent = warned ? '仍然生成' : '生成'; sync(); }
+      };
+      const execute = async () => {
+        const planId = plan.plan_id;
+        generating = true; cancel.textContent = '取消生成'; sync();
+        const disabledStates = new Map([...body.querySelectorAll('input,select,textarea,button')].map(control => [control, control.disabled]));
+        for (const control of disabledStates.keys()) control.disabled = true;
+        const progress = taskProgress('正在准备生成材料…'); let polling = false;
+        const timer = setInterval(async () => {
+          if (polling || !generating) return; polling = true;
+          try { const state = await Api.getExportProgress(planId); if (state && generating) progress.update(cancel.disabled ? '正在取消，等待当前步骤结束…' : state.message + (state.total ? ` ${state.completed}/${state.total}` : '')); }
+          catch (_) {} finally { polling = false; }
+        }, 400);
+        try {
+          const result = await Api.runExport(planId);
+          if (result.status !== 'completed') {
+            showErrors(body, { message: result.status === 'cancelled' ? '已取消生成。' : '生成失败。', diagnostics: result.diagnostics });
+            status.innerHTML = diagnosticsMarkup(result.diagnostics || []); plan = null; return;
+          }
+          remember(); plan = null; m.close(); await jobs(result.job_id || result.id);
+        } catch (e) { showErrors(body, e); }
+        finally {
+          clearInterval(timer); generating = false; progress.close(); cancel.disabled = false; cancel.textContent = '取消';
+          if (body.isConnected) { for (const [control, disabled] of disabledStates) control.disabled = disabled; run.textContent = '生成'; warned = false; sync(); }
+        }
+      };
+      // 一个按钮完成「检查 → 生成」：没有问题直接生成；有警告先停下来让用户看一眼，再点一次确认。
+      const run = mkBtn('生成', 'primary', async () => {
+        if (!(plan && plan.ok && warned)) {
+          if (plan) { Api.cancelExport(plan.plan_id).catch(() => {}); plan = null; }
+          const candidate = await check(); if (!candidate || !candidate.ok) return;
+          if ((candidate.diagnostics || []).some(d => d.severity === 'warning')) { warned = true; run.textContent = '仍然生成'; return; }
+        }
+        await execute();
+      });
+      const cancel = mkBtn('取消', 'ghost', async () => { if (plan) await Api.cancelExport(plan.plan_id); if (generating) { cancel.disabled = true; cancel.textContent = '正在取消…'; } else m.close(); });
+      const manage = mkBtn('管理收款信息', 'small ghost', () => payees(entries[0]?.scheme_id, async () => { people = await Api.listPayees(); fillPayees(); payeeNote(); enhanceNativeSelects(payeeRow); invalidate(); }));
+      payeeControl.append(payeeHolder, manage);
+      m = modal({ title: '打印导出', subhead: `已选 ${entries.length} 条发票`, wide: true, body, footer: [note, cancel, run], onClose: () => { if (plan) Api.cancelExport(plan.plan_id).catch(() => {}); } });
+      enhanceNativeSelects(body); sync();
+      if (!run.disabled) run.focus({ preventScroll: true }); // 回车即按默认选择生成
+    } catch (e) { toast(e.message, 'err'); }
   }
   async function batchFill(ids) {
     if(!ids.length)return;
@@ -964,5 +1170,5 @@ const AdapterUI = (() => {
     m = modal({ title: '导出记录', key: 'export-jobs', wide: true, body, footer: [mkBtn('完成', 'primary', () => m.close())] });
     $('.is-focus', body)?.scrollIntoView({ block: 'nearest' });
   }
-  return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs};
+  return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,usesPayee,payeeModes,settingApplies,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs};
 })();

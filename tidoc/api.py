@@ -38,6 +38,7 @@ from .db import (
 )
 
 AUTO_UPDATE_PREF_KEY = "tidoc.update.autoCheck"
+UPDATE_CHANNEL_PREF_KEY = "tidoc.update.channel"  # stable（默认）或 beta
 PAYMENT_OCR_PREF_KEY = "tidoc.paymentScreenshotOcr"
 OCR_ACCESS_KEY_ID_PREF_KEY = "tidoc.ocr.accessKeyId"
 OCR_ACCESS_KEY_SECRET_PREF_KEY = "tidoc.ocr.accessKeySecret"
@@ -95,7 +96,10 @@ def _guard(func):
         try:
             with self._api_lock:
                 result = func(self, *args, **kwargs)
-            if isinstance(result, dict) and "ok" in result:
+            # 已经是 {ok, data|error} 形式的结果原样返回；但预检计划这类业务数据本身带一个
+            # ok 字段（有阻断项时为 False，且没有 error），必须作为数据交给前端，否则前端会把
+            # 它当成调用失败，只显示「未知错误」，看不到阻断原因。
+            if isinstance(result, dict) and "ok" in result and (result["ok"] or "error" in result):
                 return result
             return {"ok": True, "data": result}
         except Exception as exc:  # noqa: BLE001 — 桥不能抛，统一转错误
@@ -2095,18 +2099,43 @@ class Api:
 
     @_guard
     def install_ocr_component(self):
-        from .services.updater import install_ocr_component, load_manifest
-        manifest = load_manifest()
+        from .services.updater import install_ocr_component
+        manifest = self._load_update_manifest()
         result = install_ocr_component(
             manifest, self.data_root.components_dir, self.data_root.updates_dir
         )
         return result.to_dict()
 
     # ------------------------------------------------------------ 联网更新（腾讯云 COS）
+    def _update_channel(self) -> str:
+        from .services.updater import CHANNEL_BETA, CHANNEL_STABLE
+        return CHANNEL_BETA if self._preference_value(UPDATE_CHANNEL_PREF_KEY, CHANNEL_STABLE) == CHANNEL_BETA else CHANNEL_STABLE
+
+    def _load_update_manifest(self):
+        from .services.updater import load_update_manifest
+        return load_update_manifest(self._update_channel())
+
+    @_guard
+    def update_channel(self):
+        return {"channel": self._update_channel()}
+
+    @_guard
+    def set_update_channel(self, channel):
+        """选择更新通道：stable 只收正式版，beta 同时收测试版（预发布）。"""
+        from .services.updater import CHANNEL_BETA, CHANNEL_STABLE
+        value = CHANNEL_BETA if str(channel) == CHANNEL_BETA else CHANNEL_STABLE
+        self._set_preference_value(UPDATE_CHANNEL_PREF_KEY, value)
+        # 换通道后，之前的检查结果不再适用，下次立即重新检查。
+        self._set_preference_value(UPDATE_LAST_CHECK_KEY, "0")
+        self._set_preference_value(UPDATE_LAST_RESULT_KEY, "")
+        return {"channel": value}
+
     @_guard
     def check_updates(self):
         from .services.updater import check_updates
-        status = check_updates(self.data_root.components_dir, updates_dir=self.data_root.updates_dir)
+        status = check_updates(
+            self.data_root.components_dir, updates_dir=self.data_root.updates_dir, channel=self._update_channel(),
+        )
         return self._record_update_check(status)
 
     @_guard
@@ -2115,7 +2144,7 @@ class Api:
 
     @_guard
     def start_core_update_download(self):
-        from .services.updater import COMPONENT_CORE, get_platform_asset, load_manifest
+        from .services.updater import COMPONENT_CORE, get_platform_asset
 
         # 自动检查已经把完整资源信息写入缓存。优先复用它，点击下载后便可
         # 立即启动后台任务，不再先同步请求一次 manifest。
@@ -2127,7 +2156,7 @@ class Api:
             and (item.get("asset") or {}).get("auto_update")
         ), None)
         if not asset:
-            asset = get_platform_asset(load_manifest(), COMPONENT_CORE)
+            asset = get_platform_asset(self._load_update_manifest(), COMPONENT_CORE)
         return self._core_updater.start(asset)
 
     @_guard
@@ -2173,6 +2202,7 @@ class Api:
             status = check_updates(
                 self.data_root.components_dir,
                 updates_dir=self.data_root.updates_dir,
+                channel=self._update_channel(),
             )
         except Exception as exc:
             # 启动检查失败时仍恢复上次发现的更新入口，并尽快重试；自动检查
@@ -2233,8 +2263,8 @@ class Api:
 
     @_guard
     def download_core_update(self):
-        from .services.updater import COMPONENT_CORE, download_update, launch_core_update_package, load_manifest
-        manifest = load_manifest()
+        from .services.updater import COMPONENT_CORE, download_update, launch_core_update_package
+        manifest = self._load_update_manifest()
         result = download_update(manifest, COMPONENT_CORE, self.data_root.updates_dir)
         launch_core_update_package(result.file_path)
         data = result.to_dict()
@@ -2249,8 +2279,8 @@ class Api:
 
     @_guard
     def install_print_component(self):
-        from .services.updater import install_print_component, load_manifest
-        manifest = load_manifest()
+        from .services.updater import install_print_component
+        manifest = self._load_update_manifest()
         result = install_print_component(
             manifest, self.data_root.components_dir, self.data_root.updates_dir
         )

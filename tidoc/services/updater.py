@@ -29,6 +29,10 @@ from typing import Any
 from tidoc import __version__ as CORE_VERSION
 
 MANIFEST_URL = "https://img.bitfsae.com/tidoc/manifest.json"
+# 测试版（预发布）单独发布清单；稳定版用户永远只读上面的 manifest.json。
+BETA_MANIFEST_URL = "https://img.bitfsae.com/tidoc/manifest-beta.json"
+CHANNEL_STABLE = "stable"
+CHANNEL_BETA = "beta"
 USER_AGENT = f"tidoc/{CORE_VERSION}"
 COMPONENT_PRINT = "print"
 COMPONENT_OCR = "ocr"
@@ -207,8 +211,8 @@ def current_platform() -> str:
 
 
 def parse_version(version: str) -> tuple[int, ...]:
-    """解析简单 semver；非数字后缀会被忽略，够发布链路使用。"""
-    cleaned = version.strip().lstrip("v")
+    """解析简单 semver 的数字部分；预发布后缀（-beta.1）和构建信息被忽略。"""
+    cleaned = version.strip().lstrip("v").split("+", 1)[0].split("-", 1)[0]
     nums = []
     for part in cleaned.split("."):
         digits = []
@@ -221,11 +225,28 @@ def parse_version(version: str) -> tuple[int, ...]:
     return tuple(nums or [0])
 
 
+def is_prerelease(version: str) -> bool:
+    """0.1.39-beta.1 这类带预发布后缀的版本是测试版。"""
+    return "-" in str(version).strip().lstrip("v").split("+", 1)[0]
+
+
+def version_key(version: str) -> tuple:
+    """按 semver 优先级排序：0.1.39-beta.1 < 0.1.39-beta.2 < 0.1.39 < 0.1.40-beta.1。"""
+    core = parse_version(version)
+    while len(core) > 1 and core[-1] == 0:
+        core = core[:-1]
+    text = str(version).strip().lstrip("v").split("+", 1)[0]
+    if "-" not in text:
+        return (core, 1, ())
+    identifiers = []
+    for part in text.split("-", 1)[1].split("."):
+        # 数字标识符按数值比较，并且小于字母标识符。
+        identifiers.append((0, int(part), "") if part.isdigit() else (1, 0, part))
+    return (core, 0, tuple(identifiers))
+
+
 def version_gt(left: str, right: str) -> bool:
-    a = parse_version(left)
-    b = parse_version(right)
-    width = max(len(a), len(b))
-    return a + (0,) * (width - len(a)) > b + (0,) * (width - len(b))
+    return version_key(left) > version_key(right)
 
 
 def sha256_file(path: str | Path) -> str:
@@ -247,6 +268,38 @@ def load_manifest(url: str = MANIFEST_URL, timeout: int = 12) -> dict[str, Any]:
         return json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise RuntimeError("更新清单不是有效 JSON。") from exc
+
+
+def load_update_manifest(channel: str = CHANNEL_STABLE, timeout: int = 12) -> dict[str, Any]:
+    """读取更新清单。测试版通道同时读稳定版和测试版清单，每个组件取其中较新的一份。
+
+    这样稳定版发布后，测试版用户会自然收到更高的正式版；测试版清单不存在或暂时读不到时，
+    退回稳定版清单，不影响更新。"""
+    if channel != CHANNEL_BETA:
+        return load_manifest(MANIFEST_URL, timeout)
+    stable: dict[str, Any] | None
+    stable_error: RuntimeError | None = None
+    try:
+        stable = load_manifest(MANIFEST_URL, timeout)
+    except RuntimeError as exc:
+        stable, stable_error = None, exc
+    try:
+        beta: dict[str, Any] | None = load_manifest(BETA_MANIFEST_URL, timeout)
+    except RuntimeError:
+        beta = None
+    if beta is None and stable is None:
+        raise stable_error or RuntimeError("无法读取更新清单。")
+    if beta is None or stable is None:
+        return stable or beta  # type: ignore[return-value]
+    merged = dict(stable)
+    components = dict(stable.get("components") or {})
+    for name, candidate in (beta.get("components") or {}).items():
+        current = components.get(name)
+        if not isinstance(current, dict) or version_gt(str(candidate.get("latest") or ""), str(current.get("latest") or "")):
+            components[name] = candidate
+    merged["components"] = components
+    merged["channel"] = CHANNEL_BETA
+    return merged
 
 
 def get_component(manifest: dict[str, Any], name: str) -> dict[str, Any]:
@@ -370,13 +423,17 @@ def downloaded_core_update_info(updates_dir: str | Path, plat: str | None = None
 
 def check_updates(
     components_dir: str | Path,
-    manifest_url: str = MANIFEST_URL,
+    manifest_url: str | None = None,
     plat: str | None = None,
     updates_dir: str | Path | None = None,
+    channel: str = CHANNEL_STABLE,
 ) -> dict[str, Any]:
     plat = plat or current_platform()
-    manifest = load_manifest(manifest_url)
+    # 明确给出清单地址（测试、自定义源）时只读该清单；否则按通道读取。
+    manifest = load_manifest(manifest_url) if manifest_url else load_update_manifest(channel)
+    manifest_url = manifest_url or (BETA_MANIFEST_URL if channel == CHANNEL_BETA else MANIFEST_URL)
     result: dict[str, Any] = {
+        "channel": channel,
         "manifest_url": manifest_url,
         "platform": plat,
         "current_core_version": CORE_VERSION,

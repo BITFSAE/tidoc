@@ -281,7 +281,7 @@ class ExportPlanner:
                 if not any(r['entry_id']==entry['id'] and r['role_id']=='invoice' and Path(r['path']).suffix.lower()=='.pdf' for r in resources):
                     add('MISSING_INVOICE_PDF','打印票面需要发票 PDF；XML 不能替代票面。',entry_id=entry['id'],target='invoice')
         if output['payee_mode']!='none' and context['payee'] is None:
-            add('MISSING_PAYEE','请选择一个完整收款对象；分别收款请补齐报账人映射。',target='payee')
+            add('MISSING_PAYEE','请为每位报账人指定完整的收款对象。' if output['payee_mode']=='by_claimant' else '请选择一个完整的收款对象（在「管理收款信息」里填写）。',target='payee')
         payee=context.get('payee')
         if payee and output['payee_mode']!='none':
             required=['name'] if payee.get('account_type')=='none' else ['name','bank_name','account_number']

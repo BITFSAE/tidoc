@@ -2,7 +2,7 @@
   "format": "tidoc-team-adapter",
   "schema_version": "1.0",
   "package_id": "org.bitfsae.reimbursement",
-  "package_version": "1.0.0",
+  "package_version": "1.0.1",
   "name": "BITFSAE 车队报账",
   "description": "BITFSAE 车队报账的材料与输出规则。",
   "author": "BITFSAE",

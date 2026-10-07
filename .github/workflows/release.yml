@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version without leading v, for manual release"
+        description: "Version without leading v, for manual release. A pre-release such as 0.1.39-beta.1 is published to the beta channel only"
         required: true
         type: string
 
@@ -88,7 +88,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
           $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
-          & $iscc "/DMyAppVersion=$env:VERSION" "/DSourceDir=$PWD\dist\tidoc" "/DOutputDir=$PWD\release" "packaging\windows\tidoc.iss"
+          # Windows file version info must be numeric: 0.1.39-beta.1 -> 0.1.39
+          $numeric = ($env:VERSION -split '-')[0]
+          & $iscc "/DMyAppVersion=$env:VERSION" "/DMyAppNumericVersion=$numeric" "/DSourceDir=$PWD\dist\tidoc" "/DOutputDir=$PWD\release" "packaging\windows\tidoc.iss"
           Compress-Archive -Path "dist\tidoc" -DestinationPath "release\tidoc-core-windows-v$env:VERSION-update.zip" -CompressionLevel Optimal
 
       - name: Install print dependencies
@@ -294,7 +296,16 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Normalize version
-        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+        run: |
+          echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+          # 0.1.39-beta.1 is a pre-release: beta channel manifest, GitHub pre-release, never "latest".
+          if [[ "${VERSION#v}" == *-* ]]; then
+            echo "PRERELEASE=true" >> "$GITHUB_ENV"
+            echo "MANIFEST_NAME=manifest-beta.json" >> "$GITHUB_ENV"
+          else
+            echo "PRERELEASE=false" >> "$GITHUB_ENV"
+            echo "MANIFEST_NAME=manifest.json" >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/download-artifact@v4
         with:
@@ -319,6 +330,7 @@ jobs:
           --release-dir release
           --version "$VERSION"
           --base-url "https://img.bitfsae.com/tidoc"
+          --out "$MANIFEST_NAME"
           --notes-file release/release_notes.json
 
       - name: Install Tencent COSCLI
@@ -362,7 +374,7 @@ jobs:
       - name: Upload manifest last
         run: |
           set -euo pipefail
-          ./coscli cp release/manifest.json "cos://${COS_BUCKET_ALIAS}/tidoc/manifest.json"
+          ./coscli cp "release/${MANIFEST_NAME}" "cos://${COS_BUCKET_ALIAS}/tidoc/${MANIFEST_NAME}"
 
       - name: Publish GitHub Release
         env:
@@ -376,7 +388,7 @@ jobs:
             "release/tidoc-core-macos-v${VERSION}-update.zip"
             "release/tidoc-core-windows-v${VERSION}.exe"
             "release/tidoc-core-windows-v${VERSION}-update.zip"
-            "release/manifest.json"
+            "release/${MANIFEST_NAME}"
           )
           for component_asset in \
             release/tidoc-print-macos-v*.zip \
@@ -385,16 +397,20 @@ jobs:
             release/tidoc-ocr-windows-v*.exe; do
             [ -e "$component_asset" ] && assets+=("$component_asset")
           done
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease --latest=false)
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" --title "Tidoc ${VERSION}" --notes-file "$notes"
+            gh release edit "$tag" --title "Tidoc ${VERSION}" --notes-file "$notes" "${flags[@]}"
             gh release upload "$tag" "${assets[@]}" --clobber
           else
-            gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" --title "Tidoc ${VERSION}" --notes-file "$notes"
+            gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" --title "Tidoc ${VERSION}" --notes-file "$notes" "${flags[@]}"
           fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: tidoc-manifest
           path: |
-            release/manifest.json
+            release/manifest*.json
             release/upload_plan.tsv

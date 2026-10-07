@@ -258,6 +258,32 @@ def sha256_file(path: str | Path) -> str:
     return h.hexdigest()
 
 
+_DIGEST_CACHE: dict[str, tuple[tuple[int, int, int], str]] = {}
+_DIGEST_CACHE_LOCK = threading.Lock()
+
+
+def cached_sha256_file(path: str | Path) -> str:
+    """SHA-256 of an installed executable, reused while its size and mtime are unchanged.
+
+    Component status is read whenever settings or export dialogs open; rehashing
+    tens of megabytes each time made those dialogs wait on disk reads.
+    """
+    path = Path(path)
+    stat = path.stat()
+    identity = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+    key = str(path)
+    with _DIGEST_CACHE_LOCK:
+        cached = _DIGEST_CACHE.get(key)
+    if cached and cached[0] == identity:
+        return cached[1]
+    digest = sha256_file(path)
+    with _DIGEST_CACHE_LOCK:
+        if len(_DIGEST_CACHE) >= 16:
+            _DIGEST_CACHE.clear()
+        _DIGEST_CACHE[key] = (identity, digest)
+    return digest
+
+
 def load_manifest(url: str = MANIFEST_URL, timeout: int = 12) -> dict[str, Any]:
     try:
         raw = _read_url(url, timeout)
@@ -385,7 +411,7 @@ def installed_component_info(
     expected_installed_hash = (data.get("installed_sha256") or "").lower()
     if expected_installed_hash:
         try:
-            actual_installed_hash = sha256_file(executable).lower()
+            actual_installed_hash = cached_sha256_file(executable).lower()
         except OSError:
             actual_installed_hash = ""
         if actual_installed_hash != expected_installed_hash:

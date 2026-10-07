@@ -504,7 +504,6 @@ body {
   padding: 14px 24px;
   background: linear-gradient(180deg, var(--panel), var(--panel-glass));
   border-bottom: 1px solid var(--line);
-  backdrop-filter: saturate(140%);
   position: relative;
 }
 .topbar::after {
@@ -809,7 +808,7 @@ body {
   align-content: start; gap: 10px; padding: 8px 8px 8px 0;
 }
 .entry-list[data-density="compact"] { gap: 6px; }
-.entry-list[data-density="compact"] .entry-card { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 8px 12px; }
+.entry-list[data-density="compact"] .entry-card { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 8px 12px; contain-intrinsic-size: auto 68px; }
 .entry-list[data-density="compact"] .entry-item-title { font-size: 13px; max-width: 42ch; }
 .entry-list[data-density="compact"] .entry-line2 { margin-top: 2px; gap: 9px; }
 .entry-list[data-density="compact"] .entry-line3 { display: none; }
@@ -832,7 +831,9 @@ body {
   background: var(--tc-card, var(--panel));
   border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px 16px; cursor: pointer;
-  contain: layout style;
+  /* 长列表只排版和绘制视口附近的卡片；auto 会记住已渲染过的真实高度。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 136px;
   min-width: 0;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1124,7 +1125,6 @@ input[type="date"] { color: var(--ink-soft); }
   display: flex; flex-direction: column; box-shadow: var(--shadow-lg);
 }
 .modal:focus { outline: none; }
-.modal-mask.no-anim, .modal-mask.no-anim .modal { animation: none; }
 .confirm-message { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--ink-soft); white-space: pre-line; }
 .modal.wide { width: min(880px, 95vw); }
 .modal.compact { width: min(460px, calc(100vw - 32px)); }
@@ -1143,7 +1143,6 @@ input[type="date"] { color: var(--ink-soft); }
 .modal-title-copy { min-width: 0; display: flex; flex-direction: column; }
 .title-chip.lg { font-size: 12px; padding: 3px 11px; }
 
-@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop { from { opacity: 0; transform: scale(.97) translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ---------------------------------------------------------------- form / detail */

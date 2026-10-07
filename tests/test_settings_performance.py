@@ -42,3 +42,70 @@ def test_maintenance_scan_does_not_hold_api_lock(api, monkeypatch):
         finally:
             release.set()
         assert scan_result.result(timeout=2)['data']['exports_size'] == 123
+
+
+def test_print_component_status_does_not_hold_api_lock(api, monkeypatch):
+    import tidoc.services.printing as printing
+    started, release = Event(), Event()
+    def probe(components_dir=None):
+        started.set()
+        assert release.wait(5)
+        return {'available': False}
+    monkeypatch.setattr(printing, 'component_status', probe)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        status = pool.submit(api.print_component_status)
+        try:
+            assert started.wait(2)
+            assert pool.submit(api.app_info).result(timeout=2)['ok']
+        finally:
+            release.set()
+        assert status.result(timeout=2) == {'ok': True, 'data': {'available': False}}
+
+
+def test_component_hash_is_reused_until_the_file_changes(tmp_path, monkeypatch):
+    import os
+    from tidoc.services import updater
+    exe = tmp_path / 'tidoc_print'
+    exe.write_bytes(b'first')
+    calls = []
+    real = updater.sha256_file
+    monkeypatch.setattr(updater, 'sha256_file', lambda path: calls.append(path) or real(path))
+    first = updater.cached_sha256_file(exe)
+    assert updater.cached_sha256_file(exe) == first and len(calls) == 1
+    exe.write_bytes(b'second')
+    os.utime(exe, ns=(exe.stat().st_atime_ns, exe.stat().st_mtime_ns + 1_000_000))
+    assert updater.cached_sha256_file(exe) != first and len(calls) == 2
+
+
+def test_print_capabilities_persist_across_launches_but_timeouts_do_not(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from tidoc.services import printing
+    exe = tmp_path / 'tidoc_print'
+    exe.write_bytes(b'component')
+    cache = tmp_path / 'capabilities-cache.json'
+    runs = []
+    def fake_run(cmd, **kwargs):
+        runs.append(cmd)
+        if len(runs) == 1:
+            raise subprocess.TimeoutExpired(cmd, 10)
+        if len(runs) == 2:
+            return SimpleNamespace(returncode=0, stdout='{"renderers": ["docx"]}', stderr='')
+        return SimpleNamespace(returncode=2, stdout='', stderr='unrecognized arguments: --capabilities')
+    monkeypatch.setattr(printing.subprocess, 'run', fake_run)
+    printing._CAPABILITIES_CACHE.clear()
+    assert printing._query_capabilities(exe, cache) == {}
+    assert not cache.exists()  # A timeout may be transient; the next launch probes again.
+    printing._CAPABILITIES_CACHE.clear()
+    assert printing._query_capabilities(exe, cache) == {'renderers': ['docx']}
+    printing._CAPABILITIES_CACHE.clear()  # Simulate a new launch.
+    assert printing._query_capabilities(exe, cache) == {'renderers': ['docx']}
+    assert len(runs) == 2
+    # A replaced executable is probed again; an old component that rejects the
+    # option gives a definite answer, which is remembered as well.
+    exe.write_bytes(b'older component')
+    printing._CAPABILITIES_CACHE.clear()
+    assert printing._query_capabilities(exe, cache) == {}
+    printing._CAPABILITIES_CACHE.clear()
+    assert printing._query_capabilities(exe, cache) == {}
+    assert len(runs) == 3

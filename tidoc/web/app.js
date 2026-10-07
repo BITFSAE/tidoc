@@ -43,7 +43,6 @@ const State = {
 const entryCardNodes = new Map();
 const entryCardOrder = [];
 const entryCardPositions = new Map();
-const entryDataPositions = new Map();
 const entrySelectionGroups = new Map();
 let focusedEntryCard = null;
 
@@ -458,7 +457,11 @@ function setupFastTooltips() {
   const hover = (target) => {
     if (!target || performance.now() < hoverBlockedUntil) { hide(); return; }
     if (target === active || target === pendingTarget) return;
-    if (active) { show(target); return; }
+    // 整张卡片的抬头提示只在明确停留后出现，扫读列表时不跟着鼠标逐张弹出；
+    // 按钮、徽标等小目标之间切换仍即时响应。
+    const isCard = target.classList.contains('entry-card');
+    if (active && !isCard) { show(target); return; }
+    if (active) hide();
     cancelPending();
     pendingTarget = target;
     // 停留后再读取尺寸；快速扫过卡片或滚动时不测量提示。
@@ -466,7 +469,7 @@ function setupFastTooltips() {
       showTimer = null;
       pendingTarget = null;
       if (target.isConnected && performance.now() >= hoverBlockedUntil) show(target);
-    }, 160);
+    }, isCard ? 600 : 160);
   };
   document.addEventListener('pointerover', (ev) => {
     if (ev.pointerType === 'touch') return;
@@ -1047,8 +1050,6 @@ function renderEntries() {
   entryCardNodes.clear();
   entryCardOrder.length = 0;
   entryCardPositions.clear();
-  entryDataPositions.clear();
-  State.entries.forEach((entry, index) => entryDataPositions.set(entry.id, index));
   entrySelectionGroups.clear();
   focusedEntryCard = null;
   const fragment = document.createDocumentFragment();
@@ -1280,7 +1281,7 @@ function entryCard(e) {
 
   // 校验状态：仅在 warning/blocked 时突出显示（pass 不占视觉）
   const checkBadge = (e.check_status && e.check_status !== 'pass')
-    ? `<span class="badge ${e.check_status}" title="${esc(e.check_message || '')}">${CHECK_LABEL[e.check_status] || ''}</span>` : '';
+    ? `<span class="badge ${e.check_status}"${e.check_message ? ` data-tooltip="${esc(e.check_message)}"` : ''}>${CHECK_LABEL[e.check_status] || ''}</span>` : '';
 
   const fields = e.fields || {};
   const notesCur = fields.notes ? fields.notes.current : '';
@@ -1290,29 +1291,29 @@ function entryCard(e) {
   const modified = paidDiff
     ? `<span class="badge modified" data-tooltip="${esc(entryModifiedTooltip(e))}">${iconPencil(11)}已修改</span>` : '';
   const ocrBadge = e.ocr_pending
-    ? `<button class="badge ocr badge-action" data-card-ocr="1" title="阿里云识别存在待确认差异，点击查看">OCR</button>` : '';
+    ? `<button class="badge ocr badge-action" data-card-ocr="1" data-tooltip="阿里云识别存在待确认差异，点击查看">OCR</button>` : '';
   const recognizedBadge = (e.ocr_recognized && !e.ocr_pending)
-    ? `<button class="badge ocr badge-action" data-card-ocr="1" title="已用阿里云识别，点击查看">已识别</button>` : '';
+    ? `<button class="badge ocr badge-action" data-card-ocr="1" data-tooltip="已用阿里云识别，点击查看">已识别</button>` : '';
   // 已按报账人筛选、或只有一个报账人时，每张卡片都带同一个名字是重复信息，不再显示。
   const owner = (State.profiles.length > 1 && !$('#filterProfile')?.value) ? State.profileById[e.profile_id] : null;
   const ownerBadge = owner
-    ? `<button class="badge person badge-action" data-card-owner="${esc(e.profile_id)}"${owner.reviewer ? ` title="审核人：${esc(owner.reviewer)} · 点击编辑"` : ' title="点击编辑报账人"'}>${esc(owner.name)}</button>` : '';
+    ? `<button class="badge person badge-action" data-card-owner="${esc(e.profile_id)}"${owner.reviewer ? ` data-tooltip="审核人：${esc(owner.reviewer)} · 点击编辑"` : ' data-tooltip="点击编辑报账人"'}>${esc(owner.name)}</button>` : '';
   // 正在查看某个批次时，卡片上不再重复显示这个批次；仍属于其他批次的才显示。
   const focusedBatchId = actualBatchId();
   const otherBatches = (e.batches || []).filter((batch) => batch.id !== focusedBatchId);
   const batchBadges = (e.batches || []).length
     ? otherBatches.map((batch) =>
       `<button class="badge batch badge-action${batch.archived ? ' archived' : ''}" data-card-batch="${esc(batch.id)}" ` +
-      `title="${batch.archived ? '已归档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</button>`
+      `data-tooltip="${batch.archived ? '已归档批次' : '报账批次'}：${esc(batch.name)}">${esc(batch.name)}</button>`
     ).join('')
-    : '<button class="badge batch empty badge-action" data-card-batch="" title="点击设置报账批次">批次</button>';
+    : '<button class="badge batch empty badge-action" data-card-batch="" data-tooltip="点击设置报账批次">批次</button>';
 
   const itemTitle = actualCur || (e.items && e.items[0] && (e.items[0].actual_name || e.items[0].name)) || '未填物资名称';
   const notesPreview = notesCur
     ? `<span class="notes-preview important" data-tooltip-overflow="${esc(notesCur)}">${iconNote(12)}${esc(notesCur)}</span>`
     : '';
   const actionBtn = (action, label, on, title) => (
-    `<button class="${on ? 'done' : ''}" data-card-action="${action}" title="${esc(title)}">` +
+    `<button class="${on ? 'done' : ''}" data-card-action="${action}" data-tooltip="${esc(title)}">` +
     `<span class="action-state"></span>${label}</button>`
   );
 
@@ -1730,12 +1731,13 @@ function selectEntryFromCard(id, range) {
   const changedIds = [];
   let selectedRange = false;
   if (range && State.lastSelectedId) {
-    const start = entryDataPositions.get(State.lastSelectedId);
-    const end = entryDataPositions.get(id);
+    // 范围按屏幕上的卡片顺序计算；分组浏览时与数据顺序不同。
+    const start = entryCardPositions.get(State.lastSelectedId);
+    const end = entryCardPositions.get(id);
     if (start !== undefined && end !== undefined) {
       const [from, to] = start < end ? [start, end] : [end, start];
       for (let index = from; index <= to; index++) {
-        const entryId = State.entries[index].id;
+        const entryId = entryCardOrder[index].dataset.entryId;
         if (State.selected.has(entryId)) continue;
         State.selected.add(entryId);
         changedIds.push(entryId);
@@ -2914,7 +2916,7 @@ function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose
     $('.modal', existing)?.focus({ preventScroll: true });
     return existing._api;
   }
-  const mask = el('div', 'modal-mask' + (replace ? ' no-anim' : ''));
+  const mask = el('div', 'modal-mask');
   const box = el('div', 'modal' + (wide ? ' wide' : compact ? ' compact' : ''));
   const titleId = 'modal-title-' + (++modalSequence);
   box.setAttribute('role', 'dialog');
@@ -3387,7 +3389,11 @@ async function buildSettings(options = {}) {
     </div>`;
 
   // 偏好回填
-  body.querySelector('#setDefaultTitle').value = localStorage.getItem('tidoc.defaultTitle') || '';
+  const selectDefaultTitle = (select, value) => {
+    // 保存的抬头已不在方案里时显示「全部」，不留空白选择。
+    select.value = [...select.options].some((option) => option.value === value) ? value : '';
+  };
+  selectDefaultTitle(body.querySelector('#setDefaultTitle'), localStorage.getItem('tidoc.defaultTitle') || '');
   body.querySelector('#setDefaultDensity').value = localStorage.getItem('tidoc.defaultDensity') || 'comfortable';
   body.querySelector('#setDefaultTitle').onchange = (ev) => {
     localStorage.setItem('tidoc.defaultTitle', ev.target.value);
@@ -3664,7 +3670,7 @@ async function buildSettings(options = {}) {
   };
 
   const previous = options.replace || null;
-  if (previous && !previous.mask.isConnected) return;   // 刷新期间用户已经关掉了设置页
+  if (previous && !previous.mask.isConnected) return;   // 加载期间用户已经关掉了占位窗口
   const m = modal({
     title: '设置',
     body,
@@ -3680,7 +3686,7 @@ async function buildSettings(options = {}) {
       const title = body.querySelector('#setDefaultTitle'), value = title.value;
       title.innerHTML = '<option value="">全部</option>' + (State.titleOptions.length ? State.titleOptions : configuredTitleNames())
         .map((name) => `<option value="${esc(name)}">${esc(TITLE_SHORT[name] || name)}</option>`).join('');
-      title.value = value;
+      selectDefaultTitle(title, value);
     }
     if (closed.dataset.modalKey === 'profiles') {
       const profile = State.profiles.find((item) => item.is_default);
@@ -3707,7 +3713,7 @@ async function buildSettings(options = {}) {
       const result = await Api.storageMaintenanceStatus();
       if (!m.mask.isConnected) return;
       maintenance = result;
-      body.querySelector('#setOpenExports').textContent = `打开导出目录 · ${fmtBytes(result.exports_size || 0)}`;
+      body.querySelector('#setOpenExports').textContent = '打开导出目录' + (result.exports_size ? ` · ${fmtBytes(result.exports_size)}` : '');
       const cleanup = body.querySelector('#setCleanup');
       cleanup.disabled = !result.files;
       cleanup.textContent = '清理临时文件' + (result.size ? ` · ${fmtBytes(result.size)}` : '');
@@ -3717,17 +3723,8 @@ async function buildSettings(options = {}) {
       if (m.mask.isConnected) body.querySelector('#setCleanup').textContent = '临时文件统计失败';
     }
   }, 40);
-  if (previous) {
-    // 刷新时保留滚动位置、已展开的折叠区和尚未保存的密钥输入。
-    const opened = [...previous.body.querySelectorAll('details')];
-    body.querySelectorAll('details').forEach((node, index) => { node.open = !!opened[index]?.open; });
-    for (const id of ['#setOcrKeyId', '#setOcrKeySecret']) {
-      const from = previous.body.querySelector(id), to = body.querySelector(id);
-      if (from && to) to.value = from.value;
-    }
-    m.body.scrollTop = previous.body.scrollTop;
-    previous.close();
-  }
+  // previous 是 openOnce 的加载占位窗口，设置窗口已插在它上面。
+  previous?.close();
 }
 
 // 更新对话框里的可选组件：安装/修复走同一套流程，只差名称与安装入口

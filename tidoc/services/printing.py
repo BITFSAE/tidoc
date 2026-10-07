@@ -5,15 +5,18 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict, is_dataclass
 from decimal import Decimal
 from pathlib import Path
 
 from .proc import hidden_window_options
-from .updater import COMPONENT_PRINT, installed_component_info
+from .updater import COMPONENT_PRINT, _component_root, installed_component_info
 
 _CAPABILITIES_CACHE = {}
+_CAPABILITIES_LOCK = threading.Lock()
+CAPABILITIES_CACHE_NAME = 'capabilities-cache.json'
 
 
 def _command(executable=None):
@@ -26,21 +29,62 @@ def _command(executable=None):
     return [sys.executable,'-m','tidoc_print']
 
 
-def _query_capabilities(executable):
-    from .exports import resource_digest
-    path=Path(executable)
-    identity=resource_digest(path) if path.is_file() else str(path.stat().st_mtime_ns)
-    key=(str(path),identity)
-    if key in _CAPABILITIES_CACHE:
-        return _CAPABILITIES_CACHE[key]
+def _executable_identity(path):
+    from .updater import cached_sha256_file
+    return cached_sha256_file(path) if path.is_file() else str(path.stat().st_mtime_ns)
+
+
+def _read_capabilities_cache(cache_file,executable,identity):
     try:
-        proc=subprocess.run(_command(executable)+['--capabilities'],text=True,capture_output=True,timeout=10,check=False,**hidden_window_options())
-        value=json.loads(proc.stdout) if proc.returncode==0 else {}
-        if not isinstance(value,dict): value={}
-    except (OSError,ValueError,subprocess.TimeoutExpired):
-        value={}
-    _CAPABILITIES_CACHE.clear();_CAPABILITIES_CACHE[key]=value
-    return value
+        data=json.loads(Path(cache_file).read_text('utf-8'))
+    except (OSError,ValueError):
+        return None
+    if not isinstance(data,dict) or data.get('executable')!=str(executable) or data.get('identity')!=identity:
+        return None
+    value=data.get('capabilities')
+    return value if isinstance(value,dict) else None
+
+
+def _write_capabilities_cache(cache_file,executable,identity,value):
+    target=Path(cache_file)
+    try:
+        target.parent.mkdir(parents=True,exist_ok=True)
+        temp=target.with_name(target.name+'.tmp')
+        temp.write_text(json.dumps({'executable':str(executable),'identity':identity,'capabilities':value},ensure_ascii=False),'utf-8')
+        os.replace(temp,target)
+    except OSError:
+        pass
+
+
+def _query_capabilities(executable,cache_file=None):
+    """Ask the installed component what it can render.
+
+    Starting a packaged component takes seconds, so a successful answer is kept on
+    disk next to the install marker and reused until the executable changes.
+    """
+    path=Path(executable)
+    with _CAPABILITIES_LOCK:
+        identity=_executable_identity(path)
+        key=(str(path),identity)
+        if key in _CAPABILITIES_CACHE:
+            return _CAPABILITIES_CACHE[key]
+        value=_read_capabilities_cache(cache_file,path,identity) if cache_file else None
+        if value is None:
+            # 组件明确作答（包括旧版组件不认识 --capabilities 而报错退出）才写入磁盘；
+            # 超时或无法启动可能是偶发的（如杀毒软件首次扫描），只留在内存里，下次启动重新探测。
+            persist=False
+            try:
+                proc=subprocess.run(_command(executable)+['--capabilities'],text=True,capture_output=True,timeout=10,check=False,**hidden_window_options())
+                persist=True
+                value=json.loads(proc.stdout) if proc.returncode==0 else {}
+                if not isinstance(value,dict): value={}
+            except ValueError:
+                value={}
+            except (OSError,subprocess.TimeoutExpired):
+                value={};persist=False
+            if persist and cache_file: _write_capabilities_cache(cache_file,path,identity,value)
+        _CAPABILITIES_CACHE.clear();_CAPABILITIES_CACHE[key]=value
+        return value
 
 
 def component_status(components_dir=None):
@@ -59,7 +103,7 @@ def component_status(components_dir=None):
             pass
     installed=installed_component_info(components_dir,COMPONENT_PRINT) if components_dir else {}
     if installed.get('valid'):
-        info=_query_capabilities(installed['executable'])
+        info=_query_capabilities(installed['executable'],_component_root(components_dir,COMPONENT_PRINT)/CAPABILITIES_CACHE_NAME)
         return {'available':True,'mode':'external','path':installed['executable'],'version':installed.get('version',''),'missing':[],**info,'ipc_versions':info.get('ipc_versions',[1]),'renderers':info.get('renderers',[]),'needs_update':2 not in info.get('ipc_versions',[])}
     return {'available':False,'mode':'repair' if installed.get('needs_repair') else ('python' if tidoc_print else 'missing'),'missing':source_info.get('missing',[]) if source_info is not None else (tidoc_print.missing_dependencies() if tidoc_print else ['打印导出组件']),'needs_repair':bool(installed.get('needs_repair')),'error':('打印导出组件缺少所需资源，请修复组件。' if source_info is not None else installed.get('issue') or '打印导出组件未安装'),'ipc_versions':[],'renderers':[]}
 

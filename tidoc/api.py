@@ -549,9 +549,7 @@ class Api:
     @_guard
     def settings_data(self):
         """Read local settings in one bridge call, without scanning directories."""
-        from .db.paths import default_data_root
-        paths = self._paths_dict()
-        paths["is_default"] = self.data_root.root == default_data_root()
+        paths = self._data_root_info()
         defaults = {
             "tidoc.multiClaimantMode": "",
             AUTO_UPDATE_PREF_KEY: "1",
@@ -1936,10 +1934,15 @@ class Api:
         return result
 
     # ------------------------------------------------------------ 打印导出组件（可选）
-    @_guard
     def print_component_status(self):
+        """Probe the component without holding the API lock; the first probe can take seconds."""
         from .services.printing import component_status
-        return component_status(self.data_root.components_dir)
+        try:
+            with self._api_lock:
+                components_dir = self.data_root.components_dir
+            return {"ok": True, "data": component_status(components_dir)}
+        except Exception as exc:  # noqa: BLE001 — 桥不能抛，统一转错误
+            return {"ok": False, "error": str(exc)}
 
     @_guard
     def delete_export_job(self,job_id,delete_files=False):
@@ -2384,10 +2387,13 @@ class Api:
 
     @_guard
     def data_root_path(self):
+        return self._data_root_info()
+
+    def _data_root_info(self) -> dict:
         from .db.paths import default_data_root
-        d = self._paths_dict()
-        d["is_default"] = str(self.data_root.root) == str(default_data_root())
-        return d
+        info = self._paths_dict()
+        info["is_default"] = self.data_root.root == Path(default_data_root())
+        return info
 
     @_guard
     def choose_and_migrate_data_root(self):

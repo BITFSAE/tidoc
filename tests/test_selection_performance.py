@@ -45,8 +45,10 @@ vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), sandbox);
 vm.runInContext(`
   State.entries = Array.from({length: 2000}, (_, index) => ({id: 'entry-' + index}));
   State.entries.forEach((entry, index) => {
-    entryCardNodes.set(entry.id, makeNode(entry.id));
-    entryDataPositions.set(entry.id, index);
+    const card = makeNode(entry.id);
+    entryCardNodes.set(entry.id, card);
+    entryCardPositions.set(entry.id, index);
+    entryCardOrder.push(card);
   });
 `, sandbox);
 vm.runInContext(process.argv[2], sandbox);
@@ -106,4 +108,20 @@ assert.equal(group.selectedCount, 3);
 clearEntrySelection();
 assert.equal(group.selectedCount, 0);
 assert.equal(group.button.textContent, '');
+""")
+
+
+def test_range_selection_follows_the_visible_card_order_when_grouped():
+    run_selection(r"""
+// Grouped view: entry-5 is shown right after entry-0, although 1–4 sit between them in the data.
+const visible = ['entry-0', 'entry-5', 'entry-1'];
+entryCardOrder.length = 0;
+entryCardPositions.clear();
+visible.forEach((id, index) => {
+  entryCardOrder.push(entryCardNodes.get(id));
+  entryCardPositions.set(id, index);
+});
+selectEntryFromCard('entry-0', false);
+selectEntryFromCard('entry-5', true);
+assert.deepEqual([...State.selected].sort(), ['entry-0', 'entry-5']);
 """)

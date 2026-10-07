@@ -375,7 +375,7 @@ def test_export_names_include_local_time_and_settings_show_export_storage():
     assert 'data-export="bindle" checked' in export_dialog
     assert 'data-export="excel" checked' not in export_dialog
     assert 'data-export="archive" checked' not in export_dialog
-    assert "打开导出目录 · ${fmtBytes(result.exports_size || 0)}" in source
+    assert "'打开导出目录' + (result.exports_size ? ` · ${fmtBytes(result.exports_size)}` : '')" in source
     data_block = source.split('<div class="settings-block-title">数据位置</div>', 1)[1].split("阿里云 OCR", 1)[0]
     assert 'id="setOpenExports"' in data_block
     assert 'id="setCleanup"' in data_block

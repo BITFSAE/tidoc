@@ -51,7 +51,7 @@
   --teal-soft: #dcf1ef;
   --teal-line: rgba(27, 122, 120, .2);
 
-  --warn: #a8650f;
+  --warn: #965909;
   --warn-soft: #fbf0d8;
   --warn-line: #f0dcb0;
   --blocked: #b3261e;
@@ -1248,8 +1248,9 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 }
 .minor-section summary {
   cursor: pointer; color: var(--ink-soft); font-size: 12px; font-weight: 700;
-  letter-spacing: .06em; text-transform: uppercase; margin-bottom: 10px;
+  letter-spacing: .06em; text-transform: uppercase;
 }
+.minor-section[open] > summary { margin-bottom: 10px; }
 .items-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .items-table th, .items-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line-soft); }
 .items-table th { color: var(--ink-soft); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -2043,8 +2044,10 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 .job-files { border-top:1px solid var(--line-soft); }
 .job-files .settings-row { padding:9px 0; }
 .job-files .settings-row-copy b { font-size:13px; font-weight:500; }
-.job-diagnostics { padding:0 0 12px; display:grid; gap:6px; }
-.job-diagnostics .hint { margin:0; }
+.job-diagnostics { padding:8px 0 12px; display:grid; gap:8px; border-top:1px solid var(--line-soft); }
+.job-files:empty { display:none; }
+.job-card .settings-row-copy { flex:1 1 auto; }
+.job-card .settings-row-copy b { overflow-wrap:anywhere; }
 .revision-badge { font-variant-numeric:tabular-nums; }
 .modal-foot-note { margin-right:auto; align-self:center; font-size:12.5px; color:var(--ink-soft); }
 .modal-foot-note.is-dirty { color:var(--univ-ink); font-weight:600; }
@@ -2058,6 +2061,48 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 .title-purple { --tc:var(--purple); --tc-soft:var(--purple-soft); --tc-line:var(--purple-line); }
 .title-teal { --tc:var(--teal); --tc-soft:var(--teal-soft); --tc-line:var(--teal-line); }
 .title-red { --tc:var(--blocked); --tc-soft:var(--blocked-soft); --tc-line:var(--blocked-line); }
+
+/* 原生 details 保留键盘交互；所有折叠标题共用固定尺寸与位置的三角箭头。 */
+details > summary {
+  display:flex; align-items:center; gap:8px; list-style:none; cursor:pointer;
+}
+details > summary::-webkit-details-marker { display:none; }
+details > summary::marker { content:""; }
+details > summary::before {
+  content:""; display:block; flex:0 0 12px; width:12px; height:12px;
+  background:var(--ink-soft); clip-path:polygon(20% 8%, 92% 50%, 20% 92%);
+}
+details[open] > summary::before { transform:rotate(90deg); }
+details > summary:focus-visible { outline:2px solid var(--primary); outline-offset:3px; border-radius:4px; }
+details.settings-block { padding-top:0; padding-bottom:0; }
+.settings-block > summary { padding:12px 0; font-size:13px; line-height:1.4; }
+.schema-advanced > summary, .settings-advanced > summary { padding:8px 0; color:var(--ink-soft); font-size:12.5px; font-weight:600; }
+.release-guide > summary > span { flex:1; }
+.att-group-loose > summary .att-group-title { flex:1; }
+
+/* 收款列表与使用选择沿用设置行，以适合内容的宽度和间距排布。 */
+.payees-dialog { gap:10px; }
+.payees-dialog .settings-block-title { padding:10px 0 4px; }
+.payees-dialog .settings-row { padding:10px 0; }
+.payees-dialog .settings-row-copy { flex:1 1 auto; overflow-wrap:anywhere; }
+.payees-dialog .settings-row-control { max-width:55%; }
+.payees-dialog .settings-row-control .select-field { min-width:0; width:220px; max-width:100%; }
+
+/* 诊断按严重程度分组；重复问题只占一行，文件预览使用独立列表。 */
+.diagnostic-section { padding:10px 12px; border:1px solid var(--line-soft); border-radius:8px; background:var(--paper-2); color:var(--ink-soft); }
+.diagnostic-section + .diagnostic-section { margin-top:8px; }
+.diagnostic-section.is-warning { background:var(--warn-soft); border-color:var(--warn-line); color:var(--warn); }
+.diagnostic-section.is-blocked { background:var(--blocked-soft); border-color:var(--blocked-line); color:var(--blocked); }
+.diagnostic-title { display:block; font-size:12px; font-weight:600; }
+.diagnostic-list { margin:6px 0 0; padding:0 0 0 16px; font-size:12.5px; line-height:1.55; }
+.diagnostic-list li + li { margin-top:6px; }
+.diagnostic-list li { overflow-wrap:anywhere; }
+.diagnostic-list small { display:block; margin-top:2px; color:var(--ink-soft); font-size:12px; }
+.export-preview-files ul { margin:0; padding:0; list-style:none; }
+.export-preview-files li { padding:8px 0; border-top:1px solid var(--line-soft); overflow-wrap:anywhere; font-size:12.5px; }
+.export-preview-files li:first-child { border-top:0; }
+.export-preview-files li > span { display:block; color:var(--ink); }
+.export-preview-files small { display:block; margin-top:2px; color:var(--ink-soft); font-size:12px; }
 
 /* ------------------------------------------------------------------ 打印导出弹窗 */
 /* 沿用设置页的 settings-block / settings-row：每个输出一行，勾选框在左，折叠区放次要内容。 */
@@ -2076,23 +2121,23 @@ button.ocr-summary-row:hover { border-color: var(--primary); background: var(--p
 .export-output.is-disabled .settings-row-copy b { color: var(--ink-faint); }
 .export-warn, .settings-row-copy .export-warn { color: var(--warn) !important; }
 .export-more > summary {
-  display: flex; align-items: baseline; gap: 10px; padding: 12px 0; list-style: none; cursor: pointer;
   color: var(--ink); font-size: 13px; font-weight: 600;
 }
-.export-more > summary::-webkit-details-marker { display: none; }
-.export-more > summary::before { content: "▸"; flex: 0 0 auto; color: var(--ink-faint); font-size: 11px; transition: transform .15s; }
-.export-more[open] > summary::before { transform: rotate(90deg); }
 .export-more > summary span { color: var(--ink-faint); font-size: 12px; font-weight: 400; }
 .export-more[open] > summary { border-bottom: 1px solid var(--line-soft); }
 .export-dialog .export-fields .form-row { padding: 10px 0; }
 .export-dialog .export-fields > .btn { margin: 4px 8px 12px 0; }
 .export-dialog .export-fields .hint { margin: 10px 0 0; }
 .export-status:empty { display: none; }
-.export-status .hint { margin: 0 0 6px; }
+.export-status { display:grid; gap:10px; }
+.export-status .diagnostic-section + .diagnostic-section { margin-top:0; }
 @media (max-width: 640px) {
-  .export-dialog .settings-row { flex-wrap: wrap; }
+  .export-dialog .settings-row, .payees-dialog .settings-row, .job-card .settings-row { flex-wrap: wrap; }
+  .export-dialog .settings-row-control { flex-wrap:wrap; flex:1 1 100%; }
+  .export-dialog .settings-row-control > div { flex:1; min-width:0; }
+  .payees-dialog .settings-row-control { flex:1 1 100%; max-width:100%; }
+  .payees-dialog .settings-row-control .select-field { width:100%; }
+  .job-card .settings-row-controls { flex-wrap:wrap; }
+  .job-card .settings-row-copy { flex-basis:100%; }
   .export-dialog .settings-row select, .export-dialog .settings-row input[type="date"] { min-width: 0; width: 100%; max-width: none; }
 }
-.export-status-title { margin: 2px 0 6px; color: var(--ink-soft); font-size: 12px; font-weight: 600; }
-.export-status .hint { padding: 7px 10px; }
-.export-status .hint + .export-status-title { margin-top: 10px; }

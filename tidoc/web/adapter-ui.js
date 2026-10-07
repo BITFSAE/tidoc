@@ -127,7 +127,46 @@ const AdapterUI = (() => {
     let node = $('.schema-errors',body); if (!node) { node = el('div','schema-errors'); node.tabIndex = -1; node.setAttribute('role','alert'); body.prepend(node); }
     node.classList.remove('hidden'); node.textContent = error.message || String(error); node.focus();
   }
-  function diagnosticsMarkup(items) { return items.map(d => `<p class="hint ${['required','blocked'].includes(d.severity) ? 'warn' : ''}">${esc(d.message || d.code)}</p>`).join(''); }
+  // 同一问题可能来自多个输出；合并显示，保留来源供定位受影响的发票。
+  function groupedDiagnostics(items) {
+    const grouped = new Map();
+    for (const item of items || []) {
+      const level = ['required', 'blocked'].includes(item.severity) ? 'blocked' : item.severity === 'warning' ? 'warning' : 'info';
+      const key = JSON.stringify([level, item.code || '', item.message || '']);
+      if (!grouped.has(key)) grouped.set(key, { ...item, level, sources: [] });
+      grouped.get(key).sources.push(...(item.sources || [item]));
+    }
+    return [...grouped.values()];
+  }
+  function diagnosticsMarkup(items, entries = [], blockedTitle = '需处理') {
+    const grouped = groupedDiagnostics(items);
+    const known = new Map(entries.map(entry => [entry.id, entry]));
+    const labels = { blocked: blockedTitle, warning: '提醒', info: '提示' };
+    return ['blocked', 'warning', 'info'].map(level => {
+      const list = grouped.filter(item => item.level === level);
+      if (!list.length) return '';
+      const rows = list.map(item => {
+        const ids = [...new Set(item.sources.map(source => source.entry_id || (known.has(source.target) ? source.target : null)).filter(Boolean))];
+        const names = ids.map(id => known.get(id)?.invoice_no || '未填写发票号');
+        const scope = names.length === 1 ? '发票 ' + names[0] : names.length > 1 ? `涉及 ${names.length} 条发票` : '';
+        const payeeFields = { 'payee.name': '收款人姓名', 'payee.bank_name': '开户行', 'payee.account_number': '账号' };
+        const missing = item.code === 'MISSING_PAYEE_FIELD' ? [...new Set(item.sources.map(source => payeeFields[source.target]).filter(Boolean))] : [];
+        return `<li><span>${esc(item.message || item.code)}</span>${scope ? `<small title="${esc(names.join('、'))}">${esc(scope)}</small>` : ''}${missing.length ? `<small>需补充：${esc(missing.join('、'))}</small>` : ''}</li>`;
+      }).join('');
+      return `<section class="diagnostic-section is-${level}" aria-label="${labels[level]}"><b class="diagnostic-title">${labels[level]} · ${list.length} 项</b><ul class="diagnostic-list">${rows}</ul></section>`;
+    }).join('');
+  }
+  function exportPreviewMarkup(candidate) {
+    if ((candidate.diagnostics || []).some(item => ['required', 'blocked'].includes(item.severity))) return '';
+    const groups = candidate.groups || [];
+    if (!groups.length) return '';
+    const types = new Map((candidate.files || []).map(file => [file.group_id, file.type]));
+    const rows = groups.map(group => {
+      const detail = [outputTypeLabels[types.get(group.group_id)], group.payee ? '收款：' + group.payee.name : '', group.payee?.account_tail ? '账号尾号 ' + group.payee.account_tail : ''].filter(Boolean).join(' · ');
+      return `<li><span>${esc(group.filename || '')}</span>${detail ? `<small>${esc(detail)}</small>` : ''}</li>`;
+    }).join('');
+    return `<section class="settings-block export-preview-files" aria-label="预计生成文件"><div class="settings-block-title">预计生成 · ${groups.length} 个文件</div><ul>${rows}</ul></section>`;
+  }
   const labels = { 'entry.default_title_id':'默认抬头', 'entry.default_paid_to_invoice':'实付初值取发票总额', 'entry.suggested_tags':'建议标签', 'profile.reviewer_required':'审核人必填', 'profile.reviewer_presentation':'审核人显示方式', 'profile.default_view':'初始报账人视图', 'payee.personnel_number_label':'人员编号名称', 'print.default_outputs':'默认输出', 'print.numbering':'材料编号', 'print.image_layout':'图片布局', 'print.content_order':'材料排序', 'print.amount_basis':'金额口径', 'print.payee_mode':'收款方式', 'print.sort_by':'条目排序', 'assist.cloud_ocr_visible':'显示云识别入口', 'assist.verification_visible':'显示查验入口', 'assist.payment_ocr':'付款截图金额识别（实验性）', 'transfer.include_notes':'绑定包包含备注', 'transfer.include_tags':'绑定包包含标签' };
   const choiceLabels={visible:'显示',advanced:'高级选项',hidden:'隐藏',self:'本人报账',delegate:'代填',invoice:'发票金额',paid:'实付金额',single:'统一收款',by_claimant:'分别收款',none:'不含收款信息',entry:'按条目',role:'按材料',selection:'当前选择顺序',invoice_date:'发票日期',invoice_no:'发票号',claimant:'报账人',seller:'销售方',created_at:'创建时间',local:'本地识别',cloud:'云识别',manual:'手动填写',a4_portrait_1:'A4 纵向，每页 1 张',a4_portrait_2:'A4 纵向，每页 2 张',a4_portrait_4:'A4 纵向，每页 4 张',a4_landscape_1:'A4 横向，每页 1 张',a4_landscape_2:'A4 横向，每页 2 张',a4_landscape_4:'A4 横向，每页 4 张'};
   function outputSettingsForm(definition,catalog,keys,values={}) {
@@ -673,7 +712,7 @@ const AdapterUI = (() => {
   }
   function payees(schemeId,onClose) { return openOnce('payees', () => withLoading('正在打开收款信息…', () => payeesPage(schemeId,onClose))); }
   async function payeesPage(schemeId=current?.id,onClose) {
-    let m; const body=el('div','settings-shell');
+    let m; const body=el('div','settings-shell payees-dialog');
     const render=async()=>{
       const [people,scheme,claimants]=await Promise.all([Api.listPayees(),Api.schemeDetails(schemeId),Api.listProfiles()]);
       const personnelLabel=scheme.definition.effective_settings['payee.personnel_number_label']||'人员编号';
@@ -683,7 +722,7 @@ const AdapterUI = (() => {
       const intro=el('p','scheme-desc');intro.textContent='只保存在本机，不会写入绑定包。';
       body.append(intro);
 
-      const list=el('section','settings-block');list.append(el('div','settings-block-title','收款对象'));
+      const list=el('section','settings-block');list.append(el('div','settings-block-title',`收款对象 · ${people.length} 位`));
       if(!people.length)list.append(el('div','settings-list-empty','还没有收款对象'));
       for(const person of people){
         const row=el('div','settings-row'),copy=el('div','settings-row-copy'),name=el('b'),detail=el('span');
@@ -716,7 +755,7 @@ const AdapterUI = (() => {
       body.append(pick);
       if(m)enhanceNativeSelects(body);
     };
-    await render();m=modal({title:'个人收款信息',key:'payees',wide:true,body,onClose,footer:[mkBtn('新建收款对象','ghost',()=>editPayee(null,schemeId,render)),mkBtn('完成','primary',()=>m.close())]});
+    await render();m=modal({title:'个人收款信息',key:'payees',body,onClose,footer:[mkBtn('新建收款对象','ghost',()=>editPayee(null,schemeId,render)),mkBtn('完成','primary',()=>m.close())]});
   }
   async function editPayee(person,schemeId,onSaved) {
     const scheme=await Api.schemeDetails(schemeId);
@@ -767,7 +806,7 @@ const AdapterUI = (() => {
       mappingLoading=false;preview.disabled=false;
     };
     const mappings=()=>{const value={fields:{},materials:{}};for(const select of $$('[data-rebind-source]',body)){if(select.value)value[select.dataset.rebindKind][select.dataset.rebindSource]=select.value;}return value;};
-    const preview=mkBtn('预览变化','ghost',async()=>{plan=null;submit.disabled=true;preview.disabled=true;const version=formVersion;try{const candidate=await Api.previewRebind(ids,$('[data-rebind-scheme]',body).value,null,mappings());if(version!==formVersion||!body.isConnected)return;plan=candidate;$('[data-rebind-preview]',body).innerHTML=diagnosticsMarkup(plan.diagnostics||[])+(plan.entries||[]).map(e=>{const entry=entries.find(item=>item.id===e.entry_id);return `<p class="hint">${esc(entry?.invoice_no||e.entry_id)}：${esc({complete:'齐备',partial:'待补材料',draft:'草稿'}[e.old_status]||e.old_status)} → ${esc({complete:'齐备',partial:'待补材料',draft:'草稿'}[e.status]||e.status)}</p>`;}).join('');submit.disabled=!plan.ok;}catch(e){showErrors(body,e);}finally{preview.disabled=mappingLoading;}});
+    const preview=mkBtn('预览变化','ghost',async()=>{plan=null;submit.disabled=true;preview.disabled=true;const version=formVersion;try{const candidate=await Api.previewRebind(ids,$('[data-rebind-scheme]',body).value,null,mappings());if(version!==formVersion||!body.isConnected)return;plan=candidate;$('[data-rebind-preview]',body).innerHTML=diagnosticsMarkup(plan.diagnostics||[],entries)+(plan.entries||[]).map(e=>{const entry=entries.find(item=>item.id===e.entry_id);return `<p class="hint">${esc(entry?.invoice_no||e.entry_id)}：${esc({complete:'齐备',partial:'待补材料',draft:'草稿'}[e.old_status]||e.old_status)} → ${esc({complete:'齐备',partial:'待补材料',draft:'草稿'}[e.status]||e.status)}</p>`;}).join('');submit.disabled=!plan.ok;}catch(e){showErrors(body,e);}finally{preview.disabled=mappingLoading;}});
     const submit=mkBtn('应用到这些条目','primary',async()=>{submit.disabled=true;try{await operation('应用报账方案',id=>Api.applyRebind(plan.preview_id,id));m.close();await refreshEntries();toast('已应用并记录规则变化','ok');}catch(e){showErrors(body,e);submit.disabled=false;}});submit.disabled=true;
     body.addEventListener('change',()=>{formVersion++;plan=null;submit.disabled=true;});
     $('[data-rebind-scheme]',body).onchange=()=>redrawMappings().catch(e=>showErrors(body,e));await redrawMappings();m=modal({title:'更改条目报账方案',body,footer:[mkBtn('取消','ghost',()=>m.close()),preview,submit]});
@@ -794,7 +833,7 @@ const AdapterUI = (() => {
     if(hasFields)actions.append(mkBtn('填写报账信息','small ghost',()=>editFields('entry',entry.id,null,null,refreshDetail)));
     actions.append(mkBtn('更改方案','small ghost',()=>rebind([entry.id])));
     section.append(actions);
-    section.insertAdjacentHTML('beforeend',diagnosticsMarkup(notices));
+    section.insertAdjacentHTML('beforeend',diagnosticsMarkup(notices,[entry]));
     for(const source of sources){const historical=el('details');historical.innerHTML=`<summary>来源报账信息 · ${esc(source.definition?.manifest?.name||'外部方案')}</summary>`;const fields=source.definition?.fields||[];for(const record of source.extension_values||[]){const field=fields.find(f=>f.id===record.field_id);const row=el('p','hint');row.textContent=(field?.label||record.field_id)+'：'+JSON.stringify(record.value);historical.append(row);}section.append(historical);}
     for(const item of history){const row=el('p','hint');row.textContent=(item.kind==='rebind'?'规则变更':item.kind==='material'?'材料角色变更':'附加信息变更')+' · '+item.changed_at;section.append(row);}
     body.append(section);
@@ -873,10 +912,10 @@ const AdapterUI = (() => {
   // ---- 打印导出的决策逻辑：不碰界面，便于单独测试 ----
   const OUTPUT_MEMORY_PREFIX = 'tidoc.export.outputs.';
   const configuredOutputs = definition => definition?.effective_settings?.['print.default_outputs'] ?? definition?.scheme?.default_outputs ?? null;
-  // 勾选哪些输出：上次生成时的勾选只在方案配置的默认输出没变时沿用；在设置里改了默认输出，以新的为准。
-  function defaultSelected(definition, output, remembered) {
-    const configured = configuredOutputs(definition);
-    const ids = remembered && Array.isArray(remembered.ids) && remembered.base === JSON.stringify(configured) ? remembered.ids : configured;
+  // 打开窗口采用当前方案的默认勾选；生成内容和字段仍由条目的固定修订决定。
+  function defaultSelected(definition, output, remembered, currentDefinition = definition) {
+    const configured = configuredOutputs(currentDefinition);
+    const ids = configured ?? (remembered && Array.isArray(remembered.ids) && remembered.base === 'null' ? remembered.ids : null);
     return ids != null ? ids.includes(output.id) : !!output.default_selected;
   }
   // 日期只对会用到它的输出才出现：方案声明的 Word／Excel 模板（上下文里的 export.date）。
@@ -894,10 +933,8 @@ const AdapterUI = (() => {
   }
   // 多个文件（如按抬头拆分）会重复报同一条问题，合并后只显示一次，并分成阻断项和提醒。
   function splitDiagnostics(candidate) {
-    const seen = new Set();
-    const list = (candidate?.diagnostics || []).filter(d => { const key = d.code + '|' + (d.message || ''); if (seen.has(key)) return false; seen.add(key); return true; });
-    const blocking = d => ['required', 'blocked'].includes(d.severity);
-    return { blocking: list.filter(blocking), warnings: list.filter(d => !blocking(d)) };
+    const list = groupedDiagnostics(candidate?.diagnostics);
+    return { blocking: list.filter(d => d.level === 'blocked'), warnings: list.filter(d => d.level !== 'blocked') };
   }
   async function print(ids) {
     if (!ids?.length) { toast('请先选择条目', 'err'); return; }
@@ -912,10 +949,11 @@ const AdapterUI = (() => {
         const binding = entry.scheme_id + ':' + entry.scheme_revision_id;
         if (!bindings.has(binding)) bindings.set(binding, { binding, schemeId: entry.scheme_id, revision: entry.scheme_revision_id, definition, name: entry.adapter?.scheme_name || definition.manifest.name });
       }
+      const schemeIds = [...new Set([...bindings.values()].map(item => item.schemeId))];
+      const liveSchemes = new Map(await Promise.all(schemeIds.map(async id => [id, await Api.schemeDetails(id)])));
       const body = el('div', 'settings-shell export-dialog');
       const meta = new Map(); // 复选框 → { output, binding }
-      // 记住上次实际生成时的勾选，下次打开直接沿用；同时记下当时方案配置的默认输出，
-      // 之后在设置里改了默认输出，这份记忆就不再沿用（以新的默认为准）。
+      // 通用输出或未配置默认值的方案沿用上次选择；已配置的方案每次采用当前默认值。
       const scopeOf = binding => binding ? binding.split(':')[0] : 'generic';
       const configuredByScope = new Map();
       const recall = scope => { try { const value = JSON.parse(localStorage.getItem(OUTPUT_MEMORY_PREFIX + scope)); return value && Array.isArray(value.ids) ? value : null; } catch (_) { return null; } };
@@ -934,12 +972,13 @@ const AdapterUI = (() => {
         return row;
       };
       // 生成内容：方案声明的输出。
-      for (const { binding, definition, name } of bindings.values()) {
+      for (const { binding, schemeId, definition, name } of bindings.values()) {
         const block = el('section', 'settings-block');
         block.append(el('div', 'settings-block-title', esc(bindings.size > 1 ? name + ' · 生成内容' : '生成内容')));
         const remembered = recall(scopeOf(binding));
-        if (!configuredByScope.has(scopeOf(binding))) configuredByScope.set(scopeOf(binding), configuredOutputs(definition));
-        for (const output of definition.outputs || []) block.append(outputRow(output, binding, defaultSelected(definition, output, remembered), definition));
+        const currentDefinition = liveSchemes.get(schemeId).definition;
+        if (!configuredByScope.has(scopeOf(binding))) configuredByScope.set(scopeOf(binding), configuredOutputs(currentDefinition));
+        for (const output of definition.outputs || []) block.append(outputRow(output, binding, defaultSelected(definition, output, remembered, currentDefinition), definition));
         body.append(block);
       }
       // 通用输出：不依赖方案，跨方案或没有安装来源方案时才是主要入口，平时折叠。
@@ -991,7 +1030,7 @@ const AdapterUI = (() => {
       const adjustForms = []; const adjust = el('details', 'settings-block export-more');
       adjust.innerHTML = '<summary>本次调整<span>仅本次有效</span></summary>';
       for (const { binding, schemeId, definition, name } of bindings.values()) {
-        const scheme = await Api.schemeDetails(schemeId); const catalog = scheme.settings_catalog || scheme.settings_descriptions || {};
+        const scheme = liveSchemes.get(schemeId); const catalog = scheme.settings_catalog || scheme.settings_descriptions || {};
         const groups = [];
         for (const group of ADJUST_GROUPS) {
           const rows = group.keys.map(key => adjustRow(definition, catalog, key)).filter(Boolean);
@@ -1045,9 +1084,8 @@ const AdapterUI = (() => {
       };
       const showStatus = candidate => {
         const { blocking, warnings } = splitDiagnostics(candidate);
-        const part = (title, items) => items.length ? `<div class="export-status-title">${title}</div>${diagnosticsMarkup(items)}` : '';
-        const files = blocking.length ? '' : (candidate.groups || []).map(group => `<p class="hint">${esc(group.filename || '')}${group.payee ? ' · 收款：' + esc(group.payee.name) + ' · 账号尾号 ' + esc(group.payee.account_tail || '') : ''}</p>`).join('');
-        status.innerHTML = part('无法生成，请先处理', blocking) + part('提醒', warnings) + files;
+        status.innerHTML = diagnosticsMarkup([...blocking, ...warnings], entries, '无法生成，请先处理') + exportPreviewMarkup(candidate);
+        if (blocking.length) status.focus({ preventScroll: true });
         status.scrollIntoView({ block: 'nearest' });
       };
       const invalidate = () => { formVersion++; const previous = plan; plan = null; warned = false; run.textContent = '生成'; status.replaceChildren(); if (previous) Api.cancelExport(previous.plan_id).catch(() => {}); sync(); };
@@ -1076,7 +1114,7 @@ const AdapterUI = (() => {
           const result = await Api.runExport(planId);
           if (result.status !== 'completed') {
             showErrors(body, { message: result.status === 'cancelled' ? '已取消生成。' : '生成失败。', diagnostics: result.diagnostics });
-            status.innerHTML = diagnosticsMarkup(result.diagnostics || []); plan = null; return;
+            status.innerHTML = diagnosticsMarkup(result.diagnostics || [], entries, '生成未完成'); plan = null; return;
           }
           remember(); plan = null; m.close(); await jobs(result.job_id || result.id);
         } catch (e) { showErrors(body, e); }
@@ -1200,7 +1238,8 @@ const AdapterUI = (() => {
       card.append(list);
       if ((job.diagnostics || []).length) {
         const notes = el('div', 'job-diagnostics');
-        notes.innerHTML = diagnosticsMarkup(job.diagnostics);
+        const entries = (job.snapshot?.files || []).flatMap(file => file.context?.entries || []);
+        notes.innerHTML = diagnosticsMarkup(job.diagnostics, entries);
         card.append(notes);
       }
       body.append(card);

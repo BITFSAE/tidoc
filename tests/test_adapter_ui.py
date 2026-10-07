@@ -240,15 +240,17 @@ def _run_adapter_ui(script, payload):
         pytest.skip('需要 Node 执行前端源码')
     harness=r"""
 const vm=require('vm'),fs=require('fs');
-const sandbox={console};vm.createContext(sandbox);
-vm.runInContext(fs.readFileSync(process.argv[1],'utf8')+';this.AdapterUI=AdapterUI;',sandbox);
+const sandbox={console,esc:value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))};vm.createContext(sandbox);
+// 只在测试环境暴露内部渲染函数，生产界面不增加入口。
+const source=fs.readFileSync(process.argv[1],'utf8').replace('return {setup,','return {diagnosticsMarkup,exportPreviewMarkup,setup,');
+vm.runInContext(source+';this.AdapterUI=AdapterUI;',sandbox);
 const A=sandbox.AdapterUI,input=JSON.parse(process.argv[2]);
 """+script
     result=subprocess.run([node,'-e',harness,str(WEB/'adapter-ui.js'),json.dumps(payload)],capture_output=True,text=True,encoding='utf-8',check=True)
     return json.loads(result.stdout)
 
 
-def test_export_dialog_default_selection_follows_the_scheme_unless_the_last_choice_is_still_current():
+def test_export_dialog_uses_current_scheme_defaults_for_historical_entries():
     out=_run_adapter_ui(r"""
 const outputs=[{id:'note',default_selected:true},{id:'accept',default_selected:false},{id:'pdf',default_selected:false}];
 const def=(configured)=>({effective_settings:configured?{'print.default_outputs':configured}:{},scheme:{default_outputs:['note']}});
@@ -263,14 +265,20 @@ console.log(JSON.stringify({
   declaredFlag:pick({effective_settings:{},scheme:{}},null),
   explicitNone:pick(def([]),null),
   garbage:pick(def(['note']),{ids:'pdf',base:JSON.stringify(['note'])}),
+  historical:outputs.filter(o=>A.defaultSelected(def(['note']),o,{ids:['note'],base:JSON.stringify(['note'])},def(['note','accept','pdf']))).map(o=>o.id),
+  currentEmpty:outputs.filter(o=>A.defaultSelected(def(['note']),o,null,def([]))).map(o=>o.id),
+  noConfigurationMemory:pick({effective_settings:{},scheme:{}},{ids:['pdf'],base:'null'}),
 }));""",{})
     assert out['noMemory']==['note','accept']
-    assert out['memory']==['pdf']
+    assert out['memory']==['note','accept']  # 本次临时选择不覆盖已配置的默认输出。
     assert out['settingsChanged']==['note']
     assert out['packageDefault']==['note']
     assert out['declaredFlag']==['note']        # 方案和设置都没配置时用输出自己的 default_selected
     assert out['explicitNone']==[]              # 明确保存「全不选」仍然是空选择
     assert out['garbage']==['note']
+    assert out['historical']==['note','accept','pdf']
+    assert out['currentEmpty']==[]
+    assert out['noConfigurationMemory']==['pdf']
 
 
 def test_export_dialog_shows_date_and_payee_rows_only_for_outputs_that_use_them():
@@ -321,3 +329,46 @@ console.log(JSON.stringify({
     assert [d['message'] for d in out['split']['blocking']]==['缺发票']            # 多个文件重复报的同一条问题只留一条
     assert [d['code'] for d in out['split']['warnings']]==['B']
     assert [d['code'] for d in out['requiredIsBlocking']['blocking']]==['R'] and [d['code'] for d in out['requiredIsBlocking']['warnings']]==['I']
+
+
+def test_export_diagnostics_keep_all_invoice_sources_and_do_not_hide_blockers():
+    out=_run_adapter_ui(r"""
+const items=[
+  {code:'PAID_DIFFERS',severity:'warning',message:'金额不同',target:'a',group_id:'docx'},
+  {code:'PAID_DIFFERS',severity:'warning',message:'金额不同',target:'a',group_id:'pdf'},
+  {code:'PAID_DIFFERS',severity:'warning',message:'金额不同',entry_id:'b',group_id:'pdf'},
+  {code:'PAID_DIFFERS',severity:'required',message:'金额不同',entry_id:'b'},
+];
+const split=A.splitDiagnostics({diagnostics:items});
+console.log(JSON.stringify({split,html:A.diagnosticsMarkup([...split.blocking,...split.warnings],[{id:'a',invoice_no:'001'},{id:'b',invoice_no:'002'}])}));
+""",{})
+    assert len(out['split']['blocking'])==1
+    assert len(out['split']['warnings'])==1
+    assert len(out['split']['warnings'][0]['sources'])==3
+    assert out['html'].count('金额不同')==2  # 同名阻断项不会让先出现的提醒吞掉。
+    assert '涉及 2 条发票' in out['html'] and '001、002' in out['html']
+    assert 'class="hint' not in out['html']
+
+
+def test_export_preview_files_are_separate_from_warnings_and_escape_private_text():
+    out=_run_adapter_ui(r"""
+const candidate={groups:[{group_id:'one',filename:'材料<&>.docx',payee:{name:'张<三>',account_tail:'1234'}},{group_id:'two',filename:'无账号.pdf',payee:{name:'单位'}}],files:[{group_id:'one',type:'docx'},{group_id:'two',type:'pdf_bundle'}],diagnostics:[{code:'W',severity:'warning',message:'核对<&>'},{code:'I',severity:'info',message:'仅供参考'}]};
+console.log(JSON.stringify({files:A.exportPreviewMarkup(candidate),notes:A.diagnosticsMarkup(candidate.diagnostics),blocked:A.exportPreviewMarkup({...candidate,diagnostics:[{severity:'blocked'}]})}));
+""",{})
+    assert '预计生成 · 2 个文件' in out['files']
+    assert '材料&lt;&amp;&gt;.docx' in out['files'] and '张&lt;三&gt;' in out['files']
+    assert 'Word 文档' in out['files'] and '材料 PDF' in out['files']
+    assert '账号尾号 1234' in out['files'] and '账号尾号 </small>' not in out['files']
+    assert 'is-warning' not in out['files'] and 'class="hint' not in out['files']
+    assert 'is-warning' in out['notes'] and 'is-info' in out['notes'] and '核对&lt;&amp;&gt;' in out['notes']
+    assert out['blocked']==''
+
+
+def test_merged_payee_diagnostics_name_every_missing_field():
+    out=_run_adapter_ui(r"""
+const diagnostics=['payee.bank_name','payee.account_number','payee.bank_name'].map(target=>({code:'MISSING_PAYEE_FIELD',severity:'required',message:'收款信息缺项',target}));
+console.log(JSON.stringify(A.diagnosticsMarkup(diagnostics)));
+""",{})
+    assert out.count('收款信息缺项')==1
+    assert '需补充：开户行、账号' in out
+    assert 'payee.' not in out

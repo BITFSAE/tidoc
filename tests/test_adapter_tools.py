@@ -225,3 +225,55 @@ def _docx_contains(files, fragment):
         if fragment in text:
             return True
     return False
+
+
+def test_pack_rewrites_outputs_with_the_files_own_line_endings(tmp_path, monkeypatch):
+    # write_text() translates "\n" to the platform default. On Windows that turned an LF package into
+    # CRLF, changed its content hash and made `pack` report a conflict with the builtin of the same version.
+    from tidoc.adapter_tools import cli
+
+    seen = {}
+    real_render = cli._render
+
+    def capture(package_path, fixture_path, out_dir, output_ids=None):
+        seen["staged"] = (Path(package_path) / "outputs.json").read_bytes()
+        return real_render(package_path, fixture_path, out_dir, output_ids)
+
+    monkeypatch.setattr(cli, "_render", capture)
+    for newline in (b"\n", b"\r\n"):
+        copied = tmp_path / ("package-" + ("crlf" if newline == b"\r\n" else "lf"))
+        shutil.copytree(ROOT / "examples/adapters/minimal", copied)
+        for name in ("outputs.json", "manifest.json", "materials.json", "scheme.json", "rules.json", "fields.json"):
+            target = copied / name
+            target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", newline))
+        cli._strict_pack(copied, tmp_path / (copied.name + ".tidoc-preset"))
+        assert seen["staged"] == (copied / "outputs.json").read_bytes()
+
+
+def test_a_failure_while_building_the_fixture_reaches_the_caller_with_the_database_closed(tmp_path, monkeypatch):
+    # Windows cannot delete an open sqlite file; cleaning up the temp dir first raised WinError 32
+    # and hid the real error.
+    import sqlite3
+
+    import pytest
+
+    import tidoc.api
+    from tidoc.adapter_tools import cli
+
+    created = []
+
+    class RecordingApi(tidoc.api.Api):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("fixture exploded")
+
+    monkeypatch.setattr(tidoc.api, "Api", RecordingApi)
+    monkeypatch.setattr(cli, "_create_fixture_entries", boom)
+    with pytest.raises(RuntimeError, match="fixture exploded"):
+        cli._fixture_runtime(ROOT / "examples/adapters/generic", ROOT / "examples/adapters/fixtures/generic.json")
+    assert len(created) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        created[0].db.conn.execute("select 1")

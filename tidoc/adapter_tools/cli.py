@@ -199,6 +199,7 @@ def _fixture_runtime(package_path, fixture_path):
     package = load_package(package_path)
     fixture_data = _fixture(fixture_path)
     temp = tempfile.TemporaryDirectory(prefix="tidoc-adapter-cli-")
+    api = None
     try:
         from ..api import Api
         api = Api(Path(temp.name) / "data")
@@ -209,6 +210,10 @@ def _fixture_runtime(package_path, fixture_path):
         entry_ids = _create_fixture_entries(api, definition, fixture_data, Path(fixture_path).resolve().parent)
         return temp, api, package, definition, fixture_data, entry_ids
     except BaseException:
+        # Windows cannot delete a database file that is still open, and the resulting WinError 32
+        # would replace the real failure. Close it first so the original error reaches the caller.
+        if api is not None:
+            api.db.close()
         temp.cleanup()
         raise
 
@@ -457,7 +462,10 @@ def _strict_pack(source, out):
                 if output.get("type") == "docx":
                     output.pop("when", None)
                     output.pop("applies_when", None)
-            output_file.write_text(json.dumps(output_data, ensure_ascii=False, indent=2) + "\n", "utf-8")
+            # Rewrite with the file's own line endings. write_text() would translate "\n" to the
+            # platform default, and a Windows-only CRLF changes the package content hash.
+            newline = "\r\n" if b"\r\n" in output_file.read_bytes() else "\n"
+            output_file.write_bytes((json.dumps(output_data, ensure_ascii=False, indent=2) + "\n").replace("\n", newline).encode("utf-8"))
             fixture = Path(temp) / "fixture.json"
             # Pack validation uses an explicit synthetic fixture that exercises
             # every declared role without mutating user fixture input from tests.

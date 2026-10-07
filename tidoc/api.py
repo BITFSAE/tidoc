@@ -2128,6 +2128,9 @@ class Api:
         # 换通道后，之前的检查结果不再适用，下次立即重新检查。
         self._set_preference_value(UPDATE_LAST_CHECK_KEY, "0")
         self._set_preference_value(UPDATE_LAST_RESULT_KEY, "")
+        if value == CHANNEL_STABLE:
+            # 退出测试版通道：已下载还没安装的测试版包不再提示安装。
+            self._core_updater.discard_prerelease()
         return {"channel": value}
 
     @_guard

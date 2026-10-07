@@ -13,12 +13,14 @@ import re
 from pathlib import Path
 
 from release_notes import bullet_notes, newest_changelog_section
+from release_version import validate_version
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("version")
     args = parser.parse_args()
+    validate_version(args.version)
     file = Path("tidoc/__init__.py")
     text = file.read_text("utf-8")
     text = re.sub(r'__version__ = "[^"]+"', f'__version__ = "{args.version}"', text)

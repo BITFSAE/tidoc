@@ -87,10 +87,6 @@ def _invoice_no_from_text(text: str) -> str:
     return ""
 
 
-def _hidden_windows_subprocess_kwargs() -> dict:
-    return hidden_window_options()
-
-
 def _parse_invoice_no(path: Path, att_type: str) -> tuple[str, str]:
     try:
         if att_type == "invoice_pdf":
@@ -414,7 +410,7 @@ foreach ($image in $prepared) {
                 errors="ignore",
                 timeout=20,
                 check=False,
-                **_hidden_windows_subprocess_kwargs(),
+                **hidden_window_options(),
             )
         return (proc.stdout or "") + "\n" + (proc.stderr or "")
     except Exception:
@@ -564,7 +560,7 @@ foreach ($r in $rects) {
                 errors="ignore",
                 timeout=20,
                 check=False,
-                **_hidden_windows_subprocess_kwargs(),
+                **hidden_window_options(),
             )
         return _invoice_no_from_text((proc.stdout or "") + "\n" + (proc.stderr or ""))
     except Exception:

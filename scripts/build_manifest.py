@@ -17,14 +17,18 @@ import argparse
 import hashlib
 import json
 import re
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+from release_version import is_prerelease, validate_version
 
 BASE_URL = "https://img.bitfsae.com/tidoc"
 STABLE_OUT = "manifest.json"
 BETA_OUT = "manifest-beta.json"
 DEFAULT_UPLOAD_PLAN = "upload_plan.tsv"
-# 版本可带预发布后缀（0.1.39-beta.1）。预发布部分按「尽量短」匹配，所以稳定版的 "-update.zip" 不会被当成预发布后缀。
+# 版本可带预发布后缀（0.1.39-beta.1）。预发布部分按「尽量短」匹配，所以稳定版的 "-update.zip" 不会被当成预发布后缀；
+# 预发布标识只允许字母数字和点（见 release_version.py），否则这里无法和固定的文件后缀区分。
 NAME_RE = re.compile(
     r"^tidoc-(?P<component>core|print|ocr)-(?P<platform>windows|macos)-v"
     r"(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*?)??)"
@@ -56,6 +60,13 @@ def main() -> int:
     parser.add_argument("--upload-plan", default=DEFAULT_UPLOAD_PLAN)
     parser.add_argument("--notes", default="", help="single line changelog")
     parser.add_argument("--notes-file", default="", help="JSON array of user-facing changelog entries")
+    parser.add_argument(
+        "--stable-manifest",
+        default="",
+        help="URL or path of the published stable manifest.json. Required for a pre-release: optional "
+        "components (print, OCR) whose version the stable manifest already serves are not republished, "
+        "because overwriting a file the stable manifest points at breaks its sha256.",
+    )
     parser.add_argument("--min-supported-version", default="0.1.0")
     parser.add_argument("--force-update", action="store_true")
     args = parser.parse_args()
@@ -68,9 +79,21 @@ def main() -> int:
     else:
         args.release_notes = [args.notes] if args.notes else []
 
-    prerelease = "-" in args.version
+    try:
+        validate_version(args.version)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    prerelease = is_prerelease(args.version)
     if args.out is None:
         args.out = BETA_OUT if prerelease else STABLE_OUT
+    stable_versions: dict[str, str] = {}
+    if prerelease:
+        if not args.stable_manifest:
+            raise SystemExit(
+                "A pre-release needs --stable-manifest so it never overwrites a component file "
+                "that the stable manifest still points at."
+            )
+        stable_versions = _published_versions(args.stable_manifest)
     release_dir = Path(args.release_dir)
     components: dict[str, dict] = {}
     upload_rows: list[tuple[Path, str]] = []
@@ -86,6 +109,12 @@ def main() -> int:
         if info["component"] == "core" and info["version"] != args.version:
             continue
         component = info["component"]
+        if prerelease and component != "core" and stable_versions.get(component) == info["version"]:
+            # The stable channel serves this exact file. Releases rebuild the component every time and
+            # PyInstaller output is not reproducible, so uploading it again would change the bytes
+            # behind the stable manifest's sha256.
+            print(f"Skip {path.name}: already published by the stable manifest")
+            continue
         platform = info["platform"]
         key = f"tidoc/{component}/{platform}/{path.name}"
         url = f"{args.base_url.rstrip('/')}/{component}/{platform}/{path.name}"
@@ -137,6 +166,25 @@ def main() -> int:
     print(f"Wrote {out_path}")
     print(f"Wrote {plan_path}")
     return 0
+
+
+def _published_versions(source: str) -> dict[str, str]:
+    """component -> latest version served by the stable manifest (URL or local path)."""
+    try:
+        if re.match(r"^https?://", source):
+            request = urllib.request.Request(source, headers={"User-Agent": "tidoc-release"})
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read()
+        else:
+            raw = Path(source).read_bytes()
+        components = json.loads(raw.decode("utf-8")).get("components") or {}
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Cannot read the stable manifest {source}: {exc}") from exc
+    return {
+        name: str(block.get("latest") or "")
+        for name, block in components.items()
+        if isinstance(block, dict)
+    }
 
 
 def _component_block(component: str, version: str, args) -> dict:

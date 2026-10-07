@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -241,7 +242,7 @@ def version_key(version: str) -> tuple:
     identifiers = []
     for part in text.split("-", 1)[1].split("."):
         # 数字标识符按数值比较，并且小于字母标识符。
-        identifiers.append((0, int(part), "") if part.isdigit() else (1, 0, part))
+        identifiers.append((0, int(part), "") if part.isascii() and part.isdigit() else (1, 0, part))
     return (core, 0, tuple(identifiers))
 
 
@@ -260,9 +261,9 @@ def sha256_file(path: str | Path) -> str:
 def load_manifest(url: str = MANIFEST_URL, timeout: int = 12) -> dict[str, Any]:
     try:
         raw = _read_url(url, timeout)
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"无法读取更新清单：{exc}") from exc
-    except RuntimeError as exc:
+    except (OSError, http.client.HTTPException, RuntimeError) as exc:
+        # URLError 也是 OSError；读取中途的超时、连接重置、IncompleteRead 不是 URLError，
+        # 统一成 RuntimeError，调用方（含测试版清单的回退）才能一致处理。
         raise RuntimeError(f"无法读取更新清单：{exc}") from exc
     try:
         return json.loads(raw.decode("utf-8"))
@@ -294,6 +295,8 @@ def load_update_manifest(channel: str = CHANNEL_STABLE, timeout: int = 12) -> di
     merged = dict(stable)
     components = dict(stable.get("components") or {})
     for name, candidate in (beta.get("components") or {}).items():
+        if not isinstance(candidate, dict):
+            continue
         current = components.get(name)
         if not isinstance(current, dict) or version_gt(str(candidate.get("latest") or ""), str(current.get("latest") or "")):
             components[name] = candidate
@@ -714,6 +717,8 @@ class CoreUpdateManager:
         self.updates_dir = Path(updates_dir)
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
+        # 用户在下载过程中退出了测试版通道：这次下载完成后丢弃，不再提示安装。
+        self._discard_when_done = False
         self._state: dict[str, Any] = {
             "state": "idle", "version": "", "progress": 0.0,
             "downloaded_bytes": 0, "total_bytes": 0, "speed_bps": 0.0,
@@ -721,6 +726,49 @@ class CoreUpdateManager:
             "install_supported": silent_core_update_supported(),
         }
         self._restore_ready_state()
+
+    def discard_prerelease(self) -> dict[str, Any]:
+        """退出测试版通道后，丢掉已下载但还没安装的测试版更新包。
+
+        已经开始安装的撤不回；正在下载的让它下载完时自行丢弃。"""
+        with self._lock:
+            state = self._state.get("state")
+            version = str(self._state.get("version") or "")
+            if state == "installing":
+                return dict(self._state)
+            if state == "downloading":
+                self._discard_when_done = is_prerelease(version)
+                return dict(self._state)
+        info = downloaded_core_update_info(self.updates_dir)
+        if is_prerelease(str(info.get("version") or "")):
+            self._remove_download(info)
+        with self._lock:
+            if is_prerelease(str(self._state.get("version") or "")):
+                self._reset_idle()
+            return dict(self._state)
+
+    def _reset_idle(self) -> None:
+        self._state.update({
+            "state": "idle", "version": "", "progress": 0.0,
+            "downloaded_bytes": 0, "total_bytes": 0, "speed_bps": 0.0,
+            "stage": "", "download_mode": "", "stage_dir": "", "file_path": "", "error": "",
+        })
+
+    def _remove_download(self, info: dict[str, Any]) -> None:
+        try:
+            _core_update_marker(self.updates_dir).unlink()
+        except OSError:
+            pass
+        file_value = str(info.get("file_path") or "")
+        if not file_value:
+            return
+        folder = Path(file_value).parent
+        try:
+            inside = folder.resolve().is_relative_to(self.updates_dir.resolve())
+        except OSError:
+            inside = False
+        if inside and folder.resolve() != self.updates_dir.resolve():
+            shutil.rmtree(folder, ignore_errors=True)
 
     def _restore_ready_state(self) -> None:
         info = downloaded_core_update_info(self.updates_dir)
@@ -760,6 +808,7 @@ class CoreUpdateManager:
                 return self.status()
             if self._state.get("state") == "ready" and self._state.get("version") == version:
                 return self.status()
+            self._discard_when_done = False
             self._state.update({
                 "state": "downloading", "version": version, "progress": 0.0,
                 "downloaded_bytes": 0, "total_bytes": int(auto_asset.get("size") or 0),
@@ -825,6 +874,14 @@ class CoreUpdateManager:
                 raise RuntimeError("更新包完整性校验失败。")
             if downloaded_path == partial:
                 partial.replace(archive)
+            with self._lock:
+                discard = self._discard_when_done
+                self._discard_when_done = False
+            if discard:
+                self._remove_download({"file_path": str(archive)})
+                with self._lock:
+                    self._reset_idle()
+                return
             self._set(stage="extract")
             extract_root = root / "staged"
             if extract_root.exists():

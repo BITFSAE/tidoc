@@ -1,5 +1,6 @@
 """打印导出组件测试：PDF 拼接、图片转 PDF、Word 生成、抬头强隔离。"""
 
+import os
 import glob
 import json
 import subprocess
@@ -13,7 +14,7 @@ import tidoc_print
 # 组件依赖未装则整体跳过（核心测试不受影响）
 pytestmark = pytest.mark.skipif(not tidoc_print.is_available(), reason="打印组件依赖未安装")
 
-SAMPLE_DIR = "/Users/poli/invoice2docx/invoices"
+SAMPLE_DIR = os.environ.get("TIDOC_SAMPLE_DIR", "/Users/poli/invoice2docx/invoices")
 
 
 def _sample(pattern):

@@ -228,3 +228,96 @@ console.log(JSON.stringify(out));
     # 通用方案没有任何输出要收款对象，也没有配置抬头：这些入口和设置都不出现。
     assert not found['generic']['uses'] and found['generic']['modes']==[]
     assert not found['generic']['payeeKey'] and not found['generic']['titleKey'] and found['generic']['pdfKey']
+
+
+def _run_adapter_ui(script, payload):
+    """在 Node 里加载真实的 adapter-ui.js（不需要 DOM），把 payload 交给 script，返回它打印的 JSON。"""
+    import json
+    import pytest
+
+    node=shutil.which('node')
+    if not node:
+        pytest.skip('需要 Node 执行前端源码')
+    harness=r"""
+const vm=require('vm'),fs=require('fs');
+const sandbox={console};vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[1],'utf8')+';this.AdapterUI=AdapterUI;',sandbox);
+const A=sandbox.AdapterUI,input=JSON.parse(process.argv[2]);
+"""+script
+    result=subprocess.run([node,'-e',harness,str(WEB/'adapter-ui.js'),json.dumps(payload)],capture_output=True,text=True,encoding='utf-8',check=True)
+    return json.loads(result.stdout)
+
+
+def test_export_dialog_default_selection_follows_the_scheme_unless_the_last_choice_is_still_current():
+    out=_run_adapter_ui(r"""
+const outputs=[{id:'note',default_selected:true},{id:'accept',default_selected:false},{id:'pdf',default_selected:false}];
+const def=(configured)=>({effective_settings:configured?{'print.default_outputs':configured}:{},scheme:{default_outputs:['note']}});
+const pick=(d,remembered)=>outputs.map(o=>A.defaultSelected(d,o,remembered)?o.id:null).filter(Boolean);
+const base=JSON.stringify(['note','accept']);
+console.log(JSON.stringify({
+  noMemory:pick(def(['note','accept']),null),
+  memory:pick(def(['note','accept']),{ids:['pdf'],base}),
+  // 在设置里把默认输出改成别的：以新的为准，旧记忆作废。
+  settingsChanged:pick(def(['note']),{ids:['pdf'],base}),
+  packageDefault:pick(def(null),null),
+  declaredFlag:pick({effective_settings:{},scheme:{}},null),
+  explicitNone:pick(def([]),null),
+  garbage:pick(def(['note']),{ids:'pdf',base:JSON.stringify(['note'])}),
+}));""",{})
+    assert out['noMemory']==['note','accept']
+    assert out['memory']==['pdf']
+    assert out['settingsChanged']==['note']
+    assert out['packageDefault']==['note']
+    assert out['declaredFlag']==['note']        # 方案和设置都没配置时用输出自己的 default_selected
+    assert out['explicitNone']==[]              # 明确保存「全不选」仍然是空选择
+    assert out['garbage']==['note']
+
+
+def test_export_dialog_shows_date_and_payee_rows_only_for_outputs_that_use_them():
+    out=_run_adapter_ui(r"""
+const single={effective_settings:{},scheme:{settings:{}}};
+const byClaimant={effective_settings:{'print.payee_mode':'by_claimant'},scheme:{settings:{}}};
+const sel=(definition,output,binding='s:r')=>({definition,output,binding});
+const note={id:'note',type:'docx',payee_mode:'single'},cover={id:'cover',type:'docx',payee_mode:'none'},sheet={id:'sheet',type:'xlsx',payee_mode:'none'};
+const pdf={id:'pdf',type:'pdf_bundle',payee_mode:'none'},generic={id:'generic_overview',type:'xlsx',payee_mode:'none'};
+const state=(items)=>A.exportRowState(items);
+console.log(JSON.stringify({
+  nothing:state([]),
+  word:state([sel(single,note)]),
+  wordNoPayee:state([sel(single,cover)]),
+  templatedExcel:state([sel(single,sheet)]),
+  pdfOnly:state([sel(single,pdf)]),
+  genericOnly:state([sel(null,generic,'')]),
+  perClaimant:state([sel(byClaimant,note)]),
+  mixed:state([sel(byClaimant,note),sel(single,note)]),
+}));""",{})
+    assert out['nothing']=={'date':False,'payee':False,'byClaimantOnly':False}
+    assert out['word']=={'date':True,'payee':True,'byClaimantOnly':False}
+    assert out['wordNoPayee']['date'] and not out['wordNoPayee']['payee']
+    assert out['templatedExcel']['date'] and not out['templatedExcel']['payee']    # 适配包的 xlsx 模板也可以引用 export.date
+    assert not out['pdfOnly']['date'] and not out['pdfOnly']['payee']
+    assert not out['genericOnly']['date'] and not out['genericOnly']['payee']
+    assert out['perClaimant']=={'date':True,'payee':True,'byClaimantOnly':True}
+    assert out['mixed']['byClaimantOnly'] is False                                  # 只要有统一收款的输出，就要选本次收款对象
+
+
+def test_one_generate_button_checks_first_warns_once_and_never_runs_a_blocked_plan():
+    out=_run_adapter_ui(r"""
+const blocked={ok:false,diagnostics:[{code:'A',severity:'blocked',message:'缺发票'},{code:'A',severity:'blocked',message:'缺发票'},{code:'B',severity:'warning',message:'金额不一致'}]};
+const warn={ok:true,diagnostics:[{code:'B',severity:'warning',message:'金额不一致'}]};
+const clean={ok:true,diagnostics:[]};
+console.log(JSON.stringify({
+  first:A.runStep(null,false),
+  afterWarningShown:A.runStep(warn,true),
+  warnedButPlanBlocked:A.runStep(blocked,true),
+  warnedFlagReset:A.runStep(warn,false),
+  clean:A.afterCheck(clean),warn:A.afterCheck(warn),blocked:A.afterCheck(blocked),failedCall:A.afterCheck(null),
+  split:A.splitDiagnostics(blocked),
+  requiredIsBlocking:A.splitDiagnostics({diagnostics:[{code:'R',severity:'required',message:'x'},{code:'I',severity:'info',message:'y'}]}),
+}));""",{})
+    assert out['first']=='check' and out['afterWarningShown']=='execute'
+    assert out['warnedButPlanBlocked']=='check' and out['warnedFlagReset']=='check'
+    assert (out['clean'],out['warn'],out['blocked'],out['failedCall'])==('execute','warn','stop','stop')
+    assert [d['message'] for d in out['split']['blocking']]==['缺发票']            # 多个文件重复报的同一条问题只留一条
+    assert [d['code'] for d in out['split']['warnings']]==['B']
+    assert [d['code'] for d in out['requiredIsBlocking']['blocking']]==['R'] and [d['code'] for d in out['requiredIsBlocking']['warnings']]==['I']

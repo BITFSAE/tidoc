@@ -261,3 +261,14 @@ def test_update_channel_defaults_to_stable_is_remembered_and_drives_the_check(mo
     again = unwrap(api.auto_check_updates())
     assert again["checked"] is True and channels == ["stable", "beta"]
     assert unwrap(api.set_update_channel("whatever"))["channel"] == "stable"  # 只认 beta，其余都是稳定版
+
+
+def test_switching_back_to_stable_drops_a_downloaded_beta_but_switching_to_beta_does_not(tmp_path):
+    api = Api(tmp_path)
+    calls = []
+    api._core_updater.discard_prerelease = lambda: calls.append('discard')
+
+    unwrap(api.set_update_channel('beta'))
+    assert calls == []
+    unwrap(api.set_update_channel('stable'))
+    assert calls == ['discard']

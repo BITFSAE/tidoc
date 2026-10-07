@@ -17,12 +17,17 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+      # Fail before any build starts if the tag is not 1.2.3 or 1.2.3-beta.1 shaped.
+      - name: Validate release version
+        run: python scripts/release_version.py "${VERSION#v}"
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
@@ -325,13 +330,22 @@ jobs:
           --json-output release/release_notes.json
 
       - name: Build manifest
-        run: >
-          python scripts/build_manifest.py
-          --release-dir release
-          --version "$VERSION"
-          --base-url "https://img.bitfsae.com/tidoc"
-          --out "$MANIFEST_NAME"
-          --notes-file release/release_notes.json
+        run: |
+          set -euo pipefail
+          args=(
+            --release-dir release
+            --version "$VERSION"
+            --base-url "https://img.bitfsae.com/tidoc"
+            --out "$MANIFEST_NAME"
+            --notes-file release/release_notes.json
+          )
+          if [ "$PRERELEASE" = "true" ]; then
+            # print/OCR are rebuilt on every tag and uploaded under a fixed per-version name. A
+            # pre-release must not overwrite a file the stable manifest points at (the sha256 would
+            # no longer match), so build_manifest skips the versions stable already serves.
+            args+=(--stable-manifest "https://img.bitfsae.com/tidoc/manifest.json")
+          fi
+          python scripts/build_manifest.py "${args[@]}"
 
       - name: Install Tencent COSCLI
         run: |
@@ -395,7 +409,10 @@ jobs:
             release/tidoc-print-windows-v*.exe \
             release/tidoc-ocr-macos-v*.zip \
             release/tidoc-ocr-windows-v*.exe; do
-            [ -e "$component_asset" ] && assets+=("$component_asset")
+            # build_manifest leaves out components a pre-release must not republish.
+            if [ -e "$component_asset" ] && grep -qF "$component_asset" release/upload_plan.tsv; then
+              assets+=("$component_asset")
+            fi
           done
           flags=()
           if [ "$PRERELEASE" = "true" ]; then

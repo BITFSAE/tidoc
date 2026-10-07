@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-SAMPLE_DIR = "/Users/poli/invoice2docx/invoices"
+# 真实发票样本是私有数据，不在仓库里；放在别处时用环境变量 TIDOC_SAMPLE_DIR 指过去，缺失的测试会跳过。
+SAMPLE_DIR = os.environ.get("TIDOC_SAMPLE_DIR", "/Users/poli/invoice2docx/invoices")
 
 
 def pytest_configure(config):

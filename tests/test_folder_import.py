@@ -1,5 +1,6 @@
 """文件夹批量导入的分组启发式测试。"""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ import pytest
 from tidoc.services import scan_files, scan_folder
 from tidoc.engine import parse_pdf
 
-SAMPLE_DIR = Path("/Users/poli/invoice2docx/invoices")
+SAMPLE_DIR = Path(os.environ.get("TIDOC_SAMPLE_DIR", "/Users/poli/invoice2docx/invoices"))
 requires_sample_data = pytest.mark.skipif(
     not SAMPLE_DIR.is_dir(),
     reason="本地发票样本目录不存在",

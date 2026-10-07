@@ -94,3 +94,58 @@ def test_api_reports_and_prunes_old_backups():
     assert result['count'] == 2 and result['size'] == 3
     after = api.storage_maintenance_status()['data']
     assert after['backups'] == BACKUP_KEEP and after['old_backups'] == 0
+
+
+def test_backup_closes_its_destination_connection_and_syncs_a_writable_handle(monkeypatch, tmp_path):
+    # Windows 拒绝重命名／删除仍被打开的文件，且对只读句柄做 fsync 会报 EBADF；
+    # 在其他系统上用「连接已关闭」和「fsync 的句柄可写」来保证同样的前提。
+    import os
+    import sqlite3
+
+    from tidoc.db import database
+
+    source = sqlite3.connect(tmp_path / 'source.db')
+    source.execute('create table t(a)')
+    source.execute('insert into t values(1)')
+    source.commit()
+
+    opened = []
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(database.sqlite3, 'connect', lambda *args, **kwargs: opened.append(real_connect(*args, **kwargs)) or opened[-1])
+    synced = []
+
+    def checked_fsync(fd):
+        os.write(fd, b'')          # 只读句柄在这里就会 EBADF，和 Windows 上的 fsync 一样
+        synced.append(fd)
+    monkeypatch.setattr(database.os, 'fsync', checked_fsync)
+
+    target = database.backup_connection(source, tmp_path / 'out' / 'backup.sqlite')
+
+    assert synced and len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute('select 1')                        # 目标连接已关闭
+    assert [p.name for p in (tmp_path / 'out').iterdir()] == ['backup.sqlite']
+    assert real_connect(target).execute('select a from t').fetchone() == (1,)
+    source.close()
+
+
+def test_a_failed_backup_leaves_no_temporary_file_and_no_open_connection(monkeypatch, tmp_path):
+    import sqlite3
+
+    from tidoc.db import database
+
+    source = sqlite3.connect(tmp_path / 'source.db')
+    source.execute('create table t(a)')
+    source.commit()
+    opened = []
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(database.sqlite3, 'connect', lambda *args, **kwargs: opened.append(real_connect(*args, **kwargs)) or opened[-1])
+    monkeypatch.setattr(database.os, 'replace', lambda *_args: (_ for _ in ()).throw(OSError('disk full')))
+
+    with pytest.raises(OSError):
+        database.backup_connection(source, tmp_path / 'out' / 'backup.sqlite')
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute('select 1')
+    assert list((tmp_path / 'out').iterdir()) == []
+    source.close()

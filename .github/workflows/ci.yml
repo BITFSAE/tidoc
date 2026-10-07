@@ -37,3 +37,21 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+      # A pre-release version (0.1.39-beta.1) reaches ISCC through /D. Compile the real installer script
+      # with one and a stub payload, so a version string ISPP cannot take fails here and not at release.
+      - name: Compile the installer script with a pre-release version
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          $stub = Join-Path $env:RUNNER_TEMP "installer-stub"
+          $out = Join-Path $env:RUNNER_TEMP "installer-out"
+          New-Item -ItemType Directory -Force -Path $stub, $out | Out-Null
+          Set-Content -Path (Join-Path $stub "tidoc.exe") -Value "stub"
+          & $iscc "/DMyAppVersion=0.0.1-beta.1" "/DMyAppNumericVersion=0.0.1" "/DSourceDir=$stub" "/DOutputDir=$out" "packaging\windows\tidoc.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+          $installer = Join-Path $out "tidoc-core-windows-v0.0.1-beta.1.exe"
+          if (-not (Test-Path $installer)) { throw "Installer was not written under the expected name: $installer" }
+          $fileVersion = (Get-Item $installer).VersionInfo.FileVersion
+          if ($fileVersion -ne "0.0.1.0") { throw "Expected numeric file version 0.0.1.0, got $fileVersion" }

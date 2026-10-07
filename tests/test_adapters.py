@@ -323,3 +323,45 @@ class AdapterDomainValidationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def _bitfsae_materials(revision):
+    import json as _json
+    roles = _json.loads((ROOT / 'tidoc/builtin_adapters/org.bitfsae.reimbursement/materials.json').read_text('utf-8'))['roles']
+    # 包 1.0.0 与现在只差一处：查验单当时是必需材料。
+    return roles if revision == 'now' else _roles(roles, inspection_pdf=1)
+
+
+def _roles(base_roles, **changes):
+    from copy import deepcopy
+    roles = deepcopy(base_roles)
+    for role in roles:
+        if role['id'] in changes:
+            role['min_count'] = changes[role['id']]
+    return roles
+
+
+def test_rebase_keeps_roles_the_user_added_and_roles_the_user_removed():
+    from tidoc.adapters.service import AdapterService
+
+    old = {'materials': [{'id': 'a', 'min_count': 1}, {'id': 'b', 'min_count': 1}, {'id': 'c', 'min_count': 0}]}
+    new = {'materials': [{'id': 'a', 'min_count': 1}, {'id': 'b', 'min_count': 0}, {'id': 'c', 'min_count': 0}, {'id': 'd', 'min_count': 0}]}
+    mine = [{'id': 'a', 'min_count': 0}, {'id': 'b', 'min_count': 1}, {'id': 'extra', 'min_count': 1}]   # a 改过；c 被删；加了 extra
+    rebased = AdapterService._rebase_overrides(old, new, {'materials': mine, 'settings': {'x': 1}})
+    assert [(r['id'], r['min_count']) for r in rebased['materials']] == [('a', 0), ('b', 0), ('d', 0), ('extra', 1)]
+    # b 与旧默认相同，跟随新默认；c 保持删除；新包新增的 d 加入；其余覆盖原样保留。
+    assert rebased['settings'] == {'x': 1}
+    # 没有任何自定义时不留下材料覆盖，之后继续跟随包。
+    assert 'materials' not in AdapterService._rebase_overrides(old, new, {'materials': old['materials']})
+
+
+def test_rebase_of_the_real_bitfsae_packages_only_follows_roles_the_user_left_alone():
+    from tidoc.adapters.service import AdapterService
+
+    old, new = {'materials': _bitfsae_materials('before')}, {'materials': _bitfsae_materials('now')}
+    minimums = lambda result: {r['id']: r['min_count'] for r in result.get('materials', new['materials'])}
+    # 明确改过的（实物图改为必需）保留，没动过的查验单跟随新默认。
+    assert minimums(AdapterService._rebase_overrides(old, new, {'materials': _roles(old['materials'], physical_image=1)}))['physical_image'] == 1
+    assert minimums(AdapterService._rebase_overrides(old, new, {'materials': _roles(old['materials'], physical_image=1)}))['inspection_pdf'] == 0
+    # 局限：保存过材料要求、且查验单仍是旧默认「必需」的覆盖，和「没动过」无法区分，也跟随新默认。
+    assert minimums(AdapterService._rebase_overrides(old, new, {'materials': _roles(old['materials'], inspection_pdf=1)}))['inspection_pdf'] == 0

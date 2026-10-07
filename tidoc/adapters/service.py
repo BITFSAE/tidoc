@@ -352,39 +352,54 @@ class AdapterService:
         """软件升级带来新版内置包后，沿用内置包的本地方案也采用新版本。
 
         用户在本地改过的内容（设置、抬头、材料要求等）保留，没改过的部分采用新的包默认值。
-        只改方案的当前修订；已有条目固定在创建时的修订上，不受影响。"""
+        只改方案的当前修订；已有条目固定在创建时的修订上，不受影响；旧修订留在历史版本里可以回退。
+
+        「改过」以和旧包默认值不同为准：保存过的覆盖里与旧默认相同的材料要求，无法和「用户明确选了
+        同一个值」区分，会跟随新默认。"""
         def version(value):
-            return tuple(int(part) for part in re.findall(r'\d+',str(value)))
+            parts=[int(part) for part in re.findall(r'\d+',str(value))]
+            while parts and parts[-1]==0:
+                parts.pop()
+            return tuple(parts)
         for scheme in self.packages.list_schemes(include_disabled=True):
             package=builtin.get(scheme['package_id'])
             if package is None:
                 continue
-            old=self.packages.get_package(self.packages.revision_record(scheme['current_revision_id'])['content_hash'])
-            if not old or old['source']!='builtin':
-                continue
-            if version(old['package_version'])>=version(package.definition['manifest']['package_version']):
-                continue
-            overrides=self._rebase_overrides(old['definition'],package.definition,scheme['overrides'])
             try:
+                old=self.packages.get_package(self.packages.revision_record(scheme['current_revision_id'])['content_hash'])
+                if not old or old['source']!='builtin':
+                    continue
+                if version(old['package_version'])>=version(package.definition['manifest']['package_version']):
+                    continue
+                overrides=self._rebase_overrides(old['definition'],package.definition,scheme['overrides'])
                 definition=self._resolve(package.definition,overrides)
                 revision=self.packages.store_revision(definition,package.content_hash,commit=False)
-            except ValueError:
-                # 本地覆盖和新版包对不上时保留这个方案的旧修订，用户仍可在方案页手动处理；
-                # 不能因为一个方案升级失败就让软件启动不了。
+            except (ValueError,KeyError,TypeError,AttributeError):
+                # 本地覆盖和新版包对不上（或覆盖数据本身残缺）时保留这个方案的旧修订，用户仍可在方案页
+                # 手动处理；不能因为一个方案升级失败就让软件启动不了。
                 continue
             self.packages.set_current_revision(scheme['id'],revision,overrides,commit=False)
 
     @staticmethod
     def _rebase_overrides(old_base,new_base,overrides):
-        """材料要求按整张表保存；只保留用户真正改过的角色，其余角色跟随新版包的默认值。"""
+        """材料要求按整张表保存；只保留用户真正改过的角色，其余角色跟随新版包的默认值。
+
+        用户删掉的角色保持删除，用户自己加的角色保留，新版包新增的角色加入。"""
         if 'materials' not in overrides:
             return overrides
         before={role['id']:role for role in old_base.get('materials',[])}
         mine={role['id']:role for role in overrides['materials']}
-        rebased=[mine[role['id']] if role['id'] in mine and mine[role['id']]!=before.get(role['id']) else role
-                 for role in new_base.get('materials',[])]
+        latest=new_base.get('materials',[])
+        rebased=[]
+        for role in latest:
+            role_id=role['id']
+            if role_id in before and role_id not in mine:
+                continue
+            rebased.append(mine[role_id] if role_id in mine and mine[role_id]!=before.get(role_id) else role)
+        known={role['id'] for role in latest}
+        rebased+=[role for role in overrides['materials'] if role['id'] not in before and role['id'] not in known]
         result={key:value for key,value in overrides.items() if key!='materials'}
-        if rebased!=new_base.get('materials',[]):
+        if rebased!=latest:
             result['materials']=rebased
         return result
 

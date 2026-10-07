@@ -1,4 +1,4 @@
-# OCR 识别组件依赖（可选安装，见 DESIGN 第 10 节）
+# OCR recognition component dependencies (optional install, see DESIGN section 10)
 # Install this file for development; release builds package these separately.
 alibabacloud-ocr-api20210707>=3.1.0
 alibabacloud-credentials>=0.3.2

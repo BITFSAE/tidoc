@@ -794,3 +794,19 @@ def test_a_builtin_scheme_that_cannot_follow_the_new_package_keeps_its_revision_
     restarted = Api(tmp_path / 'data')
     assert _inspection_min_count(restarted, scheme_id)[0] == '1.0.0'
     restarted.db.close()
+
+
+def test_a_scheme_with_damaged_overrides_never_blocks_startup_after_an_upgrade(tmp_path):
+    import json as _json
+    from tidoc.api import Api
+    first = Api(tmp_path / 'data')
+    scheme = next(s for s in first.adapters.list_schemes() if s['package_id'] == 'org.bitfsae.reimbursement')
+    first.adapters.complete_adapter_setup(scheme['id'])
+    scheme_id = _simulate_bitfsae_package_1_0_0(first)
+    # 材料覆盖里的角色缺 id：合并时会抛 KeyError，而不是 ValueError。
+    first.db.conn.execute('UPDATE schemes SET overrides_json=? WHERE id=?', (_json.dumps({'materials': [{'label': 'broken'}]}), scheme_id))
+    first.db.conn.commit()
+    first.db.close()
+    restarted = Api(tmp_path / 'data')
+    assert _inspection_min_count(restarted, scheme_id)[0] == '1.0.0'
+    restarted.db.close()

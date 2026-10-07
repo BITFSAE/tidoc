@@ -11,7 +11,6 @@ from decimal import Decimal
 from pathlib import Path
 
 from .proc import hidden_window_options
-
 from .updater import COMPONENT_PRINT, installed_component_info
 
 _CAPABILITIES_CACHE = {}

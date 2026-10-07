@@ -716,3 +716,85 @@ def test_check_updates_offers_a_beta_only_on_the_beta_channel(monkeypatch, tmp_p
     core = lambda status: next(item for item in status['updates'] if item['component'] == 'core')
     assert stable['channel'] == 'stable' and not core(stable)['available']
     assert beta['channel'] == 'beta' and core(beta)['available'] and core(beta)['latest_version'] == '99.0.0-beta.1'
+
+
+def test_a_beta_manifest_read_failing_midway_falls_back_to_the_stable_manifest(monkeypatch):
+    import http.client
+    import socket
+
+    from tidoc.services import updater
+
+    stable = json.dumps(_core_manifest('0.1.39')).encode()
+    for failure in (socket.timeout('read timed out'), ConnectionResetError('reset'), http.client.IncompleteRead(b'{')):
+        def read(url, timeout, _failure=failure):
+            if url == updater.BETA_MANIFEST_URL:
+                raise _failure
+            return stable
+        monkeypatch.setattr(updater, '_read_url', read)
+        assert updater.load_update_manifest('beta')['components']['core']['latest'] == '0.1.39', failure
+    # 两份清单都读不到时才报错，而且仍是统一的 RuntimeError。
+    monkeypatch.setattr(updater, '_read_url', lambda url, timeout: (_ for _ in ()).throw(TimeoutError('slow')))
+    with pytest.raises(RuntimeError, match='无法读取更新清单'):
+        updater.load_update_manifest('beta')
+
+
+def test_version_comparison_survives_unicode_digits_and_malformed_suffixes():
+    assert version_gt('0.1.39-beta.²', '0.1.39-beta.1')      # 非 ASCII 数字按字母标识符比较，不抛异常
+    assert not version_gt('0.1.39-beta.²', '0.1.39')
+    assert not version_gt('1.0.0-', '1.0.0')
+
+
+def _ready_core_update(tmp_path, version):
+    root = tmp_path / 'updates' / 'core' / 'windows' / version
+    (root / 'staged' / 'tidoc').mkdir(parents=True)
+    archive = root / f'tidoc-core-windows-v{version}-update.zip'
+    archive.write_bytes(b'zip')
+    marker = tmp_path / 'updates' / 'core' / 'windows' / 'current.json'
+    marker.write_text(json.dumps({
+        'component': 'core', 'version': version, 'platform': 'windows', 'file_path': str(archive),
+        'stage_dir': str(root / 'staged' / 'tidoc'), 'package_kind': 'silent', 'size': 3,
+    }), 'utf-8')
+    return root, marker
+
+
+def test_leaving_the_beta_channel_discards_a_downloaded_beta_but_keeps_a_stable_download(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    monkeypatch.setattr(updater, 'current_platform', lambda: 'windows')
+    monkeypatch.setattr(updater, 'silent_core_update_supported', lambda _asset=None: True)
+    monkeypatch.setattr(updater, 'CORE_VERSION', '0.1.38')
+
+    root, marker = _ready_core_update(tmp_path, '0.1.39-beta.1')
+    manager = CoreUpdateManager(tmp_path / 'updates')
+    assert manager.status()['state'] == 'ready'
+    assert manager.discard_prerelease()['state'] == 'idle'
+    assert not marker.exists() and not root.exists()
+    # 重启后也不会再把它当成待安装更新恢复出来。
+    assert CoreUpdateManager(tmp_path / 'updates').status()['state'] == 'idle'
+
+    root, marker = _ready_core_update(tmp_path, '0.1.39')
+    manager = CoreUpdateManager(tmp_path / 'updates')
+    assert manager.discard_prerelease()['state'] == 'ready'
+    assert marker.exists() and root.exists()
+
+
+def test_a_beta_still_downloading_when_the_channel_changes_is_dropped_when_it_finishes(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    archive = tmp_path / 'tidoc-core-windows-v9.9.9-beta.1-update.zip'
+    with zipfile.ZipFile(archive, 'w') as zf:
+        zf.writestr('tidoc/tidoc.exe', b'new-core')
+    asset = {
+        'url': archive.as_uri(), 'filename': archive.name, 'size': archive.stat().st_size, 'root_name': 'tidoc',
+        'sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+    }
+    monkeypatch.setattr(updater, 'current_platform', lambda: 'windows')
+    monkeypatch.setattr(updater, 'silent_core_update_supported', lambda _asset=None: True)
+    manager = CoreUpdateManager(tmp_path / 'updates')
+    manager._set(state='downloading', version='9.9.9-beta.1')
+    manager.discard_prerelease()                       # 用户此时退出了测试版通道
+    manager._download_worker(asset, '9.9.9-beta.1')
+
+    assert manager.status()['state'] == 'idle'
+    assert downloaded_core_update_info(tmp_path / 'updates', 'windows') == {}
+    assert not (tmp_path / 'updates' / 'core' / 'windows' / '9.9.9-beta.1').exists()

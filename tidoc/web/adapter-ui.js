@@ -474,8 +474,8 @@ const AdapterUI = (() => {
     return block;
   }
 
-  function openSettings() { return openOnce('scheme-page', () => withLoading('正在打开报账方案…', openSchemePage)); }
-  async function openSchemePage() {
+  function openSettings() { return openOnce('scheme-page', openSchemePage, '报账方案'); }
+  async function openSchemePage(pending) {
     await refresh();
     const body = el('div');
     const note = el('span', 'modal-foot-note');
@@ -677,9 +677,10 @@ const AdapterUI = (() => {
     };
 
     await render();
+    if (!pending.mask.isConnected) return;
     // 关闭按钮、点遮罩与 Esc 都由 modal() 统一走 guard：有未保存的更改时先确认。
     dialog = modal({
-      title: '报账方案', wide: true, body, key: 'scheme-page', guard: confirmLeave,
+      title: '报账方案', wide: true, body, key: 'scheme-page', guard: confirmLeave, replace: pending.mask,
       footer: [resetAll, note, mkBtn('关闭', 'ghost', requestClose), save],
     });
     sync();
@@ -710,8 +711,8 @@ const AdapterUI = (() => {
       m=modal({title:'报账信息',body:form.root,footer:[mkBtn('取消','ghost',()=>m.close()),save]});
     }catch(e){toast(e.message,'err');}
   }
-  function payees(schemeId,onClose) { return openOnce('payees', () => withLoading('正在打开收款信息…', () => payeesPage(schemeId,onClose))); }
-  async function payeesPage(schemeId=current?.id,onClose) {
+  function payees(schemeId,onClose) { return openOnce('payees', (pending) => payeesPage(schemeId,onClose,pending), '个人收款信息'); }
+  async function payeesPage(schemeId=current?.id,onClose,pending) {
     let m; const body=el('div','settings-shell payees-dialog');
     const render=async()=>{
       const [people,scheme,claimants]=await Promise.all([Api.listPayees(),Api.schemeDetails(schemeId),Api.listProfiles()]);
@@ -755,7 +756,7 @@ const AdapterUI = (() => {
       body.append(pick);
       if(m)enhanceNativeSelects(body);
     };
-    await render();m=modal({title:'个人收款信息',key:'payees',body,onClose,footer:[mkBtn('新建收款对象','ghost',()=>editPayee(null,schemeId,render)),mkBtn('完成','primary',()=>m.close())]});
+    await render();if(!pending.mask.isConnected)return;m=modal({title:'个人收款信息',key:'payees',replace:pending.mask,body,onClose,footer:[mkBtn('新建收款对象','ghost',()=>editPayee(null,schemeId,render)),mkBtn('完成','primary',()=>m.close())]});
   }
   async function editPayee(person,schemeId,onSaved) {
     const scheme=await Api.schemeDetails(schemeId);
@@ -1174,8 +1175,8 @@ const AdapterUI = (() => {
       button.ondblclick=event=>{event.preventDefault();event.stopPropagation();};
     }
   }
-  function jobs(focusId=null) { return openOnce('export-jobs', () => withLoading('正在打开导出记录…', () => jobsPage(focusId))); }
-  async function jobsPage(focusId=null) {
+  function jobs(focusId=null) { return openOnce('export-jobs', (pending) => jobsPage(focusId,pending), '导出记录'); }
+  async function jobsPage(focusId=null,pending) {
     const records = await Api.listExportJobs();
     const body = el('div', 'settings-shell');
     let m;
@@ -1244,7 +1245,8 @@ const AdapterUI = (() => {
       }
       body.append(card);
     }
-    m = modal({ title: '导出记录', key: 'export-jobs', wide: true, body, footer: [mkBtn('完成', 'primary', () => m.close())] });
+    if (!pending.mask.isConnected) return;
+    m = modal({ title: '导出记录', key: 'export-jobs', replace: pending.mask, wide: true, body, footer: [mkBtn('完成', 'primary', () => m.close())] });
     $('.is-focus', body)?.scrollIntoView({ block: 'nearest' });
   }
   return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,usesPayee,payeeModes,settingApplies,defaultSelected,exportRowState,runStep,afterCheck,splitDiagnostics,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs};

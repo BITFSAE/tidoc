@@ -1117,12 +1117,11 @@ input[type="date"] { color: var(--ink-soft); }
 .btn.icon-only.has-update .update-notice-dot { display: block; }
 
 /* ---------------------------------------------------------------- modal */
-.modal-mask { position: fixed; inset: 0; background: var(--modal-scrim); backdrop-filter: blur(3px); display: grid; place-items: center; z-index: 50; animation: fade .15s ease; }
+.modal-mask { position: fixed; inset: 0; background: var(--modal-scrim); display: grid; place-items: center; z-index: 50; }
 .modal {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg);
   width: min(680px, 92vw); max-height: 88vh; overflow: hidden;
   display: flex; flex-direction: column; box-shadow: var(--shadow-lg);
-  animation: pop .18s ease;
 }
 .modal:focus { outline: none; }
 .modal-mask.no-anim, .modal-mask.no-anim .modal { animation: none; }
@@ -2133,3 +2132,5 @@ details.settings-block { padding-top:0; padding-bottom:0; }
   .job-card .settings-row-copy { flex-basis:100%; }
   .export-dialog .settings-row select, .export-dialog .settings-row input[type="date"] { min-width: 0; width: 100%; max-width: none; }
 }
+
+.settings-row[hidden], .settings-row-actions > button[hidden] { display: none; }

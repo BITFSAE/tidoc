@@ -547,6 +547,25 @@ class Api:
         }
 
     @_guard
+    def settings_data(self):
+        """Read local settings in one bridge call, without scanning directories."""
+        from .db.paths import default_data_root
+        paths = self._paths_dict()
+        paths["is_default"] = self.data_root.root == default_data_root()
+        defaults = {
+            "tidoc.multiClaimantMode": "",
+            AUTO_UPDATE_PREF_KEY: "1",
+            SHOW_CREATED_AT_PREF_KEY: "0",
+        }
+        return {
+            "paths": paths,
+            "app_info": self.app_info()["data"],
+            "preferences": {key: self._preference_value(key, default) for key, default in defaults.items()},
+            "verification": self._invoice_verification_preferences(),
+            "channel": self._update_channel(),
+        }
+
+    @_guard
     def mark_frontend_ready(self):
         """Signal a replacement helper only after the main interface is usable."""
         if self._update_health_path is None:
@@ -2296,20 +2315,25 @@ class Api:
         return self.adapters.revalidate_templates(component_fingerprint or '')
 
     # ------------------------------------------------------------ 临时文件维护
-    @_guard
     def storage_maintenance_status(self):
+        """Scan a captured data root without holding the database/API lock."""
         from .db.backups import BACKUP_KEEP, list_backups
-        files = self._cache_cleanup_candidates()
-        backups = list_backups(self.data_root.backups_dir)
-        older = backups[BACKUP_KEEP:]
-        return {
-            "files": len(files),
-            "size": sum(path.stat().st_size for path in files if path.exists()),
-            "exports_size": _directory_size(self.data_root.exports_dir),
-            "backups": len(backups),
-            "old_backups": len(older),
-            "old_backups_size": sum(item["size"] for item in older),
-        }
+        try:
+            with self._api_lock:
+                root = self.data_root
+            files = self._cache_cleanup_candidates(root)
+            backups = list_backups(root.backups_dir)
+            older = backups[BACKUP_KEEP:]
+            return {"ok": True, "data": {
+                "files": len(files),
+                "size": sum(_file_size(path) for path in files),
+                "exports_size": _directory_size(root.exports_dir),
+                "backups": len(backups),
+                "old_backups": len(older),
+                "old_backups_size": sum(item["size"] for item in older),
+            }}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     @_guard
     def cleanup_old_backups(self):
@@ -2643,21 +2667,22 @@ class Api:
         normalized["current_core_version"] = __version__
         return normalized
 
-    def _cache_cleanup_candidates(self) -> list[Path]:
+    def _cache_cleanup_candidates(self, root=None) -> list[Path]:
         """只返回可重建的临时文件，保留待安装核心包和所有业务数据。"""
         from .services.updater import downloaded_core_update_info
 
-        pending = downloaded_core_update_info(self.data_root.updates_dir)
+        root = root or self.data_root
+        pending = downloaded_core_update_info(root.updates_dir)
         pending_path = Path(pending.get("file_path") or "") if pending else None
         pending_resolved = pending_path.resolve() if pending_path and pending_path.exists() else None
         stage_value = str(pending.get("stage_dir") or "") if pending else ""
         stage_path = Path(stage_value) if stage_value else None
         stage_resolved = stage_path.resolve() if stage_path and stage_path.exists() else None
         files: list[Path] = []
-        for path in self.data_root.dropped_dir.rglob("*"):
+        for path in root.dropped_dir.rglob("*"):
             if path.is_file():
                 files.append(path)
-        for path in self.data_root.updates_dir.rglob("*"):
+        for path in root.updates_dir.rglob("*"):
             if not path.is_file() or path.name == "current.json":
                 continue
             if pending_resolved and path.resolve() == pending_resolved:
@@ -2699,6 +2724,13 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def _directory_size(folder: Path) -> int:

@@ -122,8 +122,7 @@
   //     照抄就会把假高度写死进触发器，再反过来撑高整行（自我强化的反馈环）。
   //   - 高度本来就该由上下文 CSS 决定：工具条 chip 30px、高级筛选 34px、设置行 36px。
   // 颜色同理，全部走 CSS 语义变量，避免留下一份过期的主题快照。
-  function measureTrigger(record) {
-    const styles = getComputedStyle(record.select);
+  function measureTrigger(record, styles = getComputedStyle(record.select)) {
     const isBlock = record.display !== 'inline-block' && record.display !== 'inline-flex';
     record.trigger.style.width = isBlock ? '' : 'auto';
     record.trigger.style.maxWidth = '';
@@ -132,10 +131,10 @@
     if (customMax) record.trigger.style.maxWidth = styles.maxWidth;
   }
 
-  function enhance(select) {
+  function enhance(select, styles) {
     if (!select || select.tagName !== 'SELECT' || select.multiple) return null;
     if (bySelect.get(select) || select.closest('.select-field')) return null;  // 已经接管过
-    const display = getComputedStyle(select).display;
+    const display = styles.display;
     if (display === 'none') return null;  // 用 display:none 藏起来的下拉保持原生
 
     const field = document.createElement('span');
@@ -194,8 +193,7 @@
     records.push(record);
     bySelect.set(select, record);
     syncRecord(record);
-    measureTrigger(record);
-    requestAnimationFrame(() => measureTrigger(record));
+    measureTrigger(record, styles);
     return record;
   }
 
@@ -430,8 +428,13 @@
     const list = [];
     if (scope.tagName === 'SELECT') list.push(scope);
     if (scope.querySelectorAll) list.push(...scope.querySelectorAll('select'));
-    return list.filter((node) => !bySelect.get(node) && node.tagName === 'SELECT' && !node.multiple)
-      .map((node) => enhance(node)).filter(Boolean);
+    // 先读取所有样式，再统一包装，避免每个 select 的 DOM 写入后立即强制重排。
+    const pending = list.filter((node) => !bySelect.get(node) && node.tagName === 'SELECT' && !node.multiple)
+      .map((node) => {
+        const styles = getComputedStyle(node);
+        return { node, styles: { display: styles.display, maxWidth: styles.maxWidth } };
+      });
+    return pending.map(({ node, styles }) => enhance(node, styles)).filter(Boolean);
   }
 
   // 页面里既有代码会直接 sel.value = x（换抬头、回填偏好），而给 select.value 赋值

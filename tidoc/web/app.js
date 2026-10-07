@@ -2883,7 +2883,6 @@ function clearAllFilters() {
 // ------------------------------------------------------------------ 通用弹层
 let modalSequence = 0;
 const MODAL_FOCUSABLE = 'button, [href], input, select, textarea, summary, [tabindex]';
-const openingModals = new Set();
 
 const isFocusable = (node) => !node.disabled && node.tabIndex >= 0
   && !node.closest('[hidden], [inert]') && node.getClientRects().length > 0;
@@ -2893,11 +2892,12 @@ const findModalByKey = (key) => $(`#modalRoot [data-modal-key="${key}"]`);
 function syncModalLayers() {
   const masks = [...$('#modalRoot').children];
   masks.forEach((mask, index) => {
-    mask.inert = index < masks.length - 1;
+    const inert = index < masks.length - 1;
+    if (mask.inert !== inert) mask.inert = inert;
     mask.style.zIndex = String(51 + index);
   });
   const app = $('#app');
-  if (app) app.inert = masks.length > 0;
+  if (app && app.inert !== (masks.length > 0)) app.inert = masks.length > 0;
 }
 
 /*
@@ -2958,14 +2958,17 @@ function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose
     closed = true;
     const root = $('#modalRoot');
     const wasTop = root.lastChild === mask;
-    if (onClose) onClose();
     mask.remove();
+    window.TidocSelect?.prune();
     syncModalLayers();
     const top = root.lastChild;
     if (wasTop) {
       if (opener?.isConnected) opener.focus({ preventScroll: true });
-      if (top && !transient) top._onResume?.();
+      if (top && !transient) setTimeout(() => {
+        if (top.isConnected) top._onResume?.(mask);
+      }, 0);
     }
+    if (onClose) onClose();
     if (!top) setTimeout(() => handleSecondaryLaunch(), 0);
   };
   const requestClose = async () => {
@@ -3023,12 +3026,13 @@ function confirmDialog({ title, message, confirmText = '确定', cancelText = '�
 }
 
 // 同一类弹窗在加载期间或已打开时不再重复打开（连点按钮、快捷键重复触发）。
-async function openOnce(key, open) {
+async function openOnce(key, open, title = '正在打开…') {
   const existing = findModalByKey(key);
   if (existing) { $('.modal', existing)?.focus({ preventScroll: true }); return undefined; }
-  if (openingModals.has(key)) return undefined;
-  openingModals.add(key);
-  try { return await open(); } finally { openingModals.delete(key); }
+  const body = el('p', 'hint', '正在读取，请稍候…');
+  body.setAttribute('role', 'status');
+  const pending = modal({ title, key, body, footer: [mkBtn('关闭', 'ghost', () => pending.close())] });
+  try { return await open(pending); } finally { pending.close(); }
 }
 
 // 加载超过一瞬间才给提示，避免快速打开时闪一下；后端被长任务占用时用户能看到正在处理。
@@ -3138,46 +3142,29 @@ function editProfileFlow(p, onDone) {
   });
 }
 
-// 设置页：同一时间只开一个；子页面叠在它上面，关闭后设置页按最新数据就地刷新。
-let settingsLoading = false;
-async function openSettings(options = {}) {
-  if (!options.replace) {
-    const existing = findModalByKey('settings');
-    if (existing) { $('.modal', existing)?.focus({ preventScroll: true }); return; }
-    if (settingsLoading) return;
-  }
-  settingsLoading = true;
-  try {
-    if (options.replace) await buildSettings(options);
-    else await withLoading('正在打开设置…', () => buildSettings(options));
-  } finally {
-    settingsLoading = false;
-  }
+// 设置先显示可关闭的窗口；数据加载完成后在原层级替换，关闭后的响应不会重新打开它。
+function openSettings() {
+  return openOnce('settings', (pending) => buildSettings({ replace: pending }), '设置');
 }
 
 async function buildSettings(options = {}) {
   let paths, printStatus, appInfo, multiMode;
-  let autoUpdateMode, betaChannel, maintenance, verificationPrefs, ocrStatus, showCreatedAtMode;
+  let autoUpdateMode, betaChannel, verificationPrefs, ocrStatus, showCreatedAtMode;
+  let maintenance = {};
   const themeMode = State.themeMode;
   try {
-    paths = await Api.dataRoot();
-    printStatus = await Api.printComponentStatus();
-    ocrStatus = await Api.ocrComponentStatus();
-    appInfo = await Api.appInfo();
-    maintenance = await Api.storageMaintenanceStatus();
-    const prefValues = await Promise.all([
-      Api.appPreference(MULTI_CLAIMANT_KEY, State.multiClaimantMode ? '1' : '0'),
-      Api.appPreference(AUTO_UPDATE_KEY, '1'),
-      Api.invoiceVerificationPreferences(),
-      Api.appPreference(SHOW_CREATED_AT_KEY, '0'),
-      Api.updateChannel(),
+    const [data, print, ocr] = await Promise.all([
+      Api.settingsData(), Api.printComponentStatus(), Api.ocrComponentStatus(),
     ]);
-    multiMode = prefValues[0] === '1';
-    autoUpdateMode = prefValues[1] === '1';
-    verificationPrefs = prefValues[2];
-    showCreatedAtMode = prefValues[3] === '1';
-    betaChannel = prefValues[4]?.channel === 'beta';
-  } catch (e) { toast(e.message, 'err'); return; }
+    if (!options.replace?.mask.isConnected) return;
+    ({ paths, app_info: appInfo, verification: verificationPrefs } = data);
+    printStatus = print;
+    ocrStatus = ocr;
+    multiMode = (data.preferences[MULTI_CLAIMANT_KEY] || (State.multiClaimantMode ? '1' : '0')) === '1';
+    autoUpdateMode = data.preferences[AUTO_UPDATE_KEY] === '1';
+    showCreatedAtMode = data.preferences[SHOW_CREATED_AT_KEY] === '1';
+    betaChannel = data.channel === 'beta';
+  } catch (e) { if (options.replace?.mask.isConnected) toast(e.message, 'err'); return; }
   const body = el('div');
 
   const profileCount = State.profiles.length;
@@ -3198,17 +3185,17 @@ async function buildSettings(options = {}) {
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>报账方案</b>
-            <span>当前使用「${esc(State.scheme?.name || '未选择')}」</span>
+            <span id="setSchemeSummary">当前使用「${esc(State.scheme?.name || '未选择')}」</span>
           </div>
           <button class="btn small" id="setAdapters">管理</button>
         </div>
-        ${AdapterUI.usesPayee() ? `<div class="settings-row">
+        <div class="settings-row" id="setPayeeRow" ${AdapterUI.usesPayee() ? '' : 'hidden'}>
           <div class="settings-row-copy">
             <b>个人收款信息</b>
             <span>只保存在本机</span>
           </div>
           <button class="btn small" id="setPayees">填写</button>
-        </div>` : ''}
+        </div>
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>导出记录</b>
@@ -3222,7 +3209,7 @@ async function buildSettings(options = {}) {
         <div class="settings-row" id="setProfiles">
           <div class="settings-row-copy">
             <b>报账人</b>
-            <span>${profileCount ? `${profileCount} 个${defaultProfile ? ' · 默认 ' + esc(defaultProfile.name) : ''}` : '0 个'}</span>
+            <span id="setProfileSummary">${profileCount ? `${profileCount} 个${defaultProfile ? ' · 默认 ' + esc(defaultProfile.name) : ''}` : '0 个'}</span>
           </div>
           <button class="btn small" id="setProfilesManage">管理</button>
         </div>
@@ -3313,9 +3300,9 @@ async function buildSettings(options = {}) {
         </div>
         <div class="settings-row-actions">
           <button class="btn small ghost" id="setOpenData">打开文件夹</button>
-          <button class="btn small ghost" id="setOpenExports">打开导出目录 · ${fmtBytes(maintenance.exports_size || 0)}</button>
-          <button class="btn small ghost" id="setCleanup" ${maintenance.files ? '' : 'disabled'}>清理临时文件${maintenance.size ? ` · ${fmtBytes(maintenance.size)}` : ''}</button>
-          ${maintenance.old_backups ? `<button class="btn small ghost" id="setCleanupBackups">清理旧备份 · ${maintenance.old_backups} 份 · ${fmtBytes(maintenance.old_backups_size)}</button>` : ''}
+          <button class="btn small ghost" id="setOpenExports">打开导出目录</button>
+          <button class="btn small ghost" id="setCleanup" disabled>正在统计临时文件…</button>
+          <button class="btn small ghost" id="setCleanupBackups" hidden>清理旧备份</button>
         </div>
         <details class="settings-advanced">
           <summary>高级数据维护</summary>
@@ -3572,7 +3559,7 @@ async function buildSettings(options = {}) {
       ev.target.disabled = false;
     }
   };
-  // 子页面叠在设置页上面；关闭后设置页重新成为最上层，并按最新数据刷新（见文末 _onResume）。
+  // 子页面叠在设置页上面；关闭后只刷新相关摘要，保留设置表单（见文末 _onResume）。
   body.querySelector('#setAdapters').onclick = () => AdapterUI.openSettings();
   const payeesButton = body.querySelector('#setPayees');
   if (payeesButton) payeesButton.onclick = () => AdapterUI.payees();
@@ -3686,12 +3673,50 @@ async function buildSettings(options = {}) {
     replace: previous?.mask,
     footer: [mkBtn('关闭', 'ghost', () => m.close())],
   });
-  let refreshing = false;
-  m.mask._onResume = async () => {
-    if (refreshing) return;
-    refreshing = true;
-    try { await openSettings({ replace: m }); } finally { refreshing = false; }
+  m.mask._onResume = async (closed) => {
+    if (closed.dataset.modalKey === 'scheme-page') {
+      body.querySelector('#setSchemeSummary').textContent = `当前使用「${State.scheme?.name || '未选择'}」`;
+      body.querySelector('#setPayeeRow').hidden = !AdapterUI.usesPayee();
+      const title = body.querySelector('#setDefaultTitle'), value = title.value;
+      title.innerHTML = '<option value="">全部</option>' + (State.titleOptions.length ? State.titleOptions : configuredTitleNames())
+        .map((name) => `<option value="${esc(name)}">${esc(TITLE_SHORT[name] || name)}</option>`).join('');
+      title.value = value;
+    }
+    if (closed.dataset.modalKey === 'profiles') {
+      const profile = State.profiles.find((item) => item.is_default);
+      body.querySelector('#setProfileSummary').textContent = `${State.profiles.length} 个${profile ? ' · 默认 ' + profile.name : ''}`;
+      const multi = body.querySelector('#setMultiClaimant');
+      multi.checked = State.multiClaimantMode;
+      multi.nextElementSibling.textContent = multi.checked ? '已开启' : '已关闭';
+    }
+    if (closed.dataset.modalKey === 'update') {
+      try {
+        const [print, ocr] = await Promise.all([Api.printComponentStatus(), Api.ocrComponentStatus()]);
+        if (!m.mask.isConnected) return;
+        const badge = (status) => `<span class="${status.available ? 'settings-ok' : 'settings-warn'}">${status.available ? '已安装' : '未安装'}</span>`;
+        const copy = body.querySelector('#setComponentsUpdate .settings-row-copy');
+        copy.querySelector('b').innerHTML = '软件与组件' + ((State.updateStatus?.updates || []).some((item) => item.available) ? ' <span class="settings-warn">有可用更新</span>' : '');
+        copy.querySelector(':scope > span').innerHTML = `tidoc v${esc(appInfo.version)} · 打印导出组件 ${badge(print)} · OCR 识别组件 ${badge(ocr)}`;
+      } catch (e) { if (m.mask.isConnected) toast(e.message, 'err'); }
+    }
   };
+  // 文件统计晚于窗口显示，结果只更新维护按钮，不重建设置表单。
+  setTimeout(async () => {
+    if (!m.mask.isConnected) return;
+    try {
+      const result = await Api.storageMaintenanceStatus();
+      if (!m.mask.isConnected) return;
+      maintenance = result;
+      body.querySelector('#setOpenExports').textContent = `打开导出目录 · ${fmtBytes(result.exports_size || 0)}`;
+      const cleanup = body.querySelector('#setCleanup');
+      cleanup.disabled = !result.files;
+      cleanup.textContent = '清理临时文件' + (result.size ? ` · ${fmtBytes(result.size)}` : '');
+      cleanupBackups.hidden = !result.old_backups;
+      cleanupBackups.textContent = `清理旧备份 · ${result.old_backups} 份 · ${fmtBytes(result.old_backups_size)}`;
+    } catch (e) {
+      if (m.mask.isConnected) body.querySelector('#setCleanup').textContent = '临时文件统计失败';
+    }
+  }, 40);
   if (previous) {
     // 刷新时保留滚动位置、已展开的折叠区和尚未保存的密钥输入。
     const opened = [...previous.body.querySelectorAll('details')];
@@ -3721,9 +3746,9 @@ const UPDATE_COMPONENTS = {
   },
 };
 
-function openUpdateDialog() { return openOnce('update', openUpdateDialogImpl); }
+function openUpdateDialog() { return openOnce('update', openUpdateDialogImpl, '软件更新'); }
 
-async function openUpdateDialogImpl() {
+async function openUpdateDialogImpl(pending) {
   const body = el('div', 'update-shell', `
     <div class="update-loading">
       <div class="update-progress"><span></span></div>
@@ -3731,13 +3756,16 @@ async function openUpdateDialogImpl() {
     </div>`);
   let appInfo = { version: '', releases: 'https://github.com/totok22/tidoc/releases/latest' };
   try { appInfo = await Api.appInfo(); } catch (e) {}
+  if (!pending.mask.isConnected) return;
   const m = modal({
+    replace: pending.mask,
     title: '软件更新',
     key: 'update',
     body,
     wide: true,
     footer: [mkBtn('关闭', 'ghost', () => m.close())],
   });
+  pending.close();
   const setBusy = (label) => {
     body.querySelectorAll('button').forEach((btn) => { btn.disabled = true; });
     const op = body.querySelector('#updateOperation');

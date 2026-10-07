@@ -97,6 +97,7 @@ const Api = (() => {
     invoiceVerificationPreferences: () => call('invoice_verification_preferences'),
     setInvoiceVerificationPreferences: (options) => call('set_invoice_verification_preferences', options || {}),
     appInfo: () => call('app_info'),
+    settingsData: () => call('settings_data'),
     startupUpdateState: () => call('startup_update_state'),
     markFrontendReady: () => call('mark_frontend_ready'),
 

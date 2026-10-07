@@ -53,5 +53,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
           $installer = Join-Path $out "tidoc-core-windows-v0.0.1-beta.1.exe"
           if (-not (Test-Path $installer)) { throw "Installer was not written under the expected name: $installer" }
-          $fileVersion = (Get-Item $installer).VersionInfo.FileVersion
+          $versionInfo = (Get-Item $installer).VersionInfo
+          $fileVersion = "{0}.{1}.{2}.{3}" -f $versionInfo.FileMajorPart, $versionInfo.FileMinorPart, $versionInfo.FileBuildPart, $versionInfo.FilePrivatePart
           if ($fileVersion -ne "0.0.1.0") { throw "Expected numeric file version 0.0.1.0, got $fileVersion" }

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-10-07 · v0.1.39-beta.2
 
 ### Changed
 

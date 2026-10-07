@@ -13,7 +13,6 @@ const State = {
   selected: new Set(),
   lastSelectedId: null,
   focusedEntryId: null,
-  suppressListAnimation: false,
   density: 'comfortable',
   themeMode: document.documentElement.dataset.themeMode || 'system',
   groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
@@ -39,6 +38,14 @@ const State = {
   showCreatedAt: false,
   ocrStatus: null,      // 阿里云 OCR：组件安装 + 密钥配置状态（本地检查，不联网）
 };
+
+// 只索引当前列表的节点；重绘时清空，单卡刷新时替换。
+const entryCardNodes = new Map();
+const entryCardOrder = [];
+const entryCardPositions = new Map();
+const entryDataPositions = new Map();
+const entrySelectionGroups = new Map();
+let focusedEntryCard = null;
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -395,12 +402,23 @@ function setupFastTooltips() {
   }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['title'] });
 
   let active = null;
-  let pointerY = null;   // 最近一次鼠标的纵向位置，供高而窄的目标定位提示
+  let pendingTarget = null;
+  let showTimer = null;
+  let hoverBlockedUntil = 0;
+  const cancelPending = () => {
+    if (showTimer !== null) clearTimeout(showTimer);
+    showTimer = null;
+    pendingTarget = null;
+  };
   const hide = () => {
+    cancelPending();
+    if (!active) return;
     active = null;
     tooltip.classList.remove('visible');
   };
   const show = (target) => {
+    cancelPending();
+    if (target && target === active) return;
     // 下拉列表展开时，只显示列表内选项的提示；触发器和周围控件的提示会叠在列表上，直接隐藏。
     if (target && document.querySelector('.select-menu:not([hidden])') && !target.closest('.select-menu')) {
       hide();
@@ -424,12 +442,6 @@ function setupFastTooltips() {
     let left = Math.max(8, Math.min(rect.left + rect.width / 2 - tip.width / 2, window.innerWidth - tip.width - 8));
     const below = rect.bottom + 7;
     let top = below + tip.height <= window.innerHeight - 8 ? below : Math.max(8, rect.top - tip.height - 7);
-    if (target.dataset.tooltipSide === 'right') {
-      // 高而窄的目标（卡片色条）：提示贴在右侧、跟着鼠标高度，而不是出现在目标底部很远的地方。
-      left = Math.min(rect.right + 10, window.innerWidth - tip.width - 8);
-      const y = pointerY ?? rect.top + rect.height / 2;
-      top = Math.max(8, Math.min(y - tip.height / 2, window.innerHeight - tip.height - 8));
-    }
     const menu = target.closest('.select-menu');
     if (menu) {
       // 下拉列表里的提示放在列表右侧（放不下就放左侧），垂直对齐到选项，不盖住相邻选项。
@@ -443,21 +455,41 @@ function setupFastTooltips() {
     tooltip.style.top = `${top}px`;
   };
   const tooltipTarget = (node) => node?.closest?.('[data-tooltip], [data-tooltip-overflow]');
+  const hover = (target) => {
+    if (!target || performance.now() < hoverBlockedUntil) { hide(); return; }
+    if (target === active || target === pendingTarget) return;
+    if (active) { show(target); return; }
+    cancelPending();
+    pendingTarget = target;
+    // 停留后再读取尺寸；快速扫过卡片或滚动时不测量提示。
+    showTimer = setTimeout(() => {
+      showTimer = null;
+      pendingTarget = null;
+      if (target.isConnected && performance.now() >= hoverBlockedUntil) show(target);
+    }, 160);
+  };
   document.addEventListener('pointerover', (ev) => {
-    pointerY = ev.clientY;
-    const target = tooltipTarget(ev.target);
-    if (target && target !== active) show(target);
+    if (ev.pointerType === 'touch') return;
+    hover(tooltipTarget(ev.target));
   });
   document.addEventListener('pointerout', (ev) => {
     const next = tooltipTarget(ev.relatedTarget);
-    if (next !== active) next ? show(next) : hide();
+    if (next !== active || pendingTarget) hover(next);
   });
-  document.addEventListener('focusin', (ev) => { pointerY = null; show(tooltipTarget(ev.target)); });
+  document.addEventListener('focusin', (ev) => {
+    const target = tooltipTarget(ev.target);
+    // 鼠标点击卡片后不重新弹出刚收起的提示；键盘聚焦仍显示抬头。
+    if (target?.classList.contains('entry-card') && !ev.target.matches(':focus-visible')) hide();
+    else show(target);
+  });
   document.addEventListener('focusout', hide);
   // 按下鼠标或按键即收起提示（点开下拉、点按钮后提示不该继续挂在原地）。
   document.addEventListener('pointerdown', hide, true);
   document.addEventListener('keydown', hide, true);
-  document.addEventListener('scroll', hide, true);
+  document.addEventListener('scroll', () => {
+    hoverBlockedUntil = performance.now() + 160;
+    hide();
+  }, { capture: true, passive: true });
   window.addEventListener('blur', hide);
 }
 
@@ -1012,16 +1044,23 @@ function renderEntries() {
   const activeCard = document.activeElement?.closest?.('.entry-card');
   const restoreFocusId = activeCard?.dataset.entryId || null;
   list.dataset.density = State.density;
-  list.classList.toggle('no-anim', State.suppressListAnimation);
-  list.innerHTML = '';
+  entryCardNodes.clear();
+  entryCardOrder.length = 0;
+  entryCardPositions.clear();
+  entryDataPositions.clear();
+  State.entries.forEach((entry, index) => entryDataPositions.set(entry.id, index));
+  entrySelectionGroups.clear();
+  focusedEntryCard = null;
+  const fragment = document.createDocumentFragment();
   const empty = $('#emptyState');
   const emptyAll = State.entries.length === 0;
 
   if (State.groupBy !== 'none' && !emptyAll) {
-    renderGroupedEntries(list);
+    renderGroupedEntries(fragment);
   } else {
-    State.entries.forEach((e) => list.appendChild(entryCard(e)));
+    State.entries.forEach((e) => fragment.appendChild(entryCard(e)));
   }
+  list.replaceChildren(fragment);
 
   updateListSummary();
   updateOcrSuggestBar();
@@ -1032,32 +1071,38 @@ function renderEntries() {
   if (!State.entries.some((entry) => entry.id === State.focusedEntryId)) {
     State.focusedEntryId = State.entries[0]?.id || null;
   }
-  $$('.entry-card', list).forEach((card) => {
-    card.tabIndex = card.dataset.entryId === State.focusedEntryId ? 0 : -1;
-  });
+  syncEntryCardFocus(entryCardNodes.get(State.focusedEntryId));
   if (restoreFocusId) focusEntryCard(restoreFocusId, false);
-  State.suppressListAnimation = false;
 }
 
 function updateSelectionBar() {
   const hasSelection = State.selected.size > 0;
-  const allSelected = State.entries.length > 0 && State.entries.every((entry) => State.selected.has(entry.id));
+  const allSelected = State.entries.length > 0 && State.selected.size >= State.entries.length
+    && State.entries.every((entry) => State.selected.has(entry.id));
   const reparseBtn = $('#batchReparseBtn');
-  reparseBtn?.classList.remove('hidden');
-  $('#selectionBar').classList.toggle('empty', !hasSelection);
-  $('#selCount').textContent = hasSelection ? `已选 ${State.selected.size}` : '选择条目';
+  if (reparseBtn?.classList.contains('hidden')) reparseBtn.classList.remove('hidden');
+  const bar = $('#selectionBar');
+  if (bar.classList.contains('empty') === hasSelection) bar.classList.toggle('empty', !hasSelection);
+  const count = $('#selCount');
+  const countText = hasSelection ? `已选 ${State.selected.size}` : '选择条目';
+  if (count.textContent !== countText) count.textContent = countText;
   const selectAllBtn = $('#selectAllBtn');
   if (selectAllBtn) {
-    selectAllBtn.disabled = !State.entries.length;
-    selectAllBtn.title = allSelected ? '取消选择当前列表' : '选择当前列表';
-    selectAllBtn.setAttribute('aria-label', selectAllBtn.title);
+    const disabled = !State.entries.length;
+    if (selectAllBtn.disabled !== disabled) selectAllBtn.disabled = disabled;
+    const hint = allSelected ? '取消选择当前列表' : '选择当前列表';
+    if (selectAllBtn.dataset.tooltip !== hint) selectAllBtn.dataset.tooltip = hint;
+    if (selectAllBtn.getAttribute('aria-label') !== hint) selectAllBtn.setAttribute('aria-label', hint);
     const label = selectAllBtn.querySelector('span');
-    if (label) label.textContent = allSelected ? '取消全选' : '全选';
+    const labelText = allSelected ? '取消全选' : '全选';
+    if (label && label.textContent !== labelText) label.textContent = labelText;
   }
-  $('#clearSelBtn').classList.toggle('hidden', !hasSelection || allSelected);
+  const clearBtn = $('#clearSelBtn');
+  const hideClear = !hasSelection || allSelected;
+  if (clearBtn.classList.contains('hidden') !== hideClear) clearBtn.classList.toggle('hidden', hideClear);
   ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReparseBtn', 'batchOcrBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
     const btn = $('#' + id);
-    if (btn) btn.disabled = !hasSelection;
+    if (btn && btn.disabled === hasSelection) btn.disabled = !hasSelection;
   });
 }
 
@@ -1163,12 +1208,13 @@ async function refreshEntryCard(entryId, currentDetail = null) {
     return;
   }
 
-  const current = entryCards().find((card) => card.dataset.entryId === entryId);
+  const current = entryCardNodes.get(entryId);
   if (!current) return;
   const hadFocus = current.contains(document.activeElement);
   const replacement = entryCard(entry);
   replacement.tabIndex = entryId === State.focusedEntryId ? 0 : -1;
   current.replaceWith(replacement);
+  if (focusedEntryCard === current) syncEntryCardFocus(replacement);
   updateListSummary();
   if (hadFocus) focusEntryCard(entryId, false);
 }
@@ -1223,15 +1269,14 @@ function entryCard(e) {
   const card = el('div', 'entry-card' + (tcls ? ' ' + tcls : '') +
     (State.selected.has(e.id) ? ' selected' : ''));
   card.dataset.entryId = e.id;
+  card.tabIndex = -1;
   card.setAttribute('role', 'option');
   card.setAttribute('aria-selected', State.selected.has(e.id) ? 'true' : 'false');
   card.setAttribute('aria-label', `${itemCardLabel(e)}，${e.title ? e.title + '，' : ''}${fmtMoney(e.total)}`);
   card.setAttribute('aria-keyshortcuts', 'Enter Space ArrowUp ArrowDown Home End');
 
-  // 抬头色条：卡片左侧整条边，颜色取自抬头；悬浮显示抬头名称。选中靠点击卡片（Space 键同样可选），卡片本身会变色，不再放复选框。
-  const stripe = el('div', 'entry-stripe');
-  stripe.dataset.tooltip = entryTitleTooltip(e);
-  stripe.dataset.tooltipSide = 'right';
+  // 抬头用淡色卡片背景区分；悬浮和键盘聚焦时仍可读取完整名称。
+  card.dataset.tooltip = entryTitleTooltip(e);
 
   // 校验状态：仅在 warning/blocked 时突出显示（pass 不占视觉）
   const checkBadge = (e.check_status && e.check_status !== 'pass')
@@ -1376,20 +1421,13 @@ function entryCard(e) {
   });
 
   AdapterUI.bindCardActions(right,e);
-  card.append(stripe, main, right);
+  card.append(main, right);
   card.onclick = (ev) => {
-    if (ev.detail > 1) {
-      ev.preventDefault();
-      return;
-    }
-    State.focusedEntryId = e.id;
+    syncEntryCardFocus(card);
     card.focus({ preventScroll: true });
     selectEntryFromCard(e.id, ev.shiftKey);
   };
-  card.onfocus = () => {
-    State.focusedEntryId = e.id;
-    $$('.entry-card', $('#entryList')).forEach((node) => { node.tabIndex = node === card ? 0 : -1; });
-  };
+  card.onfocus = () => syncEntryCardFocus(card);
   card.onkeydown = (ev) => handleEntryCardKeydown(ev, e);
   card.oncontextmenu = (ev) => {
     ev.preventDefault();
@@ -1415,10 +1453,16 @@ function entryCard(e) {
     } catch (err) { toast(err.message, 'err'); }
     finally { progress.close(); }
   };
+  const position = entryCardPositions.get(e.id);
+  if (position === undefined) {
+    entryCardPositions.set(e.id, entryCardOrder.length);
+    entryCardOrder.push(card);
+  } else entryCardOrder[position] = card;
+  entryCardNodes.set(e.id, card);
   return card;
 }
 
-// 卡片色条的悬浮文字：这条发票的抬头；抬头不在方案的抬头列表里时提示出来（工具栏的抬头筛选也有对应的红点）。
+// 卡片的抬头提示；不在方案抬头列表里时注明（工具栏筛选也有对应的提示点）。
 function entryTitleTooltip(entry) {
   const name = entry.title || '';
   if (!name) return '抬头：未填写';
@@ -1434,15 +1478,22 @@ function itemCardLabel(entry) {
 }
 
 function entryCards() {
-  return $$('.entry-card', $('#entryList'));
+  return entryCardOrder;
+}
+
+function syncEntryCardFocus(card) {
+  if (!card || card === focusedEntryCard) return;
+  if (focusedEntryCard) focusedEntryCard.tabIndex = -1;
+  focusedEntryCard = card;
+  State.focusedEntryId = card.dataset.entryId;
+  card.tabIndex = 0;
 }
 
 function focusEntryCard(entryId, scroll = true) {
-  const card = entryCards().find((node) => node.dataset.entryId === entryId);
+  const card = entryCardNodes.get(entryId);
   if (!card) return;
-  State.focusedEntryId = entryId;
-  entryCards().forEach((node) => { node.tabIndex = node === card ? 0 : -1; });
-  card.focus({ preventScroll: !scroll });
+  syncEntryCardFocus(card);
+  card.focus({ preventScroll: true });
   if (scroll) card.scrollIntoView({ block: 'nearest' });
 }
 
@@ -1461,7 +1512,7 @@ function moveEntryFocus(currentId, targetIndex, extendSelection) {
 function handleEntryCardKeydown(ev, entry) {
   if (ev.target !== ev.currentTarget) return;
   const cards = entryCards();
-  const index = cards.indexOf(ev.currentTarget);
+  const index = entryCardPositions.get(entry.id);
   const key = ev.key;
   let targetIndex = null;
   if (key === 'ArrowDown' || key === 'ArrowRight') targetIndex = index + 1;
@@ -1490,9 +1541,7 @@ function handleEntryCardKeydown(ev, entry) {
   } else if (key === 'Escape' && State.selected.size) {
     ev.preventDefault();
     ev.stopPropagation();
-    State.selected.clear();
-    State.lastSelectedId = null;
-    renderEntries();
+    clearEntrySelection();
     focusEntryCard(entry.id, false);
   } else if (key === 'ContextMenu' || (ev.shiftKey && key === 'F10')) {
     ev.preventDefault();
@@ -1547,18 +1596,20 @@ function renderGroupedEntries(list) {
   [...groups.entries()].forEach(([name, items]) => {
     const total = items.reduce((s, e) => s + (Number(e.total) || 0), 0);
     const ready = items.filter((e) => (e.completeness?.ready)).length;
-    const allSel = items.every((e) => State.selected.has(e.id));
+    const selectedCount = items.filter((e) => State.selected.has(e.id)).length;
     const tcls = State.groupBy === 'title' ? (TITLE_CLASS[name] || '') : '';
 
     const head = el('div', 'group-head' + (tcls ? ' ' + tcls : ''));
     head.innerHTML = `
-      <button class="group-sel" title="选中/取消这组">${allSel ? '✓' : ''}</button>
+      <button class="group-sel" title="选中/取消这组">${selectedCount === items.length ? '✓' : ''}</button>
       <span class="group-name">${esc(name)}</span>
       <span class="group-meta"><b>${items.length}</b> 条 · 合计 <b>${fmtMoney(total)}</b> · 齐备 ${ready}/${items.length}</span>`;
-    head.querySelector('.group-sel').onclick = () => {
-      if (allSel) items.forEach((e) => State.selected.delete(e.id));
+    const group = { button: head.querySelector('.group-sel'), size: items.length, selectedCount };
+    items.forEach((e) => entrySelectionGroups.set(e.id, group));
+    group.button.onclick = () => {
+      if (group.selectedCount === group.size) items.forEach((e) => State.selected.delete(e.id));
       else items.forEach((e) => State.selected.add(e.id));
-      renderEntries();
+      syncVisibleSelectionState(items.map((e) => e.id));
     };
     list.appendChild(head);
     items.forEach((e) => list.appendChild(entryCard(e)));
@@ -1672,64 +1723,76 @@ function showSearchHintIfEmpty() {
 
 // ------------------------------------------------------------------ 选择 / 批量
 function toggleSelect(id, range) {
-  State.suppressListAnimation = true;
-  if (range && State.lastSelectedId) {
-    const ids = State.entries.map((e) => e.id);
-    const a = ids.indexOf(State.lastSelectedId);
-    const b = ids.indexOf(id);
-    if (a >= 0 && b >= 0) {
-      const [from, to] = a < b ? [a, b] : [b, a];
-      ids.slice(from, to + 1).forEach((eid) => State.selected.add(eid));
-      State.lastSelectedId = id;
-      renderEntries();
-      return;
-    }
-  }
-  if (State.selected.has(id)) State.selected.delete(id);
-  else State.selected.add(id);
-  State.lastSelectedId = id;
-  renderEntries();
+  selectEntryFromCard(id, range);
 }
 
 function selectEntryFromCard(id, range) {
+  const changedIds = [];
+  let selectedRange = false;
   if (range && State.lastSelectedId) {
-    const ids = State.entries.map((entry) => entry.id);
-    const start = ids.indexOf(State.lastSelectedId);
-    const end = ids.indexOf(id);
-    if (start >= 0 && end >= 0) {
+    const start = entryDataPositions.get(State.lastSelectedId);
+    const end = entryDataPositions.get(id);
+    if (start !== undefined && end !== undefined) {
       const [from, to] = start < end ? [start, end] : [end, start];
-      ids.slice(from, to + 1).forEach((entryId) => State.selected.add(entryId));
+      for (let index = from; index <= to; index++) {
+        const entryId = State.entries[index].id;
+        if (State.selected.has(entryId)) continue;
+        State.selected.add(entryId);
+        changedIds.push(entryId);
+      }
+      selectedRange = true;
     }
-  } else {
+  }
+  if (!selectedRange) {
     if (State.selected.has(id)) State.selected.delete(id);
     else State.selected.add(id);
+    changedIds.push(id);
   }
   State.lastSelectedId = id;
-  syncVisibleSelectionState();
+  syncVisibleSelectionState(changedIds);
 }
 
-function syncVisibleSelectionState() {
-  entryCards().forEach((card) => {
+function syncVisibleSelectionState(changedIds = null) {
+  const cards = changedIds
+    ? changedIds.map((id) => entryCardNodes.get(id)).filter(Boolean)
+    : entryCardNodes.values();
+  const changedGroups = new Set();
+  for (const card of cards) {
     const selected = State.selected.has(card.dataset.entryId);
+    if (card.classList.contains('selected') === selected) continue;
     card.classList.toggle('selected', selected);
     card.setAttribute('aria-selected', selected ? 'true' : 'false');
-  });
+    const group = entrySelectionGroups.get(card.dataset.entryId);
+    if (group) {
+      group.selectedCount += selected ? 1 : -1;
+      changedGroups.add(group);
+    }
+  }
+  for (const group of changedGroups) {
+    const label = group.selectedCount === group.size ? '✓' : '';
+    if (group.button.textContent !== label) group.button.textContent = label;
+  }
   updateSelectionBar();
 }
 async function selectAllVisible() {
-  State.suppressListAnimation = true;
+  const changedIds = State.entries.filter((entry) => !State.selected.has(entry.id)).map((entry) => entry.id);
   State.selected.clear();
   State.entries.forEach((e) => State.selected.add(e.id));
   State.lastSelectedId = State.entries.length ? State.entries[State.entries.length - 1].id : null;
-  renderEntries();
+  syncVisibleSelectionState(changedIds);
+}
+function clearEntrySelection() {
+  const restoreCardFocus = document.activeElement === $('#clearSelBtn');
+  const changedIds = [...State.selected];
+  State.selected.clear();
+  State.lastSelectedId = null;
+  syncVisibleSelectionState(changedIds);
+  if (restoreCardFocus) focusEntryCard(State.focusedEntryId, false);
 }
 function toggleSelectAllVisible() {
   const allSelected = State.entries.length > 0 && State.entries.every((entry) => State.selected.has(entry.id));
-  State.suppressListAnimation = true;
   if (allSelected) {
-    State.selected.clear();
-    State.lastSelectedId = null;
-    renderEntries();
+    clearEntrySelection();
     return;
   }
   selectAllVisible();
@@ -2747,7 +2810,7 @@ function bindEvents() {
   $('#emptyNew').onclick = () => openNewEntry();
   $('#actionImport').onclick = doImport;
 
-  $('#clearSelBtn').onclick = () => { State.suppressListAnimation = true; State.selected.clear(); State.lastSelectedId = null; renderEntries(); };
+  $('#clearSelBtn').onclick = clearEntrySelection;
   $('#selectAllBtn').onclick = toggleSelectAllVisible;
   $('#addToBatchBtn').onclick = addSelectionToBatch;
   $('#tagBtn').onclick = () => tagSelectionFlow();
@@ -2796,7 +2859,7 @@ function bindEvents() {
     else if (e.key.toLowerCase() === 'n') openNewEntry();
     else if (e.key.toLowerCase() === 't' && State.selected.size) tagSelectionFlow();
     else if (e.key === 'Escape' && State.selected.size) {
-      State.selected.clear(); State.lastSelectedId = null; renderEntries();
+      clearEntrySelection();
     }
     else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') { e.preventDefault(); selectAllVisible(); }
   });

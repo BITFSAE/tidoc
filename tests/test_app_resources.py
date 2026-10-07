@@ -258,7 +258,7 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert ".att-group-actions" in css
     assert ".att-group.has .attach-item" in css
     assert ".archive-confirm-note" in css
-    assert "reparseBtn?.classList.remove('hidden')" in source
+    assert "reparseBtn.classList.remove('hidden')" in source
     assert "Api.rerecognizeMaterials([ids[index]], kinds)" in source
     assert "正在识别 ${index + 1}/${ids.length} 条" in source
     assert "State.materialRequirements.physical_image || atts.some" in source

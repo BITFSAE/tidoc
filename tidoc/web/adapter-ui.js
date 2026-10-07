@@ -22,7 +22,7 @@ const AdapterUI = (() => {
     try { return await action(id); }
     finally { settled = true; clearInterval(timer); dialog.close(); }
   }
-  // 抬头没有指定颜色（neutral，方案里无处设置）时按顺序分配不同的颜色，避免所有抬头的卡片色条都一样；
+  // 抬头没有指定颜色（neutral，方案里无处设置）时按顺序分配不同的颜色，供卡片底色区分；
   // 方案明确指定的颜色保持不变，且不会被分给其他抬头。
   const TITLE_PALETTE = ['blue', 'green', 'purple', 'teal', 'amber', 'red'];
   function titleColors(titles) {
@@ -661,7 +661,7 @@ const AdapterUI = (() => {
             const updated = await Api.updateScheme(scheme.id, scheme.revision_id, { ...changes, settings: values, clear });
             await refresh();
             await render(scheme.id);
-            // 抬头变了：工具栏的抬头筛选、卡片色条和分组标题都要跟着更新。
+            // 抬头变了：工具栏筛选、卡片底色和分组标题都要跟着更新。
             if (changes.titles) { await refreshTitleOptions(); renderEntries(); }
             toast(updated.current_revision_id === scheme.revision_id ? '设置没有变化' : '已保存。新建条目使用新设置，已有条目沿用原规则。', 'ok');
           } catch (e) {

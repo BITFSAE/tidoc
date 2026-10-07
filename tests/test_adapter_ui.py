@@ -142,26 +142,27 @@ def test_tooltips_stay_above_dropdown_menus_and_option_tips_only_show_when_trunc
         assert needle in tooltips,needle
 
 
-def test_titles_without_a_color_get_distinct_stripe_colors():
+def test_titles_without_a_color_get_distinct_card_tints():
     css=(WEB/'styles.css').read_text('utf-8')
     adapter=(WEB/'adapter-ui.js').read_text('utf-8')
     app=(WEB/'app.js').read_text('utf-8')
     assert 'titleColors(State.titleProfiles)' in adapter
-    # 色条与分组标题按语义色上色（卡片类名已带 title- 前缀，不再重复拼接）。
-    assert ".entry-card:is(.title-blue" in css and ".group-head:is(.title-blue" in css
+    # 卡片底色与分组标题共用抬头语义色。
+    assert 'var(--tc-card, var(--panel))' in css and '.group-head:is(.title-blue' in css
     for color in ('blue','green','amber','purple','teal','red'):
         assert f'.title-{color} {{ --tc:' in css
     assert "' title-' + tcls" not in app and "(tcls ? ' ' + tcls : '')" in app
 
 
-def test_card_has_no_checkbox_and_stripe_names_the_title():
+def test_card_has_no_checkbox_or_stripe_and_names_the_title():
     source=(WEB/'app.js').read_text('utf-8')
     css=(WEB/'styles.css').read_text('utf-8')
     card=source.split('function entryCard(',1)[1].split('function entryCards(',1)[0]
-    # 选中靠点击卡片；复选框与"切换选中"的色条按钮都是重复入口，色条只负责标明抬头。
+    # 选中靠点击卡片；抬头用底色区分，完整名称仍可悬浮读取。
     assert "entry-check" not in source and 'entry-check' not in css
     assert '切换选中' not in source and 'entryTitleTooltip(e)' in card
-    assert "card.append(stripe, main, right)" in card
+    assert 'entry-stripe' not in source and 'entry-stripe' not in css
+    assert 'card.append(main, right)' in card and 'card.dataset.tooltip = entryTitleTooltip(e)' in card
     assert 'function entryTitleTooltip(' in source and '抬头：' in source
     # 卡片上不重复显示已知信息：单一报账人／已按报账人筛选、正在查看的批次。
     assert "State.profiles.length > 1 && !$('#filterProfile')?.value" in card

@@ -1,0 +1,41 @@
+name: Docs
+
+# 文档站由腾讯云 EdgeOne Pages 构建发布；这里只在文档相关文件变化时先构建一遍，
+# 让死链接、缺失的截图和 Markdown 语法错误在合并前暴露。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "DESIGN.md"
+      - "CHANGELOG.md"
+      - "CONTRIBUTING.md"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "DESIGN.md"
+      - "CHANGELOG.md"
+      - "CONTRIBUTING.md"
+      - ".github/workflows/docs.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run build

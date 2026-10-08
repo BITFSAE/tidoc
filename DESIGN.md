@@ -423,3 +423,12 @@ tidoc App
 输出预检和重绑定预览返回时，前端核对表单版本及对话框是否仍打开。用户改选择或关闭窗口后，旧响应不覆盖当前表单，也不启用生成或应用按钮；旧输出预览及时取消。重绑定目标方案的异步加载同样核对请求序号和当前选择，丢弃过期结果。
 
 `python -m tidoc.adapter_tools` 提供源目录初始化、校验、规则说明、fixture 渲染、样例测试、定义差异和严格打包。打包含 DOCX 的适配包时必须安装打印依赖，并以 fixture 完成真实渲染。自动渲染检查不替代在 Windows、macOS 办公软件中人工检查版式。
+
+## 16. 文档站
+
+- 定位：面向使用者的文档站（https://tidoc.bitfsae.com）含简介、开始使用、使用指南、更新与组件和常见问题，另设「开发相关」给开发者。读者大多不了解内部逻辑、代码和内部术语，写作规则见 [AGENTS.md](AGENTS.md) 的 Documentation site 一节。
+- 技术：VitePress，源码在 `docs/`，依赖只写在 `docs/package.json`，不改变 Python 应用结构；`node_modules` 和构建产物不提交。
+- 内容归属：使用说明只写在站点页面（`docs/intro`、`start`、`guide`、`update`、`faq`），截图放 `docs/public/images/`，只用虚构数据。设计取舍留在本文档，发布与运维细节留在 [docs/UPDATE.md](docs/UPDATE.md)。`DESIGN.md`、`CHANGELOG.md`、`CONTRIBUTING.md` 在仓库根目录，由 `docs/dev/` 和 `docs/update/` 下的页面嵌入；`docs/adapters/` 与 `UPDATE.md` 留在原位，由站点配置的 rewrites 挂到「开发相关」下；`TEAM_ADAPTER_PLAN.md` 是实施与验收记录，不进站点。这些文件之间的相对链接在渲染时由 `docs/.vitepress/repo-links.ts` 改写为站内或 GitHub 地址，源文件不变。
+- 部署：腾讯云 EdgeOne Pages 连接 GitHub 仓库，Root Directory 为 `docs`，构建配置在 `docs/edgeone.json`，`main` 更新后自动构建发布。不使用 GitHub Pages，也不经过官网服务器。项目、域名和证书由维护者在腾讯云配置。
+- 构建检查：死链接和缺失的截图会使构建失败，修改文档后先运行 `cd docs && npm ci && npm run build`；`.github/workflows/docs.yml` 在文档相关文件变化时用同一命令构建一遍，合并前暴露这些问题。
+- 搜索：使用 VitePress 本地搜索。它默认只按空格和标点切词，一整句中文会成为一个词，所以 `docs/.vitepress/search-tokenize.ts` 把连续汉字切成相邻两字的组合，构建和浏览器两端使用同一个切词函数。

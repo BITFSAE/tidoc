@@ -6,6 +6,8 @@
 
 > 通用的报账凭证管理与整理工具。
 
+**文档：[tidoc.bitfsae.com](https://tidoc.bitfsae.com)**（下载安装、使用指南、更新与常见问题）
+
 tidoc 是一款跨平台桌面程序，以一张发票为工作单元，完成发票导入、材料补齐、识别提醒、筛选和批次整理，并导出可交换或打印的报账材料。适合个人、团队和社团使用。
 
 - **整理**：把一张发票和对应付款截图、实物图、查验单放在同一个条目中。
@@ -18,7 +20,7 @@ tidoc 是一款跨平台桌面程序，以一张发票为工作单元，完成�
 
 - [官网下载](https://www.bitfsae.com/)：首页底部选择「报账软件」。
 - [GitHub Releases](https://github.com/totok22/tidoc/releases/latest)：下载最新 Windows 或 macOS 安装包。
-- [完整使用指南](docs/USER_GUIDE.md)：从安装、导入到批次、打印、阿里云 OCR 和数据备份。
+- [使用文档](https://tidoc.bitfsae.com)：从安装、导入到批次、打印、阿里云 OCR 和数据备份，以及常见问题。
 - [Bilibili 操作演示](https://www.bilibili.com/video/BV1XN3q69EPi/)：视频为早期版本，操作流程仍可参考。
 
 Windows 下载 `tidoc-core-windows-v{version}.exe` 后按提示安装。macOS 下载 `tidoc-core-macos-v{version}.dmg`，打开后把 Tidoc 拖入“应用程序”。
@@ -43,7 +45,7 @@ Windows 下载 `tidoc-core-windows-v{version}.exe` 后按提示安装。macOS �
 
 打印和 Word 需要安装打印导出组件。阿里云 OCR 用于补齐本地识别遗漏，两项都可以在「设置 → 组件与更新」中按需安装。
 
-所有详细操作、常见问题、阿里云 AccessKey 开通步骤和数据备份方法都集中在[《Tidoc 使用指南》](docs/USER_GUIDE.md)。
+所有详细操作、常见问题、阿里云 AccessKey 开通步骤和数据备份方法都在[文档站](https://tidoc.bitfsae.com)（源文件在 [docs/](docs/)）。
 
 ## 开发
 
@@ -62,6 +64,8 @@ pytest                             # 运行测试
 ```
 
 从源码运行时优先使用当前工作区的 `tidoc_print` / `tidoc_ocr`；发布版只调用已安装并校验过的独立组件。
+
+文档站本地预览：`cd docs && npm ci && npm run dev`；构建检查：`npm run build`（死链接和缺失截图会使构建失败）。
 
 团队适配包开发入口见[开发手册](docs/adapters/README.md)，目标、测试覆盖和待验收事项见[《团队适配包实施与验收记录》](docs/TEAM_ADAPTER_PLAN.md)。
 
@@ -82,6 +86,7 @@ tidoc/            核心（pywebview + pypdf + Send2Trash + jsonschema）
 ├─ web/           HTML/CSS/JS 前端
 ├─ api.py         PyWebView JS ↔ Python 桥
 └─ app.py         应用入口
+docs/             文档站（VitePress）：使用文档、开发文档和截图
 tidoc_print/      打印导出组件（可选，含 Word / PDF 重依赖）
 tidoc_ocr/        OCR 识别组件（可选，含阿里云 SDK，只在用户点击时联网）
 scripts/          构建、版本号注入和打包入口
@@ -119,6 +124,8 @@ tests/            pytest 测试
 - [x] 导出显示实际生成阶段，长导出期间仍可查询进度和请求取消；线程与 API 锁回归用例见计划记录
 - [x] 默认输出区分缺省继承和显式全不选；打印窗口采用当前方案的默认勾选，历史条目也及时生效，预检与界面保留空选择；具体语义见[输出说明](docs/adapters/OUTPUTS.md#默认输出与本次选择)
 - [x] 完整全库回归、Node 源码语法检查及核心／打印源码自检通过；当前结果见计划记录
+- [x] 文档站源码与构建配置（VitePress，`docs/`）：简介、开始使用、使用指南、更新与组件、常见问题和开发文档，含中文搜索、浅色／深色主题和移动端布局
+- [ ] 文档站上线：EdgeOne Pages 连接仓库并接入 `tidoc.bitfsae.com`（由维护者在腾讯云配置）
 - [ ] 团队适配完整验收：逐项确认 W1～W12 和 A01～A26，复验 XML 单独扫描导入、兼容组合、升级迁移及真实应用
 - [ ] Windows / macOS 人工办公软件版式核对及完整跨平台发布验收
 

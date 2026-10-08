@@ -31,3 +31,8 @@ Thumbs.db
 
 # 本地 agent skills
 .agents/
+
+# 文档站（VitePress）
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/

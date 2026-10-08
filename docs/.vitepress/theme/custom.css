@@ -16,6 +16,24 @@
   --vp-custom-block-tip-bg: var(--vp-c-brand-soft);
 }
 
+/* 深色模式底色：VitePress 默认的 #1b1b1f、#202127 带蓝紫调，这里改成无色相的中性灰黑。 */
+.dark {
+  --vp-c-bg: #1a1a1a;
+  --vp-c-bg-alt: #141414;
+  --vp-c-bg-elv: #212121;
+  --vp-c-bg-soft: #212121;
+  --vp-c-border: #3a3a3a;
+  --vp-c-divider: #2b2b2b;
+  --vp-c-gutter: #000000;
+  --vp-c-text-1: #e3e3e3;
+  --vp-c-text-2: #a0a0a0;
+  --vp-c-text-3: #707070;
+  --vp-c-gray-1: #555555;
+  --vp-c-gray-2: #444444;
+  --vp-c-gray-3: #333333;
+  --vp-c-gray-soft: rgba(128, 128, 128, 0.16);
+}
+
 .dark {
   --vp-c-brand-1: #59a6f8;
   --vp-c-brand-2: #7fbaf9;

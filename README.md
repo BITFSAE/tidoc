@@ -60,7 +60,7 @@ pytest                             # 运行测试
 
 从源码运行时优先使用当前工作区的 `tidoc_print` / `tidoc_ocr`；发布版只调用已安装并校验过的独立组件。
 
-文档站（`docs/`，VitePress）本地预览：`cd docs && npm ci && npm run dev`；构建检查：`npm run build`（死链接和缺失截图会使构建失败）。页面标题、描述、站点地图和分享图的约定见 [AGENTS.md](AGENTS.md) 的 Documentation site 一节。
+文档站（`docs/`，VitePress）本地预览：`cd docs && npm ci && npm run dev`；构建检查：`npm run build`（死链接和缺失截图会使构建失败）。页面标题、描述、站点地图和分享图的约定见 [AGENTS.md](AGENTS.md) 的 Documentation site 一节。首页和概念页的界面截图用 `python -m scripts.docs_screenshots` 重新生成（需要 Chrome 或 Edge 和 Pillow，数据是脚本里的虚构数据，不会读写真实数据目录）。
 
 团队适配包开发入口见[开发手册](docs/adapters/README.md)，目标、测试覆盖和待验收事项见[《团队适配包实施与验收记录》](docs/TEAM_ADAPTER_PLAN.md)。
 

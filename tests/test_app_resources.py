@@ -232,6 +232,10 @@ def test_frontend_has_payment_ocr_setting_batch_profile_and_scroll_constraints()
     assert "https://www.bitfsae.com/news/tidoc-guide" in source
     assert 'id="setDocGuide"' in source
     assert "说明文档" in source
+    assert "https://tidoc.bitfsae.com" in source
+    assert 'id="setDocsSite"' in source
+    assert 'id="docsBtn"' in html
+    assert "$('#docsBtn').onclick" in source
     assert "setGuide').onclick = () => openUsageGuide(false)" in source
     assert "m.close(); openUsageGuide" not in source
     assert "paymentActionLabel" in source

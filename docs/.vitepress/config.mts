@@ -1,8 +1,14 @@
-import { defineConfig } from 'vitepress'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { defineConfig, type HeadConfig } from 'vitepress'
 import { miniSearch } from './search-tokenize'
 import { repoLinks } from './repo-links'
 
 const repo = 'https://github.com/BITFSAE/tidoc'
+const siteUrl = 'https://tidoc.bitfsae.com'
+const siteName = 'Tidoc'
+const siteDescription = 'Tidoc 是一款整理报账发票和相关材料的桌面软件，支持 Windows 和 macOS，识别在本机完成。'
+const ogImage = `${siteUrl}/og-image.png`
 
 // 「开始使用」和「使用指南」共用一份侧栏，读完安装可以顺着往下读。
 const usageSidebar = [
@@ -33,17 +39,152 @@ const usageSidebar = [
   }
 ]
 
+// 地址形式与 cleanUrls: false 的构建结果一致：首页和各栏目首页以 / 结尾，其余页面带 .html。
+function pagePath(relativePath: string): string {
+  const path = relativePath.replace(/\.md$/, '')
+  if (path === 'index') return '/'
+  if (path.endsWith('/index')) return `/${path.slice(0, -'index'.length)}`
+  return `/${path}.html`
+}
+
+function linkPath(link: string): string {
+  return link.endsWith('/') ? link : `${link}.html`
+}
+
+// 页面没有写 description 时，取正文第一段，避免每页都落到同一句站点简介。
+function summarize(source: string): string {
+  const body = source.replace(/^---\n[\s\S]*?\n---\n/, '')
+  for (const block of body.split(/\n\s*\n/)) {
+    const text = block.trim()
+    if (!text || /^(#|:::|<|```|!\[|\||>|[-*] |\d+\. )/.test(text) || /[：:]$/.test(text)) continue
+    const plain = text
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/[`*]/g, '')
+      .replace(/\s+/g, ' ')
+    if (plain.length <= 110) return plain
+    const cut = plain.slice(0, 110)
+    const end = cut.lastIndexOf('。')
+    return end >= 40 ? cut.slice(0, end + 1) : `${cut}…`
+  }
+  return ''
+}
+
+type SidebarItem = { text: string; link?: string; items?: SidebarItem[] }
+
+function sidebarNames(sidebars: Record<string, SidebarItem[]>): Map<string, string> {
+  const names = new Map<string, string>()
+  const walk = (items: SidebarItem[]) => {
+    for (const item of items) {
+      if (item.link) names.set(linkPath(item.link), item.text)
+      if (item.items) walk(item.items)
+    }
+  }
+  Object.values(sidebars).forEach(walk)
+  return names
+}
+
 export default defineConfig({
   lang: 'zh-CN',
   title: 'Tidoc',
   titleTemplate: ':title · Tidoc',
-  description: 'Tidoc 是一款整理报账发票和相关材料的桌面软件，支持 Windows 和 macOS，识别在本机完成。',
+  description: siteDescription,
   cleanUrls: false,
 
   head: [
     ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }],
-    ['meta', { name: 'theme-color', content: '#2b5fd1' }]
+    ['link', { rel: 'apple-touch-icon', href: '/logo.png' }],
+    ['meta', { name: 'theme-color', content: '#2b5fd1' }],
+    ['meta', { name: 'applicable-device', content: 'pc,mobile' }],
+    ['meta', { name: 'keywords', content: 'Tidoc,报账,发票整理,发票识别,发票查验,报销材料,报账批次,付款截图' }],
+    ['meta', { property: 'og:site_name', content: siteName }],
+    ['meta', { property: 'og:locale', content: 'zh_CN' }],
+    ['meta', { property: 'og:image', content: ogImage }],
+    ['meta', { property: 'og:image:width', content: '1200' }],
+    ['meta', { property: 'og:image:height', content: '630' }],
+    ['meta', { property: 'og:image:alt', content: 'Tidoc 主界面：报账发票与材料整理' }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: ogImage }]
   ],
+
+  sitemap: { hostname: siteUrl },
+
+  transformPageData(pageData, { siteConfig }) {
+    if (pageData.description || pageData.isNotFound || !pageData.filePath) return
+    pageData.description = summarize(readFileSync(join(siteConfig.srcDir, pageData.filePath), 'utf-8'))
+  },
+
+  transformHead({ pageData, siteConfig, title, description }) {
+    if (pageData.isNotFound) return [['meta', { name: 'robots', content: 'noindex' }]]
+
+    const themeConfig = siteConfig.site.themeConfig
+    const url = siteUrl + pagePath(pageData.relativePath)
+    const isHome = pageData.relativePath === 'index.md'
+    const head: HeadConfig[] = [
+      ['link', { rel: 'canonical', href: url }],
+      ['meta', { property: 'og:type', content: isHome ? 'website' : 'article' }],
+      ['meta', { property: 'og:url', content: url }],
+      ['meta', { property: 'og:title', content: title }],
+      ['meta', { property: 'og:description', content: description }],
+      ['meta', { name: 'twitter:title', content: title }],
+      ['meta', { name: 'twitter:description', content: description }]
+    ]
+
+    const publisher = { '@type': 'Organization', name: 'BITFSAE', url: 'https://www.bitfsae.com/' }
+    const graph: object[] = []
+
+    if (isHome) {
+      graph.push(
+        {
+          '@type': 'WebSite',
+          '@id': `${siteUrl}/#website`,
+          name: siteName,
+          url: `${siteUrl}/`,
+          description: siteDescription,
+          inLanguage: 'zh-CN',
+          publisher
+        },
+        {
+          '@type': 'SoftwareApplication',
+          '@id': `${siteUrl}/#software`,
+          name: siteName,
+          description: siteDescription,
+          url: `${siteUrl}/`,
+          image: ogImage,
+          applicationCategory: 'BusinessApplication',
+          operatingSystem: 'Windows, macOS',
+          inLanguage: 'zh-CN',
+          downloadUrl: `${siteUrl}/start/install.html`,
+          softwareHelp: `${siteUrl}/start/quickstart.html`,
+          license: `${repo}/blob/main/LICENSE`,
+          offers: { '@type': 'Offer', price: '0', priceCurrency: 'CNY' },
+          publisher
+        }
+      )
+    } else {
+      const names = sidebarNames(themeConfig.sidebar as Record<string, SidebarItem[]>)
+      const here = pagePath(pageData.relativePath)
+      const section = (themeConfig.nav as { text: string; link: string; activeMatch?: string }[]).find(
+        (item) => item.activeMatch && new RegExp(item.activeMatch).test(here.replace(/\.html$/, ''))
+      )
+      const crumbs = [{ name: '首页', url: `${siteUrl}/` }]
+      if (section && linkPath(section.link) !== here) {
+        crumbs.push({ name: section.text, url: siteUrl + linkPath(section.link) })
+      }
+      crumbs.push({ name: names.get(here) ?? section?.text ?? pageData.title, url })
+      graph.push({
+        '@type': 'BreadcrumbList',
+        itemListElement: crumbs.map((crumb, index) => ({
+          '@type': 'ListItem',
+          position: index + 1,
+          name: crumb.name,
+          item: crumb.url
+        }))
+      })
+    }
+
+    head.push(['script', { type: 'application/ld+json' }, JSON.stringify({ '@context': 'https://schema.org', '@graph': graph })])
+    return head
+  },
 
   // 团队适配计划是实施与验收记录，不放进文档站；README 只是仓库入口。
   srcExclude: ['TEAM_ADAPTER_PLAN.md', 'README.md', 'node_modules/**'],

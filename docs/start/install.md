@@ -1,3 +1,8 @@
+---
+title: 下载与安装：Windows 和 macOS
+description: 下载 Tidoc 最新版安装包，Windows 和 macOS 各有一个。本页说明两个系统的安装步骤、首次启动和以后的更新方式。
+---
+
 # 下载与安装
 
 下载安装包，安装后即可使用。Windows 和 macOS 各有一个安装包。

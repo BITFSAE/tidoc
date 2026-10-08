@@ -1,5 +1,6 @@
 ---
 editLink: false
+description: Tidoc 的设计文档：整体架构、数据模型和主要功能的设计取舍，面向开发者。
 ---
 
 ::: tip 面向开发者

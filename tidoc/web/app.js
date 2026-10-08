@@ -94,6 +94,7 @@ function configuredTitleNames() {
 }
 const BILIBILI_GUIDE_URL = 'https://www.bilibili.com/video/BV1XN3q69EPi/';
 const DOC_GUIDE_URL = 'https://www.bitfsae.com/news/tidoc-guide';
+const DOCS_SITE_URL = 'https://tidoc.bitfsae.com';
 const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
 const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
 const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
@@ -276,6 +277,7 @@ const I = {
   lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   github: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-1.05-.01-1.9-2.78.62-3.37-1.21-3.37-1.21-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .08 1.53 1.06 1.53 1.06.9 1.57 2.35 1.12 2.92.85.09-.66.35-1.12.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.3 9.3 0 0 1 12 6.95a9.3 9.3 0 0 1 2.5.35c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.59.69.49A10.24 10.24 0 0 0 22 12.23C22 6.58 17.52 2 12 2Z"/></svg>',
   bilibili: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 3 3 3M16 3l-3 3"/><rect x="3" y="6" width="18" height="14" rx="3"/><path d="M8 12v2M16 12v2M9 17h6"/></svg>',
+  globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.6 3.9 5.6 3.9 9s-1.3 6.4-3.9 9c-2.6-2.6-3.9-5.6-3.9-9s1.3-6.4 3.9-9z"/></svg>',
   doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h8l4 4v14H7z"/><path d="M15 3v4h4"/><path d="M10 12h6M10 16h6"/></svg>',
 };
 function iconPencil(s) { return wrapSvg(I.pencil, s); }
@@ -2836,6 +2838,7 @@ function bindEvents() {
   $('#settingsBtn').onclick = openSettings;
   $('#updateActionBtn').onclick = handleTopbarUpdateAction;
   $('#themeToggle').onclick = toggleTheme;
+  $('#docsBtn').onclick = () => Api.openExternalUrl(DOCS_SITE_URL).catch((e) => toast(e.message, 'err'));
   $('#appTitle').onclick = () => Api.openExternalUrl('https://github.com/totok22/tidoc').catch((e) => toast(e.message, 'err'));
   $('#appTitle').onkeydown = (e) => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -3493,6 +3496,7 @@ async function buildSettings(options = {}) {
           <div class="settings-credit"><button class="link-btn" id="setBitfsae">BITFSAE</button><span>出品</span></div>
           <div class="settings-about-actions">
             <button class="link-btn with-icon" id="setRepo">${wrapSvg(I.github, 14)}<span>GitHub</span></button>
+            <button class="link-btn with-icon" id="setDocsSite">${wrapSvg(I.globe, 14)}<span>文档站</span></button>
             <button class="link-btn with-icon" id="setBilibili">${wrapSvg(I.bilibili, 14)}<span>视频说明</span></button>
             <button class="link-btn with-icon" id="setDocGuide">${wrapSvg(I.doc, 14)}<span>说明文档</span></button>
             <button class="link-btn" id="setGuide">使用提示</button>
@@ -3727,6 +3731,7 @@ async function buildSettings(options = {}) {
   body.querySelector('#setGuide').onclick = () => openUsageGuide(false);
   body.querySelector('#setBitfsae').onclick = () => Api.openExternalUrl('https://www.bitfsae.com').catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
+  body.querySelector('#setDocsSite').onclick = () => Api.openExternalUrl(DOCS_SITE_URL).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setBilibili').onclick = () => Api.openExternalUrl(BILIBILI_GUIDE_URL).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setDocGuide').onclick = () => Api.openExternalUrl(DOC_GUIDE_URL).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepoLogo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));

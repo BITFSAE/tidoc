@@ -1,3 +1,8 @@
+---
+title: 导出、打印与交接：Excel、Word、PDF 与绑定包
+description: 把整理好的发票条目导出为 .tidoc 绑定包交给他人，导出总览 Excel 和附件整理包，或生成 Word 与材料 PDF 用于打印。
+---
+
 # 导出、打印与交接
 
 整理好的[条目](/guide/concepts)可以导出为 `.tidoc` 绑定包交给别人继续整理，导出总览 Excel 和附件整理包，或生成 Word 与材料 PDF 用于打印。本页按这三类操作说明。

@@ -15,7 +15,10 @@ hero:
       text: 开始使用
       link: /start/quickstart
     - theme: alt
-      text: 下载 Tidoc
+      text: 演示视频 📺
+      link: https://www.bilibili.com/video/BV1XN3q69EPi/
+    - theme: alt
+      text: 下载安装
       link: /start/install
     - theme: alt
       text: GitHub
@@ -71,6 +74,17 @@ features:
 <img class="shot-light" src="/images/main-overview.png" alt="Tidoc 主界面" width="1800" height="1293">
 <img class="shot-dark" src="/images/main-overview-dark.png" alt="Tidoc 主界面（深色）" width="1800" height="1293">
 </div>
+</div>
+
+<div class="home-video-banner">
+<div class="video-banner-icon">📺</div>
+<div class="video-banner-info">
+<div class="video-banner-title">不想看长文档？看两分钟操作视频快速上手</div>
+<div class="video-banner-desc">视频完整演示了发票导入、补齐材料、核对提醒到批次导出的全流程，几分钟即可直观掌握常用操作。</div>
+</div>
+<a class="video-banner-btn" href="https://www.bilibili.com/video/BV1XN3q69EPi/" target="_blank" rel="noreferrer">
+观看 B 站演示视频 <span class="vpi-arrow-right"></span>
+</a>
 </div>
 </div>
 
@@ -136,3 +150,17 @@ features:
 </div>
 </div>
 </div>
+
+<div class="home-section home-community-section">
+<div class="community-card">
+<div class="community-content">
+<h3 class="community-title">遇到问题发票？欢迎反馈与交流</h3>
+<p class="community-desc">发票版式不断更新，如果遇到本地识别不准、金额有偏差的发票，欢迎将脱敏后的发票文件发送至邮箱 <a href="mailto:info@bitfsae.com">info@bitfsae.com</a>，我们会持续补充样本进行测试与改进。<br>有任何疑问或功能建议，也欢迎在 GitHub 提交 Issue 或 PR。</p>
+</div>
+<div class="community-links">
+<a class="community-link" href="https://github.com/BITFSAE/tidoc/issues" target="_blank" rel="noreferrer">GitHub 提交 Issue</a>
+<a class="community-link" href="mailto:info@bitfsae.com">发送邮件反馈</a>
+</div>
+</div>
+</div>
+

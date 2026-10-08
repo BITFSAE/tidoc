@@ -1,6 +1,6 @@
 ---
 layout: home
-title: Tidoc：报账发票与材料整理软件
+title: Tidoc：报账发票与材料整理软件，支持 Windows 和 macOS
 titleTemplate: false
 description: Tidoc 是整理报账发票和相关材料的桌面软件，支持 Windows 和 macOS。发票、付款截图与查验单收拢在同一条目，本地解析票面并校验价税，按批次导出归档材料与打印件。
 markdownStyles: false

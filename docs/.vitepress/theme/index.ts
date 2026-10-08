@@ -10,7 +10,7 @@ export default {
   setup() {
     const route = useRoute()
     const zoom = () =>
-      mediumZoom('.vp-doc img, .VPHome .home-shot img', { background: 'var(--vp-c-bg)' })
+      mediumZoom('.vp-doc img, .VPHome .home-shot img, .window-content img', { background: 'var(--vp-c-bg)' })
     onMounted(zoom)
     watch(
       () => route.path,

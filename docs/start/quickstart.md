@@ -4,7 +4,7 @@
 
 不熟悉「条目」「材料」「批次」这些词时，先看[基本概念](/guide/concepts)。
 
-::: tip 📺 操作演示视频
+::: tip 操作演示视频
 如果更喜欢看视频演示，推荐先花两分钟看一遍 **[Bilibili 操作演示视频（BV1XN3q69EPi）](https://www.bilibili.com/video/BV1XN3q69EPi/)**。视频演示了从发票导入、补齐材料、核对提醒到批次导出的完整流程。
 :::
 

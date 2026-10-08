@@ -4,7 +4,11 @@
 
 ## 下载
 
-有两个下载入口，内容相同：
+选择系统，点击「下载」获取最新版安装包。页面会标出当前设备对应的系统。
+
+<TidocDownload />
+
+点击「下载」没有反应时，可以从下面两个入口下载，内容相同：
 
 - **官网**：打开 [www.bitfsae.com](https://www.bitfsae.com/)，在首页底部选择「报账软件」。
 - **GitHub Releases**：打开 [Releases 页面](https://github.com/BITFSAE/tidoc/releases/latest)，在最新版本的文件列表中选择安装包。

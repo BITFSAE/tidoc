@@ -18,6 +18,7 @@ tidoc 是一款跨平台桌面程序，以一张发票为工作单元，完成�
 
 ## 开始使用
 
+- [下载与安装](https://tidoc.bitfsae.com/start/install)：文档站直接提供 Windows 和 macOS 最新版安装包的下载按钮。
 - [官网下载](https://www.bitfsae.com/)：首页底部选择「报账软件」。
 - [GitHub Releases](https://github.com/totok22/tidoc/releases/latest)：下载最新 Windows 或 macOS 安装包。
 - [使用文档](https://tidoc.bitfsae.com)：从安装、导入到批次、打印、阿里云 OCR 和数据备份，以及常见问题。

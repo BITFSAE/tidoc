@@ -175,8 +175,9 @@ export default defineConfig({
     },
 
     footer: {
-      message: '以 MIT 许可证发布。',
-      copyright: '© BITFSAE'
+      message:
+        '以 <a href="https://github.com/BITFSAE/tidoc/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT 许可证</a>发布。',
+      copyright: '© <a href="https://www.bitfsae.com/" target="_blank" rel="noreferrer">BITFSAE</a>'
     }
   }
 })

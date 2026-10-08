@@ -625,3 +625,10 @@ def test_other_material_cannot_map_to_invoice(tmp_path):
         bindle_service._validated_material_mapping(source.entries,eid,entry['scheme_revision_id'],
             'other','invoice','other','forged.pdf')
     source.db.close()
+
+
+def test_bundle_preview_does_not_report_skipped_extension_values_for_new_entries():
+    incoming={"extension_values":[{"scope":"entry","package_id":"org.example.team","field_id":"project","value":"项目甲"}]}
+    # 新条目没有本机条目可对应，预览不能提示「部分附加信息无法对应」。
+    assert bindle_service._extension_merge_preview(None,None,incoming,"org.example.team")=={"eligible":[],"skipped":0}
+    assert bindle_service._extension_merge_preview(None,None,{},"org.example.team")=={"eligible":[],"skipped":0}

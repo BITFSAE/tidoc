@@ -4675,9 +4675,12 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const completenessLine = (detail) => {
     const state = detail.completeness || { ready: false, missing: [] };
     // 缺哪些材料由「报账材料」分组逐项标注，这里只在齐全时给一句确认，避免重复。
-    return state.ready
-      ? `<p class="hint ok-hint" style="margin-top:10px">材料齐全、实付已填、校验通过。</p>`
-      : '';
+    if (!state.ready) return '';
+    // 识别提醒不影响材料齐备，但此时发票内容还没核对完，不能写「校验通过」。
+    const text = detail.check_status === 'warning'
+      ? '材料齐全、实付已填；识别提醒还需要核对。'
+      : '材料齐全、实付已填、校验通过。';
+    return `<p class="hint ok-hint" style="margin-top:10px">${text}</p>`;
   };
   const compLine = completenessLine(e);
 

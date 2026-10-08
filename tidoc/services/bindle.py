@@ -792,8 +792,11 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapte
 
 def _extension_merge_preview(entries_repo, existing_id, source_adapter, package_id):
     incoming = source_adapter.get("extension_values") or []
-    if not existing_id or not incoming:
-        return {"eligible": [], "skipped": len(incoming)}
+    if not incoming:
+        return {"eligible": [], "skipped": 0}
+    if not existing_id:
+        # 新条目没有本机值要保留；导入时同包、同字段、同类型的值会随条目一起带入。
+        return {"eligible": [], "skipped": 0}
     conn = entries_repo.db.conn
     columns = {row[1] for row in conn.execute("PRAGMA table_info(extension_values)")}
     if not columns:

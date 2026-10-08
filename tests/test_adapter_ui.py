@@ -398,3 +398,11 @@ def test_card_title_dot_has_distinct_colours_in_both_themes():
     assert 'class="entry-title-wrap">${titleDot}<span class="entry-item-title"' in app
     # 按抬头分组或已筛选到某个抬头时整页同一个抬头，不画圆点。
     assert "State.groupBy !== 'title' && !$('#filterTitle')?.value" in app
+
+
+def test_detail_banner_does_not_claim_validation_passed_while_a_warning_is_open():
+    source=(WEB/'app.js').read_text('utf-8')
+    start=source.index('const completenessLine')
+    block=source[start:source.index('const compLine',start)]
+    assert "check_status === 'warning'" in block
+    assert '识别提醒还需要核对' in block

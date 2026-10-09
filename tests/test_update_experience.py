@@ -198,6 +198,18 @@ def test_frontend_health_marker_is_written_atomically(tmp_path):
     assert not list(health.parent.glob(".health.json-*.tmp"))
 
 
+def test_release_highlights_link_to_the_docs_changelog():
+    source = (
+        Path(__file__).resolve().parents[1] / "tidoc" / "web" / "app.js"
+    ).read_text("utf-8")
+
+    assert "/update/changelog.html" in source
+    assert "release-changelog-link" in source
+    # 正式版带版本锚点，测试版没有对应条目，不带锚点。
+    assert "!isPrerelease(clean) ? `#v${clean}`" in source
+    assert "notes.slice(0, RELEASE_NOTES_SHOWN)" in source
+
+
 def test_frontend_upgrade_confirmation_shows_version_transition():
     source = (
         Path(__file__).resolve().parents[1] / "tidoc" / "web" / "app.js"

@@ -570,11 +570,19 @@ function showCompletedUpdateWhenFree(data) {
   show();
 }
 
+// 更新弹窗只列前几条，其余在文档站的更新日志里；正式版直接定位到该版本，测试版没有对应条目，打开日志首页。
+const RELEASE_NOTES_SHOWN = 6;
+function changelogUrl(version) {
+  const clean = String(version || '').replace(/^v/, '');
+  return `${DOCS_SITE_URL}/update/changelog.html${clean && !isPrerelease(clean) ? `#v${clean}` : ''}`;
+}
+
 function openReleaseHighlights(mode, data) {
   const available = mode === 'available';
   const version = available ? data.latest_version : data.current_version;
   const rawNotes = data.notes || [];
   const notes = Array.isArray(rawNotes) ? rawNotes : [rawNotes];
+  const hiddenNotes = Math.max(0, notes.length - RELEASE_NOTES_SHOWN);
   const seen = () => {
     if (data.seen_key) Api.setAppPreference(data.seen_key, '1').catch(() => {});
   };
@@ -591,13 +599,15 @@ function openReleaseHighlights(mode, data) {
     <div class="release-change-list">
       <b>本次更新</b>
       ${notes.length
-        ? `<ul>${notes.slice(0, 6).map((note) => `<li>${esc(note)}</li>`).join('')}</ul>`
+        ? `<ul>${notes.slice(0, RELEASE_NOTES_SHOWN).map((note) => `<li>${esc(note)}</li>`).join('')}</ul>`
         : '<p>此版本没有附加更新说明。</p>'}
+      <button type="button" class="link-btn release-changelog-link" title="在浏览器打开文档站的更新日志">${hiddenNotes ? `还有 ${hiddenNotes} 项更改，查看完整更新日志` : '查看完整更新日志'}</button>
     </div>
     <details class="release-guide">
       <summary><span><b>使用指南</b><small>从导入发票到整理、打印的完整流程</small></span><em>6 步</em></summary>
       <div class="guide-steps">${usageGuideStepsMarkup()}</div>
     </details>`;
+  body.querySelector('.release-changelog-link').onclick = () => Api.openExternalUrl(changelogUrl(version)).catch((e) => toast(e.message, 'err'));
   let m;
   const close = () => { seen(); m.close(); };
   const footer = available

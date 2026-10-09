@@ -1685,6 +1685,7 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .release-change-list > b { font-size: 12px; }
 .release-change-list ul { margin: 8px 0 0 18px; padding: 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.6; }
 .release-change-list p { margin: 7px 0 0; color: var(--ink-soft); font-size: 12.5px; }
+.release-change-list .release-changelog-link { display: block; margin-top: 9px; font-size: 12.5px; text-align: left; }
 .release-guide { border: 1px solid var(--line); border-radius: 11px; background: var(--panel-raised); overflow: hidden; }
 .release-guide summary {
   list-style: none; cursor: pointer; min-height: 58px; padding: 10px 14px;

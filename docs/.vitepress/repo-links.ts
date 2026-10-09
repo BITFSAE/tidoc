@@ -6,8 +6,11 @@ import type MarkdownIt from 'markdown-it'
 // 这里在渲染时把指向它们的相对链接改写成站内地址或 GitHub 地址，源文件保持原样。
 const repoRoot = path.resolve(__dirname, '../..')
 
+export const repo = 'https://github.com/BITFSAE/tidoc'
+
 // 这几页只是把仓库根目录的文件嵌进来，正文里的相对链接是相对仓库根目录写的。
-const rootIncludes = new Set(['docs/dev/design.md', 'docs/dev/contributing.md', 'docs/update/changelog.md'])
+// 更新日志页不在其中：它在构建时解析 CHANGELOG.md，条目里的链接另行改写。
+const rootIncludes = new Set(['docs/dev/design.md', 'docs/dev/contributing.md'])
 
 export function repoLinks(repo: string) {
   const github = (rel: string, hash: string) => {

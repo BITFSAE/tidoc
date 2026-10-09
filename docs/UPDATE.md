@@ -100,6 +100,7 @@ tidoc/ocr/macos/tidoc-ocr-macos-v<ocr_version>.zip
 - Windows 核心在生成安装器前通过 PowerShell 启动成品并等待退出，显式检查进程退出码。配置存在不等于对应成品已经运行成功，结果须随实际构建记录。
 - macOS 核心包构建后只剥离实际存在的依赖库 Mach-O 符号（`*.so` / `*.dylib` / 名为 `Python` 的解释器），保留主可执行文件末尾的 PyInstaller 内嵌归档，再以 ad-hoc 签名重签；没有匹配文件时跳过，不中断发布。DMG 使用 ULMO（LZMA）压缩。打印组件在 PyInstaller 收集阶段剥离符号，由 `--self-test` 兜底校验。
 - Release 说明和客户端 What’s changed 都从 `CHANGELOG.md` 最新一节生成；`scripts/set_version.py` 同时把该节嵌入核心程序，更新完成弹窗优先使用检查缓存、缓存缺失或过期时回退到安装包内说明，确保一键更新和手动安装都能显示，避免多处手工维护后内容不一致。
+- 文档站的更新日志页在构建时读取同一个 `CHANGELOG.md`，所以版本标题必须写成 `## 2026-10-08 · v0.1.39`、`## 2026-09-14`（没有版本号的日期记录）或 `## Unreleased`，小节标题用 `### Added`、`### Changed`、`### Fixed`，条目写成单行 `- ` 列表；标题写成其他形式会让文档站构建失败。`Unreleased` 一节在改成带版本号的标题之前不会出现在站点上。条目的第一句会在页面里作为要点单独突出，所以第一句要能独立说明改了什么。
 - Windows 核心首次安装仍使用 Inno Setup 的按用户安装器；安装到用户目录，不要求管理员权限，并提供开始菜单、可选桌面快捷方式和卸载入口。发布任务同时把 `dist/tidoc` 打成带单一 `tidoc/` 根目录的一键更新 ZIP。macOS 同时用 `ditto` 生成保留应用包元数据的 `tidoc.app/` 更新 ZIP。
 - 平台图标集中在 `icon/`：`source/icon-master.png` 是完整方形母版；Windows 使用 `windows/icon-rounded.png` 和多尺寸 `windows/icon.ico`，透明圆角由素材提供；macOS 使用不手工裁圆角的 `macos/icon-1024.png` 和 `macos/icon.icns`，交给系统裁切。`scripts/generate_brand_assets.py` 可从方形源图重建这些文件及 Web 用 PNG。
 

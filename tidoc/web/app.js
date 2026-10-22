@@ -1460,6 +1460,9 @@ function entryCard(e) {
 
   AdapterUI.bindCardActions(right,e);
   card.append(main, right);
+  // Tab 在卡片之间移动（见 stepEntryTab），卡片里的按钮不进 Tab 顺序；
+  // 键盘操作这些按钮的功能走 Enter 打开的详情，或菜单键打开的条目菜单。
+  card.querySelectorAll('button').forEach((button) => { button.tabIndex = -1; });
   card.onclick = (ev) => {
     syncEntryCardFocus(card);
     card.focus({ preventScroll: true });
@@ -1548,6 +1551,20 @@ function moveEntryFocus(currentId, targetIndex, extendSelection) {
   focusEntryCard(targetId);
 }
 
+// Tab / Shift+Tab 在列表里一张一张往下（往上）走，分组标题上的「选中这组」按钮也算一站；
+// 走到头就交给浏览器，焦点离开列表。
+function stepEntryTab(ev) {
+  if (ev.key !== 'Tab' || ev.defaultPrevented || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const from = ev.target.closest?.('.entry-card, .group-sel');
+  if (!from) return;
+  const stops = [...$('#entryList').querySelectorAll('.entry-card, .group-sel')];
+  const next = stops[stops.indexOf(from) + (ev.shiftKey ? -1 : 1)];
+  if (!next) return;
+  ev.preventDefault();
+  if (next.classList.contains('entry-card')) focusEntryCard(next.dataset.entryId);
+  else next.focus();
+}
+
 function handleEntryCardKeydown(ev, entry) {
   if (ev.target !== ev.currentTarget) return;
   const cards = entryCards();
@@ -1585,7 +1602,7 @@ function handleEntryCardKeydown(ev, entry) {
   } else if (key === 'ContextMenu' || (ev.shiftKey && key === 'F10')) {
     ev.preventDefault();
     const rect = ev.currentTarget.getBoundingClientRect();
-    openEntryMenu(rect.left + 24, rect.top + 24, entry);
+    openEntryMenu(rect.left + 24, rect.top + 24, entry, { keyboard: true });
   }
 }
 
@@ -1918,7 +1935,12 @@ function renderBatchFolders() {
     btn.onclick = (ev) => {
       ev.stopPropagation();
       const b = State.batches.find((x) => x.id === btn.dataset.folderMenu);
-      if (b) openBatchMenu(ev.clientX, ev.clientY, b);
+      if (!b) return;
+      // 键盘触发的点击没有鼠标位置（detail 为 0），菜单贴在按钮下方。
+      if (ev.detail === 0) {
+        const rect = btn.getBoundingClientRect();
+        openBatchMenu(rect.left, rect.bottom + 4, b, { keyboard: true });
+      } else openBatchMenu(ev.clientX, ev.clientY, b);
     };
   });
   const newBtn = $('#folderNewBatch');
@@ -1942,12 +1964,11 @@ function hasArchivedBatches() {
   return State.batches.some((batch) => batch.archived);
 }
 
-function openBatchMenu(x, y, b) {
-  closeEntryMenu();
+function openBatchMenu(x, y, b, options) {
   const menu = el('div', 'entry-context-menu');
   const item = (label, fn, danger) => {
     const btn = el('button', danger ? 'danger' : '', esc(label));
-    btn.onclick = async () => { closeEntryMenu(); await fn(); };
+    btn.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await fn(); };
     menu.appendChild(btn);
   };
   item('打开这批', () => focusBatch(b.id));
@@ -1955,10 +1976,7 @@ function openBatchMenu(x, y, b) {
   item('批次备注', () => batchNoteFlow(b));
   item(b.archived ? '恢复到在办' : '归档批次', () => archiveBatchFlow(b));
   item('删除批次', () => deleteBatchFlow(b), true);
-  menu.style.left = Math.min(x, window.innerWidth - 190) + 'px';
-  menu.style.top = Math.min(y, window.innerHeight - 200) + 'px';
-  document.body.appendChild(menu);
-  setTimeout(() => document.addEventListener('click', closeEntryMenu, { once: true }), 0);
+  showContextMenu(menu, x, y, options);
 }
 
 async function deleteBatchFlow(batchSummary) {
@@ -2703,12 +2721,11 @@ function askUseRecognizedPaymentAmount(amounts, sum, currentPaid = '', invoiceTo
   });
 }
 
-function openEntryMenu(x, y, e) {
-  closeEntryMenu();
+function openEntryMenu(x, y, e, options) {
   const menu = el('div', 'entry-context-menu');
   const item = (label, fn, danger) => {
     const b = el('button', danger ? 'danger' : '', esc(label));
-    b.onclick = async () => { closeEntryMenu(); await fn(); };
+    b.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await fn(); };
     menu.appendChild(b);
   };
   item('打开详情', () => openEntryDetail(e.id));
@@ -2735,10 +2752,39 @@ function openEntryMenu(x, y, e) {
     await addSelectionToBatch([e.id]);
   });
   item('删除条目', () => quickDelete(e), true);
+  showContextMenu(menu, x, y, options);
+}
+
+/*
+ * 右键菜单的共用部分：定位、键盘操作和关闭。鼠标右键打开时焦点不动；键盘打开
+ * （options.keyboard：菜单键、Shift+F10、回车点「⋯」）时焦点进入菜单，↑↓ 移动并首尾循环，
+ * Home/End 跳到头尾，Enter 或空格执行，Esc 或 Tab 关闭并把焦点还给打开前的位置。
+ */
+function showContextMenu(menu, x, y, { keyboard = false } = {}) {
+  closeEntryMenu();
+  const items = [...menu.querySelectorAll('button')];
+  menu.setAttribute('role', 'menu');
+  items.forEach((item) => { item.setAttribute('role', 'menuitem'); item.tabIndex = -1; });
   document.body.appendChild(menu);
   menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px';
   menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + 'px';
-  setTimeout(() => document.addEventListener('click', closeEntryMenu, { once: true }), 0);
+  const focusItem = (index) => items[(index + items.length) % items.length]?.focus();
+  menu._opener = document.activeElement;
+  menu._onKeydown = (ev) => {
+    const current = items.indexOf(document.activeElement);
+    const handled = () => { ev.preventDefault(); ev.stopPropagation(); };
+    if (ev.key === 'Escape') { handled(); closeEntryMenu({ restoreFocus: true }); }
+    else if (ev.key === 'Tab') { ev.preventDefault(); closeEntryMenu({ restoreFocus: true }); }
+    else if (ev.key === 'ArrowDown') { handled(); focusItem(current + 1); }
+    else if (ev.key === 'ArrowUp') { handled(); focusItem(current < 0 ? -1 : current - 1); }
+    else if (ev.key === 'Home') { handled(); focusItem(0); }
+    else if (ev.key === 'End') { handled(); focusItem(-1); }
+    // 在菜单外按了别的键：菜单收起，这个键照常生效。
+    else if (!menu.contains(ev.target) && !['Shift', 'Control', 'Alt', 'Meta'].includes(ev.key)) closeEntryMenu();
+  };
+  document.addEventListener('keydown', menu._onKeydown, true);
+  setTimeout(() => { if (menu.isConnected) document.addEventListener('click', closeEntryMenu, { once: true }); }, 0);
+  if (keyboard) items[0]?.focus();
 }
 
 async function batchEntryNoteFlow(e) {
@@ -2760,9 +2806,13 @@ async function batchEntryNoteFlow(e) {
   setTimeout(() => body.querySelector('#batchEntryNote')?.focus(), 20);
 }
 
-function closeEntryMenu() {
-  const old = $('.entry-context-menu');
-  if (old) old.remove();
+function closeEntryMenu({ restoreFocus = false } = {}) {
+  const menu = $('.entry-context-menu');
+  if (!menu) return;
+  document.removeEventListener('keydown', menu._onKeydown, true);
+  document.removeEventListener('click', closeEntryMenu);
+  menu.remove();
+  if (restoreFocus && menu._opener?.isConnected) menu._opener.focus({ preventScroll: true });
 }
 
 async function quickNoteFlow(e) {
@@ -2806,24 +2856,33 @@ function bindEvents() {
     btn.onclick = () => setQuickView(btn.dataset.view);
   });
 
-  let kwTimer;
-  const relist = () => { State.selected.clear(); syncFilterControlStates(); refreshEntries(); };
+  let kwTimer = null;
+  const relist = () => { State.selected.clear(); syncFilterControlStates(); return refreshEntries(); };
+  const queueRelist = () => { clearTimeout(kwTimer); kwTimer = setTimeout(() => { kwTimer = null; relist(); }, 220); };
   const relistFromAdvanced = () => { State.selected.clear(); State.quickView = 'all'; updateQuickViewButtons(); syncFilterControlStates(); refreshEntries(); };
   if ($('#filterStatus')) $('#filterStatus').onchange = relistFromAdvanced;
   $('#filterTitle').onchange = () => { State.activeTitle = $('#filterTitle').value; relist(); };
   $('#filterCheck').onchange = relistFromAdvanced;
   $('#filterProfile').onchange = relist;
   $('#sortSelect').onchange = relist;
-  $('#filterKeyword').oninput = () => { showSearchHintIfEmpty(); syncFilterControlStates(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
+  $('#filterKeyword').oninput = () => { showSearchHintIfEmpty(); syncFilterControlStates(); queueRelist(); };
+  // 搜索框里按 ↓ 或 Enter：搜索词立即生效，焦点落到结果列表的当前卡片上。
+  $('#filterKeyword').addEventListener('keydown', async (ev) => {
+    if (ev.isComposing || (ev.key !== 'Enter' && ev.key !== 'ArrowDown')) return;
+    ev.preventDefault();
+    if (kwTimer !== null) { clearTimeout(kwTimer); kwTimer = null; await relist(); }
+    focusEntryCard(State.focusedEntryId);
+  });
   $('#searchClear').onclick = () => {
     $('#filterKeyword').value = '';
     showSearchHintIfEmpty();
     clearTimeout(kwTimer);
+    kwTimer = null;
     relist();
     $('#filterKeyword').focus();
   };
-  $('#filterAmountMin').oninput = () => { syncFilterControlStates(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
-  $('#filterAmountMax').oninput = () => { syncFilterControlStates(); clearTimeout(kwTimer); kwTimer = setTimeout(relist, 220); };
+  $('#filterAmountMin').oninput = () => { syncFilterControlStates(); queueRelist(); };
+  $('#filterAmountMax').oninput = () => { syncFilterControlStates(); queueRelist(); };
   $('#filterDateFrom').onchange = relist;
   $('#filterDateTo').onchange = relist;
 
@@ -2889,6 +2948,7 @@ function bindEvents() {
   $('#filterPaymentCount').onchange = () => { State.paymentCountFilter = $('#filterPaymentCount').value; relistFromAdvanced(); };
   setupGlobalDrop();
   setupClipboardUpload();
+  $('#entryList').addEventListener('keydown', stepEntryTab);
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
@@ -2905,9 +2965,10 @@ function bindEvents() {
       if (e.key === 'Escape') e.target.blur();
       return;
     }
-    if (e.key === '/') { e.preventDefault(); $('#filterKeyword').focus(); }
-    else if (e.key.toLowerCase() === 'n') openNewEntry();
-    else if (e.key.toLowerCase() === 't' && State.selected.size) tagSelectionFlow();
+    const plain = !e.metaKey && !e.ctrlKey && !e.altKey;   // Cmd/Ctrl+N 等组合键不当作单键快捷键
+    if (e.key === '/' && plain) { e.preventDefault(); $('#filterKeyword').focus(); }
+    else if (e.key.toLowerCase() === 'n' && plain) openNewEntry();
+    else if (e.key.toLowerCase() === 't' && plain && State.selected.size) tagSelectionFlow();
     else if (e.key === 'Escape' && State.selected.size) {
       clearEntrySelection();
     }
@@ -2933,6 +2994,8 @@ function clearAllFilters() {
 // ------------------------------------------------------------------ 通用弹层
 let modalSequence = 0;
 const MODAL_FOCUSABLE = 'button, [href], input, select, textarea, summary, [tabindex]';
+// 回车可以提交的单行输入类型；搜索框、复选框、文件框等不算。
+const TEXT_FIELD_TYPES = new Set(['text', 'number', 'email', 'url', 'tel', 'password', 'date', 'time', 'datetime-local', 'month', 'week']);
 
 const isFocusable = (node) => !node.disabled && node.tabIndex >= 0
   && !node.closest('[hidden], [inert]') && node.getClientRects().length > 0;
@@ -3063,10 +3126,36 @@ function modal({ title, subhead, titleChip, body, footer, wide, compact, onClose
     if (e.shiftKey && (current === first || current === box)) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && current === last) { e.preventDefault(); first.focus(); }
   });
+  // Enter 等于点默认按钮（页脚最右边的主按钮；只有一个按钮的提示窗口就是它）。
+  // 在单行输入框里回车，或在简单窗口里直接回车时生效；按钮、下拉里的回车保持原样，
+  // 多行文本框里回车是换行，Ctrl/Cmd + Enter 才提交；输入法组字时的回车只确认文字。
+  mask.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.defaultPrevented || e.isComposing || e.repeat || e.altKey || e.shiftKey) return;
+    const target = e.target;
+    const multiline = target instanceof HTMLTextAreaElement;
+    const singleLine = target instanceof HTMLInputElement && TEXT_FIELD_TYPES.has(target.type);
+    const onFrame = target === box || target === mask;
+    const buttons = [...foot.querySelectorAll('button')];
+    if (multiline ? !(e.ctrlKey || e.metaKey) : !(singleLine || (onFrame && (compact || buttons.length === 1)))) return;
+    const primary = buttons.filter((b) => !b.disabled && b.classList.contains('primary')).pop();
+    const lone = onFrame && buttons.length === 1 && !buttons[0].disabled && !buttons[0].classList.contains('danger')
+      ? buttons[0] : null;
+    const button = primary || lone;
+    if (!button) return;
+    e.preventDefault();
+    button.click();
+  });
   // 弹窗里的下拉是 innerHTML 直接生成的，创建后统一接入自绘组件
   enhanceNativeSelects(bodyEl);
   setupInlineProfileCreation(bodyEl);
   box.focus({ preventScroll: true });
+  // 内容从文本框开始的窗口，直接把光标放进去，打开就能输入；以下拉或按钮开头的窗口保持焦点在窗口上。
+  const firstControl = [...bodyEl.querySelectorAll(MODAL_FOCUSABLE)].find(isFocusable);
+  if (firstControl instanceof HTMLTextAreaElement
+      || (firstControl instanceof HTMLInputElement && TEXT_FIELD_TYPES.has(firstControl.type))) {
+    firstControl.focus({ preventScroll: true });
+    try { firstControl.setSelectionRange(firstControl.value.length, firstControl.value.length); } catch (e) { /* number、date 没有光标位置 */ }
+  }
   const api = { mask, body: bodyEl, close, requestClose, foot };
   mask._api = api;
   return api;

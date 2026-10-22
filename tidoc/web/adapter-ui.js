@@ -690,7 +690,6 @@ const AdapterUI = (() => {
     const input = $('[data-copy-name]', body); input.value = scheme.name + ' 副本';
     let m;
     const submit = async () => { try { const copied = await Api.copyScheme(scheme.id, input.value); await refresh(); m.close(); if (onCopied) await onCopied(copied); toast('已复制方案', 'ok'); } catch (e) { showErrors(body, e); } };
-    input.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
     m = modal({ title: '复制报账方案', key: 'scheme-copy', compact: true, body, footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('复制', 'primary', submit)] });
     input.focus(); input.select();
   }

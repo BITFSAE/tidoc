@@ -934,7 +934,8 @@ html[data-engine="blink"] .entry-list[data-density="compact"] .entry-card { cont
   width: 100%; border: none; background: transparent; color: var(--ink);
   text-align: left; padding: 8px 9px; border-radius: 6px; cursor: pointer; font-size: 13px;
 }
-.entry-context-menu button:hover { background: var(--paper-2); }
+.entry-context-menu button:hover, .entry-context-menu button:focus-visible { background: var(--paper-2); }
+.entry-context-menu button:focus-visible { outline: 2px solid var(--primary-ring-strong); outline-offset: -2px; }
 .entry-context-menu button.danger { color: var(--blocked); }
 
 /* 层级：弹窗遮罩 50+ < 通知 100 < 右键菜单 120 < 下拉列表 400 < 悬浮提示 500。

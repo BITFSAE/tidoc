@@ -18,9 +18,11 @@
       document.documentElement.dataset.themeMode = mode;
       document.documentElement.dataset.theme = dark ? 'dark' : 'light';
       document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+      // WebView2 是 Chromium（UA 带 Edg/ 或 Chrome/），macOS 的系统 WebView 是 WebKit；个别样式只在 Chromium 上启用。
+      document.documentElement.dataset.engine = /\b(Edg|Chrome)\//.test(navigator.userAgent) ? 'blink' : 'webkit';
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=0.1.40-beta.1" />
+  <link rel="stylesheet" href="styles.css?v=0.1.40" />
 </head>
 <body>
   <div id="app" class="app">
@@ -267,10 +269,10 @@
   <div id="modalRoot"></div>
   <div id="toastRoot" class="toast-root" aria-live="polite"></div>
 
-  <script src="api.js?v=0.1.40-beta.1"></script>
-  <script src="select.js?v=0.1.40-beta.1"></script>
-  <script src="schema-form.js?v=0.1.40-beta.1"></script>
-  <script src="adapter-ui.js?v=0.1.40-beta.1"></script>
-  <script src="app.js?v=0.1.40-beta.1"></script>
+  <script src="api.js?v=0.1.40"></script>
+  <script src="select.js?v=0.1.40"></script>
+  <script src="schema-form.js?v=0.1.40"></script>
+  <script src="adapter-ui.js?v=0.1.40"></script>
+  <script src="app.js?v=0.1.40"></script>
 </body>
 </html>

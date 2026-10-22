@@ -13,11 +13,16 @@ from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 from PIL import Image
+from reportlab import rl_config
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
+
+# reportlab 默认把图片和页面流再套一层 ASCII85：生成慢、占内存、文件还大约四分之一，
+# 而 PDF 本来就支持二进制流（pypdf 合并时也是这样写的）。
+rl_config.useA85 = 0
 
 # 注册一个内置 CJK 字体，保证中文标注不乱码（无需外部字体文件）
 _CJK_FONT = "STSong-Light"
@@ -113,6 +118,33 @@ def merge_pdf_groups(pdf_groups: list[list[str | Path]], out_path: str | Path,
     return out_path
 
 
+def _pdf_image(path: str | Path, im: Image.Image):
+    """JPEG 原样嵌入，不解码也不重新压缩；其他格式转成 RGB 后直接交给 reportlab。
+
+    以前每张图先编码成 PNG 再让 reportlab 解码，一张手机截图或 12 MP 照片要多出几百 MB 内存，
+    生成的 PDF 也比原图大好几倍。reportlab 收到文件路径时才会直接嵌入 JPEG 数据；
+    交给它 ImageReader 对象的话，它会为了算指纹先把整张图解码成 RGB。
+    """
+    from reportlab.lib.utils import ImageReader
+
+    if (im.format == "JPEG" and im.mode in ("RGB", "L")
+            and Path(path).suffix.lower() in (".jpg", ".jpeg") and _jpeg_embeddable(path)):
+        return str(path)
+    return ImageReader(im.convert("RGB"))
+
+
+def _jpeg_embeddable(path: str | Path) -> bool:
+    """reportlab 遇到不支持的 JPEG（如算术编码、12 位）时不报错，而是悄悄换成占位图，先自己试读一遍。"""
+    from reportlab.pdfbase import pdfutils
+
+    try:
+        with open(path, "rb") as stream:
+            pdfutils.readJPEGInfo(stream)
+        return True
+    except Exception:  # noqa: BLE001 - 任何读不懂的 JPEG 都改走转换流程
+        return False
+
+
 def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
                   annotations: list[str] | None = None,
                   batch_note: str = "", show_page_footer: bool = True,
@@ -133,8 +165,6 @@ def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
     rows = images_per_page // cols
     slot_w = (page_w - 2 * margin - gap * (cols - 1)) / cols
     slot_h = (page_h - 2 * margin - footer_h - gap * (rows - 1)) / rows
-    from reportlab.lib.utils import ImageReader
-
     total_pages = (len(image_paths) + images_per_page - 1) // images_per_page
     for page_index, start in enumerate(range(0, len(image_paths), images_per_page), start=1):
         if cancel_check and cancel_check():
@@ -144,7 +174,6 @@ def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
         for offset, img_path in enumerate(image_paths[start:start + images_per_page]):
             idx = start + offset
             with Image.open(img_path) as im:
-                im = im.convert("RGB")
                 iw, ih = im.size
                 scale = min(slot_w / iw, slot_h / ih)
                 draw_w, draw_h = iw * scale, ih * scale
@@ -152,10 +181,7 @@ def images_to_pdf(image_paths: list[str | Path], out_path: str | Path,
                 slot_y = margin + footer_h + (rows - 1 - offset // cols) * (slot_h + gap)
                 x = slot_x + (slot_w - draw_w) / 2
                 y = slot_y + (slot_h - draw_h) / 2
-                tmp = io.BytesIO()
-                im.save(tmp, format="PNG")
-                tmp.seek(0)
-                c.drawImage(ImageReader(tmp), x, y, width=draw_w, height=draw_h)
+                c.drawImage(_pdf_image(img_path, im), x, y, width=draw_w, height=draw_h)
             note = annotations[idx] if annotations and idx < len(annotations) else ""
             if note:
                 _draw_label(c, note, slot_x + slot_w / 2, slot_y - 3 * mm,

@@ -1211,3 +1211,37 @@ def test_bindle_merge_fills_invoice_number_when_file_hash_matches(repos, tmp_pat
 
     assert result["updated_entry_ids"] == [existing_id]
     assert target_entries.get(existing_id)["invoice_no"] == "A100"
+
+
+def test_archive_members_are_streamed_to_disk_with_their_digest(tmp_path):
+    import hashlib
+
+    from tidoc.services.bindle import _extract_archive_member, _has_archive_member
+
+    payload = os.urandom(3 * 1024 * 1024 + 17)        # 跨过多个 1 MB 读取块
+    package = tmp_path / "pack.zip"
+    with zipfile.ZipFile(package, "w") as zf:
+        zf.writestr("attachments/a.bin", payload)
+    with zipfile.ZipFile(package) as zf:
+        assert _has_archive_member(zf, "attachments/a.bin")
+        assert not _has_archive_member(zf, "attachments/missing.bin")
+        dest = tmp_path / "out.bin"
+        digest = _extract_archive_member(zf, "attachments/a.bin", dest)
+    assert dest.read_bytes() == payload
+    assert digest == hashlib.sha256(payload).hexdigest()
+
+
+def test_duplicate_member_names_are_still_reported_as_tampering(repos, tmp_path):
+    import warnings
+
+    profile = repos["profiles"].create("张三", "李老师")
+    entry_id = repos["entries"].create(profile["id"], parsed=ParsedInvoice(total=Decimal("1.00")))
+    package = export_bindle(
+        repos["entries"], repos["attachments"], [entry_id],
+        tmp_path / "dup.tidoc", {profile["id"]: profile},
+    )
+    with zipfile.ZipFile(package, "a") as zf, warnings.catch_warnings():
+        warnings.simplefilter("ignore")               # zipfile 自己会提示重名
+        zf.writestr("summary.json", b"{}")            # 与包内已有的成员重名
+    preview = inspect_bindle(package, repos["entries"])
+    assert any(str(name).startswith("duplicate:") for name in preview["tampered"])

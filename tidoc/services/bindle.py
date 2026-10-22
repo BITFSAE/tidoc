@@ -20,7 +20,7 @@ import uuid
 import zipfile
 import copy
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -170,6 +170,25 @@ def _archive_digest(path: Path) -> str:
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
+    return digest.hexdigest()
+
+
+def _has_archive_member(archive: zipfile.ZipFile, arcname: str) -> bool:
+    """Constant-time membership test; namelist() would rebuild the whole list on every call."""
+    try:
+        archive.getinfo(arcname)
+    except KeyError:
+        return False
+    return True
+
+
+def _extract_archive_member(archive: zipfile.ZipFile, arcname: str, dest: Path) -> str:
+    """Stream one member to disk and return its sha256 without holding the file in memory."""
+    digest = hashlib.sha256()
+    with archive.open(arcname) as source, dest.open("wb") as target:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+            target.write(block)
     return digest.hexdigest()
 
 
@@ -407,7 +426,7 @@ def inspect_bindle(path: str | Path, entries_repo: EntryRepo | None = None, *, a
     with zipfile.ZipFile(path, "r") as zf:
         name_list = zf.namelist()
         names = set(name_list)
-        duplicate_names = sorted({name for name in name_list if name_list.count(name) > 1})
+        duplicate_names = sorted(name for name, count in Counter(name_list).items() if count > 1)
         if MANIFEST_NAME not in names or ENTRIES_NAME not in names:
             raise ValueError("不是合法的 .tidoc 绑定包（缺少签名清单或条目数据）。")
 
@@ -1141,7 +1160,7 @@ def _merge_existing_entry(
             continue
         stored_path = str(attachment.get("stored_path") or "")
         arcname = f"attachments/{stored_path}"
-        if not stored_path or arcname not in archive.namelist():
+        if not stored_path or not _has_archive_member(archive, arcname):
             continue
         suffix = Path(
             str(attachment.get("original_name") or "") or stored_path
@@ -1171,8 +1190,7 @@ def _merge_existing_entry(
         stored_name = attachments_repo._unique_name(dest_dir, entry_id, att_type, suffix)
         dest = dest_dir / stored_name
         created_files.append(dest)
-        dest.write_bytes(archive.read(arcname))
-        actual_digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+        actual_digest = _extract_archive_member(archive, arcname, dest)
         if digest and actual_digest != digest and not tampered:
             raise ValueError(f"附件 {attachment.get('original_name') or stored_name} 校验失败。")
         conn.execute(
@@ -1667,13 +1685,12 @@ def import_bindle(
                 created_dirs.append(dest_dir)
                 for att in e.get("attachments", []):
                     arcname = f"attachments/{att['stored_path']}"
-                    if arcname not in zf.namelist():
+                    if not _has_archive_member(zf, arcname):
                         continue
                     stored_name = Path(att["stored_path"]).name
                     dest = dest_dir / stored_name
                     created_files.append(dest)
-                    dest.write_bytes(zf.read(arcname))
-                    actual_digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+                    actual_digest = _extract_archive_member(zf, arcname, dest)
                     expected_digest = str(att.get("sha256") or "")
                     if (
                         expected_digest

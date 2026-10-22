@@ -132,6 +132,8 @@ class Api:
         self._verification_sessions: dict[str, dict] = {}
         self._bindle_inspection_cache: dict | None = None
         self._launch_files = [launch_file] if launch_file else []
+        from .services.native_drop import NativeDropRegistry
+        self._native_drops = NativeDropRegistry()
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
         self._sync_entry_statuses()
         from .services.updater import CoreUpdateManager
@@ -145,7 +147,7 @@ class Api:
         等文件系统方法）全部当成 JS API 暴露：既有安全隐患，又让注入体积暴涨、
         拖慢桥就绪，导致前端首个调用报「后端方法不存在」。
         """
-        internal = {"bind_window", "queue_launch_file"}
+        internal = {"bind_window", "queue_launch_file", "enable_native_drop"}
         return [
             name for name in vars(type(self))
             if not name.startswith("_")
@@ -155,6 +157,23 @@ class Api:
 
     def bind_window(self, window) -> None:
         self._window = window
+
+    def enable_native_drop(self, window) -> None:
+        """让原生层把拖入文件的真实路径交给后端，页面不必再读取文件内容回传。"""
+        from webview.dom import DOMEventHandler
+
+        handler = DOMEventHandler(self._native_drops.record)
+
+        def attach() -> None:
+            try:
+                window.dom.document.events.drop += handler
+            except Exception:  # noqa: BLE001 - 失败时拖入仍走读取文件内容的老流程
+                self._native_drops.enabled = False
+            else:
+                self._native_drops.enabled = True
+
+        # 页面重新载入后原有的监听会丢失，所以每次载入完成都登记一次。
+        window.events.loaded += attach
 
     def queue_launch_file(self, path: str) -> None:
         """Queue a .tidoc path handed off by a secondary application launch."""
@@ -763,11 +782,50 @@ class Api:
 
         return scan_files(paths or [])
 
+    def _staged_drop_path(self, name: str) -> Path:
+        dest_dir = self.data_root.dropped_dir / uuid.uuid4().hex[:8]
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        return dest_dir / name
+
+    @_guard
+    def take_dropped_paths(self, files):
+        """拖入文件的真实位置已由原生层报给后端时，直接从磁盘复制到中转区（流式，不占内存）。
+
+        没有原生路径（监听没登记上、文件在受保护位置等）时返回 None，由前端改为读取文件内容。
+        """
+        requested = [
+            {"name": str(item.get("name") or ""), "size": item.get("size")}
+            for item in (files or []) if isinstance(item, dict)
+        ]
+        sources = self._native_drops.claim(requested)
+        if sources is None:
+            return {"paths": None}
+        self.data_root.dropped_dir.mkdir(parents=True, exist_ok=True)
+        out: list[str] = []
+        total_bytes = 0
+        try:
+            for source, item in zip(sources, requested):
+                name = _safe_filename(item["name"] or Path(source).name or "dropped-file")
+                size = Path(source).stat().st_size
+                if size > MAX_DROPPED_FILE_BYTES:
+                    raise ValueError(f"文件过大：{name}（单个文件不能超过 100 MB）")
+                if total_bytes + size > MAX_DROPPED_TOTAL_BYTES:
+                    raise ValueError("拖入文件总大小不能超过 500 MB")
+                total_bytes += size
+                dest = self._staged_drop_path(name)
+                out.append(str(dest))
+                shutil.copyfile(source, dest)
+        except BaseException:
+            for path in out:
+                Path(path).unlink(missing_ok=True)
+                _remove_empty_dropped_parent(self.data_root.dropped_dir, Path(path).parent)
+            raise
+        return {"paths": out}
+
     @_guard
     def save_dropped_files(self, files):
         """保存前端拖入但拿不到本机路径的文件，返回临时路径列表。"""
-        staging = self.data_root.dropped_dir
-        staging.mkdir(parents=True, exist_ok=True)
+        self.data_root.dropped_dir.mkdir(parents=True, exist_ok=True)
         out = []
         total_bytes = 0
         for item in (files or []):
@@ -787,9 +845,7 @@ class Api:
             except (binascii.Error, ValueError) as exc:
                 raise ValueError(f"文件内容无效：{name}") from exc
             total_bytes += len(raw)
-            dest_dir = staging / uuid.uuid4().hex[:8]
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / name
+            dest = self._staged_drop_path(name)
             dest.write_bytes(raw)
             out.append(str(dest))
         return {"paths": out}

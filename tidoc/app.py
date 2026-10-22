@@ -270,6 +270,7 @@ def main() -> None:
             background_color=_initial_window_background(api),
         )
         api.bind_window(window)
+        api.enable_native_drop(window)
         window.events.closed += stop_event.set
         threading.Thread(
             target=_serve_instance_requests,

@@ -1477,8 +1477,9 @@ function entryCard(e) {
   };
   card.ondragleave = () => card.classList.remove('card-dragging');
   card.ondrop = async (ev) => {
+    // 不拦截冒泡：原生层的拖放监听挂在 document 上，靠它拿到文件的真实路径；
+    // 全局的 drop 处理对卡片内的落点会自行跳过。
     ev.preventDefault();
-    ev.stopPropagation();
     card.classList.remove('card-dragging');
     const progress = taskProgress('正在读取拖入材料…');
     try {
@@ -5134,7 +5135,7 @@ async function openInboundBindle(infos, cleanupPaths, progress = null) {
 async function addDroppedMaterialFiles(entryId, files, progress = null) {
   if (!files.length) return false;
   progress?.update('正在读取拖入材料…');
-  const paths = await droppedFilesToPaths(files);
+  const paths = await droppedFilesToPaths(files, { dropped: true });
   let cleanupDeferred = false;
   try {
     progress?.update(State.paymentOcrEnabled ? '正在识别文件类型和付款金额…' : '正在识别文件类型…');
@@ -5257,11 +5258,22 @@ function readFileAsDataURL(file) {
   });
 }
 
-async function droppedFilesToPaths(files) {
+// 拖入时原生层已经知道文件的真实位置，后端直接从磁盘复制到中转区，不把文件内容读进页面再回传。
+// 粘贴的文件没有磁盘位置，只能读取内容；拿不到原生路径时（返回 null）也退回读取内容。
+async function nativeDroppedPaths(list) {
+  const result = await Api.takeDroppedPaths(list.map((file) => ({ name: file.name, size: file.size })));
+  return result?.paths?.length === list.length ? result.paths : null;
+}
+
+async function droppedFilesToPaths(files, { dropped = false } = {}) {
   const list = [...(files || [])];
   if (!list.length) return [];
   const directPaths = list.map(dragFilePath).filter(Boolean);
   if (directPaths.length === list.length) return directPaths;
+  if (dropped) {
+    const nativePaths = await nativeDroppedPaths(list);
+    if (nativePaths) return nativePaths;
+  }
   const payload = [];
   for (const file of list) {
     payload.push({ name: file.name || 'dropped-file', data_url: await readFileAsDataURL(file) });
@@ -5285,7 +5297,6 @@ function setupMaterialDrop(zone, entryId, onDone) {
   zone.ondragleave = () => zone.classList.remove('dragging');
   zone.ondrop = async (ev) => {
     ev.preventDefault();
-    ev.stopPropagation();
     zone.classList.remove('dragging');
     const files = [...(ev.dataTransfer?.files || [])];
     const progress = taskProgress('正在读取拖入材料…');
@@ -5333,7 +5344,7 @@ function setupGlobalDrop() {
     let paths = [];
     let cleanupDeferred = false;
     try {
-      paths = await droppedFilesToPaths([...ev.dataTransfer.files]);
+      paths = await droppedFilesToPaths([...ev.dataTransfer.files], { dropped: true });
       progress.update('正在识别文件类型和材料信息…');
       const infos = await materialInfosForPaths(paths);
       if (await openInboundBindle(infos, paths, progress)) {

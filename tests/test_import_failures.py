@@ -440,15 +440,17 @@ def test_bindle_import_failure_rolls_back_records_and_extracted_files(
     target_profile = target_profiles.create("王五", "赵老师")
     target_entries = EntryRepo(target_db)
     target_attachments = AttachmentRepo(target_db, target_root)
-    original_write_bytes = Path.write_bytes
+    import tidoc.services.bindle as bindle_module
 
-    def fail_target_extract(path, data):
-        if target_root.attachments_dir in path.parents:
-            original_write_bytes(path, b"partial")
+    original_extract = bindle_module._extract_archive_member
+
+    def fail_target_extract(archive, arcname, dest):
+        if target_root.attachments_dir in dest.parents:
+            dest.write_bytes(b"partial")
             raise OSError("附件解压失败")
-        return original_write_bytes(path, data)
+        return original_extract(archive, arcname, dest)
 
-    monkeypatch.setattr(Path, "write_bytes", fail_target_extract)
+    monkeypatch.setattr(bindle_module, "_extract_archive_member", fail_target_extract)
 
     with pytest.raises(OSError, match="附件解压失败"):
         import_bindle(

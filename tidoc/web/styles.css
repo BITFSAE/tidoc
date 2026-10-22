@@ -810,7 +810,7 @@ body {
   align-content: start; gap: 10px; padding: 8px 8px 8px 0;
 }
 .entry-list[data-density="compact"] { gap: 6px; }
-.entry-list[data-density="compact"] .entry-card { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 8px 12px; contain-intrinsic-size: auto 68px; }
+.entry-list[data-density="compact"] .entry-card { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 8px 12px; }
 .entry-list[data-density="compact"] .entry-item-title { font-size: 13px; max-width: 42ch; }
 .entry-list[data-density="compact"] .entry-line2 { margin-top: 2px; gap: 9px; }
 .entry-list[data-density="compact"] .entry-line3 { display: none; }
@@ -833,11 +833,16 @@ body {
   background: var(--tc-card, var(--panel));
   border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px 16px; cursor: pointer;
-  /* 长列表只排版和绘制视口附近的卡片；auto 会记住已渲染过的真实高度。 */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 136px;
   min-width: 0;
 }
+/* 长列表只排版和绘制视口附近的卡片；auto 会记住已渲染过的真实高度。
+   只在 Chromium（Windows 的 WebView2）上启用：macOS 的 WebKit 在卡片重新进入视口时有
+   已知的漏画缺陷（卡片外框在、内容整块空白），所以那里让每张卡片照常绘制。 */
+html[data-engine="blink"] .entry-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 136px;
+}
+html[data-engine="blink"] .entry-list[data-density="compact"] .entry-card { contain-intrinsic-size: auto 68px; }
 @media (hover: hover) and (pointer: fine) {
   .entry-card:hover { box-shadow: var(--shadow-sm); border-color: var(--line-hover); }
 }

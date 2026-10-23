@@ -5910,15 +5910,15 @@ async function openBindleImportPreview(path, insp, options = {}) {
     const currentLocation = isExisting
       ? `所在批次 · ${existingBatchNames.length ? existingBatchNames.join('、') : '未进批次'}`
       : '本机无此条目';
+    const ownerText = `${profile?.name || entry.profile_name || '未填写'} · ${profile?.reviewer || entry.reviewer || '未填写'}`;
     return `<div class="bindle-entry-row${initiallySelected.has(entry.profile_id || '__fallback__') ? '' : ' off'}" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}" data-bind-entry-index="${entryIndex}">
       <input type="checkbox" data-bind-entry-enabled aria-label="导入发票 ${esc(entry.invoice_no || entryIndex + 1)}" ${initiallySelected.has(entry.profile_id || '__fallback__') ? 'checked' : ''}/>
       <span class="mono">${esc(entry.invoice_no || '无发票号')}</span>
       <span class="bindle-entry-seller" data-tooltip-overflow="${esc(entry.seller || '')}">${esc(entry.seller || '未识别销售方')}</span>
       <span class="bindle-entry-amount">${fmtMoney(entry.total)}</span>
-      <span class="bindle-entry-owner">${esc(profile?.name || entry.profile_name || '未填写')} · ${esc(profile?.reviewer || entry.reviewer || '未填写')}</span>
+      <span class="bindle-entry-owner" data-tooltip-overflow="${esc(ownerText)}">${esc(ownerText)}</span>
       <div class="bindle-entry-result">
-        <div><span class="bindle-entry-action ${esc(entry.import_action || 'new')}">${esc(action)}</span><button type="button" class="bindle-entry-adjust" data-bind-entry-adjust aria-expanded="false" aria-controls="bindleEntryOverride${entryIndex}">单独设置</button></div>
-        <small data-tooltip-overflow="${esc(actionDetail)}">${esc(actionDetail)}</small>
+        <div class="bindle-entry-line"><span class="bindle-entry-action ${esc(entry.import_action || 'new')}">${esc(action)}</span><small data-tooltip-overflow="${esc(actionDetail)}">${esc(actionDetail)}</small><button type="button" class="bindle-entry-adjust" data-bind-entry-adjust aria-expanded="false" aria-controls="bindleEntryOverride${entryIndex}">单独设置</button></div>
         <small class="bindle-entry-location" data-tooltip-overflow="${esc(currentLocation)}">${esc(currentLocation)}</small>
         <small class="bindle-entry-target-summary"></small>
       </div>
@@ -6019,12 +6019,12 @@ async function openBindleImportPreview(path, insp, options = {}) {
       const panel=el('details','bindle-entry-material-map'); panel.innerHTML='<summary>材料角色对应</summary><p class="hint">保留外部材料时不会计入本机方案的必需材料。明确选择对应角色后才参与计算。</p>';
       let roles=targetScheme.definition.materials;
       if(entry.existing_entry_id){const existing=await Api.getEntry(entry.existing_entry_id);roles=existing.material_roles||roles;}
-      for(const role of mapping.requires_explicit_mapping){const label=el('label','form-row');label.append(document.createTextNode(role));const select=el('select');select.dataset.bindRoleSource=role;select.innerHTML='<option value="">保留为外部材料</option>'+roles.filter(r=>r.id!=='invoice').map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('');label.append(select);panel.append(label);}row.append(panel);
+      for(const role of mapping.requires_explicit_mapping){const label=el('label','form-row');const roleName=el('span');roleName.textContent=attachTypeLabel(role);label.append(roleName);const select=el('select');select.dataset.bindRoleSource=role;select.innerHTML='<option value="">保留为外部材料</option>'+roles.filter(r=>r.id!=='invoice').map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('');label.append(select);panel.append(label);}row.append(panel);
     }
     const notes=[];
     if(entry.adapter_compatibility?.missing_capabilities?.length)notes.push('来源方案有未支持的规则，请保留原资料并核对本机要求。');
     if(entry.extension_merge_preview?.skipped)notes.push('部分附加信息无法对应，保留本机值及外部历史信息。');
-    if(notes.length){const hint=el('p','hint');hint.textContent=notes.join(' ');row.append(hint);}
+    if(notes.length){const hint=el('p','hint bindle-entry-note');hint.textContent=notes.join(' ');row.append(hint);}
   }
 
   const tagInput = body.querySelector('#bindleTagInput');
@@ -6048,8 +6048,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
     const syncOwner = () => {
       body.querySelectorAll('[data-bind-entry-profile]').forEach((entryRow) => {
         if (entryRow.dataset.bindEntryProfile !== row.dataset.bindProfile) return;
-        entryRow.querySelector('.bindle-entry-owner').textContent =
-          `${nameInput.value.trim() || '未填写'} · ${reviewerInput.value.trim() || '未填写'}`;
+        const owner = entryRow.querySelector('.bindle-entry-owner');
+        owner.textContent = `${nameInput.value.trim() || '未填写'} · ${reviewerInput.value.trim() || '未填写'}`;
+        owner.dataset.tooltipOverflow = owner.textContent;
       });
     };
     nameInput.oninput = syncOwner;

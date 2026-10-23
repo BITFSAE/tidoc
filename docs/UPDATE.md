@@ -89,7 +89,7 @@ tidoc/ocr/macos/tidoc-ocr-macos-v<ocr_version>.zip
 
 团队适配资源、迁移和成品核对要求见下节。用户安装的方案、包资源、修订和导出任务位于用户数据目录，核心升级不覆盖这些目录。
 
-核心 `--self-test` 检查前端入口、适配包 Schema、共享 context Schema 和两个内置包是否可加载。该检查确认资源能读取，不会执行办公软件界面检查。CI 和发布测试配置运行旧 IPC 转换、新 IPC、内置包、示例和适配 CLI 测试，并安装 `requirements-print.txt`，使打印用例具备真实依赖。真实 Windows / macOS 发布包和办公软件验收需要另行执行并记录。
+核心 `--self-test` 检查前端入口、适配包 Schema、共享 context Schema 和两个内置包是否可加载，并现场生成一个虚构二维码、经 PNG 和 JPEG 往返识别，确认二维码识别库能加载。该检查确认资源能读取，不会执行办公软件界面检查。CI 和发布测试配置运行旧 IPC 转换、新 IPC、内置包、示例和适配 CLI 测试，并安装 `requirements-print.txt`，使打印用例具备真实依赖。真实 Windows / macOS 发布包和办公软件验收需要另行执行并记录。
 
 打印组件 `--self-test` 在临时目录通过正式 IPC v2 实际渲染一份中文／金额 DOCX，以及一份包含样例发票 PDF、图片和编号的材料 PDF。它核对 DOCX 文本及金额和材料 PDF 的两页结果，然后清理临时目录。成功结果包含 `smoke_outputs: ["docx", "pdf_bundle"]`；依赖实际加载或渲染失败时报告 `COMPONENT_SELF_TEST_FAILED`，退出码为 1。能找到依赖模块但无法加载其运行库的情况也会被此流程发现。
 

@@ -72,7 +72,7 @@ python -m tidoc.adapter_tools validate examples/adapters/generic
 ## 项目结构
 
 ```text
-tidoc/            核心（pywebview + pypdf + Send2Trash + jsonschema）
+tidoc/            核心（pywebview + pypdf + Send2Trash + jsonschema + Pillow + zxing-cpp）
 ├─ engine/        发票 XML / PDF 解析与金额校验
 ├─ adapters/      适配包协议、规则、内置包加载和方案服务
 ├─ builtin_adapters/  内置报账方案（通用、BITFSAE）

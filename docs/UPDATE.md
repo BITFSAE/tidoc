@@ -89,11 +89,11 @@ tidoc/ocr/macos/tidoc-ocr-macos-v<ocr_version>.zip
 
 团队适配资源、迁移和成品核对要求见下节。用户安装的方案、包资源、修订和导出任务位于用户数据目录，核心升级不覆盖这些目录。
 
-核心 `--self-test` 检查前端入口、适配包 Schema、共享 context Schema 和两个内置包是否可加载。该检查确认资源能读取，不会执行办公软件界面检查。CI 和发布测试配置运行旧 IPC 转换、新 IPC、内置包、示例和适配 CLI 测试，并安装 `requirements-print.txt`，使打印用例具备真实依赖。最新源码全库回归及核心／打印源码自检已通过，结果见[计划记录](TEAM_ADAPTER_PLAN.md#23-实施与验收覆盖记录)；真实 Windows / macOS 发布包和办公软件验收仍须另行记录。
+核心 `--self-test` 检查前端入口、适配包 Schema、共享 context Schema 和两个内置包是否可加载。该检查确认资源能读取，不会执行办公软件界面检查。CI 和发布测试配置运行旧 IPC 转换、新 IPC、内置包、示例和适配 CLI 测试，并安装 `requirements-print.txt`，使打印用例具备真实依赖。真实 Windows / macOS 发布包和办公软件验收需要另行执行并记录。
 
 打印组件 `--self-test` 在临时目录通过正式 IPC v2 实际渲染一份中文／金额 DOCX，以及一份包含样例发票 PDF、图片和编号的材料 PDF。它核对 DOCX 文本及金额和材料 PDF 的两页结果，然后清理临时目录。成功结果包含 `smoke_outputs: ["docx", "pdf_bundle"]`；依赖实际加载或渲染失败时报告 `COMPONENT_SELF_TEST_FAILED`，退出码为 1。能找到依赖模块但无法加载其运行库的情况也会被此流程发现。
 
-源码打印自检已成功报告 `smoke_outputs: ["docx", "pdf_bundle"]`，相关用例已纳入当前完整全库通过运行。该流程进入发布成品自检配置；实际渲染自检不代表原生 Word／WPS、字体回退、长表分页或平台 UI 已验收。
+自检通过时输出 `smoke_outputs: ["docx", "pdf_bundle"]`，发布成品的自检配置也会执行它。实际渲染自检不能代替原生 Word／WPS、字体回退、长表分页或平台界面的检查。
 
 - 推送 `v*.*.*` tag 后，GitHub Actions 自动测试、构建 macOS DMG 与 Windows 安装器、生成更新清单、上传 COS，并发布带安装包的 GitHub Release。
 - Windows / macOS 核心、打印组件和 OCR 组件打包后执行 `--self-test`，确认最终成品中的代码、资源与依赖可加载；自检失败会中止发布。
@@ -125,7 +125,7 @@ tidoc/ocr/macos/tidoc-ocr-macos-v<ocr_version>.zip
 
 发布前分别在 Windows 和 macOS 成品上执行核心与组件 `--self-test`，再检查空目录首次选择、旧库迁移、组件安装与修复、四类导出、取消、历史重新生成和数据目录迁移。源码测试、模拟 frozen 资源定位和成功构建都不能替代这些检查。Word、WPS 或 LibreOffice 的中文字体、长表分页和实际打印版式需记录办公软件及平台版本。
 
-当前验收证据和未完成项集中保存在[计划覆盖记录](TEAM_ADAPTER_PLAN.md#23-实施与验收覆盖记录)。新增资源参数已写入工作流也不等于对应平台成品通过验收。
+新增资源参数已写入工作流，不等于对应平台成品通过验收。
 
 ## 文件关联
 

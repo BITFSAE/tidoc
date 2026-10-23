@@ -1,8 +1,8 @@
 """HMAC 签名（设计文档第 6.1 节）。
 
-检测级防篡改：密钥内置于软件，对绑定包内每个文件与汇总文本算 HMAC-SHA256，
-生成签名清单。导入时逐项校验，不符即判定"已被外部修改"，醒目标红，不静默接受。
-这是检测而非加密；已确认不上非对称签名。
+改动检测：密钥内置于软件，对绑定包内每个文件与汇总文本算 HMAC-SHA256，
+生成校验清单。导入时逐项校验，不符即判定"已被外部修改"，醒目标红，不静默接受。
+密钥随开源代码公开，所以这只能发现手工改动和文件损坏，不能防止有意伪造，也不是加密。
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def sign_stream(stream: BinaryIO, key: bytes = _BUILTIN_KEY) -> str:
 
 
 def verify(data: bytes, signature: str, key: bytes = _BUILTIN_KEY) -> bool:
-    """常数时间比较，防时序侧信道。"""
+    """比较签名。"""
     return hmac.compare_digest(sign_bytes(data, key), signature)
 
 

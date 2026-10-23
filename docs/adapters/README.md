@@ -13,7 +13,7 @@ python -m tidoc.adapter_tools test ./my-team --cases ./cases
 python -m tidoc.adapter_tools pack ./my-team --out ./dist
 ```
 
-JSON 输出可用于脚本和 AI 工作流。命令以 `0` 表示通过，以 `1` 表示包或样例失败，以 `2` 表示渲染依赖不可用。`pack` 会验证 DOCX 并执行真实渲染；缺少打印依赖时不会生成发布包。
+JSON 输出可用于脚本。命令以 `0` 表示通过，以 `1` 表示包或样例失败，以 `2` 表示渲染依赖不可用。`pack` 会验证 DOCX 并执行真实渲染；缺少打印依赖时不会生成发布包。
 
 ## 文档
 
@@ -23,7 +23,6 @@ JSON 输出可用于脚本和 AI 工作流。命令以 `0` 表示通过，以 `1
 - [模板](TEMPLATES.md)：DOCX 变量、循环和渲染要求。
 - [输出](OUTPUTS.md)：Word、PDF、Excel 和附件包。
 - [兼容性](COMPATIBILITY.md)：核心与打印组件的兼容边界。
-- [AI 工作流](AI_WORKFLOW.md)：可复制的适配开发任务说明。
 - [注册表参考](REFERENCE.md)：由代码注册表生成的设置、字段和能力清单。
 
-协议 Schema 位于 [`schemas/team-adapter/1/`](../../schemas/team-adapter/1/)。开发者应同时阅读 [适配计划](../TEAM_ADAPTER_PLAN.md) 的公开边界。计划记录实施状态，不替代本目录的协议说明。
+协议 Schema 位于 [`schemas/team-adapter/1/`](../../schemas/team-adapter/1/)，示例包和 fixture 位于 [`examples/adapters/`](../../examples/adapters/)。

@@ -257,7 +257,6 @@ export default defineConfig({
             { text: '模板', link: '/dev/adapters/TEMPLATES' },
             { text: '输出', link: '/dev/adapters/OUTPUTS' },
             { text: '兼容性', link: '/dev/adapters/COMPATIBILITY' },
-            { text: 'AI 工作流', link: '/dev/adapters/AI_WORKFLOW' },
             { text: '注册表参考', link: '/dev/adapters/REFERENCE' }
           ]
         }

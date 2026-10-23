@@ -23,6 +23,6 @@ description: 面向参与开发、发布软件或编写团队报账方案的人�
 
 - [适配包开发](/dev/adapters/README)：从示例开始，用命令行工具检查和打包。
 - [包格式](/dev/adapters/FORMAT)、[字段与设置](/dev/adapters/FIELDS)、[条件规则](/dev/adapters/RULES)、[模板](/dev/adapters/TEMPLATES)、[输出](/dev/adapters/OUTPUTS)。
-- [兼容性](/dev/adapters/COMPATIBILITY)、[AI 工作流](/dev/adapters/AI_WORKFLOW)、[注册表参考](/dev/adapters/REFERENCE)。
+- [兼容性](/dev/adapters/COMPATIBILITY)、[注册表参考](/dev/adapters/REFERENCE)。
 
 适配包的使用方法（导入和选择方案）面向普通用户，见[报账方案](/guide/schemes)。

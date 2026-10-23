@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import shutil
 import uuid
 import zipfile
 import copy

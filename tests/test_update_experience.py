@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 from tidoc import __version__
 from tidoc.api import (

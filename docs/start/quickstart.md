@@ -65,5 +65,5 @@ description: 用五步走完一遍 Tidoc：选择报账方案、导入发票、�
 ## 接下来
 
 - 遇到问题先看[常见问题](/faq)。
-- 想少点几下：[省时间的操作](/guide/shortcuts)介绍拖放、右键菜单、批量处理，以及手机传文件、看图的搭配工具；熟悉之后可以用[键盘快捷键](/guide/keyboard)。
+- 想少点几下：[省时间的操作](/guide/shortcuts)介绍拖放、右键菜单、批量处理和 Windows 看图工具；熟悉之后可以用[键盘快捷键](/guide/keyboard)。
 - 遇到识别有问题的发票或有建议，欢迎发邮件到 `info@bitfsae.com`，或在 [GitHub Issues](https://github.com/BITFSAE/tidoc/issues) 提出。

@@ -414,23 +414,6 @@ def refresh_entry_check(entries_repo: EntryRepo, entry_id: str) -> None:
     entries_repo.recompute_status(entry_id)
 
 
-def _entry_items_to_parsed(items: list[dict]):
-    from ..engine.models import ParsedItem
-
-    parsed = []
-    for item in items:
-        quantity = str(item.get("quantity") or "").strip()
-        parsed.append(ParsedItem(
-            name=item.get("name") or "",
-            actual_name=item.get("actual_name") or item.get("name") or "",
-            unit=item.get("unit") or "",
-            quantity=d(quantity) if quantity else None,
-            total=d(item.get("total")),
-            spec=item.get("spec") or "",
-        ))
-    return parsed
-
-
 def apply_plan(entries_repo: EntryRepo, entry_id: str, plan: dict, normalized: dict) -> dict:
     """只补本地空缺；返回实际改动，供汇总展示。"""
     applied_fields = []

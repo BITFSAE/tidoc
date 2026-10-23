@@ -832,13 +832,11 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
 
     @_guard
     def correct_locked_field(self, entry_id, field, value, profile_id=""):
-        result = self.entries.correct_locked_field(entry_id, field, value, profile_id)
-        if field in {"total", "buyer_name", "buyer_tax_id", "title"}:
-            from .services.ocr import refresh_entry_check
+        from .services.ocr import refresh_entry_check
 
-            refresh_entry_check(self.entries, entry_id)
-            result = self.entries.get(entry_id)
-        return result
+        self.entries.correct_locked_field(entry_id, field, value, profile_id)
+        refresh_entry_check(self.entries, entry_id)
+        return self.entries.get(entry_id)
 
     @_guard
     def update_entry_profile(self, entry_id, profile_id, operator_profile_id=""):

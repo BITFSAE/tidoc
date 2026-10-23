@@ -897,7 +897,10 @@ def test_parser_evidence_survives_manual_correction_cloud_items_and_restart(api,
     from tidoc.services.ocr import refresh_entry_check, _replace_items
     from tidoc.db.entries import LOCAL_INVOICE_RECOGNITION_VERSION
     from tidoc.db import Database, EntryRepo
-    parsed = parse_texts(plain_text(words='壹佰元整'), layout_text(words='壹佰元整'))
+    parsed = parse_texts(
+        plain_text(words='壹佰元整', invoice_no=OTHER_INVOICE_NO),
+        layout_text(words='壹佰元整'),
+    )
     profile = api.profiles.create('测试人员', '')
     entry_id = api.entries.create(profile['id'], parsed=parsed)
     # Blank title policy avoids unrelated organization warnings in this fixture.
@@ -905,9 +908,12 @@ def test_parser_evidence_survives_manual_correction_cloud_items_and_restart(api,
     refresh_entry_check(api.entries, entry_id)
     before = api.entries.get(entry_id)['check_message']
     assert '大写金额' in before
-    api.entries.correct_locked_field(entry_id, 'total', '125.00')
-    refresh_entry_check(api.entries, entry_id)
-    assert '大写金额' in api.entries.get(entry_id)['check_message']
+    assert '发票号码识别到两个不同的结果' in before
+    corrected = api.correct_locked_field(entry_id, 'invoice_no', INVOICE_NO)['data']
+    assert '发票号码识别到两个不同的结果' not in corrected['check_message']
+    assert '大写金额' in corrected['check_message']
+    corrected_total = api.correct_locked_field(entry_id, 'total', '125.00')['data']
+    assert '大写金额' in corrected_total['check_message']
     _replace_items(api.entries, entry_id, {'items': [{'name': '测试物品', 'total': '125'}]})
     assert '大写金额' in api.entries.get(entry_id)['check_message']
     db = Database(api.db.path) if hasattr(api.db, 'path') else Database(api.data_root.db_path)

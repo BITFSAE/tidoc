@@ -1,23 +1,14 @@
 """文件夹批量导入的分组启发式测试。"""
 
-import os
-from pathlib import Path
-
-import pytest
-
 from tidoc.services import scan_files, scan_folder
 from tidoc.engine import parse_pdf
 
-SAMPLE_DIR = Path(os.environ.get("TIDOC_SAMPLE_DIR", "/Users/poli/invoice2docx/invoices"))
-requires_sample_data = pytest.mark.skipif(
-    not SAMPLE_DIR.is_dir(),
-    reason="本地发票样本目录不存在",
-)
+# 依赖真实发票样本的测试通过 conftest 里的 sample_dir 夹具取得目录：
+# 设置环境变量 TIDOC_INVOICE_SAMPLES 才会运行，否则跳过。
 
 
-@requires_sample_data
-def test_scan_folder_groups_by_prefix():
-    r = scan_folder(SAMPLE_DIR)
+def test_scan_folder_groups_by_prefix(sample_dir):
+    r = scan_folder(sample_dir)
     # 批量导入按发票 PDF 建条目；付款截图/查验单不靠命名自动绑定。
     assert r["total_files"] > 0
     assert len(r["groups"]) >= 10
@@ -30,9 +21,8 @@ def test_scan_folder_groups_by_prefix():
     assert "inspection_pdf" not in types
 
 
-@requires_sample_data
-def test_scan_folder_type_classification():
-    r = scan_folder(SAMPLE_DIR)
+def test_scan_folder_type_classification(sample_dir):
+    r = scan_folder(sample_dir)
     for g in r["groups"]:
         for f in g["files"]:
             assert f["type"] in {"invoice_pdf", "invoice_xml"}
@@ -41,11 +31,10 @@ def test_scan_folder_type_classification():
     assert r["matched_xml_count"] > 0
 
 
-@requires_sample_data
-def test_scan_files_accepts_multi_selected_invoice_files():
+def test_scan_files_accepts_multi_selected_invoice_files(sample_dir):
     paths = [
-        f"{SAMPLE_DIR}/28+电子元件+390.05+发票.pdf",
-        f"{SAMPLE_DIR}/20260425205440942/立创商城发票-7556653A-26957000000103383672.xml",
+        f"{sample_dir}/28+电子元件+390.05+发票.pdf",
+        f"{sample_dir}/20260425205440942/立创商城发票-7556653A-26957000000103383672.xml",
     ]
     r = scan_files(paths)
     assert r["invoice_pdf_count"] == 1
@@ -346,8 +335,7 @@ def test_scan_folder_does_not_match_short_numeric_pdf_stem_to_xml(tmp_path):
     assert r["ungrouped"][0]["type"] == "invoice_xml"
 
 
-@requires_sample_data
-def test_known_messy_sample_pdfs_parse_core_fields():
+def test_known_messy_sample_pdfs_parse_core_fields(sample_dir):
     samples = [
         ("26+稳压电源+128.62+发票.pdf", "深圳市驿生胜利科技有限公司", "直流稳压电源"),
         ("27+pc耗材+200.13+发票.pdf", "深圳拓竹科技有限公司", "3D打印机线材"),
@@ -355,7 +343,7 @@ def test_known_messy_sample_pdfs_parse_core_fields():
         ("71+排插+107+发票.pdf", "北京京东金禾贸易有限公司", "公牛"),
     ]
     for filename, seller, item_keyword in samples:
-        inv = parse_pdf(f"{SAMPLE_DIR}/{filename}")
+        inv = parse_pdf(f"{sample_dir}/{filename}")
         assert inv.invoice_no
         assert inv.buyer_name == "北京理工大学教育基金会"
         assert inv.seller == seller
@@ -363,11 +351,10 @@ def test_known_messy_sample_pdfs_parse_core_fields():
         assert item_keyword in inv.items[0].actual_name
 
 
-@requires_sample_data
-def test_batch_create_entries(api):
+def test_batch_create_entries(sample_dir, api):
     from tidoc.services import scan_folder as sf
     p = api.create_profile("张三", "李老师")["data"]
-    scan = sf(SAMPLE_DIR)
+    scan = sf(sample_dir)
     # 取前两组做批量创建
     picked = scan["groups"][:2]
     groups = [{"label": g["label"],

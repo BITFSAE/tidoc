@@ -11,6 +11,23 @@ CHECK_PASS = "pass"
 CHECK_WARNING = "warning"
 CHECK_BLOCKED = "blocked"
 
+# 同一字段在不同读取方式（普通文本 / 版面文本）下的比对结论。只有这四种，没有概率。
+FIELD_AGREE = "agree"        # 读到的方式结果相同
+FIELD_CONFLICT = "conflict"  # 至少两种方式都读到了，但结果不同
+FIELD_MISSING = "missing"    # 没读全：全部缺失，或只有一种方式读到而无法比对
+FIELD_VERIFIED = "verified"  # 采用的值通过了独立校验（校验位、闭合、大写金额、已配置抬头、合法日期）
+
+# 总额的来源，从可信到不可信
+TOTAL_SOURCE_XML = "xml"              # 官方电子发票 XML 的结构化字段
+TOTAL_SOURCE_LABEL = "label"          # 票面「价税合计（小写）」
+TOTAL_SOURCE_PAIR = "pair"            # 「大写金额 + 小写金额」同行出现，没有标签
+TOTAL_SOURCE_DERIVED = "derived"      # 没有小写标签，由大写金额或合计行互相印证得出
+TOTAL_SOURCE_MAX_AMOUNT = "max_amount"  # 最后兜底：取页面上最大的 ¥ 金额，可信度低
+
+# 校验提醒的强弱。都以「识别提醒」展示，不改变 pass / warning / blocked 的状态。
+ISSUE_STRONG = "strong"      # 票面金额或关键字段互相矛盾，需要人工核对
+ISSUE_ADVISORY = "advisory"  # 辅助提示，例如税率估算、校验位
+
 
 @dataclass
 class ParsedItem:
@@ -41,6 +58,26 @@ class ParsedItem:
 
 
 @dataclass
+class FieldCheck:
+    """单个字段在多种读取方式下的比对结果。"""
+
+    state: str = FIELD_MISSING
+    value: str = ""                  # 最终采用的值
+    candidates: dict = field(default_factory=dict)  # 读取方式 -> 候选值，如 {"text": ..., "layout": ...}
+    basis: str = ""                  # 采用依据，如 label / checksum / configured_title / words / closure
+    flags: tuple = ()                # 附加发现，如 checksum_failed / invalid_date
+
+    def to_dict(self) -> dict:
+        return {
+            "state": self.state,
+            "value": self.value,
+            "candidates": dict(self.candidates),
+            "basis": self.basis,
+            "flags": list(self.flags),
+        }
+
+
+@dataclass
 class ParsedInvoice:
     """一张发票的识别结果。"""
 
@@ -53,6 +90,16 @@ class ParsedInvoice:
     items: list[ParsedItem] = field(default_factory=list)
     source: str = ""           # 数据来源说明（xml / pdf / xml+pdf）
     total_present: bool | None = None  # False means absent; zero is a valid invoice amount.
+    # 以下字段由解析器填写，用于独立校验；手工构造的发票可以全部留空，校验层会跳过对应检查。
+    seller_tax_id: str = ""
+    subtotal: Decimal | None = None          # 不含税金额合计（票面「合计」行）
+    tax_total: Decimal | None = None         # 税额合计
+    total_in_words: Decimal | None = None    # 大写金额折算出的数值
+    total_words_text: str = ""               # 大写金额原文
+    total_source: str = ""                   # TOTAL_SOURCE_*；空表示未标注来源
+    total_read: Decimal | None = None        # 解析时读到的总额；total 被外部覆盖后据此识别
+    tax_rates: list = field(default_factory=list)  # 票面出现的税率（百分数），0 表示免税 / 不征税
+    field_checks: dict = field(default_factory=dict)  # 字段名 -> FieldCheck
 
     def to_dict(self) -> dict:
         return {
@@ -65,7 +112,27 @@ class ParsedInvoice:
             "items": [item.to_dict() for item in self.items],
             "source": self.source,
             "total_present": self.total_present,
+            "seller_tax_id": self.seller_tax_id,
+            "subtotal": None if self.subtotal is None else str(self.subtotal),
+            "tax_total": None if self.tax_total is None else str(self.tax_total),
+            "total_in_words": None if self.total_in_words is None else str(self.total_in_words),
+            "total_words_text": self.total_words_text,
+            "total_source": self.total_source,
+            "tax_rates": [str(rate) for rate in self.tax_rates],
+            "field_checks": {name: check.to_dict() for name, check in self.field_checks.items()},
         }
+
+
+@dataclass(frozen=True)
+class CheckIssue:
+    """一条新增的校验提醒。message 已并入 CheckResult.message，这里保留编码和强弱供程序使用。"""
+
+    code: str
+    level: str   # ISSUE_STRONG / ISSUE_ADVISORY
+    message: str
+
+    def to_dict(self) -> dict:
+        return {"code": self.code, "level": self.level, "message": self.message}
 
 
 @dataclass
@@ -74,9 +141,12 @@ class CheckResult:
 
     status: str = CHECK_WARNING     # pass / warning / blocked
     message: str = ""
+    # 票面金额与字段校验新增的提醒（金额闭合、大写金额、字段冲突等）；旧有的明细、抬头提醒只在 message 里。
+    issues: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {"status": self.status, "message": self.message}
+        return {"status": self.status, "message": self.message,
+                "issues": [issue.to_dict() for issue in self.issues]}
 
 
 @dataclass(frozen=True)

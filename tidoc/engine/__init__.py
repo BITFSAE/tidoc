@@ -4,13 +4,15 @@ from .models import (
     CHECK_BLOCKED,
     CHECK_PASS,
     CHECK_WARNING,
+    CheckIssue,
     CheckResult,
+    FieldCheck,
     ParsedInvoice,
     ParsedItem,
     RecognitionContext,
     PolicyContext,
 )
-from .money import d, fmt_decimal, fmt_money, money
+from .money import d, fmt_decimal, fmt_money, money, parse_amount
 from .validator import (
     EXPECTED_BUYER_TAX_IDS,
     SUPPORTED_TITLES,
@@ -40,12 +42,15 @@ __all__ = [
     "CHECK_BLOCKED",
     "CHECK_PASS",
     "CHECK_WARNING",
+    "CheckIssue",
     "CheckResult",
+    "FieldCheck",
     "ParsedInvoice",
     "ParsedItem",
     "RecognitionContext",
     "PolicyContext",
     "d",
+    "parse_amount",
     "money",
     "fmt_money",
     "fmt_decimal",

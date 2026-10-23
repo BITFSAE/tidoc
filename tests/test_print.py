@@ -1,6 +1,5 @@
 """打印导出组件测试：PDF 拼接、图片转 PDF、Word 生成、抬头强隔离。"""
 
-import os
 import glob
 import json
 import subprocess
@@ -10,17 +9,18 @@ from decimal import Decimal
 import pytest
 
 import tidoc_print
+from tests.conftest import SAMPLES_ENV, SAMPLES_SKIP_REASON, invoice_samples_dir
 
 # 组件依赖未装则整体跳过（核心测试不受影响）
 pytestmark = pytest.mark.skipif(not tidoc_print.is_available(), reason="打印组件依赖未安装")
 
-SAMPLE_DIR = os.environ.get("TIDOC_SAMPLE_DIR", "/Users/poli/invoice2docx/invoices")
-
-
 def _sample(pattern):
-    files = sorted(glob.glob(f"{SAMPLE_DIR}/{pattern}"))
+    sample_dir = invoice_samples_dir()
+    if sample_dir is None:
+        pytest.skip(SAMPLES_SKIP_REASON)
+    files = sorted(glob.glob(f"{sample_dir}/{pattern}"))
     if not files:
-        pytest.skip(f"无样本：{pattern}")
+        pytest.skip(f"{SAMPLES_ENV} 指向的目录里没有样本：{pattern}")
     return files
 
 

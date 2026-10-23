@@ -7,8 +7,28 @@ from pathlib import Path
 
 import pytest
 
-# 真实发票样本是私有数据，不在仓库里；放在别处时用环境变量 TIDOC_SAMPLE_DIR 指过去，缺失的测试会跳过。
-SAMPLE_DIR = os.environ.get("TIDOC_SAMPLE_DIR", "/Users/poli/invoice2docx/invoices")
+# 真实发票样本是私有数据，不在仓库里。把环境变量 TIDOC_INVOICE_SAMPLES 指向存放样本的目录即可运行
+# 依赖样本的测试（XML 放在目录下任意层级，PDF 命名为 *发票.pdf，付款截图命名为 *付款截图.jpg）；
+# 没有设置时这些测试会跳过。
+SAMPLES_ENV = "TIDOC_INVOICE_SAMPLES"
+SAMPLES_SKIP_REASON = (
+    f"未设置环境变量 {SAMPLES_ENV}（指向存放真实发票样本的目录），跳过依赖真实发票样本的测试"
+)
+
+
+def invoice_samples_dir() -> Path | None:
+    """环境变量指向的样本目录；未设置或目录不存在时返回 None。"""
+    value = os.environ.get(SAMPLES_ENV, "").strip()
+    path = Path(value).expanduser() if value else None
+    return path if path is not None and path.is_dir() else None
+
+
+@pytest.fixture
+def sample_dir():
+    path = invoice_samples_dir()
+    if path is None:
+        pytest.skip(SAMPLES_SKIP_REASON)
+    return path
 
 
 def pytest_configure(config):
@@ -19,18 +39,18 @@ def pytest_configure(config):
 
 
 @pytest.fixture
-def sample_xmls():
-    files = sorted(glob.glob(f"{SAMPLE_DIR}/**/*.xml", recursive=True))
+def sample_xmls(sample_dir):
+    files = sorted(glob.glob(f"{sample_dir}/**/*.xml", recursive=True))
     if not files:
-        pytest.skip("无发票 XML 样本")
+        pytest.skip(f"{SAMPLES_ENV} 指向的目录里没有发票 XML 样本")
     return files
 
 
 @pytest.fixture
-def sample_pdfs():
-    files = sorted(glob.glob(f"{SAMPLE_DIR}/*发票.pdf"))
+def sample_pdfs(sample_dir):
+    files = sorted(glob.glob(f"{sample_dir}/*发票.pdf"))
     if not files:
-        pytest.skip("无发票 PDF 样本")
+        pytest.skip(f"{SAMPLES_ENV} 指向的目录里没有 *发票.pdf 样本")
     return files
 
 

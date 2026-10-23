@@ -15,8 +15,30 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-from .models import ParsedInvoice, ParsedItem
-from .money import d, money
+from .fields import (
+    compact_text,
+    is_valid_iso_date,
+    parse_chinese_amount,
+    read_total_fields,
+    select_total,
+    tax_id_checksum_ok,
+    words_match_total,
+)
+from .models import (
+    FIELD_AGREE,
+    FIELD_CONFLICT,
+    FIELD_MISSING,
+    FIELD_VERIFIED,
+    TOTAL_SOURCE_DERIVED,
+    TOTAL_SOURCE_LABEL,
+    TOTAL_SOURCE_MAX_AMOUNT,
+    TOTAL_SOURCE_PAIR,
+    TOTAL_SOURCE_XML,
+    FieldCheck,
+    ParsedInvoice,
+    ParsedItem,
+)
+from .money import d, money, parse_amount
 
 
 def clean_item_name(name: str) -> str:
@@ -31,20 +53,48 @@ def _child_text(elem: ET.Element, tag: str) -> str:
 
 # --------------------------------------------------------------------------- XML
 
+def _xml_rate_percent(text: str) -> Decimal | None:
+    """XML 里的税率写成小数（0.130000），统一成百分数 13；已经是百分数的原样保留。"""
+    rate = parse_amount(text.rstrip("%"))
+    if rate is None or rate < 0:
+        return None
+    percent = rate * 100 if rate <= 1 and "%" not in text else rate
+    return Decimal(format(percent.normalize(), "f"))
+
+
 def parse_xml(path: str | Path) -> ParsedInvoice:
     path = Path(path)
     root = ET.parse(path).getroot()
 
+    # 总额和合计字段用严格转换：缺失或读不出来就是缺失，不能悄悄变成 0。
+    total_text = _child_text(root, "TotalTax-includedAmount")
+    total = parse_amount(total_text)
     invoice = ParsedInvoice(
         invoice_no=_child_text(root, "EIid"),
         invoice_date=_child_text(root, "IssueTime") or _child_text(root, "RequestTime")[:10],
         seller=_child_text(root, "SellerName"),
         buyer_name=_child_text(root, "BuyerName"),
         buyer_tax_id=_child_text(root, "BuyerIdNum"),
-        total=d(_child_text(root, "TotalTax-includedAmount")),
-        total_present=bool(_child_text(root, "TotalTax-includedAmount")),
+        total=total if total is not None else Decimal("0"),
+        total_present=total is not None,
         source="xml",
+        seller_tax_id=_child_text(root, "SellerIdNum"),
+        subtotal=parse_amount(_child_text(root, "TotalAmWithoutTax")),
+        tax_total=parse_amount(_child_text(root, "TotalTaxAm")),
+        total_words_text=_child_text(root, "TotalTax-includedAmountInChinese"),
+        total_source=TOTAL_SOURCE_XML if total is not None else "",
+        total_read=total,
     )
+    invoice.total_in_words = parse_chinese_amount(invoice.total_words_text)
+    if total is None:
+        invoice.field_checks["total"] = FieldCheck(
+            FIELD_MISSING, "", {"xml": total_text}, basis="unreadable" if total_text else "absent"
+        )
+    for rate_text in {elem.text.strip() for elem in root.iter("TaxRate") if elem.text and elem.text.strip()}:
+        percent = _xml_rate_percent(rate_text)
+        if percent is not None and percent not in invoice.tax_rates:
+            invoice.tax_rates.append(percent)
+    invoice.tax_rates.sort()
 
     parents = [elem for elem in root.iter() if elem.find("ItemName") is not None]
     last: ParsedItem | None = None
@@ -105,12 +155,16 @@ def _compact_digits(value: str) -> str:
     return re.sub(r"\D", "", value or "")
 
 
-def _extract_invoice_no(text: str) -> str:
+def _find_invoice_no(text: str) -> tuple[str, str]:
     """Extract invoice numbers even when PDF text separates every digit.
 
     Several tax-platform PDFs keep the invoice number visually intact but expose
     it to pypdf as ``2 6 4 4 ...``.  Restrict the fallback to exactly twenty
     digits so ordinary dates, tax ids, and bank account numbers are not chosen.
+
+    Returns ``(number, how)``: ``how`` is ``"label"`` when the digits follow the
+    ``发票号码`` label and ``"bare"`` when they are a label-less twenty-digit run.
+    Label-located numbers win over bare ones when the two reading paths disagree.
     """
     labeled = re.search(
         r"发票号码[:：]?[^\d\r\n]*((?:\d[^\S\r\n]*){20,})",
@@ -119,15 +173,19 @@ def _extract_invoice_no(text: str) -> str:
     if labeled:
         value = _compact_digits(labeled.group(1))
         if len(value) == 20:
-            return value
+            return value, "label"
     match = re.search(r"(?<!\d)\d{20}(?!\d)", text or "")
     if match:
-        return match.group(0)
+        return match.group(0), "bare"
     for spaced in _DIGIT_RUN_RE.finditer(text or ""):
         value = _compact_digits(spaced.group(0))
         if len(value) == 20:
-            return value
-    return ""
+            return value, "bare"
+    return "", ""
+
+
+def _extract_invoice_no(text: str) -> str:
+    return _find_invoice_no(text)[0]
 
 
 def _extract_invoice_date(text: str) -> str:
@@ -670,7 +728,10 @@ def _parse_loose_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decima
     if m:
         before = compact[:m.start()]
         nums = re.findall(r"-?\d+(?:\.\d+)?", before)
-        amount = d(nums[-1]) if nums else Decimal("0")
+        if not nums:
+            # 前面读不到任何金额：不能把缺失当作 0 元，交给上层按「读不出」处理。
+            return None
+        amount = d(nums[-1])
         quantity = d(nums[-3]) if len(nums) >= 3 else None
         unit_match = re.search(r"([\u4e00-\u9fffA-Za-z]{1,4})\s+-?\d+(?:\.\d+)?\s+-?\d+\.\d{2}\s*$", before)
         unit = unit_match.group(1) if unit_match else ""
@@ -1019,25 +1080,290 @@ def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
     path = Path(path)
     text = _pdf_text(path)
     invoice = _parse_invoice_text(text, source="pdf", context=context)
+    layout_text = layout_invoice = layout_parties = None
     try:
         layout_text = _pdf_layout_text(path)
         layout_invoice = _parse_invoice_text(layout_text, source="pdf-layout", context=context)
-        if not invoice.invoice_no:
-            invoice.invoice_no = layout_invoice.invoice_no
-        if not invoice.invoice_date:
-            invoice.invoice_date = layout_invoice.invoice_date
         layout_parties = _extract_layout_parties(layout_text)
-        if layout_parties:
-            invoice.seller, _seller_tax_id, invoice.buyer_name, invoice.buyer_tax_id = layout_parties
-
-        layout_items = _parse_pdf_items(layout_text.splitlines(), layout=True)
-        layout_total = sum((item.total for item in layout_items), Decimal("0"))
-        if layout_items and money(layout_total - invoice.total) == Decimal("0.00"):
-            invoice.items = layout_items
     except Exception:
-        # 版面提取只是商品名续行增强；不支持时继续使用普通文本解析结果。
-        pass
+        # 版面提取只是补充读取方式；不支持时继续使用普通文本解析结果。
+        layout_text = layout_invoice = layout_parties = None
+    # 两种读取方式逐字段比较：一致就采用，不一致或缺失记入 invoice.field_checks，
+    # 由 check_invoice 变成识别提醒，而不是静默用版面结果覆盖。
+    _reconcile_fields(invoice, text, layout_invoice, layout_text, layout_parties, context)
+    if layout_text is not None:
+        try:
+            layout_items = _parse_pdf_items(layout_text.splitlines(), layout=True)
+            layout_total = sum((item.total for item in layout_items), Decimal("0"))
+            if layout_items and money(layout_total - invoice.total) == Decimal("0.00"):
+                invoice.items = layout_items
+        except Exception:
+            pass
     return invoice
+
+
+# --------------------------------------------------------------------------- 两种读取方式的字段比对
+
+_INVOICE_NO_RANK = {"label": 2, "bare": 1}
+
+
+def _normalize_tax_text(value: str) -> str:
+    return re.sub(r"[^0-9A-Z]", "", str(value or "").upper())
+
+
+# 发票上竖排的「国家税务总局全国统一发票监制章」会被普通文本流误当成名称。
+_TAX_STAMP_TEXT = "国家税务总局全国统一发票监制章"
+
+
+def _party_name_key(value: str) -> str:
+    """比较购销方名称用的标准形态；税务监制章的文字片段不是名称，按没读到处理。"""
+    key = compact_text(value)
+    return "" if len(key) >= 2 and key in _TAX_STAMP_TEXT else key
+
+
+def _decide(
+    values: dict,
+    *,
+    prefer: str,
+    norm=compact_text,
+    verifiers: dict | None = None,
+    ranker=None,
+) -> tuple[str, FieldCheck]:
+    """比较同一字段在各读取方式下的候选值，返回 (采用的值, 比对记录)。
+
+    只有四种结论：一致 / 冲突 / 缺失 / 已通过独立校验。两种方式都读到且不同时，
+    先看独立校验（校验位、合法日期、已配置抬头）能否判定，再看标签定位的优先级，
+    都判定不了就记为冲突，并按 ``prefer`` 沿用原来的取值。
+    """
+    present = {key: value for key, value in values.items() if norm(value)}
+    if not present:
+        return "", FieldCheck(FIELD_MISSING, "", dict(values))
+    if len(present) == 1:
+        key, value = next(iter(present.items()))
+        state = FIELD_AGREE if len(values) == 1 else FIELD_MISSING
+        return value, FieldCheck(state, value, dict(values), basis=f"only:{key}")
+    if len({norm(value) for value in present.values()}) == 1:
+        chosen = present.get(prefer) or next(iter(present.values()))
+        return chosen, FieldCheck(FIELD_AGREE, chosen, dict(values))
+    for name, verify in (verifiers or {}).items():
+        results = {key: verify(key, value) for key, value in present.items()}
+        winners = [key for key, ok in results.items() if ok is True]
+        losers = [key for key, ok in results.items() if ok is False]
+        if len(winners) == 1 and losers:
+            chosen = present[winners[0]]
+            return chosen, FieldCheck(FIELD_VERIFIED, chosen, dict(values), basis=name)
+    if ranker is not None:
+        ranks = {key: ranker(key) for key in present}
+        top = max(ranks.values())
+        leaders = [key for key, rank in ranks.items() if rank == top]
+        if len(leaders) == 1:
+            chosen = present[leaders[0]]
+            return chosen, FieldCheck(FIELD_VERIFIED, chosen, dict(values), basis="label")
+    chosen = present.get(prefer) or next(iter(present.values()))
+    return chosen, FieldCheck(FIELD_CONFLICT, chosen, dict(values), basis=f"prefer:{prefer}")
+
+
+def _tax_id_flags(value: str) -> tuple:
+    return ("checksum_failed",) if tax_id_checksum_ok(value) is False else ()
+
+
+def _reconcile_fields(invoice, text, layout, layout_text, layout_parties, context) -> None:
+    """把普通文本与版面文本两条读取路径的结果合并进 ``invoice`` 并记录逐字段比对。
+
+    ``layout`` 为 None（没有版面文本，或 Aspose XML 这类只有一条路径的来源）时只记录
+    单路径下的缺失，不做比较。
+    """
+    from .validator import supported_titles
+
+    two = layout is not None
+    checks = invoice.field_checks
+
+    def candidates(text_value, layout_value) -> dict:
+        return {"text": text_value, "layout": layout_value} if two else {"text": text_value}
+
+    # 发票号码：标签定位优先于任意 20 位数字；同级冲突才算冲突。
+    no_text, how_text = _find_invoice_no(text)
+    no_layout, how_layout = _find_invoice_no(layout_text) if two else ("", "")
+    hows = {"text": how_text, "layout": how_layout}
+    chosen, check = _decide(
+        candidates(no_text, no_layout), prefer="text", norm=_compact_digits,
+        ranker=lambda key: _INVOICE_NO_RANK.get(hows[key], 0),
+    )
+    invoice.invoice_no, checks["invoice_no"] = chosen, check
+
+    # 开票日期：只有一方是真实存在的日期时采用它。
+    chosen, check = _decide(
+        candidates(invoice.invoice_date, layout.invoice_date if two else ""), prefer="text",
+        verifiers={"valid_date": lambda _key, value: is_valid_iso_date(value)},
+    )
+    if chosen and not is_valid_iso_date(chosen):
+        check.flags = ("invalid_date",)
+    invoice.invoice_date, checks["invoice_date"] = chosen, check
+
+    # 购买方 / 销售方：版面文本带「购 / 销」锚点，找到时仍以它为准，但与普通文本的差异要留痕。
+    titles = {compact_text(title) for title in supported_titles(context) if title}
+
+    def configured(key, value):
+        # 已配置的抬头只用来印证版面文本里的购买方；普通文本读到的抬头与之不符时按冲突处理，
+        # 不因为它碰巧是已配置的抬头就改用它。
+        if key == "layout":
+            return compact_text(value) in titles
+        return False if compact_text(value) not in titles else None
+
+    text_parties = {
+        "seller": invoice.seller, "seller_tax_id": invoice.seller_tax_id,
+        "buyer_name": invoice.buyer_name, "buyer_tax_id": invoice.buyer_tax_id,
+    }
+    if two and layout_parties:
+        l_seller, l_seller_tax, l_buyer, l_buyer_tax = layout_parties
+        layout_values = {
+            "seller": l_seller, "seller_tax_id": l_seller_tax,
+            "buyer_name": l_buyer, "buyer_tax_id": l_buyer_tax,
+        }
+
+        def swapped(first: str, second: str, norm) -> bool:
+            """普通文本把购销双方读反了：两方都有值，且恰好与版面文本互换。"""
+            return bool(
+                norm(text_parties[first]) and norm(text_parties[second])
+                and norm(text_parties[first]) == norm(layout_values[second])
+                and norm(text_parties[second]) == norm(layout_values[first])
+            )
+
+        names_swapped = swapped("seller", "buyer_name", compact_text)
+        ids_swapped = swapped("seller_tax_id", "buyer_tax_id", _normalize_tax_text)
+        for name, tax_name in (("seller", "seller_tax_id"), ("buyer_name", "buyer_tax_id")):
+            # 名称：普通文本可能读成竖排的税务监制章文字，这样的候选当作没读到。
+            if names_swapped:
+                # 版面文本的「购 / 销」标签是独立的角色依据。
+                value = layout_values[name]
+                checks[name] = FieldCheck(
+                    FIELD_VERIFIED, value, {"text": text_parties[name], "layout": value}, basis="role_anchor",
+                )
+            else:
+                verifiers = {"configured_title": configured} if (name == "buyer_name" and titles) else None
+                chosen, checks[name] = _decide(
+                    candidates(text_parties[name], layout_values[name]), prefer="layout",
+                    norm=_party_name_key, verifiers=verifiers,
+                )
+                layout_values[name] = chosen
+            # 税号：版面文本按列读取，空格子就是空，不去借普通文本里可能属于对方的税号。
+            text_tax, layout_tax = text_parties[tax_name], layout_values[tax_name]
+            if ids_swapped:
+                tax_check = FieldCheck(
+                    FIELD_VERIFIED, layout_tax, candidates(text_tax, layout_tax), basis="role_anchor",
+                )
+            elif text_tax and layout_tax:
+                same = _normalize_tax_text(text_tax) == _normalize_tax_text(layout_tax)
+                tax_check = FieldCheck(
+                    FIELD_AGREE if same else FIELD_CONFLICT, layout_tax, candidates(text_tax, layout_tax),
+                    basis="" if same else "prefer:layout",
+                )
+            else:
+                tax_check = FieldCheck(
+                    FIELD_MISSING, layout_tax, candidates(text_tax, layout_tax),
+                    basis="layout_cell_empty" if text_tax else "",
+                )
+            tax_check.flags = _tax_id_flags(layout_tax)
+            checks[tax_name] = tax_check
+        invoice.seller, invoice.seller_tax_id = layout_values["seller"], layout_values["seller_tax_id"]
+        invoice.buyer_name, invoice.buyer_tax_id = layout_values["buyer_name"], layout_values["buyer_tax_id"]
+    else:
+        for name, tax_name in (("seller", "seller_tax_id"), ("buyer_name", "buyer_tax_id")):
+            _chosen, checks[name] = _decide(candidates(text_parties[name], ""), prefer="text")
+            _chosen, tax_check = _decide(
+                candidates(text_parties[tax_name], ""), prefer="text", norm=_normalize_tax_text,
+            )
+            tax_check.flags = _tax_id_flags(text_parties[tax_name])
+            checks[tax_name] = tax_check
+
+    _reconcile_total(invoice, layout)
+
+
+def _reconcile_total(invoice, layout) -> None:
+    """合并两条路径读到的价税合计、不含税合计、税额合计和大写金额，并选出总额。
+
+    总额的来源按可信度：小写标签 / 大写+小写同行 > 大写与合计行印证 > 页面最大金额。
+    两条路径的标签值不同时，看大写金额和「不含税 + 税额」哪个能印证；都印证不了就记冲突。
+    """
+    paths = {"text": invoice} if layout is None else {"text": invoice, "layout": layout}
+    strong_sources = (TOTAL_SOURCE_LABEL, TOTAL_SOURCE_PAIR, TOTAL_SOURCE_DERIVED)
+    labeled = {
+        key: path.total_read for key, path in paths.items()
+        if path.total_source in strong_sources and path.total_read is not None
+    }
+    fallback = {
+        key: path.total_read for key, path in paths.items()
+        if path.total_source == TOTAL_SOURCE_MAX_AMOUNT and path.total_read is not None
+    }
+    # 先把两条路径各自读到的合计字段取出来，下面会改写 invoice 本身。
+    by_layout_first = [path for path in reversed(list(paths.values()))]
+    pairs = [(p.subtotal, p.tax_total) for p in by_layout_first if p.subtotal is not None and p.tax_total is not None]
+    word_reads = [(p.total_in_words, p.total_words_text) for p in by_layout_first if p.total_in_words is not None]
+    word_texts = [p.total_words_text for p in by_layout_first if p.total_words_text]
+    rates = sorted({rate for path in paths.values() for rate in path.tax_rates})
+
+    def confirmations(value) -> list[str]:
+        names = []
+        if any(words_match_total(words, value) for words, _text in word_reads):
+            names.append("words")
+        if any(a + b == value for a, b in pairs):
+            names.append("closure")
+        return names
+
+    def first_key(values: dict) -> str:
+        return "text" if "text" in values else next(iter(values))
+
+    if labeled:
+        if len(set(labeled.values())) == 1:
+            key = first_key(labeled)
+            total, confirmed = labeled[key], confirmations(labeled[key])
+            if confirmed:
+                state, basis = FIELD_VERIFIED, "+".join(confirmed)
+            elif len(paths) == 1:
+                state, basis = FIELD_AGREE, "only:text"
+            elif len(labeled) == len(paths):
+                state, basis = FIELD_AGREE, ""
+            else:
+                state, basis = FIELD_MISSING, f"only:{key}"
+        else:
+            verified = {key: value for key, value in labeled.items() if confirmations(value)}
+            if len(set(verified.values())) == 1:
+                key = first_key(verified)
+                total = verified[key]
+                state, basis = FIELD_VERIFIED, "+".join(confirmations(total))
+            else:
+                total = labeled[first_key(labeled)]
+                state, basis = FIELD_CONFLICT, "prefer:text"
+        strong = [paths[key].total_source for key in labeled if labeled[key] == total]
+        source = next((s for s in (TOTAL_SOURCE_LABEL, TOTAL_SOURCE_PAIR, TOTAL_SOURCE_DERIVED) if s in strong), "")
+    elif fallback:
+        total = fallback[first_key(fallback)]
+        source, state, basis = TOTAL_SOURCE_MAX_AMOUNT, FIELD_MISSING, "max_amount"
+    else:
+        total, source, state, basis = None, "", FIELD_MISSING, ""
+
+    candidates = {
+        key: "" if key not in {**fallback, **labeled} else str({**fallback, **labeled}[key]) for key in paths
+    }
+    invoice.total = total if total is not None else Decimal("0")
+    invoice.total_present = total is not None
+    invoice.total_read = total
+    invoice.total_source = source
+    invoice.field_checks["total"] = FieldCheck(
+        state, "" if total is None else str(total), candidates, basis=basis,
+    )
+
+    # 不含税 / 税额：优先能与总额闭合的一组，其次版面文本的一组。
+    if total is not None:
+        pairs = [pair for pair in pairs if pair[0] + pair[1] == total] or pairs
+        word_reads = [read for read in word_reads if words_match_total(read[0], total)] or word_reads
+    invoice.subtotal, invoice.tax_total = pairs[0] if pairs else (None, None)
+    if word_reads:
+        invoice.total_in_words, invoice.total_words_text = word_reads[0]
+    else:
+        # 读到了大写文字但折算不出数值：保留原文，让提醒能说明「无法解读」。
+        invoice.total_in_words, invoice.total_words_text = None, (word_texts[0] if word_texts else "")
+    invoice.tax_rates = rates
 
 
 def _parse_invoice_text(text: str, source: str = "pdf", context=None) -> ParsedInvoice:
@@ -1052,19 +1378,12 @@ def _parse_invoice_text(text: str, source: str = "pdf", context=None) -> ParsedI
         # 兜底走旧的「日期行下两行就是购买方」启发式
         buyer_name, buyer_tax_id = _extract_pdf_buyer(lines, context)
         seller_name = _extract_pdf_seller(lines, buyer_tax_id, buyer_name, context)
+        seller_tax_id = ""
 
-    # Only allow horizontal spacing after the currency sign.  ``\s*`` also crosses a
-    # newline, so a trailing ``¥`` in the tax line could consume a bank/account number
-    # on the next line and turn it into an enormous invoice total.
-    raw_amounts = re.findall(
-        r"[¥￥][^\S\r\n]*"
-        r"(-?(?:[0-9,，][^\S\r\n]*)+"
-        r"(?:\.[^\S\r\n]*(?:[0-9][^\S\r\n]*){1,2})?)"
-        r"(?=\r?\n|[^\S\r\n]*[¥￥]|[^0-9\s.]|$)",
-        text,
-    )
-    amounts = [d(re.sub(r"[\s,，]", "", value)) for value in raw_amounts]
-    total = max(amounts) if amounts else Decimal("0")
+    # 总额优先按「价税合计」标签读取；页面最大金额只是最后的兜底，并标记为低可信。
+    # 金额只允许同一行内的空格，避免行尾的 ¥ 把下一行的账号吞成巨额总额。
+    fields = read_total_fields(text)
+    total, total_source = select_total(fields)
 
     invoice = ParsedInvoice(
         invoice_no=invoice_no,
@@ -1072,9 +1391,17 @@ def _parse_invoice_text(text: str, source: str = "pdf", context=None) -> ParsedI
         seller=seller_name,
         buyer_name=buyer_name,
         buyer_tax_id=buyer_tax_id,
-        total=total,
-        total_present=bool(amounts),
+        total=total if total is not None else Decimal("0"),
+        total_present=total is not None,
         source=source,
+        seller_tax_id=seller_tax_id,
+        subtotal=fields.subtotal,
+        tax_total=fields.tax_total,
+        total_in_words=fields.words,
+        total_words_text=fields.words_text,
+        total_source=total_source,
+        total_read=total,
+        tax_rates=list(fields.rates),
     )
     items = _parse_pdf_items(lines)
     if not items:
@@ -1146,7 +1473,10 @@ def parse_aspose_xml(path: str | Path, context=None) -> ParsedInvoice:
     用来兜底那些 pypdf 抽取破碎、但 Aspose 能拿到完整版面文字的发票。
     """
     path = Path(path)
-    return _parse_invoice_text(_aspose_text(path), source="aspose-xml", context=context)
+    text = _aspose_text(path)
+    invoice = _parse_invoice_text(text, source="aspose-xml", context=context)
+    _reconcile_fields(invoice, text, None, None, None, context)
+    return invoice
 
 
 def parse_invoice_files(xml_path: str | Path | None = None, pdf_path: str | Path | None = None, context=None) -> ParsedInvoice:

@@ -866,7 +866,7 @@ def test_xml_and_pdf_are_cross_checked_without_overwriting_xml(tmp_path, monkeyp
     from tidoc.engine import parse_invoice_files
     xml = tmp_path / 'invoice.xml'
     xml.write_text('<Invoice><EIid>26110000000000000001</EIid><SellerName>示例销售方</SellerName>'
-                   '<TotalTax-includedAmount>126.00</TotalTax-includedAmount></Invoice>')
+                   '<TotalTax-includedAmount>126.00</TotalTax-includedAmount></Invoice>', encoding='utf-8')
     monkeypatch.setattr(parser_module, 'parse_pdf', lambda *args, **kwargs: ParsedInvoice(
         invoice_no=OTHER_INVOICE_NO, seller='其他销售方', total=Decimal('120'), total_present=True))
     parsed = parse_invoice_files(xml, tmp_path / 'invoice.pdf', context=CONTEXT)

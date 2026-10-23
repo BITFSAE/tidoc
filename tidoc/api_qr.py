@@ -13,7 +13,7 @@ class QrTicketApi:
         成功返回 {paths, files, host, invoice_no, warnings}；paths 可直接交给 scan_files /
         批量导入。失败返回 {ok:false, error, code, stage, open_url?}，open_url 是已通过校验的取票链接，
         可交给 open_external_url 让用户在浏览器里下载后手工导入。options.preview_only 只识别、不联网。
-        联网可能持续数十秒，因此不走 _guard，不占用全局调用锁。
+        联网可能持续数十秒到几分钟（慢平台生成 PDF），因此不走 _guard，不占用全局调用锁。
         """
         from .services import qr_fetch
 

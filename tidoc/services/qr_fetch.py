@@ -4,9 +4,15 @@
 
 1. decode  —— 从图片里解出二维码文本（zxing-cpp + Pillow，必要时放大、缩小、分块再试）。
 2. link    —— 校验文本是不是国家税务总局电子发票服务平台的取票链接，并取出下载所需参数。
-3. download—— 联网下载 XML（平台以 ZIP 包装）和 PDF。
+3. download—— 同时联网下载 XML（平台以 ZIP 包装）和 PDF；两种格式互不等待，任何一种先到都先收下。
+               平台吐完最后一段就停止读取（长度已知时以完整长度为准，长度未知时看 PDF 的 %%EOF、
+               ZIP 的中央目录），不再等连接关闭；
+               连接中断或 5xx 会在总时限内自动重试。
 4. content —— 校验下载内容确实是 PDF / XML，并用 XML 里的发票号码核对二维码，再交给调用方
               走现有导入流程。
+
+各地平台的下载速度差别很大：广东、湖北通常几秒完成；深圳平台生成 PDF 很慢（一张 150 KB 的
+PDF 可能要 20–120 秒），因此总时限设为 180 秒，XML 与 PDF 并行下载，至少不会把两份的时间相加。
 
 联网规则（只在用户把二维码图片交给软件时发生，没有任何后台请求）：
 
@@ -33,6 +39,7 @@ import io
 import http.client
 import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from contextlib import contextmanager, nullcontext
 import json
@@ -60,7 +67,7 @@ class FetchCancellation:
     def __init__(self):
         self.event = threading.Event()
         self.lock = threading.Lock()
-        self.abort = None
+        self.aborts = set()
 
     def check(self):
         if self.event.is_set():
@@ -69,8 +76,8 @@ class FetchCancellation:
     def cancel(self):
         self.event.set()
         with self.lock:
-            abort = self.abort
-        if abort:
+            aborts = list(self.aborts)
+        for abort in aborts:
             try:
                 abort()
             except OSError:
@@ -78,20 +85,23 @@ class FetchCancellation:
 
     @contextmanager
     def watching(self, abort):
+        # XML 和 PDF 并行下载，取消时要同时中断两个响应。
         with self.lock:
-            self.abort = abort
+            self.aborts.add(abort)
+            cancelled = self.event.is_set()
         try:
-            if self.event.is_set():
+            if cancelled:
                 abort()
             self.check()
             yield
             self.check()
         finally:
             with self.lock:
-                self.abort = None
+                self.aborts.discard(abort)
 
 
 _cancellation = ContextVar("qr_fetch_cancellation", default=None)
+_fetch_deadline = ContextVar("qr_fetch_deadline", default=None)
 
 
 def _check_cancelled():
@@ -119,11 +129,15 @@ MAX_IMAGE_PIXELS = 80_000_000
 MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 MAX_XML_BYTES = 5 * 1024 * 1024
 MAX_QR_TEXT_CHARS = 2048
-REQUEST_TIMEOUT = 15          # 单次连接 / 读取超时（秒）
-TOTAL_TIMEOUT = 45            # 单个文件从请求到读完的总时限（秒）
+REQUEST_TIMEOUT = 30          # 单次连接 / 读取超时（秒）
+TOTAL_TIMEOUT = 150           # 单个请求从发出到读完的总时限（秒）
+FETCH_TIMEOUT = 180           # 一种格式从开始到放弃的总时限（秒），含自动重试
 DECODE_TIME_BUDGET = 8.0      # 解码尝试的总时限（秒）
 MAX_REDIRECTS = 3
 READ_CHUNK = 64 * 1024
+RETRY_ATTEMPTS = 3            # 网络中断、连接失败、5xx 时最多请求几次
+RETRY_WINDOW = 60             # 只在这个时间（秒）内失败才重试，避免又等一遍慢下载
+RETRY_PAUSE = 0.5             # 重试前的短暂等待（秒）
 
 # ----------------------------------------------------------------------------- 白名单
 
@@ -511,16 +525,40 @@ def _require_allowed_url(url: str) -> None:
         raise QrFetchError("untrusted_redirect", "redirect target not allowed")
 
 
-def _read_limited(resp, max_bytes: int, deadline: float) -> bytes:
+def _body_complete(tail: bytes, kind: str | None) -> bool:
+    """长度未知时用文件自己的结束标记收尾；标记必须在末尾，避免被增量更新里的旧标记骗停。"""
+    if kind == "pdf":
+        return tail.rstrip(b"\x00\t\r\n ").endswith(b"%%EOF")
+    if kind == "xml" and tail.rfind(b"PK\x05\x06") >= 0:
+        # ZIP 的中央目录结束记录：22 字节固定部分 + 注释长度。
+        start = tail.rfind(b"PK\x05\x06")
+        if len(tail) - start < 22:
+            return False
+        comment = int.from_bytes(tail[start + 20:start + 22], "little")
+        return len(tail) - start >= 22 + comment
+    return False
+
+
+def _read_some(resp, size: int) -> bytes:
+    """read1 只取已经到达的数据；chunked 响应不必等下一个分块或结束标记。"""
+    read1 = getattr(resp, "read1", None)
+    if read1 is not None:
+        return read1(size)
+    return resp.read(size)
+
+
+def _read_limited(resp, max_bytes: int, deadline: float, kind: str | None = None) -> bytes:
     declared = resp.headers.get("Content-Length")
-    if declared and declared.isdigit() and int(declared) > max_bytes:
+    declared_size = int(declared) if declared and declared.isdigit() else None
+    if declared_size is not None and declared_size > max_bytes:
         raise QrFetchError("too_large", "content-length")
     chunks: list[bytes] = []
+    tail = b""
     total = 0
     while True:
         _check_cancelled()
         try:
-            chunk = resp.read(READ_CHUNK)
+            chunk = _read_some(resp, READ_CHUNK)
         except (OSError, ValueError, http.client.HTTPException):
             _check_cancelled()
             raise
@@ -533,6 +571,16 @@ def _read_limited(resp, max_bytes: int, deadline: float) -> bytes:
         if time.monotonic() > deadline:
             raise QrFetchError("network", "total timeout")
         chunks.append(chunk)
+        tail = (tail + chunk)[-4096:]
+        if declared_size is not None:
+            # 长度已知就以完整长度为准，不用文件内的标记判断，避免截断增量更新的 PDF。
+            if total >= declared_size:
+                break
+        elif _body_complete(tail, kind):
+            break
+    if declared_size is not None and total < declared_size:
+        # read1 不像 read(n) 那样在短读时抛 IncompleteRead，这里补上，交给上层重试。
+        raise QrFetchError("network", "incomplete body")
     return b"".join(chunks)
 
 
@@ -540,19 +588,20 @@ def _lower_headers(headers) -> dict[str, str]:
     return {str(k).lower(): str(v) for k, v in headers.items()} if headers else {}
 
 
-def _urllib_once(url: str, body: bytes | None, max_bytes: int, deadline: float) -> _Response:
+def _urllib_once(url: str, body: bytes | None, max_bytes: int, deadline: float, kind: str | None) -> _Response:
     headers = {"User-Agent": USER_AGENT, "Accept": "*/*", "Accept-Encoding": "identity"}
     if body is not None:
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=body, headers=headers, method="POST" if body is not None else "GET")
     try:
         _check_cancelled()
-        with _build_opener().open(request, timeout=REQUEST_TIMEOUT) as resp:
+        timeout = max(1.0, min(REQUEST_TIMEOUT, deadline - time.monotonic()))
+        with _build_opener().open(request, timeout=timeout) as resp:
             token = _cancellation.get()
             if token:
                 with token.watching(lambda: _abort_response(resp)):
-                    return _Response(resp.status, _lower_headers(resp.headers), _read_limited(resp, max_bytes, deadline))
-            return _Response(resp.status, _lower_headers(resp.headers), _read_limited(resp, max_bytes, deadline))
+                    return _Response(resp.status, _lower_headers(resp.headers), _read_limited(resp, max_bytes, deadline, kind))
+            return _Response(resp.status, _lower_headers(resp.headers), _read_limited(resp, max_bytes, deadline, kind))
     except urllib.error.HTTPError as exc:
         token = _cancellation.get()
         try:
@@ -618,9 +667,9 @@ def _curl_once(url: str, body: bytes | None, max_bytes: int, deadline: float) ->
         return _Response(status, headers, data)
 
 
-def _request_once(url: str, body: bytes | None, max_bytes: int, deadline: float) -> _Response:
+def _request_once(url: str, body: bytes | None, max_bytes: int, deadline: float, kind: str | None) -> _Response:
     try:
-        return _urllib_once(url, body, max_bytes, deadline)
+        return _urllib_once(url, body, max_bytes, deadline, kind)
     except QrFetchError:
         raise
     except (urllib.error.URLError, ssl.SSLError, OSError) as exc:
@@ -635,23 +684,50 @@ def _request_once(url: str, body: bytes | None, max_bytes: int, deadline: float)
         raise QrFetchError("network", type(exc).__name__) from exc
 
 
-def _http_request(url: str, body: bytes | None = None, max_bytes: int | None = None) -> _Response:
-    """发出请求并手动跟随重定向，每一跳都重新校验白名单。``body`` 非空时为 JSON POST。"""
-    deadline = time.monotonic() + TOTAL_TIMEOUT
+def _http_request(
+    url: str, body: bytes | None = None, max_bytes: int | None = None, kind: str | None = None,
+) -> _Response:
+    """发出请求并手动跟随重定向，每一跳都重新校验白名单。``body`` 非空时为 JSON POST。
+
+    连接中断、读超时、5xx 会在总时限内重试；重试从最后一个地址重新开始，仍逐跳检查白名单。
+    """
     max_bytes = MAX_DOWNLOAD_BYTES if max_bytes is None else max_bytes
-    current = url
-    for _hop in range(MAX_REDIRECTS + 1):
+    budget = _fetch_deadline.get()
+    attempt = 0
+    while True:
+        attempt += 1
+        started = time.monotonic()
+        deadline = started + TOTAL_TIMEOUT
+        if budget is not None:
+            deadline = min(deadline, budget)
+        current = url
+        try:
+            for _hop in range(MAX_REDIRECTS + 1):
+                _check_cancelled()
+                _require_allowed_url(current)
+                response = _request_once(current, body, max_bytes, deadline, kind)
+                if response.status in _REDIRECT_STATUSES:
+                    location = response.headers.get("location", "")
+                    if not location:
+                        raise QrFetchError("platform_changed", "redirect without location")
+                    current = urllib.parse.urljoin(current, location)
+                    continue
+                # 5xx 多是平台临时故障；重试通常就好，又不会像超时那样已经等了很久。
+                if response.status >= 500 and attempt < RETRY_ATTEMPTS and time.monotonic() - started < RETRY_WINDOW:
+                    break
+                return response
+            else:
+                raise QrFetchError("platform_changed", "too many redirects")
+        except QrFetchError as exc:
+            if (
+                exc.code != "network"
+                or attempt >= RETRY_ATTEMPTS
+                or time.monotonic() - started >= RETRY_WINDOW
+                or (budget is not None and budget - time.monotonic() < 10)
+            ):
+                raise
         _check_cancelled()
-        _require_allowed_url(current)
-        response = _request_once(current, body, max_bytes, deadline)
-        if response.status in _REDIRECT_STATUSES:
-            location = response.headers.get("location", "")
-            if not location:
-                raise QrFetchError("platform_changed", "redirect without location")
-            current = urllib.parse.urljoin(current, location)
-            continue
-        return response
-    raise QrFetchError("platform_changed", "too many redirects")
+        time.sleep(RETRY_PAUSE)
 
 
 def _export_url(link: InvoiceLink, file_format: str) -> str:
@@ -760,7 +836,7 @@ def _extract_xml(body: bytes, invoice_no: str) -> tuple[bytes, bool]:
 def _download(link: InvoiceLink, kind: str) -> tuple[FetchedFile, bool]:
     """下载一种格式；返回文件和“发票号码是否已与二维码核对”。PDF 只检查魔数，不核对号码。"""
     file_format = "XML" if kind == "xml" else "PDF"
-    response = _http_request(_export_url(link, file_format))
+    response = _http_request(_export_url(link, file_format), kind=kind)
     if response.status != 200:
         raise _classify_http_failure(response)
     body = response.body
@@ -834,17 +910,61 @@ def _refine_link(link: InvoiceLink) -> tuple[InvoiceLink, bool]:
     return refined, True
 
 
+def _new_fetch_state(link: InvoiceLink) -> dict:
+    return {
+        "link": link,
+        "lock": threading.Lock(),
+        "refine_event": threading.Event(),
+        "refining": False,
+        "refine_error": None,
+        "confirmed": False,
+    }
+
+
+def _refine_once(state: dict) -> tuple[InvoiceLink, bool]:
+    """XML 和 PDF 并行下载时，查询接口只调用一次；另一条线程等这次查询的结果。"""
+    lock = state["lock"]
+    event = state["refine_event"]
+    with lock:
+        if event.is_set():
+            if state["refine_error"] is not None:
+                raise state["refine_error"]
+            return state["link"], state["confirmed"]
+        if state["refining"]:
+            waiting = True
+        else:
+            state["refining"] = True
+            waiting = False
+    if waiting:
+        event.wait()
+        with lock:
+            if state["refine_error"] is not None:
+                raise state["refine_error"]
+            return state["link"], state["confirmed"]
+    try:
+        refined, confirmed = _refine_link(state["link"])   # 可能抛出更明确的错误（链接失效、验证码、限流）
+    except BaseException as exc:
+        with lock:
+            state["refine_error"] = exc
+            event.set()
+        raise
+    with lock:
+        state["link"] = refined
+        state["confirmed"] = confirmed
+        event.set()
+    return refined, confirmed
+
+
 def _download_with_fallback(kind: str, state: dict) -> tuple[FetchedFile, bool]:
     """先按二维码里的参数直接下载（最快）；失败且像是链接或参数问题时，查询平台再核对一次。"""
+    used = state["link"]
     try:
-        return _download(state["link"], kind)
+        return _download(used, kind)
     except QrFetchError as exc:
-        if exc.code not in {"link_invalid", "platform_changed"} or state.get("queried"):
+        if exc.code not in {"link_invalid", "platform_changed"}:
             raise
-        state["queried"] = True
-        refined, confirmed = _refine_link(state["link"])   # 可能抛出更明确的错误（链接失效、验证码、限流）
-        if refined != state["link"]:
-            state["link"] = refined
+        refined, confirmed = _refine_once(state)
+        if refined != used:
             return _download(refined, kind)
         if confirmed:
             # 平台确认这张发票有效，但下载接口不给文件：多半是下载接口改了。
@@ -852,41 +972,80 @@ def _download_with_fallback(kind: str, state: dict) -> tuple[FetchedFile, bool]:
         raise
 
 
-def fetch_invoice_files(link: InvoiceLink, cancellation: FetchCancellation | None = None) -> QrFetchResult:
+def _fetch_kind(
+    kind: str, state: dict, cancellation: FetchCancellation | None, deadline: float,
+) -> tuple[FetchedFile, bool]:
+    """在下载线程里恢复取消信号和总时限；ContextVar 不会自动传进新线程。"""
     token = _cancellation.set(cancellation)
+    budget = _fetch_deadline.set(deadline)
     try:
-        _check_cancelled()
-        result = _fetch_invoice_files(link)
-        _check_cancelled()
-        return result
+        return _download_with_fallback(kind, state)
     finally:
+        _fetch_deadline.reset(budget)
         _cancellation.reset(token)
 
 
-def _fetch_invoice_files(link: InvoiceLink) -> QrFetchResult:
-    """联网取回发票 XML 和 PDF。XML 优先；只拿到其中一个时仍返回，并在 warnings 里说明。"""
+def fetch_invoice_files(link: InvoiceLink, cancellation: FetchCancellation | None = None) -> QrFetchResult:
+    deadline = time.monotonic() + FETCH_TIMEOUT
+    token = _cancellation.set(cancellation)
+    budget = _fetch_deadline.set(deadline)
+    try:
+        _check_cancelled()
+        result = _fetch_invoice_files(link, cancellation, deadline)
+        _check_cancelled()
+        return result
+    finally:
+        _fetch_deadline.reset(budget)
+        _cancellation.reset(token)
+
+
+def _fetch_invoice_files(
+    link: InvoiceLink, cancellation: FetchCancellation | None = None, deadline: float | None = None,
+) -> QrFetchResult:
+    """并行取回发票 XML 和 PDF；只拿到其中一个时仍返回，并在 warnings 里说明。"""
+    if deadline is None:
+        deadline = time.monotonic() + FETCH_TIMEOUT
     result = QrFetchResult(host=link.host, invoice_no=link.invoice_no)
-    state: dict = {"link": link}
+    state = _new_fetch_state(link)
     errors: dict[str, QrFetchError] = {}
-    for kind in ("xml", "pdf"):
-        try:
-            fetched, verified = _download_with_fallback(kind, state)
-            result.files.append(fetched)
-            if kind == "xml" and not verified:
-                result.warnings.append("发票 XML 中没有发票号码字段，无法与二维码核对，请导入后确认发票号码。")
-        except QrFetchError as exc:
-            _check_cancelled()
-            errors[kind] = exc
-            # 链接无效、被拦截、网络故障时再请求 PDF 只会重复失败；内容类问题则值得再试另一种格式。
-            if exc.code not in {"bad_content", "too_large"}:
-                break
+    fetched: dict[str, tuple[FetchedFile, bool]] = {}
+    kinds = ("xml", "pdf")
+    with ThreadPoolExecutor(max_workers=len(kinds), thread_name_prefix="qr-fetch") as pool:
+        futures = {kind: pool.submit(_fetch_kind, kind, state, cancellation, deadline) for kind in kinds}
+        for kind in kinds:
+            try:
+                fetched[kind] = futures[kind].result()
+            except QrFetchError as exc:
+                _check_cancelled()
+                errors[kind] = exc
+    for kind in kinds:
+        if kind not in fetched:
+            continue
+        item, verified = fetched[kind]
+        result.files.append(item)
+        if kind == "xml" and not verified:
+            result.warnings.append("发票 XML 中没有发票号码字段，无法与二维码核对，请导入后确认发票号码。")
     if not result.files:
-        raise next(iter(errors.values()))
+        raise _best_error(errors)
     if "xml" in errors:
         result.warnings.append("未能取得发票 XML，只取回了 PDF；识别会以 PDF 文字为准。")
     elif "pdf" in errors:
-        result.warnings.append("未能取得发票 PDF，只取回了 XML；打印票面前请补充发票 PDF。")
+        if errors["pdf"].code == "network":
+            result.warnings.append("税务平台传输 PDF 太慢或网络中断，本次只取回了 XML；打印票面前请补充发票 PDF。")
+        else:
+            result.warnings.append("未能取得发票 PDF，只取回了 XML；打印票面前请补充发票 PDF。")
     return result
+
+
+def _best_error(errors: dict[str, QrFetchError]) -> QrFetchError:
+    """两种格式都失败时，优先报平台给出的明确原因，其次才是网络错误。"""
+    if not errors:
+        return QrFetchError("network", "no response")
+    for kind in ("xml", "pdf"):
+        error = errors.get(kind)
+        if error is not None and error.code != "network":
+            return error
+    return errors.get("pdf") or errors["xml"]
 
 
 def fetch_invoice_from_image(data: bytes) -> QrFetchResult:

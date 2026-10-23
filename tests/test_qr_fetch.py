@@ -313,7 +313,7 @@ def test_find_invoice_link_prefers_the_most_informative_error(monkeypatch):
 
 # ----------------------------------------------------------------------------- 3. 联网下载
 
-def test_success_downloads_xml_then_pdf_with_minimal_honest_requests(monkeypatch):
+def test_success_downloads_xml_and_pdf_with_minimal_honest_requests(monkeypatch):
     opener = install(monkeypatch, platform_handler())
     result = qr.fetch_invoice_files(link())
 
@@ -332,9 +332,10 @@ def test_success_downloads_xml_then_pdf_with_minimal_honest_requests(monkeypatch
         headers = {k.lower(): v for k, v in request.header_items()}
         assert headers["user-agent"].startswith("tidoc/")
         assert not {"origin", "referer", "cookie", "authorization"} & set(headers)
-    params = urllib.parse.parse_qs(urllib.parse.urlsplit(opener.requests[0].full_url).query)
-    assert params["Wjgs"] == ["XML"] and params["Fphm"] == [INVOICE_NO]
-    assert params["Kprq"] == [ISSUED] and params["Jym"] == ["AB12"]
+    params = {urllib.parse.parse_qs(urllib.parse.urlsplit(r.full_url).query)["Wjgs"][0]: r for r in opener.requests}
+    xml_params = urllib.parse.parse_qs(urllib.parse.urlsplit(params["XML"].full_url).query)
+    assert xml_params["Fphm"] == [INVOICE_NO]
+    assert xml_params["Kprq"] == [ISSUED] and xml_params["Jym"] == ["AB12"]
 
 
 def test_raw_xml_without_zip_is_accepted(monkeypatch):
@@ -362,7 +363,11 @@ def test_redirects_leaving_the_allowlist_are_refused(monkeypatch, location, expe
     with pytest.raises(qr.QrFetchError) as caught:
         qr.fetch_invoice_files(link())
     assert caught.value.code == expected
-    assert len(opener.requests) == 1          # 没有对非白名单地址发出请求
+    # XML 和 PDF 并行发出，但都只请求白名单内的地址，没有跟随跳转。
+    assert len(opener.requests) == 2
+    for request in opener.requests:
+        parts = urllib.parse.urlsplit(request.full_url)
+        assert (parts.scheme, parts.hostname, parts.port) == ("https", HOST, 8443)
 
 
 def test_redirect_inside_the_allowlist_is_followed_and_limited(monkeypatch):
@@ -435,6 +440,147 @@ def test_connection_failures_are_network_errors(monkeypatch, failure):
     with pytest.raises(qr.QrFetchError) as caught:
         qr.fetch_invoice_files(link())
     assert caught.value.code == "network" and caught.value.stage == "download"
+
+
+def test_xml_and_pdf_download_at_the_same_time(monkeypatch):
+    import threading
+
+    pdf_started = threading.Event()
+
+    def handler(request):
+        fmt = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)["Wjgs"][0]
+        if fmt == "PDF":
+            pdf_started.set()
+            return FakeResponse(200, PDF_BYTES, {"Content-Type": "application/pdf"})
+        # 如果 XML 在 PDF 开始之前就等完了，说明还是串行下载。
+        assert pdf_started.wait(3), "XML 下载在等 PDF 开始"
+        return FakeResponse(200, make_zip({"a.xml": make_xml()}), {"Content-Type": "application/zip"})
+
+    install(monkeypatch, handler)
+    assert [f.kind for f in qr.fetch_invoice_files(link()).files] == ["xml", "pdf"]
+
+
+def test_pdf_stops_at_its_end_marker_instead_of_waiting_for_the_connection_to_close(monkeypatch):
+    class TailResponse(FakeResponse):
+        def read(self, size=-1):
+            chunk = super().read(size)
+            if chunk:
+                return chunk
+            raise AssertionError("PDF 已经读到 %%EOF，不应再等连接关闭")
+
+    def handler(request):
+        fmt = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)["Wjgs"][0]
+        body, ctype = (PDF_BYTES, "application/pdf") if fmt == "PDF" else (make_zip({"a.xml": make_xml()}), "application/zip")
+        return TailResponse(200, body, {"Content-Type": ctype})
+
+    install(monkeypatch, handler)
+    assert len(qr.fetch_invoice_files(link()).files) == 2
+
+
+def test_pdf_uses_read1_so_chunked_data_is_checked_without_waiting_for_the_terminator(monkeypatch):
+    class ChunkedResponse(FakeResponse):
+        def read(self, size=-1):
+            raise AssertionError("chunked 响应应先使用 read1，不能等凑满缓冲区")
+
+        def read1(self, size=-1):
+            return self._stream.read(size)
+
+    def handler(request):
+        fmt = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)["Wjgs"][0]
+        if fmt == "PDF":
+            return ChunkedResponse(200, PDF_BYTES, {"Content-Type": "application/pdf"})
+        return FakeResponse(200, make_zip({"a.xml": make_xml()}), {"Content-Type": "application/zip"})
+
+    install(monkeypatch, handler)
+    assert len(qr.fetch_invoice_files(link()).files) == 2
+
+
+def test_pdf_end_marker_must_be_at_the_end():
+    assert qr._body_complete(b"%PDF-1.4\n%%EOF\n", "pdf")
+    assert qr._body_complete(b"%PDF-1.4\n%%EOF\n \r\n", "pdf")
+    # 增量更新里前面的 %%EOF 后面还有内容，不能在这里停。
+    assert not qr._body_complete(b"%PDF-1.4\n%%EOF\n1 0 obj\n<<>>\nendobj\n", "pdf")
+
+
+def test_known_length_wins_over_an_early_marker_so_incremental_pdfs_are_not_truncated():
+    early = b"%PDF-1.4\n%%EOF\n"
+    rest = b"1 0 obj\n<<>>\nendobj\nstartxref\n9\n%%EOF\n"
+    headers = email.message.Message()
+    headers["Content-Length"] = str(len(early + rest))
+
+    class PiecewiseResponse:
+        def __init__(self):
+            self.headers = headers
+            self.pieces = [early, rest]
+
+        def read1(self, size=-1):
+            return self.pieces.pop(0) if self.pieces else b""
+
+        def read(self, size=-1):
+            raise AssertionError("应使用 read1")
+
+    assert qr._read_limited(PiecewiseResponse(), 1024 * 1024, float("inf"), "pdf") == early + rest
+
+
+def test_a_body_shorter_than_content_length_is_not_accepted(monkeypatch):
+    body = b"%PDF-1.4\n%%EOF\n"
+    headers = {"Content-Type": "application/pdf", "Content-Length": str(len(body) + 100)}
+    install(monkeypatch, lambda r: FakeResponse(200, body, headers))
+    with pytest.raises(qr.QrFetchError) as caught:
+        qr.fetch_invoice_files(link())
+    assert caught.value.code == "network"
+
+
+def test_zip_stops_at_its_end_record_instead_of_waiting_for_the_connection_to_close(monkeypatch):
+    class TailResponse(FakeResponse):
+        def read(self, size=-1):
+            chunk = super().read(size)
+            if chunk:
+                return chunk
+            raise AssertionError("ZIP 已经读到中央目录结束记录，不应再等连接关闭")
+
+    def handler(request):
+        fmt = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)["Wjgs"][0]
+        if fmt == "PDF":
+            return FakeResponse(200, PDF_BYTES, {"Content-Type": "application/pdf"})
+        return TailResponse(200, make_zip({"a.xml": make_xml()}), {"Content-Type": "application/zip"})
+
+    install(monkeypatch, handler)
+    assert qr.fetch_invoice_files(link()).files[0].data == make_xml()
+
+
+def test_a_dropped_connection_is_retried_once(monkeypatch):
+    attempts = {"pdf": 0}
+
+    def handler(request):
+        fmt = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)["Wjgs"][0]
+        if fmt == "PDF":
+            attempts["pdf"] += 1
+            if attempts["pdf"] == 1:
+                raise ConnectionResetError("reset by platform")
+            return FakeResponse(200, PDF_BYTES, {"Content-Type": "application/pdf"})
+        return FakeResponse(200, make_zip({"a.xml": make_xml()}), {"Content-Type": "application/zip"})
+
+    install(monkeypatch, handler)
+    assert [f.kind for f in qr.fetch_invoice_files(link()).files] == ["xml", "pdf"]
+    assert attempts["pdf"] == 2
+
+
+def test_a_server_error_is_retried_once(monkeypatch):
+    attempts = {"pdf": 0}
+
+    def handler(request):
+        fmt = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)["Wjgs"][0]
+        if fmt == "PDF":
+            attempts["pdf"] += 1
+            if attempts["pdf"] == 1:
+                return FakeResponse(503, b"busy", {"Content-Type": "text/plain"})
+            return FakeResponse(200, PDF_BYTES, {"Content-Type": "application/pdf"})
+        return FakeResponse(200, make_zip({"a.xml": make_xml()}), {"Content-Type": "application/zip"})
+
+    install(monkeypatch, handler)
+    assert [f.kind for f in qr.fetch_invoice_files(link()).files] == ["xml", "pdf"]
+    assert attempts["pdf"] == 2
 
 
 def test_non_pdf_xml_content_is_refused(monkeypatch):
@@ -525,6 +671,18 @@ def test_missing_pdf_still_returns_xml_with_a_warning(monkeypatch):
     assert any("PDF" in w for w in result.warnings)
 
 
+def test_pdf_that_times_out_leaves_xml_with_a_specific_warning(monkeypatch):
+    def handler(request):
+        if "Wjgs=PDF" in request.full_url:
+            raise TimeoutError("platform is too slow")
+        return platform_handler()(request)
+
+    install(monkeypatch, handler)
+    result = qr.fetch_invoice_files(link())
+    assert [f.kind for f in result.files] == ["xml"]
+    assert any("太慢" in w and "PDF" in w for w in result.warnings)
+
+
 def test_empty_response_means_invalid_link_after_the_platform_agrees(monkeypatch):
     def handler(request):
         if request.full_url.endswith("exportDzfpwjEwm") or "exportDzfpwjEwm" in request.full_url:
@@ -576,11 +734,15 @@ def test_platform_supplied_parameters_are_used_for_a_retry(monkeypatch):
             return platform_handler()(request)
         return platform_handler(query={"code": "1", "fphm": INVOICE_NO, "kprq": "2020-01-02 03:04:05", "jym": "ZZ99"})(request)
 
-    install(monkeypatch, handler)
+    opener = install(monkeypatch, handler)
     result = qr.fetch_invoice_files(link())
     assert [f.kind for f in result.files] == ["xml", "pdf"]
-    assert seen[0] == ("AB12", ISSUED) and seen[1] == ("ZZ99", ISSUED)
-    assert seen[2][0] == "ZZ99"               # PDF 沿用查询得到的参数，不再重复查询
+    # 先按二维码里的参数下载；失败后改用平台给的参数，查询只做一次。
+    # 两条下载线程谁先看到新参数取决于时序，因此不固定首次请求的次数。
+    assert all(item[1] == ISSUED for item in seen)
+    assert ("AB12", ISSUED) in seen and ("ZZ99", ISSUED) in seen
+    queries = [r for r in opener.requests if "queryFpjcxxb" in r.full_url]
+    assert len(queries) == 1
 
 
 def test_query_for_another_invoice_is_not_trusted(monkeypatch):
@@ -609,9 +771,10 @@ def test_captcha_and_rate_limit_messages_are_reported_not_bypassed(monkeypatch, 
     with pytest.raises(qr.QrFetchError) as caught:
         qr.fetch_invoice_files(link())
     assert caught.value.code == code
-    # 报错后不再继续请求任何接口。
+    # XML 和 PDF 都已发出后才发现验证码；之后不再请求任何接口。
     assert all("saveDzfpxzjlxx" not in r.full_url for r in opener.requests)
-    assert len([r for r in opener.requests if "exportDzfpwjEwm" in r.full_url]) == 1
+    assert len([r for r in opener.requests if "exportDzfpwjEwm" in r.full_url]) == 2
+    assert len([r for r in opener.requests if "queryFpjcxxb" in r.full_url]) == 1
 
 
 def test_query_blocked_by_the_platform_is_reported(monkeypatch):
@@ -764,7 +927,7 @@ def test_api_method_is_exposed_to_the_bridge(api):
 
 
 @pytest.mark.parametrize('response_kind', ['eof', 'closed_stream', 'http_error'])
-def test_cancel_interrupts_an_open_response_and_stops_the_second_download(monkeypatch, response_kind):
+def test_cancel_interrupts_open_responses(monkeypatch, response_kind):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
     entered, stopped = Event(), Event()
@@ -798,7 +961,9 @@ def test_cancel_interrupts_an_open_response_and_stops_the_second_download(monkey
             assert caught.value.code == 'cancelled'
         finally:
             stopped.set()
-    assert len(opener.requests) == 1
+    # XML 和 PDF 同时下载：取消会中断已经打开的响应，也不再启动新的请求。
+    assert 1 <= len(opener.requests) <= 2
+    assert all("exportDzfpwjEwm" in r.full_url for r in opener.requests)
 
 
 def test_already_cancelled_fetch_never_opens_a_connection():

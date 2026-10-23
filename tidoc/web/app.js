@@ -36,6 +36,7 @@ const State = {
   updateStatus: null,
   coreUpdateRuntime: null,
   showCreatedAt: false,
+  qrTipDismissed: false, // 「可以拖入取票二维码」的说明是否已被关掉
   ocrStatus: null,      // 阿里云 OCR：组件安装 + 密钥配置状态（本地检查，不联网）
 };
 
@@ -58,10 +59,10 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const CLOSE_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
 
-function toast(msg, kind) {
+function toast(msg, kind, duration = 2600) {
   const t = el('div', 'toast' + (kind ? ' ' + kind : ''), esc(msg));
   $('#toastRoot').appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .25s'; setTimeout(() => t.remove(), 280); }, 2600);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .25s'; setTimeout(() => t.remove(), 280); }, duration);
 }
 
 function taskProgress(message) {
@@ -76,6 +77,22 @@ function taskProgress(message) {
       if (closed) return;
       const text = node.querySelector('[data-task-progress]');
       if (text) text.textContent = next;
+    },
+    // 可取消的任务：在提示条右侧放一个「取消」；传 null 撤掉。取消只表示不再等待结果。
+    cancelable(onCancel) {
+      if (closed) return;
+      node.querySelector('[data-task-cancel]')?.remove();
+      if (typeof onCancel !== 'function') return;
+      const button = el('button', 'toast-action', '取消');
+      button.type = 'button';
+      button.dataset.taskCancel = '';
+      button.title = '取消后软件不再等待结果；已发出的请求会在后台结束，取回的文件会被丢弃。';
+      button.onclick = () => {
+        button.disabled = true;
+        button.textContent = '正在取消…';
+        onCancel();
+      };
+      node.appendChild(button);
     },
     close() {
       if (closed) return;
@@ -798,6 +815,7 @@ async function loadWorkflowPreferences() {
     if (multiMode) localStorage.setItem(MULTI_CLAIMANT_KEY, multiMode);
     if (State.defaultEntryTitle) localStorage.setItem(DEFAULT_ENTRY_TITLE_KEY, State.defaultEntryTitle);
   } catch (e) {}
+  await loadQrTipPreference();
 }
 
 // 启动时套用用户在设置里选的默认抬头 / 密度
@@ -4355,7 +4373,9 @@ async function openBatchImport() {
         <b>多选发票文件</b>
         <span>选择几张 PDF，可同时选 XML</span>
       </button>
-    </div>`;
+    </div>
+    <div id="biQrTip"></div>`;
+  mountQrTip(body.querySelector('#biQrTip'));
   const m = modal({
     title: '批量导入',
     body,
@@ -4412,6 +4432,8 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
   const NEW_IMPORT_BATCH = '__new_batch__';
 
   const body = el('div');
+  // 二维码取票的结果（取回几张、哪些没成功）放在窗口里；「在浏览器中打开」只需绑定一次，重绘不影响。
+  if (options.qrReport) bindQrReport(body, options.qrReport);
   const render = () => {
     const groupRows = groups.map((g, gi) => `
       <div class="bi-group${g.selected ? '' : ' off'}${g.error ? ' failed' : ''}${g.created ? ' created' : ''}">
@@ -4475,6 +4497,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         <div><span>跳过</span><b>${ignored.length + ungrouped.length}</b></div>
       </div>
       <div class="hint" style="margin-top:12px">从 <b>${esc(sourceLabel)}</b> 扫描到 <b>${scan.total_files}</b> 个候选文件。每个发票 PDF 创建一条；XML 只在能匹配到 PDF 时一起带入。</div>
+      ${qrReportHtml(options.qrReport)}
       <div class="import-assignment-grid">
         ${claimantConfirmHtml(selectedImportProfileId)}
         <div class="form-row claimant-row">
@@ -5354,6 +5377,14 @@ async function nativeDroppedPaths(list) {
   return result?.paths?.length === list.length ? result.paths : null;
 }
 
+// 截图粘贴有时没有文件名，或名字不带扩展名；按图片类型补上，后面按扩展名识别图片时才认得出来。
+const IMAGE_MIME_EXTENSIONS = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/bmp': '.bmp', 'image/gif': '.gif' };
+function droppedFileName(file) {
+  const name = file.name || 'dropped-file';
+  const extension = IMAGE_MIME_EXTENSIONS[String(file.type || '').toLowerCase()];
+  return extension && !/\.[A-Za-z0-9]{1,5}$/.test(name) ? name + extension : name;
+}
+
 async function droppedFilesToPaths(files, { dropped = false } = {}) {
   const list = [...(files || [])];
   if (!list.length) return [];
@@ -5365,7 +5396,7 @@ async function droppedFilesToPaths(files, { dropped = false } = {}) {
   }
   const payload = [];
   for (const file of list) {
-    payload.push({ name: file.name || 'dropped-file', data_url: await readFileAsDataURL(file) });
+    payload.push({ name: droppedFileName(file), data_url: await readFileAsDataURL(file) });
   }
   const saved = await Api.saveDroppedFiles(payload);
   return saved.paths || [];
@@ -5403,7 +5434,7 @@ function setupGlobalDrop() {
   const hasFiles = (dt) => dt && Array.from(dt.types || []).includes('Files');
   const keepOverlayVisible = (ev) => {
     showDragOverlay();
-    updateDragHint(ev.target instanceof Element && !!ev.target.closest('.entry-card'));
+    updateDragHint(ev.target instanceof Element && !!ev.target.closest('.entry-card'), dragItemsAreImages(ev.dataTransfer));
     clearTimeout(hideTimer);
     hideTimer = setTimeout(hideDragOverlay, 220);
   };
@@ -5434,10 +5465,15 @@ function setupGlobalDrop() {
     let cleanupDeferred = false;
     try {
       paths = await droppedFilesToPaths([...ev.dataTransfer.files], { dropped: true });
+      // 空白处拖入的图片可能是商家给的取票二维码：先换成从税务平台取回的发票文件，其余照旧。
+      const qr = await expandQrTicketImages(paths, progress);
+      paths = qr.paths;
+      if (!paths.length) { reportQrOutcome(qr); return; }
       progress.update('正在识别文件类型和材料信息…');
       const infos = await materialInfosForPaths(paths);
       if (await openInboundBindle(infos, paths, progress)) {
         cleanupDeferred = true;
+        reportQrOutcome(qr);
         return;
       }
       const invoiceInfos = infos.filter(isInvoiceImportInfo);
@@ -5445,19 +5481,22 @@ function setupGlobalDrop() {
       if (invoiceInfos.length) {
         progress.update('正在扫描发票并整理导入分组…');
         const scan = await Api.scanFiles(invoiceInfos.map((info) => info.path));
-        openBatchImportPreview(scan, `${invoiceInfos.length} 个拖入文件`, {
+        openBatchImportPreview(scan, qrSourceLabel(`${invoiceInfos.length} 个拖入文件`, qr, invoiceInfos.length), {
           pendingMaterialInfos: materialInfos,
           cleanupPaths: paths,
+          qrReport: qr.report,
         });
         return;
       }
       if (materialInfos.length) {
         progress.update(State.paymentOcrEnabled ? '正在识别金额并匹配对应条目…' : '正在准备手动绑定付款截图…');
         await handleLooseMaterialInfos(materialInfos, paths);
+        reportQrOutcome(qr);
         return;
       }
       await cleanupDroppedPaths(paths);
-      toast('请拖入发票 PDF、XML、付款截图、实物图或查验单', 'err');
+      if (qr.report?.failed?.length) reportQrOutcome(qr);
+      else toast('请拖入发票 PDF、XML、付款截图、实物图或查验单', 'err');
     } catch (e) {
       if (!cleanupDeferred) await cleanupDroppedPaths(paths);
       toast(e.message || '处理拖入文件失败', 'err');
@@ -5503,12 +5542,20 @@ function setupClipboardUpload() {
     const progress = taskProgress('正在读取剪切板材料…');
     let paths = [];
     let cleanupDeferred = false;
+    let qr = null;
     try {
       paths = await droppedFilesToPaths(files);
+      // 在条目详情里粘贴的图片是该条目的材料，不判断二维码；其他情况下先看是不是取票二维码。
+      if (!activeEntryId) {
+        qr = await expandQrTicketImages(paths, progress);
+        paths = qr.paths;
+        if (!paths.length) { reportQrOutcome(qr); return; }
+      }
       progress.update('正在识别文件类型和材料信息…');
       const infos = await materialInfosForPaths(paths);
       if (await openInboundBindle(infos, paths, progress)) {
         cleanupDeferred = true;
+        reportQrOutcome(qr);
         return;
       }
       if (activeEntryId) {
@@ -5530,16 +5577,19 @@ function setupClipboardUpload() {
       if (invoiceInfos.length) {
         progress.update('正在扫描发票并整理导入分组…');
         const scan = await Api.scanFiles(invoiceInfos.map((info) => info.path));
-        openBatchImportPreview(scan, `剪切板 ${invoiceInfos.length} 个文件`, {
+        openBatchImportPreview(scan, qrSourceLabel(`剪切板 ${invoiceInfos.length} 个文件`, qr, invoiceInfos.length), {
           pendingMaterialInfos: materialInfos,
           cleanupPaths: paths,
+          qrReport: qr?.report,
         });
       } else if (materialInfos.length) {
         progress.update(State.paymentOcrEnabled ? '正在识别金额并匹配对应条目…' : '正在准备手动绑定付款截图…');
         await handleLooseMaterialInfos(materialInfos, paths);
+        reportQrOutcome(qr);
       } else {
         await cleanupDroppedPaths(paths);
-        toast('剪切板里没有可导入的发票或材料', 'err');
+        if (qr?.report?.failed?.length) reportQrOutcome(qr);
+        else toast('剪切板里没有可导入的发票或材料', 'err');
       }
     } catch (e) {
       if (!cleanupDeferred) await cleanupDroppedPaths(paths);
@@ -5550,8 +5600,288 @@ function setupClipboardUpload() {
   });
 }
 
+// ------------------------------------------------------------------ 二维码取票
+// 商家给的取票二维码（图片或截图）→ 从税务平台取回发票 XML / PDF → 与拖入发票文件走同一条导入流程。
+// 只对「拖到主界面空白处」和「不在条目详情里粘贴」的图片做判断；落在卡片或详情上的图片仍是材料。
+// 判断分两步：先让后端只识别二维码（不联网、很快），确认是取票二维码才联网取票；
+// 不是取票二维码的图片原样回到付款截图 / 实物图的处理，不打扰用户。
+const QR_IMAGE_RE = /\.(png|jpe?g|webp|bmp)$/i;
+const QR_CONCURRENCY = 2;
+const QR_WAIT_NOTICE_SECONDS = 6;
+const QR_TIP_KEY = 'tidoc.hint.qrTicket.dismissed';
+const QR_STAGE_LABEL = { decode: '识别二维码', link: '校验取票链接', download: '下载文件', content: '校验文件内容' };
+// 预检时出现这些错误，说明图片里确实是税务平台的取票二维码，只是软件读不懂它；这类图片要告诉用户，不能当材料。
+const QR_TICKET_LIKE_CODES = new Set(['platform_changed']);
+
+function isQrImagePath(path) {
+  return QR_IMAGE_RE.test(String(path || ''));
+}
+
+// 按顺序返回结果；最多同时跑 limit 个，stopped() 为真后不再启动新的。worker 自己处理异常。
+async function mapWithLimit(items, limit, worker, stopped = () => false) {
+  const results = new Array(items.length);
+  let next = 0;
+  const lanes = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length && !stopped()) {
+      const index = next++;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(lanes);
+  return results;
+}
+
+// 预检：只识别二维码，不联网。tickets 是取票二维码；rest 是应回到原有流程的路径（含非图片文件）。
+async function detectQrTicketImages(paths, { api = Api, concurrency = QR_CONCURRENCY } = {}) {
+  const list = [...(paths || [])];
+  const candidates = list.filter(isQrImagePath);
+  const verdicts = new Map();
+  await mapWithLimit(candidates, concurrency, async (path) => {
+    try {
+      const data = await api.fetchInvoiceByQr(path, { preview_only: true });
+      verdicts.set(path, { kind: 'ticket', invoice_no: data?.invoice_no || '', host: data?.host || '' });
+    } catch (error) {
+      verdicts.set(path, { kind: 'other', code: error?.code || '', message: error?.message || '', stage: error?.stage || '' });
+    }
+  });
+  const found = { tickets: [], failures: [], rest: [], duplicates: [], faceQr: 0, unsupported: 0 };
+  const seen = new Set();
+  for (const path of list) {
+    const verdict = verdicts.get(path);
+    if (!verdict) { found.rest.push(path); continue; }
+    const name = baseName(path);
+    if (verdict.kind === 'ticket') {
+      const key = verdict.invoice_no || path;
+      if (seen.has(key)) { found.duplicates.push(path); continue; }
+      seen.add(key);
+      found.tickets.push({ path, name, invoice_no: verdict.invoice_no, host: verdict.host });
+    } else if (QR_TICKET_LIKE_CODES.has(verdict.code)) {
+      found.failures.push({ path, name, invoice_no: '', error: verdict.message || '取票二维码无法识别', code: verdict.code, stage: verdict.stage, open_url: '' });
+    } else {
+      if (verdict.code === 'invoice_face_qr') found.faceQr += 1;
+      else if (verdict.code === 'image_unsupported') found.unsupported += 1;
+      found.rest.push(path);
+    }
+  }
+  return found;
+}
+
+// 联网取票：同时最多 concurrency 张，一张失败不影响其余；isCancelled() 为真后不再启动新的。
+async function fetchQrTickets(tickets, { api = Api, concurrency = QR_CONCURRENCY, isCancelled = () => false, onSettle = () => {} } = {}) {
+  return mapWithLimit(tickets, concurrency, async (ticket) => {
+    let outcome;
+    try {
+      const data = await api.fetchInvoiceByQr(ticket.path, null);
+      outcome = { ticket, ok: true, data: data || {} };
+    } catch (error) {
+      outcome = {
+        ticket, ok: false, error: error?.message || '取票失败', code: error?.code || '',
+        stage: error?.stage || '', detail: error?.detail || '', open_url: error?.open_url || '',
+      };
+    }
+    onSettle(outcome);
+    return outcome;
+  }, isCancelled);
+}
+
+function qrProgressText(done, total, seconds) {
+  const notes = [];
+  if (total > 1) notes.push(`已完成 ${done}/${total}`);
+  if (seconds >= QR_WAIT_NOTICE_SECONDS) notes.push(`已等待 ${seconds} 秒`);
+  return `正在从税务平台取票…${notes.length ? `（${notes.join('，')}）` : ''}`;
+}
+
+// 没有当成取票二维码、却值得让用户知道的两种图片。其余不是二维码的图片不提示。
+function qrFallbackNotice({ faceQr = 0, unsupported = 0 } = {}) {
+  const notes = [];
+  if (faceQr) notes.push(`有 ${faceQr} 张图片是发票票面上的二维码（只含发票信息，没有取票地址），已按普通材料处理。取票请用商家给的取票二维码。`);
+  if (unsupported) notes.push(`有 ${unsupported} 张图片是 HEIC 格式，识别不了二维码，已按普通材料处理。要取票请转存为 JPG / PNG，或截图后再试。`);
+  return notes.join('');
+}
+
+// 把拖入 / 粘贴的路径里的取票二维码图片换成从税务平台取回的发票文件，其余路径原样保留。
+// 返回 { paths, report, cancelled }：paths 可直接接着走原有的识别与导入；report 记录成功、警告和失败。
+async function expandQrTicketImages(paths, progress, {
+  api = Api, notify = toast, cleanup = cleanupDroppedPaths, now = () => Date.now(),
+} = {}) {
+  const list = [...(paths || [])];
+  if (!list.some(isQrImagePath)) return { paths: list, report: null, cancelled: false, fetchedFileCount: 0 };
+  progress?.update('正在检查图片里是否有取票二维码…');
+  const found = await detectQrTicketImages(list, { api });
+  const notice = qrFallbackNotice(found);
+  if (notice) notify(notice, '', 7000);
+  const consumed = list.filter((path) => !found.rest.includes(path));
+  if (!found.tickets.length && !found.failures.length) {
+    return { paths: found.rest, report: null, cancelled: false, fetchedFileCount: 0 };
+  }
+
+  const report = { fetched: [], failed: [...found.failures], duplicates: found.duplicates.length };
+  const stagedFiles = [];
+  let cancelled = false;
+  try {
+    if (found.tickets.length) {
+      const total = found.tickets.length;
+      const settled = [];
+      let done = 0;
+      let stop = () => {};
+      const cancelSignal = new Promise((resolve) => { stop = resolve; });
+      const startedAt = now();
+      const show = () => progress?.update(qrProgressText(done, total, Math.floor((now() - startedAt) / 1000)));
+      progress?.cancelable?.(() => { cancelled = true; stop('cancelled'); });
+      show();
+      const ticker = setInterval(show, 1000);
+      let outcomes = [];
+      try {
+        const run = fetchQrTickets(found.tickets, {
+          api,
+          isCancelled: () => cancelled,
+          onSettle: (outcome) => {
+            done += 1;
+            // 取消后才返回的结果没人再等，取回的文件直接丢弃。
+            if (cancelled) { if (outcome.ok) cleanup(outcome.data.paths || []); return; }
+            settled.push(outcome);
+            show();
+          },
+        });
+        const winner = await Promise.race([run, cancelSignal]);
+        if (!cancelled) outcomes = winner;
+      } finally {
+        clearInterval(ticker);
+        progress?.cancelable?.(null);
+      }
+      if (cancelled) {
+        await cleanup(settled.filter((outcome) => outcome.ok).flatMap((outcome) => outcome.data.paths || []));
+        notify('已取消取票，不再等待税务平台的结果', '', 3200);
+      } else {
+        for (const outcome of outcomes) {
+          const { ticket } = outcome;
+          const filePaths = outcome.ok ? outcome.data.paths || [] : [];
+          if (outcome.ok && filePaths.length) {
+            stagedFiles.push(...filePaths);
+            report.fetched.push({
+              name: ticket.name, invoice_no: outcome.data.invoice_no || ticket.invoice_no,
+              warnings: outcome.data.warnings || [], kinds: (outcome.data.files || []).map((file) => file.kind),
+            });
+          } else {
+            report.failed.push({
+              name: ticket.name, invoice_no: ticket.invoice_no,
+              error: outcome.ok ? '没有取回发票文件，请稍后再试。' : outcome.error,
+              code: outcome.code || '', stage: outcome.stage || '', detail: outcome.detail || '', open_url: outcome.open_url || '',
+            });
+          }
+        }
+      }
+    }
+  } catch (error) {
+    await cleanup(stagedFiles);
+    throw error;
+  } finally {
+    // 二维码图片本身只是取票的凭据，用完即删（不会动用户原来的文件，它们只是中转区里的副本）。
+    await cleanup(consumed);
+  }
+  return { paths: [...found.rest, ...stagedFiles], report, cancelled, fetchedFileCount: stagedFiles.length };
+}
+
+function qrTicketLabel(item) {
+  return `${esc(item.name || '图片')}${item.invoice_no ? ` · 发票号码 ${esc(item.invoice_no)}` : ''}`;
+}
+
+// 取票结果：取回几张、哪些只拿到一部分文件、哪些没成功以及原因。standalone 用于单独的失败窗口，不再重复标题。
+function qrReportHtml(report, { standalone = false } = {}) {
+  const fetched = report?.fetched || [];
+  const failed = report?.failed || [];
+  if (!fetched.length && !failed.length) return '';
+  const warned = fetched.filter((item) => (item.warnings || []).length);
+  const duplicates = report.duplicates ? `<small>另有 ${report.duplicates} 张图片的发票号码重复，已合并。</small>` : '';
+  const warnRows = warned.map((item) => `
+    <div class="qr-report-row warn">
+      <b>${qrTicketLabel(item)}</b>
+      <span>${item.warnings.map(esc).join('；')}</span>
+    </div>`).join('');
+  const failRows = failed.map((item, index) => {
+    const tip = [QR_STAGE_LABEL[item.stage], item.detail].filter(Boolean).join('：');
+    const guide = item.open_url
+      ? `<div class="qr-report-actions"><button type="button" class="btn small" data-qr-open="${index}">在浏览器中打开</button><small>下载 PDF / XML 后，把文件拖进软件即可。</small></div>`
+      : item.code === 'platform_changed'
+        ? '<small>软件没能读出取票链接，可以用手机扫描这张二维码，在浏览器里下载发票文件后拖进软件。</small>' : '';
+    return `
+    <div class="qr-report-row err">
+      <b>${qrTicketLabel(item)}</b>
+      <span${tip ? ` title="${esc(tip)}"` : ''}>${esc(item.error)}</span>
+      ${guide}
+    </div>`;
+  }).join('');
+  if (!failed.length && !warned.length) {
+    return `<div class="hint ok qr-report-head">已从税务平台取回 ${fetched.length} 张发票的文件。${duplicates}</div>`;
+  }
+  const head = standalone ? '' : `<div class="qr-report-head">二维码取票：${fetched.length ? `取回 ${fetched.length} 张` : ''}${fetched.length && failed.length ? '，' : ''}${failed.length ? `${failed.length} 张没有成功` : ''}${duplicates}</div>`;
+  return `<div class="qr-report${failed.length ? ' has-error' : ''}">${head}${failRows}${warnRows}</div>`;
+}
+
+function bindQrReport(root, report) {
+  root.addEventListener('click', (event) => {
+    const button = event.target?.closest?.('[data-qr-open]');
+    if (!button) return;
+    const item = (report.failed || [])[Number(button.dataset.qrOpen)];
+    if (item?.open_url) Api.openExternalUrl(item.open_url).catch((e) => toast(e.message, 'err'));
+  });
+}
+
+function openQrFailureDialog(report) {
+  const body = el('div', 'qr-report-dialog', qrReportHtml(report, { standalone: true }));
+  bindQrReport(body, report);
+  const m = modal({
+    title: '二维码取票没有成功',
+    body,
+    footer: [mkBtn('关闭', 'primary', () => m.close())],
+  });
+  return m;
+}
+
+// 没有进入导入窗口时（全部失败，或同批的其余文件走了别的流程），把取票失败单独告诉用户。
+function reportQrOutcome(qr) {
+  if (qr?.report?.failed?.length) openQrFailureDialog(qr.report);
+}
+
+function qrSourceLabel(fallback, qr, invoiceCount) {
+  const fetched = qr?.report?.fetched?.length || 0;
+  if (!fetched) return fallback;
+  return (qr.fetchedFileCount || 0) >= invoiceCount ? `${fetched} 张取票二维码` : `${fallback}（含 ${fetched} 张取票二维码）`;
+}
+
+// 「也可以把取票二维码图片拖进来」：低调的一行说明，关掉后不再出现。
+function mountQrTip(slot) {
+  if (!slot) return;
+  slot.replaceChildren();
+  if (State.qrTipDismissed) return;
+  const tip = el('div', 'qr-tip', `<span>也可以把商家给的取票二维码图片拖进来，或截图后粘贴。</span>
+    <button type="button" class="qr-tip-close" aria-label="不再显示这条说明" title="不再显示">${CLOSE_ICON}</button>`);
+  tip.querySelector('button').onclick = () => {
+    dismissQrTip();
+    $$('.qr-tip').forEach((node) => node.remove());
+  };
+  slot.appendChild(tip);
+}
+
+function dismissQrTip() {
+  State.qrTipDismissed = true;
+  try { localStorage.setItem(QR_TIP_KEY, '1'); } catch (e) { /* 浏览器存储不可用时只在本次运行内生效 */ }
+  Api.setAppPreference(QR_TIP_KEY, '1').catch(() => {});
+}
+
+async function loadQrTipPreference() {
+  let dismissed = false;
+  try { dismissed = localStorage.getItem(QR_TIP_KEY) === '1'; } catch (e) {}
+  if (!dismissed) {
+    try { dismissed = !!(await Api.appPreference(QR_TIP_KEY, '')); } catch (e) {}
+    if (dismissed) { try { localStorage.setItem(QR_TIP_KEY, '1'); } catch (e) {} }
+  }
+  State.qrTipDismissed = dismissed;
+}
+
 // 拖入文件时只留一条提示：空白区（虚线框）导入，悬停的条目卡片（高亮）绑定材料。
 const DRAG_HINT_IMPORT = '松开导入：发票 PDF / XML 或 .tidoc 绑定包';
+const DRAG_HINT_IMPORT_IMAGES = '松开导入：取票二维码图片，或付款截图、实物图';
 const DRAG_HINT_BIND = '松开添加到此条目：付款截图、实物图或查验单';
 
 function showDragOverlay() {
@@ -5563,10 +5893,21 @@ function showDragOverlay() {
   updateDragHint(false);
 }
 
-function updateDragHint(onCard) {
+// 拖动过程中浏览器只告诉我们每一项的类型，不告诉文件名；类型拿不到时按默认提示。
+function dragItemsAreImages(dt) {
+  const files = Array.from(dt?.items || []).filter((item) => item.kind === 'file');
+  return files.length > 0 && files.every((item) => String(item.type || '').startsWith('image/'));
+}
+
+function dragHintText(onCard, images = false) {
+  if (onCard) return DRAG_HINT_BIND;
+  return images ? DRAG_HINT_IMPORT_IMAGES : DRAG_HINT_IMPORT;
+}
+
+function updateDragHint(onCard, images = false) {
   document.body.classList.toggle('drag-over-card', onCard);
   const hint = $('.drag-hint');
-  if (hint) hint.textContent = onCard ? DRAG_HINT_BIND : DRAG_HINT_IMPORT;
+  if (hint) hint.textContent = dragHintText(onCard, images);
 }
 
 function hideDragOverlay() {

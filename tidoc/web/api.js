@@ -36,7 +36,16 @@ const Api = (() => {
     const fn = window.pywebview.api[method];
     if (!fn) throw new Error(`后端方法不存在：${method}`);
     const res = await fn(...args);
-    if (res && res.ok === false) { const error = new Error(res.error || '未知错误'); error.diagnostics = res.diagnostics || []; error.code = res.code; throw error; }
+    if (res && res.ok === false) {
+      const error = new Error(res.error || '未知错误');
+      error.diagnostics = res.diagnostics || [];
+      error.code = res.code;
+      // 二维码取票的失败带有出错阶段和可交给浏览器的取票链接；其他调用没有这些字段，保持 undefined。
+      if (res.stage !== undefined) error.stage = res.stage;
+      if (res.open_url !== undefined) error.open_url = res.open_url;
+      if (res.detail !== undefined) error.detail = res.detail;
+      throw error;
+    }
     return res && 'data' in res ? res.data : res;
   }
 
@@ -207,5 +216,7 @@ const Api = (() => {
     cleanupOldBackups: () => call('cleanup_old_backups'),
     openPath: (path) => call('open_path', path),
     openExternalUrl: (url) => call('open_external_url', url),
+    // 二维码取票：识别图片里的税务平台取票二维码并联网取回发票文件；preview_only 只识别、不联网。
+    fetchInvoiceByQr: (imagePath, options) => call('fetch_invoice_by_qr', imagePath, options || null),
   };
 })();

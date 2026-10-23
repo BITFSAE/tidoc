@@ -1292,3 +1292,42 @@ def test_check_updates_lists_ocr_component(tmp_path):
     assert names == {"core", "ocr"}
     ocr_row = next(row for row in status["updates"] if row["component"] == "ocr")
     assert ocr_row["available"] is True
+
+
+@pytest.mark.parametrize('name', ['*轴承*轴承', '*电子元件*电子元件', '*泵*泵'])
+def test_repeated_category_is_not_a_duplicated_full_product_name(name):
+    out = normalize_invoice_data({'totalAmount': '1', 'invoiceDetails': [
+        {'itemName': name, 'amount': '1', 'tax': '0'},
+    ]})
+    assert out['items'][0]['name'] == name
+    assert out['items'][0]['actual_name'] == name.split('*')[-1]
+
+
+def test_cloud_name_fragment_requires_following_matching_discount():
+    details = [
+        {'itemName': '*电子元件*USB转换芯', 'unit': '个', 'quantity': '1', 'amount': '3.19', 'tax': '.41'},
+        {'itemName': '片'},
+        {'itemName': '*电子元件*USB转换芯片', 'amount': '-.16', 'tax': '-.02'},
+    ]
+    out = normalize_invoice_data({'totalAmount': '3.42', 'invoiceDetails': details})
+    assert len(out['items']) == 1
+    assert out['items'][0]['actual_name'] == 'USB转换芯片'
+    assert out['items'][0]['total'] == '3.42'
+    assert out['closure_pass'] is True
+    details[2]['itemName'] = '*电子元件*另一商品'
+    assert len(normalize_invoice_data({'invoiceDetails': details})['items']) == 3
+
+
+def test_saved_cloud_raw_is_reinterpreted_without_mutating_history():
+    from tidoc.services.ocr import saved_normalized_result
+    row = {
+        'normalized': json.dumps({'items': [{'actual_name': '*轴承'}], 'total': '1.00'}),
+        'raw_json': json.dumps({'invoiceDetails': [{'itemName': '*轴承*轴承', 'amount': '1', 'tax': '0'}]}),
+    }
+    original = dict(row)
+    current = saved_normalized_result(row)
+    assert current['items'][0]['actual_name'] == '轴承'
+    assert current['closure_pass'] is True
+    assert row == original
+    row['raw_json'] = '{broken'
+    assert saved_normalized_result(row)['items'][0]['actual_name'] == '*轴承'

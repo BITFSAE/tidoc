@@ -22,6 +22,7 @@ from ..db.attachments import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
 from ..db.entries import EntryRepo
 from ..db.ocr_results import OcrRepo
 from ..engine.money import d, money
+from ..ocr_normalization import normalize_invoice_data
 from .proc import hidden_window_options
 from .updater import COMPONENT_OCR, installed_component_info, version_gt
 
@@ -38,6 +39,31 @@ FIELD_LABELS = {
     "buyer_tax_id": "购买方税号",
     "items": "物品明细",
 }
+
+
+def saved_normalized_result(row: dict) -> dict:
+    """Re-read saved item evidence with current rules without changing history."""
+    try:
+        normalized = json.loads(row.get('normalized') or '{}')
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(normalized, dict) or not normalized:
+        return {}
+    try:
+        raw = json.loads(row.get('raw_json') or '{}')
+        if isinstance(raw, dict) and isinstance(raw.get('invoiceDetails'), list) and raw['invoiceDetails']:
+            refreshed = normalize_invoice_data(raw)
+            if not refreshed['items'] and normalized.get('items'):
+                return normalized
+            normalized = {
+                **normalized, 'items': refreshed['items'], 'item_sum': refreshed['item_sum'],
+                'closure_pass': bool(refreshed['items']) and _value_same(
+                    'total', refreshed['item_sum'], normalized.get('total')
+                ),
+            }
+    except (TypeError, ValueError, ArithmeticError, AttributeError):
+        pass  # Historical malformed responses retain their saved interpretation.
+    return normalized
 
 
 def pdf_page_count(path: str | Path) -> int:
@@ -610,10 +636,7 @@ def result_view(
     latest = ocr_repo.latest(entry_id)
     if not latest:
         return view
-    try:
-        normalized = json.loads(latest.get("normalized") or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        normalized = {}
+    normalized = saved_normalized_result(latest)
     if not normalized:
         return view
 
@@ -786,10 +809,7 @@ def sync_ocr_states(
         row = latest_rows.get(entry["id"])
         if row is None:
             continue
-        try:
-            normalized = json.loads(row.get("normalized") or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            normalized = {}
+        normalized = saved_normalized_result(row)
         if not normalized:
             continue
         if "items" not in entry:
@@ -818,10 +838,9 @@ def apply_ocr_field(entries_repo: EntryRepo, ocr_repo: OcrRepo, entry_id: str, f
         raise ValueError("该条目还没有阿里云识别结果。")
     if field not in COMPARED_FIELDS:
         raise ValueError(f"字段「{field}」不在阿里云 OCR 采用范围内。")
-    try:
-        normalized = json.loads(latest.get("normalized") or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("已保存的识别结果无法解析，请重新识别。") from exc
+    normalized = saved_normalized_result(latest)
+    if not normalized:
+        raise ValueError("已保存的识别结果无法解析，请重新识别。")
     value = str(normalized.get(field) or "").strip()
     if not value:
         raise ValueError(f"阿里云识别结果中没有「{FIELD_LABELS.get(field, field)}」。")
@@ -848,10 +867,9 @@ def apply_ocr_items(entries_repo: EntryRepo, ocr_repo: OcrRepo, entry_id: str) -
     latest = ocr_repo.latest(entry_id)
     if not latest:
         raise ValueError("该条目还没有阿里云识别结果。")
-    try:
-        normalized = json.loads(latest.get("normalized") or "{}")
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("已保存的识别结果无法解析，请重新识别。") from exc
+    normalized = saved_normalized_result(latest)
+    if not normalized:
+        raise ValueError("已保存的识别结果无法解析，请重新识别。")
     if not normalized.get("items"):
         raise ValueError("阿里云识别结果中没有明细。")
 

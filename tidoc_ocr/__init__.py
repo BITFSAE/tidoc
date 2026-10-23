@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
-# 组件版本独立于核心；0.2.1 修正空名称折扣行的合并。
-__version__ = "0.2.1"
+# 组件版本独立于核心；0.2.2 修正跨页名称续行与合法分类名称。
+__version__ = "0.2.2"
 
 # 组件所需的重依赖模块名（import 名与包名不同）
 _REQUIRED = (

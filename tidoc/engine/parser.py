@@ -44,7 +44,7 @@ from .money import d, money, parse_amount
 
 def clean_item_name(name: str) -> str:
     """去掉发票物资名称里的 *分类* 星号段。"""
-    return re.sub(r"\*[^*]+\*", "", name).strip()
+    return re.sub(r"^\s*\*[^*]+\*", "", name).strip()
 
 
 def _child_text(elem: ET.Element, tag: str) -> str:
@@ -1204,6 +1204,38 @@ def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
                 invoice.items = layout_items
         except (ValueError, ArithmeticError):
             pass
+    try:
+        from .pdf_items import read_positioned_items
+
+        positioned = read_positioned_items(path)
+        if (
+            positioned and len(positioned) == len(invoice.items)
+            and all(a.total == b.total for a, b in zip(positioned, invoice.items))
+            and money(sum((item.total for item in positioned), Decimal('0')) - invoice.total) == 0
+        ):
+            for current, candidate in zip(invoice.items, positioned):
+                old_name = re.sub(r'\s+', '', current.actual_name)
+                new_name = re.sub(r'\s+', '', candidate.actual_name)
+                # A PDF text fragment can omit part of an already readable name.
+                # Position evidence may separate columns, but must not truncate it.
+                if new_name and (new_name not in old_name or '项目名称' in old_name):
+                    current.name = candidate.name
+                    current.actual_name = candidate.actual_name
+                unit = candidate.unit
+                if (
+                    unit in _PDF_UNIT_SUFFIXES
+                    or re.fullmatch(r'(?:\d+(?:\.\d+)?)?[A-Za-z米千克公斤]+/[\u4e00-\u9fffA-Za-z]+', unit)
+                ) and (
+                    not current.unit or unit == current.unit
+                    or (current.unit.endswith('/') and unit.startswith(current.unit))
+                ):
+                    current.unit = unit
+                if current.quantity is None:
+                    current.quantity = candidate.quantity
+                if not current.spec:
+                    current.spec = candidate.spec
+    except (OSError, ValueError, ArithmeticError, PyPdfError, DependencyError, NotImplementedError, KeyError, RuntimeError):
+        pass
     return invoice
 
 

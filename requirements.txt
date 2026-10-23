@@ -3,8 +3,8 @@ pywebview==6.2.1   # Native window using the system WebView
 pypdf==6.14.2      # PDF text extraction
 Send2Trash==2.1.0  # Recoverable cleanup after verification PDF archival
 jsonschema==4.26.0  # JSON Schema Draft 2020-12 validation for team adapter packages
-Pillow==12.3.0     # Decode QR code images (same pin as the optional print component)
-zxing-cpp==3.1.1   # QR code recognition for ticket QR codes (abi3 wheels for Windows and macOS)
+Pillow==12.3.0     # Decode QR code images (keep the same pin as requirements-print.txt)
+zxing-cpp==3.1.1   # QR code recognition for ticket QR codes (module name: zxingcpp; prebuilt wheels for Windows and macOS on Python 3.10+, abi3 from 3.12)
 
 # Standard-library modules need no installation: xml, sqlite3, hashlib, hmac, zipfile
 

@@ -91,6 +91,48 @@ def self_test() -> None:
     from .adapters.resources import verify_core_resources
 
     verify_core_resources()
+    _verify_qr_decoder()
+
+
+# 自检用的虚构链接：.invalid 保证解析不到任何真实主机；自检只做本地编码和解码，不联网。
+_SELF_TEST_QR_TEXT = "https://example.invalid/x"
+
+
+def _verify_qr_decoder() -> None:
+    """Round-trip a fictional QR code through the packaged QR libraries.
+
+    Encodes with zxing-cpp, saves with Pillow (PNG and JPEG, so both codecs are exercised) and
+    decodes with the same function the ticket fetch uses. Failure raises, so ``--self-test``
+    exits non-zero and the release build stops. Importing alone would not catch a missing
+    native library, which is why the code is actually decoded.
+    """
+    import io
+
+    try:
+        import zxingcpp
+        from PIL import Image
+
+        from .services import qr_fetch
+    except ImportError as exc:
+        raise RuntimeError(f"QR decoder libraries cannot be loaded: {exc}") from exc
+
+    barcode = zxingcpp.create_barcode(_SELF_TEST_QR_TEXT, zxingcpp.BarcodeFormat.QRCode)
+    bitmap = zxingcpp.write_barcode_to_image(barcode, scale=6)
+    height, width = bitmap.shape[:2]
+    gray = Image.frombytes("L", (width, height), bytes(bitmap))
+    for image_format in ("PNG", "JPEG"):
+        buffer = io.BytesIO()
+        gray.save(buffer, format=image_format)
+        try:
+            texts = qr_fetch.decode_qr_texts(buffer.getvalue())
+        except qr_fetch.QrFetchError as exc:
+            raise RuntimeError(
+                f"QR decoder failed on a {image_format} round trip: {exc.code}"
+            ) from exc
+        if texts != [_SELF_TEST_QR_TEXT]:
+            raise RuntimeError(
+                f"QR decoder returned an unexpected result on a {image_format} round trip"
+            )
 
 
 def _configure_webview_settings() -> None:
@@ -237,7 +279,17 @@ def _serve_instance_requests(instance, api, window, stop_event) -> None:
 
 def main() -> None:
     if "--self-test" in sys.argv:
-        self_test()
+        try:
+            self_test()
+        except Exception:
+            # Windowed builds show a blocking error dialog for an uncaught exception, which would
+            # leave the release smoke test (Start-Process -Wait) waiting forever. Report on stderr
+            # when there is one and fail through the exit status instead.
+            if sys.stderr is not None:
+                import traceback
+
+                traceback.print_exc()
+            sys.exit(1)
         return
     launch_file = _launch_bindle_path()
     instance = SingleInstance()

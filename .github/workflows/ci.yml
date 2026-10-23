@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # zxing-cpp and Pillow ship prebuilt wheels for Windows and macOS (Python 3.10+). Without this, an
+  # unsupported Python would make pip fall back to a source build that needs a C++ toolchain.
+  PIP_ONLY_BINARY: zxing-cpp,Pillow
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}

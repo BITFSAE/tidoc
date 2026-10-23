@@ -14,6 +14,11 @@ on:
 permissions:
   contents: write
 
+env:
+  # zxing-cpp and Pillow ship prebuilt wheels for Windows and macOS (Python 3.10+). Without this, an
+  # unsupported Python would make pip fall back to a source build that needs a C++ toolchain.
+  PIP_ONLY_BINARY: zxing-cpp,Pillow
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -67,14 +72,28 @@ jobs:
       - name: Install core dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller pillow
+          pip install -r requirements.txt pyinstaller
 
       - name: Build Windows core
+        # Core only needs Pillow to decode ticket QR images (tidoc/services/qr_fetch.py) and to
+        # verify PNG/JPEG materials. The modules excluded below are never reached by that code:
+        # AVIF (libavif, the largest part of Pillow), Tk and Qt bridges, and LittleCMS colour
+        # management (only used for LAB conversion). Image.open() tolerates a missing plugin, so
+        # an AVIF screenshot is reported as unreadable instead of crashing. The print and OCR
+        # components are separate builds and must not carry these flags; tests/test_core_packaging.py
+        # keeps both sides in step.
         run: >
           pyinstaller --noconfirm --clean --onedir --windowed
           --name tidoc
           --paths "."
           --collect-submodules tidoc
+          --exclude-module PIL.AvifImagePlugin
+          --exclude-module PIL._avif
+          --exclude-module PIL.ImageCms
+          --exclude-module PIL._imagingcms
+          --exclude-module PIL.ImageTk
+          --exclude-module PIL._imagingtk
+          --exclude-module PIL.ImageQt
           --icon "icon/windows/icon.ico"
           --add-data "tidoc/web;tidoc/web"
           --add-data "schemas/team-adapter;schemas/team-adapter"
@@ -173,11 +192,25 @@ jobs:
           pip install -r requirements.txt pyinstaller
 
       - name: Build macOS core app
+        # Core only needs Pillow to decode ticket QR images (tidoc/services/qr_fetch.py) and to
+        # verify PNG/JPEG materials. The modules excluded below are never reached by that code:
+        # AVIF (libavif, the largest part of Pillow), Tk and Qt bridges, and LittleCMS colour
+        # management (only used for LAB conversion). Image.open() tolerates a missing plugin, so
+        # an AVIF screenshot is reported as unreadable instead of crashing. The print and OCR
+        # components are separate builds and must not carry these flags; tests/test_core_packaging.py
+        # keeps both sides in step.
         run: >
           pyinstaller --noconfirm --clean --onedir --windowed
           --name "tidoc"
           --paths "."
           --collect-submodules tidoc
+          --exclude-module PIL.AvifImagePlugin
+          --exclude-module PIL._avif
+          --exclude-module PIL.ImageCms
+          --exclude-module PIL._imagingcms
+          --exclude-module PIL.ImageTk
+          --exclude-module PIL._imagingtk
+          --exclude-module PIL.ImageQt
           --icon "icon/macos/icon.icns"
           --argv-emulation
           --osx-bundle-identifier "com.bitfsae.tidoc"

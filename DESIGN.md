@@ -42,15 +42,21 @@
 - `pypdf`（读 PDF 文本，轻）
 - `Send2Trash`（把已归档的外部文件移到系统废纸篓 / 回收站，可恢复）
 - `jsonschema`（校验团队适配包及共享输出上下文的 Draft 2020-12 Schema）
+- `Pillow`（二维码取票：读取用户给的二维码图片，转灰度、放大缩小后交给识别库；导出预检时也用它确认 PNG / JPEG 材料能正常打开）
+- `zxing-cpp`（二维码取票：从图片里识别税务平台的取票二维码；模块名 `zxingcpp`，自带 C++ 原生库，Windows / macOS 都有预编译包，不需要本机编译器）
 - 标准库 `xml`、`sqlite3`、`hashlib`、`hmac`、`zipfile`
+
+二维码取票在核心进程内完成（用户把二维码图片交给软件时识别，随后联网取回发票文件），所以 `Pillow` 和 `zxing-cpp` 随核心安装，不做成可选组件。macOS 的 HEIC 图片由系统自带的 `sips` 转换；Windows 没有可靠的内置解码器，提示用户转存为 JPG / PNG，因此不引入 HEIC 解码库。
+
+核心打包时只保留取票用得到的 Pillow 部分：PyInstaller 构建参数排除 AVIF 解码、Tk / Qt 桥接和色彩管理（`PIL.AvifImagePlugin`、`PIL._avif`、`PIL.ImageTk`、`PIL._imagingtk`、`PIL.ImageQt`、`PIL.ImageCms`、`PIL._imagingcms`），其中 AVIF 的解码库最大。排除后 PNG、JPEG、WebP、GIF、BMP、TIFF 照常可读，AVIF 图片按“无法读取这张图片”处理。这份清单写在 `release.yml` 的两个核心构建步骤里，两个平台必须一致，且不得出现在打印、识别组件的构建里（组件独立构建，需要完整的 Pillow）；`tests/test_core_packaging.py` 检查这几点。核心 `--self-test` 用 `zxing-cpp` 现生成一个虚构二维码，经 Pillow 存成 PNG 和 JPEG，再用取票的解码函数读回；成品缺库或模块被误排除时自检失败，发布中止。
 
 **重依赖全部下沉到「打印导出组件」（可选安装，按需从 COS 下载）：**
 - `python-docx`（读取和检查方案定义的 Word 文档）
 - `pypdf`（PDF 拼接）
-- `Pillow` + `reportlab`（付款截图转 / 拼进 PDF、拼接页编号）
+- `Pillow` + `reportlab`（付款截图转 / 拼进 PDF、拼接页编号；打印组件独立构建，带完整的 Pillow，与核心使用同一个版本号）
 - `docxtpl` + `Jinja2`（受限 Word 模板渲染）
 
-核心和独立打印组件都依赖 `jsonschema`，打印依赖清单为 `requirements-print.txt`。唯一的输出上下文 Schema 位于 `schemas/team-adapter/1/context.schema.json`，由轻量模块 `tidoc_print.context_validation` 加载，核心与独立组件使用同一校验器和资源。字段投影模块与校验模块不依赖数据库、API 或 WebView。
+核心和独立打印组件都依赖 `jsonschema` 和 `Pillow`，两份清单里的 `Pillow` 版本必须相同（CI 会把两份一起安装）。打印依赖清单为 `requirements-print.txt`。唯一的输出上下文 Schema 位于 `schemas/team-adapter/1/context.schema.json`，由轻量模块 `tidoc_print.context_validation` 加载，核心与独立组件使用同一校验器和资源。字段投影模块与校验模块不依赖数据库、API 或 WebView。
 
 > 总览 Excel 由核心直接手写 OXML + zip 生成（见 `services/exports.py`），不引 openpyxl；PDF 拼接用 pypdf，不引 pikepdf。
 

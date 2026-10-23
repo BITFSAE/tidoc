@@ -1,5 +1,11 @@
 """文件夹批量导入的分组启发式测试。"""
 
+import re
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
 from tidoc.services import scan_files, scan_folder
 from tidoc.engine import parse_pdf
 
@@ -32,15 +38,46 @@ def test_scan_folder_type_classification(sample_dir):
 
 
 def test_scan_files_accepts_multi_selected_invoice_files(sample_dir):
-    paths = [
-        f"{sample_dir}/28+电子元件+390.05+发票.pdf",
-        f"{sample_dir}/20260425205440942/立创商城发票-7556653A-26957000000103383672.xml",
-    ]
-    r = scan_files(paths)
-    assert r["invoice_pdf_count"] == 1
+    # 样本里有「发票 PDF + 同号 XML」成对的文件时，只多选这两个文件也应配成一组。
+    paired = next(
+        (
+            g for g in scan_folder(sample_dir)["groups"]
+            if {f["type"] for f in g["files"]} == {"invoice_pdf", "invoice_xml"}
+        ),
+        None,
+    )
+    if paired is None:
+        pytest.skip("样本目录里没有成对的发票 PDF 和 XML")
+    paths = [f["path"] for f in paired["files"]]
+    for selection in (paths, paths[::-1]):
+        r = scan_files(selection)
+        assert r["invoice_pdf_count"] == 1
+        assert r["matched_xml_count"] == 1
+        assert len(r["groups"]) == 1
+        assert {f["type"] for f in r["groups"][0]["files"]} == {"invoice_pdf", "invoice_xml"}
+
+
+def test_scan_files_pairs_selected_pdf_and_xml_by_invoice_number(tmp_path):
+    number = "12345678901234567890"
+    pdf = tmp_path / f"{number}.pdf"
+    xml = tmp_path / f"数电发票-{number}.xml"
+    other = tmp_path / "98765432109876543210.pdf"
+    for path in (pdf, xml, other):
+        path.write_bytes(b"placeholder")
+
+    for selection in ([pdf, xml], [xml, pdf]):
+        r = scan_files(selection)
+        assert r["invoice_pdf_count"] == 1
+        assert r["matched_xml_count"] == 1
+        assert len(r["groups"]) == 1
+        assert {f["type"] for f in r["groups"][0]["files"]} == {"invoice_pdf", "invoice_xml"}
+        # 没有被选中的文件不会混进来。
+        assert other.name not in {f["name"] for f in r["groups"][0]["files"]}
+
+    r = scan_files([pdf, xml, other])
+    assert r["invoice_pdf_count"] == 2
     assert r["matched_xml_count"] == 1
-    assert len(r["groups"]) == 1
-    assert {f["type"] for f in r["groups"][0]["files"]} == {"invoice_pdf", "invoice_xml"}
+    assert len(r["groups"]) == 2
 
 
 def test_scan_folder_accepts_messy_invoice_pdfs_without_xml(tmp_path):
@@ -335,20 +372,36 @@ def test_scan_folder_does_not_match_short_numeric_pdf_stem_to_xml(tmp_path):
     assert r["ungrouped"][0]["type"] == "invoice_xml"
 
 
-def test_known_messy_sample_pdfs_parse_core_fields(sample_dir):
-    samples = [
-        ("26+稳压电源+128.62+发票.pdf", "深圳市驿生胜利科技有限公司", "直流稳压电源"),
-        ("27+pc耗材+200.13+发票.pdf", "深圳拓竹科技有限公司", "3D打印机线材"),
-        ("26332000004713530326-北京理工大学教育基金会.pdf", "杭州深度求索人工智能基础技术研究有限公司", "技术服务"),
-        ("71+排插+107+发票.pdf", "北京京东金禾贸易有限公司", "公牛"),
-    ]
-    for filename, seller, item_keyword in samples:
-        inv = parse_pdf(f"{sample_dir}/{filename}")
-        assert inv.invoice_no
-        assert inv.buyer_name == "北京理工大学教育基金会"
-        assert inv.seller == seller
-        assert inv.items
-        assert item_keyword in inv.items[0].actual_name
+def test_sample_pdfs_parse_core_fields(sample_pdfs):
+    """样本集里每张发票 PDF 都能解析出核心字段，且金额自洽。
+
+    只断言通用性质，不依赖具体样本内容：
+    - 发票号码是 20 位数字，购买方、销售方、第一条明细名称非空，明细名称已去掉 *分类* 星号；
+    - 各条明细金额之和等于价税合计；
+    - 样本若按「序号+类别+金额+发票.pdf」命名，文件名里的金额应等于解析出的价税合计。
+    """
+    name_amount = re.compile(r"\+(\d+(?:\.\d+)?)\+发票\.pdf$")
+    problems = []
+    for path in sample_pdfs:
+        name = Path(path).name
+        inv = parse_pdf(path)
+        if not re.fullmatch(r"\d{20}", inv.invoice_no):
+            problems.append((name, "发票号码"))
+        if not inv.buyer_name:
+            problems.append((name, "购买方"))
+        if not inv.seller:
+            problems.append((name, "销售方"))
+        if not inv.items:
+            problems.append((name, "明细"))
+            continue
+        if not inv.items[0].actual_name or inv.items[0].actual_name.startswith("*"):
+            problems.append((name, "明细名称"))
+        if sum((item.total for item in inv.items), Decimal("0")) != inv.total:
+            problems.append((name, "明细合计与价税合计不一致"))
+        match = name_amount.search(name)
+        if match and Decimal(match.group(1)) != inv.total:
+            problems.append((name, "价税合计与文件名金额不一致"))
+    assert not problems, problems
 
 
 def test_batch_create_entries(sample_dir, api):

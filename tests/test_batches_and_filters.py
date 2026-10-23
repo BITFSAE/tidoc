@@ -272,19 +272,57 @@ def test_api_batch_listing_includes_unbatched_count(api):
     assert [item["id"] for item in api.list_entries({"archived_only": True})["data"]] == [entry["id"]]
 
 
-def test_entry_list_uses_bounded_query_count(repos, sample_xmls):
-    _make_entries(repos, sample_xmls, 3)
-    statements = []
-    repos["db"].conn.set_trace_callback(statements.append)
-    try:
-        entries = repos["entries"].list()
-    finally:
-        repos["db"].conn.set_trace_callback(None)
+def test_entry_list_uses_bounded_query_count(api, tmp_path):
+    """列表的 SELECT 数是固定值，不随条目数增长（防止逐条目查询）。
 
-    selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
-    assert len(entries) == 3
-    # 主查询 + 修改字段 / 附件 / 可编辑字段 / 批次归属，仍为固定查询数。
-    assert len(selects) == 5
+    条目带方案、付款截图、实付修改和批次归属，让每个预取查询都真的取到数据。
+    """
+    from tidoc.engine.models import ParsedInvoice
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_ids = []
+
+    def add_entries(count):
+        batch_members = []
+        for _ in range(count):
+            n = len(entry_ids)
+            entry_id = api.entries.create(
+                profile["id"],
+                parsed=ParsedInvoice(invoice_no=f"{n:020d}", total=Decimal("10.00") + n),
+            )
+            shot = tmp_path / f"付款{n}.png"
+            shot.write_bytes(f"payment {n}".encode())
+            api.attachments.add(entry_id, shot, TYPE_PAYMENT)
+            api.entries.update_field(entry_id, "paid_amount", "1.00", profile["id"])
+            entry_ids.append(entry_id)
+            batch_members.append(entry_id)
+        api.batches.create(f"批次{len(entry_ids)}", entry_ids=batch_members[: count // 2 + 1])
+
+    def select_count(load):
+        statements = []
+        api.db.conn.set_trace_callback(statements.append)
+        try:
+            rows = load()
+        finally:
+            api.db.conn.set_trace_callback(None)
+        selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+        return len(rows), len(selects)
+
+    repo_counts, api_counts = [], []
+    for size in (3, 6, 12):  # 每一轮条目数翻倍
+        add_entries(size - len(entry_ids))
+        repo_counts.append(select_count(api.entries.list))
+        api_counts.append(select_count(lambda: api.list_entries({})["data"]))
+
+    assert [count for count, _ in repo_counts] == [3, 6, 12]
+    assert [count for count, _ in api_counts] == [3, 6, 12]
+    # 条目数翻倍，查询数不变。
+    assert len({selects for _, selects in repo_counts}) == 1
+    assert len({selects for _, selects in api_counts}) == 1
+    # 仓库层固定 8 次：条目主查询 + 报账人资料 + 方案来源 + 实付修改 + 附件 + 扩展字段值 + 可编辑字段 + 批次归属。
+    assert repo_counts[0][1] <= 8
+    # 接口层多一次 OCR 状态同步。
+    assert api_counts[0][1] <= 9
 
 
 def test_amount_filter_and_sort_are_numeric(repos):

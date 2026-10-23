@@ -272,26 +272,32 @@ def test_entry_profiles_can_be_changed_in_batch(repos):
         assert any(h["field"] == "报账人" and "王五" in h["new_value"] for h in entry["history"])
 
 
-def test_print_uses_operator_profile_for_reimburse_doc(repos, sample_xmls, tmp_path, monkeypatch):
+def test_print_uses_operator_profile_for_reimburse_doc(repos, tmp_path, monkeypatch):
+    """不带方案的打印入口：收款人取经办人资料，报账人仍是条目所属的报账人。"""
+    import pytest
+    import tidoc_print
     from tidoc.services import printing
 
+    if not tidoc_print.is_available():
+        pytest.skip("打印组件依赖未安装")
     claimant = repos["profiles"].create("张三", "李老师")
-    parsed = parse_xml(sample_xmls[0])
+    parsed = ParsedInvoice(
+        invoice_no="12345678901234567890",
+        invoice_date="2026-01-02",
+        seller="示例销售方",
+        buyer_name="示例大学",
+        total=Decimal("12.50"),
+        items=[ParsedItem(name="*文具*笔", actual_name="笔", unit="支", quantity=Decimal("2"), total=Decimal("12.50"))],
+    )
     eid = repos["entries"].create(claimant["id"], title=parsed.buyer_name, parsed=parsed)
     captured = {}
 
-    monkeypatch.setattr(
-        printing,
-        "component_status",
-        lambda components_dir=None: {"available": True, "mode": "external", "path": "tidoc-print", "missing": []},
-    )
-
-    def fake_external(executable, entries, out_dir, options, profiles):
-        captured["entries"] = entries
-        captured["profiles"] = profiles
+    def fake_execute(request, components_dir=None, cancel_check=None):
+        captured["request"] = request
         return {"results": []}
 
-    monkeypatch.setattr(printing, "_build_prints_external", fake_external)
+    # 旧入口现在把请求转成 JSON IPC v2 后交给 execute_print_request，这里只截获请求。
+    monkeypatch.setattr(printing, "execute_print_request", fake_execute)
     printing.build_prints(
         repos["entries"],
         repos["profiles"],
@@ -307,9 +313,35 @@ def test_print_uses_operator_profile_for_reimburse_doc(repos, sample_xmls, tmp_p
         }},
     )
 
-    assert captured["entries"][0]["profile_name"] == "张三"
-    assert captured["profiles"][eid]["person_name"] == "运营同学"
-    assert captured["profiles"][eid]["bank_card"] == "62220000"
+    request = captured["request"]
+    assert request["ipc_version"] == 2
+    outputs = {item["output"]["id"]: item for item in request["files"]}
+    reimburse = outputs["reimburse_doc"]
+    assert reimburse["output"]["payee_mode"] == "single"
+    payee = reimburse["context"]["payee"]
+    assert payee["name"] == "运营同学"
+    assert payee["personnel_id"] == "112233"
+    assert payee["contact"] == "13800000000"
+    assert payee["bank_name"] == "测试银行"
+    assert payee["account_number"] == "62220000"
+    assert reimburse["context"]["entries"][0]["claimant"]["name"] == "张三"
+
+
+def test_print_request_is_refused_when_component_lacks_ipc_v2_or_renderer(monkeypatch):
+    """旧版打印导出组件（不支持 IPC v2 / 缺少所选输出能力）要明确提示检查更新，不能硬跑。"""
+    import pytest
+    from tidoc.services import printing
+
+    request = {"files": [{"output": {"type": "docx"}}]}
+    status = {"available": True, "mode": "external", "path": "tidoc-print", "missing": []}
+
+    monkeypatch.setattr(printing, "component_status", lambda components_dir=None: {**status, "ipc_versions": [1], "renderers": ["docx"]})
+    with pytest.raises(RuntimeError, match="请检查更新"):
+        printing.execute_print_request(request)
+
+    monkeypatch.setattr(printing, "component_status", lambda components_dir=None: {**status, "ipc_versions": [1, 2], "renderers": ["pdf_bundle"]})
+    with pytest.raises(RuntimeError, match="缺少所选输出能力"):
+        printing.execute_print_request(request)
 
 
 def test_list_filters(repos, sample_xmls):
@@ -446,11 +478,41 @@ def test_attachment_duplicate_rejected(repos, sample_xmls):
         repos["attachments"].add(eid, sample_xmls[0], TYPE_PAYMENT)
 
 
-def test_api_applies_payment_ocr_amount(api, sample_xmls, tmp_path, monkeypatch):
+def _api_entry_with_total(api, total="30.00"):
+    """不依赖真实样本：建一个带发票总额的条目（实付默认取发票总额）。"""
+    from tidoc.engine.models import ParsedInvoice
+
+    profile = api.create_profile("张三", "李老师")["data"]
+    entry_id = api.entries.create(profile["id"], parsed=ParsedInvoice(total=Decimal(total)))
+    return api.get_entry(entry_id)["data"]
+
+
+def test_payment_ocr_is_off_by_default(api, tmp_path, monkeypatch):
     from tidoc.services import folder_import
 
-    p = api.create_profile("张三", "李老师")["data"]
-    e = api.create_entry(p["id"], xml_path=sample_xmls[0])["data"]
+    entry = _api_entry_with_total(api)
+    assert api.app_preference("tidoc.paymentScreenshotOcr")["data"] == "0"
+    payment = tmp_path / "付款截图.jpg"
+    payment.write_bytes(b"fake image")
+
+    def unexpected_ocr(path):
+        raise AssertionError(f"付款截图识别默认应关闭：{path}")
+
+    monkeypatch.setattr(folder_import, "extract_payment_image_amount", unexpected_ocr)
+    res = api.add_attachment(entry["id"], str(payment), "payment_screenshot")["data"]
+
+    assert "payment_ocr" not in res
+    updated = api.get_entry(entry["id"])["data"]
+    assert updated["fields"]["paid_amount"]["current"] == "30.00"
+    assert updated["fields"]["paid_amount"]["value_source"] != "payment_ocr"
+
+
+def test_api_applies_payment_ocr_amount(api, tmp_path, monkeypatch):
+    from tidoc.services import folder_import
+
+    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭，这里验证开启后的行为
+    e = _api_entry_with_total(api, "30.00")
+    assert e["fields"]["paid_amount"]["current"] == "30.00"
     payment = tmp_path / "付款截图.jpg"
     payment.write_bytes(b"fake image")
 
@@ -464,11 +526,11 @@ def test_api_applies_payment_ocr_amount(api, sample_xmls, tmp_path, monkeypatch)
     assert updated["fields"]["paid_amount"]["value_source"] == "payment_ocr"
 
 
-def test_api_can_recognize_payment_ocr_without_applying(api, sample_xmls, tmp_path, monkeypatch):
+def test_api_can_recognize_payment_ocr_without_applying(api, tmp_path, monkeypatch):
     from tidoc.services import folder_import
 
-    p = api.create_profile("张三", "李老师")["data"]
-    e = api.create_entry(p["id"], xml_path=sample_xmls[0])["data"]
+    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭，这里验证开启后的行为
+    e = _api_entry_with_total(api, "30.00")
     before = e["fields"]["paid_amount"]["current"]
     payment = tmp_path / "付款截图.jpg"
     payment.write_bytes(b"fake image")

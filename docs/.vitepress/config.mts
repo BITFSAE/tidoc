@@ -23,13 +23,14 @@ const usageSidebar = [
     items: [
       { text: '基本概念', link: '/guide/concepts' },
       { text: '导入发票', link: '/guide/import' },
+      { text: '省时间的操作', link: '/guide/shortcuts' },
       { text: '补齐材料', link: '/guide/materials' },
       { text: '核对识别结果', link: '/guide/check' },
       { text: '筛选、标签与批次', link: '/guide/organize' },
       { text: '导出、打印与交接', link: '/guide/export' },
       { text: '报账方案', link: '/guide/schemes' },
       { text: '设置与数据', link: '/guide/settings' },
-      { text: '快捷操作', link: '/guide/shortcuts' }
+      { text: '键盘快捷键', link: '/guide/keyboard' }
     ]
   },
   {

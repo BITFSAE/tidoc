@@ -25,13 +25,13 @@ description: 用五步走完一遍 Tidoc：选择报账方案、导入发票、�
 
 ## 2. 导入发票
 
-点击右上角「导入发票」，选择一张或多张发票的 PDF、XML，也可以选择整个文件夹。同一张发票的 XML 和 PDF 一起选，软件会自动配对，优先使用 XML 里的数据。
+最快的方式是把发票的 PDF、XML 直接拖进窗口，或在 Finder、资源管理器中复制后在软件里粘贴。要选择整个文件夹，点击右上角「导入发票」。同一张发票的 XML 和 PDF 一起导入，软件会自动配对，优先使用 XML 里的数据。
 
 在预览里检查识别结果，选择报账人和报账批次，确认后创建条目。
 
 ![导入预览](/images/import-preview.png)
 
-也可以把文件直接拖进窗口，或在 Finder、资源管理器中复制后在软件里粘贴。详见[导入发票](/guide/import)。
+详见[导入发票](/guide/import)。
 
 ## 3. 补齐材料
 
@@ -65,5 +65,5 @@ description: 用五步走完一遍 Tidoc：选择报账方案、导入发票、�
 ## 接下来
 
 - 遇到问题先看[常见问题](/faq)。
-- 熟悉之后可以用[快捷操作](/guide/shortcuts)加快整理。
+- 想少点几下：[省时间的操作](/guide/shortcuts)介绍拖放、右键菜单、批量处理，以及手机传文件、看图的搭配工具；熟悉之后可以用[键盘快捷键](/guide/keyboard)。
 - 遇到识别有问题的发票或有建议，欢迎发邮件到 `info@bitfsae.com`，或在 [GitHub Issues](https://github.com/BITFSAE/tidoc/issues) 提出。

@@ -474,6 +474,112 @@ def test_layout_item_name_can_continue_across_multiple_lines():
     assert items[0].actual_name == "绿联usb无线网卡台式机wifi6接收发射器"
 
 
+def test_layout_keeps_numeric_model_continuations_in_name_column():
+    items = _parse_pdf_items([
+        "*金属制品*测试孔挡GB89     4    个 100 0.0232743362832 2.33 13% 0.30",
+        "34",
+        "*金属制品*测试孔挡GB89     24   个 50 0.0513274336283 2.57 13% 0.33",
+        "324",
+        "                 999",  # 规格列里的数字不能拼进名称。
+        "*金属制品*测试孔挡GB893     3   个 1 1.00 1.00 13% 0.13",
+        "3",  # 数字续行恰好与已读到的末尾相同，也不能丢失。
+        "合计 ¥4.90 ¥0.63",
+        "12345678901234567890",
+    ], layout=True)
+
+    assert [item.actual_name for item in items] == [
+        "测试孔挡GB8934", "测试孔挡GB89324", "测试孔挡GB8933",
+    ]
+    assert [item.quantity for item in items] == [Decimal("100"), Decimal("50"), Decimal("1")]
+    assert [item.total for item in items] == [Decimal("2.63"), Decimal("2.90"), Decimal("1.13")]
+
+
+@pytest.mark.parametrize("joined,amount,tax,quantity", [
+    ("13.8790052831858", "3.87", "0.51", "1"),
+    ("15.7924668761062", "5.80", "0.75", "1"),
+    ("123.8790052831858", "46.54", "6.05", "12"),
+])
+def test_layout_recovers_joined_quantity_despite_cent_allocation(joined, amount, tax, quantity):
+    items = _parse_pdf_items([
+        f"*金属制品*测试垫片     M6*12   份 {joined} {amount} 13% {tax}",
+    ], layout=True)
+
+    assert items[0].unit == "份"
+    assert items[0].quantity == Decimal(quantity)
+    assert items[0].total == Decimal(amount) + Decimal(tax)
+
+
+def test_joined_quantity_rounding_does_not_guess_from_inconsistent_or_ambiguous_values():
+    assert parser_module._joined_quantity(
+        "13.8790052831858", Decimal("3.85"), allow_cent_allocation=True
+    ) is None
+    # 两个拆分都接近金额时仍保留未知数量。
+    assert parser_module._joined_quantity(
+        "1000.000001", Decimal("0.01"), allow_cent_allocation=True
+    ) is None
+    assert parser_module._joined_quantity(
+        "13.879", Decimal("3.87"), allow_cent_allocation=True
+    ) is None
+    assert parser_module._joined_quantity(
+        "110.000001", Decimal("0.01"), allow_cent_allocation=True
+    ) is None
+    # 没有独立金额的拆分仍使用严格闭合。
+    assert parser_module._joined_quantity("13.8790052831858", Decimal("3.87")) is None
+
+
+@pytest.mark.parametrize("continuation", [
+    "超薄介子M1-M30项目名称     规格型号     单位 数量 单价 金额 税率 税额",
+    "项目名称     规格型号     单位 数量 单价 金额 税率 税额\n超薄介子M1-M30",
+])
+def test_pdf_name_continues_past_page_headers_and_totals(monkeypatch, tmp_path, continuation):
+    from types import SimpleNamespace
+
+    first = """电子发票（普通发票） 发票号码：12345678901234567890
+项目名称     规格型号     单位 数量 单价 金额 税率 税额
+*金属制品*测试垫圈     M6*20   份 1 3.54 3.54 13% 0.46
+合计 ¥3.54 ¥0.46
+开票人：示例
+"""
+    second = f"""电子发票（普通发票） 发票号码：12345678901234567890
+开票日期：2026年06月17日
+共2页 第2页
+名称：示例购买方     名称：示例销售方
+{continuation}
+
+合计 ¥3.54 ¥0.46
+价税合计（小写）¥4.00
+备注：这行不属于商品名
+"""
+    reader = SimpleNamespace(pages=[
+        SimpleNamespace(extract_text=lambda **_kwargs: first),
+        SimpleNamespace(extract_text=lambda **_kwargs: second),
+    ])
+    monkeypatch.setattr(parser_module, "PdfReader", lambda _path: reader)
+
+    invoice = parse_pdf(tmp_path / "fictional.pdf")
+
+    assert len(invoice.items) == 1
+    assert invoice.items[0].actual_name == "测试垫圈超薄介子M1-M30"
+    assert invoice.items[0].unit == "份"
+    assert invoice.items[0].quantity == Decimal("1")
+    assert invoice.items[0].total == invoice.total == Decimal("4.00")
+
+
+def test_next_page_new_item_does_not_extend_previous_item_name():
+    items = _parse_pdf_items([
+        "*金属制品*测试垫圈     M6   个 1 1.00 1.00 13% 0.13",
+        "小计 ¥1.00 ¥0.13",
+        "\f",
+        "电子发票（普通发票） 发票号码：12345678901234567890",
+        "项目名称     规格型号     单位 数量 单价 金额 税率 税额",
+        "*金属制品*测试螺母     M6   个 2 1.00 2.00 13% 0.26",
+        "价税合计（小写）¥3.39",
+    ], layout=True)
+
+    assert [item.actual_name for item in items] == ["测试垫圈", "测试螺母"]
+    assert [item.total for item in items] == [Decimal("1.13"), Decimal("2.26")]
+
+
 def test_parse_xml_fields(sample_xmls):
     inv = parse_xml(sample_xmls[0])
     assert inv.invoice_no

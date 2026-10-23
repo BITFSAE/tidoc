@@ -141,6 +141,8 @@ def recognition_issues(invoice: ParsedInvoice) -> list[CheckIssue]:
     红字发票的金额为负数，比较时按带符号的值闭合，大写金额没写「负」时按绝对值比较。
     """
     issues: list[CheckIssue] = []
+    for index, warning in enumerate(invoice.source_warnings):
+        _issue(issues, f"source_warning_{index}", ISSUE_ADVISORY, warning)
     checks = invoice.field_checks
     total_check = checks.get("total")
 

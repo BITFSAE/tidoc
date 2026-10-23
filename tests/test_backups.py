@@ -4,6 +4,8 @@ import tempfile
 
 import pytest
 
+from tidoc.db.schema import SCHEMA_VERSION
+
 from tests.test_adapter_storage import legacy_db
 from tidoc.adapters.service import AdapterService
 from tidoc.api import Api
@@ -58,7 +60,7 @@ def test_upgrade_start_saves_one_backup_not_two(tmp_path):
     assert db.migration_backup is not None and db.migration_backup.parent == root.backups_dir
     AdapterService(db, root).bootstrap()
     names = [item['name'] for item in list_backups(root.backups_dir)]
-    assert len(names) == 1 and names[0].startswith('tidoc-before-v12-')
+    assert len(names) == 1 and names[0].startswith(f'tidoc-before-v{SCHEMA_VERSION}-')
     db.close()
 
 
@@ -149,3 +151,28 @@ def test_a_failed_backup_leaves_no_temporary_file_and_no_open_connection(monkeyp
         opened[0].execute('select 1')
     assert list((tmp_path / 'out').iterdir()) == []
     source.close()
+
+
+def test_v12_upgrade_adds_evidence_without_changing_existing_invoice(tmp_path):
+    import sqlite3
+    from tidoc.db.schema import SCHEMA
+    root = DataRoot(tmp_path / 'v12')
+    old_schema = '\n'.join(line for line in SCHEMA.splitlines()
+                           if 'seller_tax_id TEXT' not in line and 'recognition_data TEXT' not in line)
+    with sqlite3.connect(root.db_path) as conn:
+        conn.executescript(old_schema)
+        conn.execute("INSERT INTO meta VALUES('schema_version','12')")
+        conn.execute("INSERT INTO profiles(id,name,reviewer,created_at) VALUES('p','虚构人员','','2026-01-01')")
+        conn.execute("INSERT INTO entries(id,profile_id,invoice_no,total,created_at,updated_at) VALUES('e','p','26110000000000000001','126.00','2026-01-01','2026-01-01')")
+    db = Database(root.db_path)
+    try:
+        row = db.conn.execute("SELECT * FROM entries WHERE id='e'").fetchone()
+        assert row['total'] == '126.00' and row['invoice_no'] == '26110000000000000001'
+        assert row['seller_tax_id'] == row['recognition_data'] == ''
+        assert db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+        assert db.migration_backup is not None
+        with sqlite3.connect(db.migration_backup) as backup:
+            assert backup.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == '12'
+            assert 'recognition_data' not in {r[1] for r in backup.execute('PRAGMA table_info(entries)')}
+    finally:
+        db.close()

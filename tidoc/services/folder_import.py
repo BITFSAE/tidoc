@@ -15,6 +15,8 @@ import sys
 import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from pypdf.errors import DependencyError, PyPdfError
+from xml.etree.ElementTree import ParseError
 
 from ..engine.parser import parse_invoice_files
 from .proc import hidden_window_options
@@ -94,7 +96,7 @@ def _parse_invoice_no(path: Path, att_type: str) -> tuple[str, str]:
         else:
             parsed = parse_invoice_files(xml_path=path)
         return parsed.invoice_no or "", ""
-    except Exception as exc:  # noqa: BLE001 - 扫描阶段只提示，不阻断导入预览
+    except (OSError, ValueError, PyPdfError, DependencyError, ParseError) as exc:
         guessed = _invoice_no_from_name(path)
         return guessed, f"未能预解析：{exc}"
 
@@ -613,7 +615,7 @@ def _pdf_probe_text(path: Path) -> str:
                         try:
                             chunks.append(value.decode(enc, errors="ignore"))
                             break
-                        except Exception:
+                        except UnicodeError:
                             continue
                 elif value:
                     chunks.append(str(value))
@@ -622,7 +624,7 @@ def _pdf_probe_text(path: Path) -> str:
             if text:
                 chunks.append(text[:2000])
         return "\n".join(chunks)
-    except Exception:
+    except (OSError, ValueError, PyPdfError, DependencyError):
         return ""
 
 
@@ -646,7 +648,7 @@ def _pdf_invoice_numbers(path: Path) -> set[str]:
                         try:
                             metadata_chunks.append(value.decode(enc, errors="ignore"))
                             break
-                        except Exception:
+                        except UnicodeError:
                             continue
                 elif value:
                     metadata_chunks.append(str(value))
@@ -661,7 +663,7 @@ def _pdf_invoice_numbers(path: Path) -> set[str]:
             if invoice_no:
                 numbers.add(invoice_no)
         return numbers
-    except Exception:
+    except (OSError, ValueError, PyPdfError, DependencyError):
         return set()
 
 

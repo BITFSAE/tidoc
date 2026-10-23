@@ -7,9 +7,8 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import asdict, is_dataclass
-from decimal import Decimal
 from pathlib import Path
+from pypdf.errors import DependencyError, PyPdfError
 
 from .proc import hidden_window_options
 from .updater import COMPONENT_PRINT, _component_root, installed_component_info
@@ -69,9 +68,10 @@ def _query_capabilities(executable,cache_file=None):
         if key in _CAPABILITIES_CACHE:
             return _CAPABILITIES_CACHE[key]
         value=_read_capabilities_cache(cache_file,path,identity) if cache_file else None
+        persist = value is not None
         if value is None:
             # 组件明确作答（包括旧版组件不认识 --capabilities 而报错退出）才写入磁盘；
-            # 超时或无法启动可能是偶发的（如杀毒软件首次扫描），只留在内存里，下次启动重新探测。
+            # 超时或无法启动可能是偶发的（如杀毒软件首次扫描），不缓存失败，下次查询重新探测。
             persist=False
             try:
                 proc=subprocess.run(_command(executable)+['--capabilities'],text=True,capture_output=True,timeout=10,check=False,**hidden_window_options())
@@ -83,7 +83,9 @@ def _query_capabilities(executable,cache_file=None):
             except (OSError,subprocess.TimeoutExpired):
                 value={};persist=False
             if persist and cache_file: _write_capabilities_cache(cache_file,path,identity,value)
-        _CAPABILITIES_CACHE.clear();_CAPABILITIES_CACHE[key]=value
+        if persist:
+            _CAPABILITIES_CACHE.clear()
+            _CAPABILITIES_CACHE[key]=value
         return value
 
 
@@ -165,7 +167,7 @@ def _entry_to_print_payload(entry,attachments_dir,profile):
             parsed=parse_pdf(paths('invoice_pdf')[0])
             if parsed.items and (not parsed.invoice_no or parsed.invoice_no==entry.get('invoice_no','')):
                 items=[item.to_dict() for item in parsed.items]
-        except Exception:
+        except (OSError, ValueError, PyPdfError, DependencyError):
             pass
     rendered=[]
     for index,item in enumerate(items):
@@ -200,25 +202,3 @@ def build_prints(entries_repo,profiles_repo,attachments_dir,entry_ids,out_dir,op
     from tidoc_print.protocol import convert_v1_request
     request=convert_v1_request({'entries':payloads,'profiles':persons,'options':options,'out_dir':str(out_dir)})
     return execute_print_request(request,components_dir)
-
-
-def _build_prints_external(executable,entries,out_dir,options,profiles):
-    from tidoc_print.protocol import convert_v1_request
-    request=convert_v1_request({'entries':[_jsonable(e) for e in entries],'profiles':{k:_jsonable(v) for k,v in profiles.items()},'options':options or {},'out_dir':str(out_dir)})
-    # Retained helper uses the same serialized request and executable entrypoint.
-    with tempfile.TemporaryDirectory() as tmp:
-        inp=Path(tmp)/'input.json';res=Path(tmp)/'result.json'
-        inp.write_text(json.dumps(request,ensure_ascii=False),'utf-8')
-        proc=subprocess.run(_command(executable)+['--input',str(inp),'--result',str(res)],capture_output=True,text=True,timeout=120,**hidden_window_options())
-        if proc.returncode or not res.exists(): raise RuntimeError('打印组件执行失败')
-        result=json.loads(res.read_text('utf-8'))
-        if not result['ok']:raise RuntimeError(result['error'])
-        return result['data']
-
-
-def _jsonable(value):
-    if is_dataclass(value):return _jsonable(asdict(value))
-    if isinstance(value,Decimal):return str(value)
-    if isinstance(value,dict):return {key:_jsonable(val) for key,val in value.items()}
-    if isinstance(value,(list,tuple)):return [_jsonable(val) for val in value]
-    return value

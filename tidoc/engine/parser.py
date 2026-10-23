@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from pypdf import PdfReader
+from pypdf.errors import DependencyError, PyPdfError
 
 from .fields import (
     compact_text,
@@ -136,7 +137,7 @@ def _pdf_text(path: Path) -> str:
 def _pdf_layout_text(path: Path) -> str:
     """Extract a second text view that preserves item-column indentation."""
     reader = PdfReader(str(path))
-    return "\n".join(
+    return "\n\f\n".join(
         (page.extract_text(extraction_mode="layout") or "")
         for page in reader.pages
     )
@@ -580,15 +581,29 @@ def _parse_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Dec
     return None
 
 
-def _joined_quantity(joined: str, amount: Decimal) -> Decimal | None:
+def _joined_quantity(
+    joined: str, amount: Decimal, *, allow_cent_allocation: bool = False
+) -> Decimal | None:
     """Split an integer quantity from a unit price concatenated by PDF text."""
     dot_index = joined.find(".")
+    rounded_candidates = []
     for split_at in range(1, dot_index):
         quantity = d(joined[:split_at])
         unit_price = d(joined[split_at:])
         if quantity > 0 and money(quantity * unit_price) == money(amount):
             return quantity
-    return None
+        # Some issuers allocate a cent between line amounts and tax while
+        # retaining a high-precision unit price. Require a unique split and an
+        # independently read amount; never adjust the printed amount itself.
+        if (
+            allow_cent_allocation
+            and quantity > 0
+            and money(quantity * unit_price) > 0
+            and len(joined[dot_index + 1:]) >= 6
+            and abs(quantity * unit_price - amount) <= Decimal("0.01")
+        ):
+            rounded_candidates.append(quantity)
+    return rounded_candidates[0] if len(rounded_candidates) == 1 else None
 
 
 def _packed_quantity_amount(value: str) -> tuple[Decimal, Decimal] | None:
@@ -693,7 +708,9 @@ def _parse_loose_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decima
     )
     if joined_price:
         amount = d(joined_price.group("amount"))
-        quantity = _joined_quantity(joined_price.group("joined"), amount)
+        quantity = _joined_quantity(
+            joined_price.group("joined"), amount, allow_cent_allocation=True
+        )
         if quantity is not None:
             return (
                 joined_price.group("unit"),
@@ -808,6 +825,7 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
     pending_name_parts: list[str] = []
     allow_layout_suffix = False
     layout_blank_lines = 0
+    awaiting_page_header = False
 
     def layout_name_part(raw_line: str) -> str:
         stripped = raw_line.strip()
@@ -825,10 +843,14 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
         if (
             not suffix
             or suffix in {"购", "买", "方", "信", "息", "销", "售", "备", "注"}
-            or re.fullmatch(r"[\W_]+|\d+", suffix)
+            or re.fullmatch(r"[\W_]+", suffix)
+            or (
+                suffix.isdigit()
+                and not re.search(r"[A-Za-z][A-Za-z0-9]*$", last.actual_name)
+            )
         ):
             return False
-        if not last.actual_name.endswith(suffix):
+        if suffix.isdigit() or not last.actual_name.endswith(suffix):
             # A specification column can sit after a short first-line product
             # fragment. Put the continuation before that final token so
             # ``...核 不含线`` + ``心板`` becomes ``...核心板 不含线``.
@@ -876,6 +898,12 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
         return any(compact.startswith(prefix) for prefix in _SKIP_PREFIXES)
 
     for raw_line in lines:
+        if layout and raw_line == "\f":
+            # Resume at the next table header, excluding the page's repeated
+            # invoice/buyer/seller fields from the previous product name.
+            awaiting_page_header = last is not None
+            allow_layout_suffix = False
+            continue
         line = raw_line.strip()
         if not line:
             if allow_layout_suffix:
@@ -884,6 +912,19 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
                     allow_layout_suffix = False
             continue
         layout_blank_lines = 0
+        if awaiting_page_header:
+            header = re.search(r"项目\s*名称", raw_line)
+            if header and re.search(r"规格\s*型号", raw_line):
+                awaiting_page_header = False
+                allow_layout_suffix = True
+                # A continuation may share the text line with column labels.
+                prefix = raw_line[:header.start()].rstrip()
+                if prefix.strip():
+                    allow_layout_suffix = append_layout_name_suffix(prefix)
+                continue
+            if not line.startswith("*"):
+                continue
+            awaiting_page_header = False
         if is_item_boundary(line):
             allow_layout_suffix = False
             continue
@@ -1085,7 +1126,7 @@ def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
         layout_text = _pdf_layout_text(path)
         layout_invoice = _parse_invoice_text(layout_text, source="pdf-layout", context=context)
         layout_parties = _extract_layout_parties(layout_text)
-    except Exception:
+    except (OSError, ValueError, PyPdfError, DependencyError, NotImplementedError, KeyError, RuntimeError):
         # 版面提取只是补充读取方式；不支持时继续使用普通文本解析结果。
         layout_text = layout_invoice = layout_parties = None
     # 两种读取方式逐字段比较：一致就采用，不一致或缺失记入 invoice.field_checks，
@@ -1093,11 +1134,12 @@ def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
     _reconcile_fields(invoice, text, layout_invoice, layout_text, layout_parties, context)
     if layout_text is not None:
         try:
-            layout_items = _parse_pdf_items(layout_text.splitlines(), layout=True)
+            # splitlines() consumes form feeds and loses PDF page boundaries.
+            layout_items = _parse_pdf_items(layout_text.split("\n"), layout=True)
             layout_total = sum((item.total for item in layout_items), Decimal("0"))
             if layout_items and money(layout_total - invoice.total) == Decimal("0.00"):
                 invoice.items = layout_items
-        except Exception:
+        except (ValueError, ArithmeticError):
             pass
     return invoice
 
@@ -1479,6 +1521,36 @@ def parse_aspose_xml(path: str | Path, context=None) -> ParsedInvoice:
     return invoice
 
 
+def _cross_check_pdf(invoice: ParsedInvoice, path, context) -> None:
+    """Keep XML authoritative and report disagreements with the supplied PDF."""
+    try:
+        pdf = parse_pdf(path, context=context)
+    except (OSError, ValueError, PyPdfError, DependencyError):
+        invoice.source_warnings.append("随附 PDF 无法读取，尚未与 XML 核对，请检查发票文件。")
+        return
+    if not pdf.invoice_no and not pdf.seller and pdf.total_present is False:
+        invoice.source_warnings.append("随附 PDF 未能读出发票内容，尚未与 XML 核对，请对照原件检查。")
+        return
+    for name in ("invoice_no", "invoice_date", "seller", "seller_tax_id", "buyer_name", "buyer_tax_id", "total"):
+        xml_value = str(getattr(invoice, name))
+        pdf_value = str(getattr(pdf, name))
+        if name == "total":
+            if invoice.total_present is False or pdf.total_present is False:
+                continue
+            same = money(invoice.total) == money(pdf.total)
+        else:
+            if not xml_value or not pdf_value:
+                continue
+            same = compact_text(xml_value) == compact_text(pdf_value)
+        flags = _tax_id_flags(xml_value) if name.endswith("tax_id") else ()
+        if name == "invoice_date" and not is_valid_iso_date(xml_value):
+            flags = ("invalid_date",)
+        invoice.field_checks[name] = FieldCheck(
+            FIELD_AGREE if same else FIELD_CONFLICT, xml_value,
+            {"xml": xml_value, "pdf": pdf_value}, basis="xml", flags=flags,
+        )
+
+
 def parse_invoice_files(xml_path: str | Path | None = None, pdf_path: str | Path | None = None, context=None) -> ParsedInvoice:
     """给定 XML / PDF 路径（可只给其一），返回最优解析结果。
 
@@ -1493,6 +1565,7 @@ def parse_invoice_files(xml_path: str | Path | None = None, pdf_path: str | Path
             invoice = parse_xml(xml_path)
             if pdf_path:
                 invoice.source = "xml+pdf"
+                _cross_check_pdf(invoice, pdf_path, context)
             return invoice
         # 否则当作 Aspose 版面 XML
         invoice = parse_aspose_xml(xml_path, context=context)

@@ -385,7 +385,7 @@ def installed_component_info(
         }
     try:
         data = json.loads(marker.read_text("utf-8"))
-    except Exception:
+    except (OSError, ValueError, UnicodeError):
         return {
             "marker_exists": True,
             "valid": False,
@@ -440,7 +440,7 @@ def downloaded_core_update_info(updates_dir: str | Path, plat: str | None = None
         return {}
     try:
         info = json.loads(marker.read_text("utf-8"))
-    except Exception:
+    except (OSError, ValueError, UnicodeError):
         return {}
     file_value = str(info.get("file_path") or "")
     file_path = Path(file_value) if file_value else None

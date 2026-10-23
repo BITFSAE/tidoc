@@ -860,3 +860,113 @@ def test_generated_pdf_with_inconsistent_amounts_produces_recognition_reminders(
     assert result.status == CHECK_WARNING
     assert {"total_not_closed", "words_mismatch"} <= codes(result)
     assert invoice.total == Decimal("126.00")
+
+
+def test_xml_and_pdf_are_cross_checked_without_overwriting_xml(tmp_path, monkeypatch):
+    from tidoc.engine import parse_invoice_files
+    xml = tmp_path / 'invoice.xml'
+    xml.write_text('<Invoice><EIid>26110000000000000001</EIid><SellerName>示例销售方</SellerName>'
+                   '<TotalTax-includedAmount>126.00</TotalTax-includedAmount></Invoice>')
+    monkeypatch.setattr(parser_module, 'parse_pdf', lambda *args, **kwargs: ParsedInvoice(
+        invoice_no=OTHER_INVOICE_NO, seller='其他销售方', total=Decimal('120'), total_present=True))
+    parsed = parse_invoice_files(xml, tmp_path / 'invoice.pdf', context=CONTEXT)
+    assert parsed.invoice_no == INVOICE_NO
+    assert parsed.total == Decimal('126')
+    check = check_invoice(parsed, context=CONTEXT)
+    assert {'invoice_no_conflict', 'seller_conflict', 'total_conflict'} <= codes(check)
+    assert parsed.field_checks['total'].candidates == {'xml': '126.00', 'pdf': '120'}
+    assert check.status == CHECK_WARNING
+
+
+@pytest.mark.parametrize("failure", ["format", "dependency"])
+def test_unreadable_pdf_does_not_discard_a_readable_xml(tmp_path, monkeypatch, failure):
+    from tidoc.engine import parse_invoice_files
+    xml = tmp_path / 'invoice.xml'
+    xml.write_text('<Invoice><EIid>26110000000000000001</EIid><TotalTax-includedAmount>0.00</TotalTax-includedAmount></Invoice>')
+    def unreadable(*args, **kwargs):
+        from pypdf.errors import DependencyError
+        raise DependencyError('encrypted PDF dependency missing') if failure == 'dependency' else ValueError('bad PDF')
+    monkeypatch.setattr(parser_module, 'parse_pdf', unreadable)
+    parsed = parse_invoice_files(xml, tmp_path / 'invoice.pdf')
+    assert parsed.total_present is True
+    assert parsed.source_warnings
+    assert 'source_warning_0' in codes(check_invoice(parsed, context=CONTEXT))
+
+
+def test_parser_evidence_survives_manual_correction_cloud_items_and_restart(api, parse_texts):
+    from tidoc.services.ocr import refresh_entry_check, _replace_items
+    from tidoc.db.entries import LOCAL_INVOICE_RECOGNITION_VERSION
+    from tidoc.db import Database, EntryRepo
+    parsed = parse_texts(plain_text(words='壹佰元整'), layout_text(words='壹佰元整'))
+    profile = api.profiles.create('测试人员', '')
+    entry_id = api.entries.create(profile['id'], parsed=parsed)
+    # Blank title policy avoids unrelated organization warnings in this fixture.
+    assert api.entries.get(entry_id)['seller_tax_id'] == SELLER_ID
+    refresh_entry_check(api.entries, entry_id)
+    before = api.entries.get(entry_id)['check_message']
+    assert '大写金额' in before
+    api.entries.correct_locked_field(entry_id, 'total', '125.00')
+    refresh_entry_check(api.entries, entry_id)
+    assert '大写金额' in api.entries.get(entry_id)['check_message']
+    _replace_items(api.entries, entry_id, {'items': [{'name': '测试物品', 'total': '125'}]})
+    assert '大写金额' in api.entries.get(entry_id)['check_message']
+    db = Database(api.db.path) if hasattr(api.db, 'path') else Database(api.data_root.db_path)
+    try:
+        repo = EntryRepo(db)
+        refresh_entry_check(repo, entry_id)
+        assert '大写金额' in repo.get(entry_id)['check_message']
+        db.conn.execute('UPDATE entries SET recognition_version=? WHERE id=?', ('invoice-local-2026-09-14-1', entry_id))
+        db.conn.commit()
+        assert LOCAL_INVOICE_RECOGNITION_VERSION != 'invoice-local-2026-09-14-1'
+        assert repo.invoice_recognition_current(entry_id) is False
+    finally:
+        db.close()
+
+
+def test_bindle_keeps_seller_tax_id_and_evidence_without_treating_them_as_a_local_cache(api, tmp_path, parse_texts):
+    from tidoc.api import Api
+    from tidoc.services.ocr import refresh_entry_check
+    parsed = parse_texts(plain_text(words='壹佰元整'), layout_text(words='壹佰元整'))
+    profile = api.profiles.create('测试人员', '')
+    entry_id = api.entries.create(profile['id'], parsed=parsed)
+    exported = api.export_bindle([entry_id])
+    assert exported['ok'], exported
+    target = Api(tmp_path / 'receiving')
+    try:
+        imported = target.import_bindle(exported['data']['path'], '')
+        assert imported['ok'], imported
+        imported_id = imported['data']['entry_ids'][0]
+        entry = target.entries.get(imported_id)
+        assert entry['seller_tax_id'] == SELLER_ID
+        assert entry['recognition_version'] == ''
+        refresh_entry_check(target.entries, imported_id)
+        assert '大写金额' in target.entries.get(imported_id)['check_message']
+        assert 'recognition_data' not in target.entries.list()[0]
+    finally:
+        target.db.close()
+
+
+@pytest.mark.parametrize('broken', [
+    {'total': 'NaN'}, {'tax_rates': ['Infinity']}, {'source_warnings': 'invalid'},
+    {'seller_tax_id': []}, {'field_checks': []},
+    {'field_checks': {'total': {'candidates': {'xml': []}}}},
+    {'items': [{'name': [], 'actual_name': '', 'unit': '', 'total': '1'}]},
+])
+def test_binding_package_rejects_unusable_parser_evidence(broken):
+    import json
+    from tidoc.services.bindle import _validated_recognition_data
+    with pytest.raises(ValueError, match='识别记录无法读取'):
+        _validated_recognition_data(json.dumps(broken))
+
+
+def test_image_only_pdf_is_reported_as_not_cross_checked(tmp_path):
+    from pypdf import PdfWriter
+    from tidoc.engine import parse_invoice_files
+    xml = write_xml(tmp_path)
+    pdf = tmp_path / 'scan.pdf'
+    writer = PdfWriter()
+    writer.add_blank_page(width=300, height=300)
+    writer.write(pdf)
+    parsed = parse_invoice_files(xml, pdf, context=CONTEXT)
+    assert parsed.total == Decimal('126.00')
+    assert 'source_warning_0' in codes(check_invoice(parsed, context=CONTEXT))

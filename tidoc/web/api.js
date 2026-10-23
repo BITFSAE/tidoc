@@ -211,12 +211,12 @@ const Api = (() => {
     chooseAndMigrateDataRoot: () => call('choose_and_migrate_data_root'),
     resetDataRootToDefault: () => call('reset_data_root_to_default'),
     storageMaintenanceStatus: () => call('storage_maintenance_status'),
-    cleanupOldBackups: () => call('cleanup_old_backups'),
     cleanupAppCache: () => call('cleanup_app_cache'),
     cleanupOldBackups: () => call('cleanup_old_backups'),
     openPath: (path) => call('open_path', path),
     openExternalUrl: (url) => call('open_external_url', url),
     // 二维码取票：识别图片里的税务平台取票二维码并联网取回发票文件；preview_only 只识别、不联网。
+    cancelInvoiceQr: (requestId) => call('cancel_invoice_qr', requestId),
     fetchInvoiceByQr: (imagePath, options) => call('fetch_invoice_by_qr', imagePath, options || null),
   };
 })();

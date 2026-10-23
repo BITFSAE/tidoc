@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 
-import functools
 import base64
 import binascii
 import hashlib
 import json
 import os
+import sqlite3
 import re
 import shutil
 import subprocess
@@ -22,8 +22,6 @@ import webbrowser
 import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-
-from send2trash import send2trash
 
 from tidoc import __version__
 
@@ -37,46 +35,35 @@ from .db import (
     ProfileRepo,
 )
 
-AUTO_UPDATE_PREF_KEY = "tidoc.update.autoCheck"
-UPDATE_CHANNEL_PREF_KEY = "tidoc.update.channel"  # stable（默认）或 beta
-PAYMENT_OCR_PREF_KEY = "tidoc.paymentScreenshotOcr"
-OCR_ACCESS_KEY_ID_PREF_KEY = "tidoc.ocr.accessKeyId"
-OCR_ACCESS_KEY_SECRET_PREF_KEY = "tidoc.ocr.accessKeySecret"
-DEFAULT_PAID_TO_INVOICE_PREF_KEY = "tidoc.defaultPaidToInvoiceTotal"
-DEFAULT_ENTRY_TITLE_PREF_KEY = "tidoc.defaultEntryTitle"
-TITLE_PROFILES_PREF_KEY = "tidoc.titleProfiles"
-BINDLE_INCLUDE_NOTES_PREF_KEY = "tidoc.bindle.includeNotes"
-BINDLE_INCLUDE_TAGS_PREF_KEY = "tidoc.bindle.includeTags"
-SHOW_CREATED_AT_PREF_KEY = "tidoc.cards.showCreatedAt"
-INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY = (
-    "tidoc.invoiceVerification.watchDirectory"
+from .api_shared import (
+    AUTO_UPDATE_PREF_KEY,
+    UPDATE_CHANNEL_PREF_KEY,
+    PAYMENT_OCR_PREF_KEY,
+    OCR_ACCESS_KEY_ID_PREF_KEY,
+    OCR_ACCESS_KEY_SECRET_PREF_KEY,
+    DEFAULT_PAID_TO_INVOICE_PREF_KEY,
+    DEFAULT_ENTRY_TITLE_PREF_KEY,
+    TITLE_PROFILES_PREF_KEY,
+    BINDLE_INCLUDE_NOTES_PREF_KEY,
+    BINDLE_INCLUDE_TAGS_PREF_KEY,
+    SHOW_CREATED_AT_PREF_KEY,
+    INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY,
+    INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY,
+    UPDATE_LAST_CHECK_KEY,
+    UPDATE_LAST_RESULT_KEY,
+    APP_LAST_SEEN_VERSION_KEY,
+    AUTO_UPDATE_INTERVAL_SECONDS,
+    MAX_DROPPED_FILE_BYTES,
+    MAX_DROPPED_TOTAL_BYTES,
+    DuplicateInvoiceError,
+    _guard,
+    _is_inside,
+    _remove_empty_dropped_parent
 )
-INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY = (
-    "tidoc.invoiceVerification.trashSourceAfterArchive"
-)
-UPDATE_LAST_CHECK_KEY = "tidoc.update.lastCheck"
-UPDATE_LAST_RESULT_KEY = "tidoc.update.lastResult"
-APP_LAST_SEEN_VERSION_KEY = "tidoc.update.lastSeenVersion"
-# 启动检查仍受用户开关控制；一小时内复用缓存，避免每次启动都联网，
-# 同时避免发布新版本后最长一天都看不到更新入口。
-AUTO_UPDATE_INTERVAL_SECONDS = 60 * 60
-MAX_DROPPED_FILE_BYTES = 100 * 1024 * 1024
-MAX_DROPPED_TOTAL_BYTES = 500 * 1024 * 1024
-
-
-class DuplicateInvoiceError(ValueError):
-    """导入命中了已有发票，携带可供前端定位原条目的结构化信息。"""
-
-    def __init__(self, existing: dict):
-        self.existing = existing
-        invoice_no = existing.get("invoice_no") or ""
-        seller = existing.get("seller") or "未识别销售方"
-        claimant = existing.get("profile_name") or "未识别报账人"
-        identity = f"发票号 {invoice_no} 已存在" if invoice_no else "相同发票文件已存在"
-        super().__init__(
-            f"{identity}（{seller}，报账人：{claimant}）。"
-            "如需调整归属，请修改原条目的报账人，不要重复创建。"
-        )
+from .api_schemes import SchemeApi
+from .api_verification import InvoiceVerificationApi
+from .api_updates import UpdateApi
+from .api_qr import QrTicketApi
 
 
 def _mask_access_key(key_id: str) -> str:
@@ -89,25 +76,7 @@ def _mask_access_key(key_id: str) -> str:
     return text[:6] + "****"
 
 
-def _guard(func):
-    """把返回值包成 {ok:True,...}，异常包成 {ok:False,error:...}。"""
-    @functools.wraps(func)
-    def wrapper(self, *args, **kwargs):
-        try:
-            with self._api_lock:
-                result = func(self, *args, **kwargs)
-            # 已经是 {ok, data|error} 形式的结果原样返回；但预检计划这类业务数据本身带一个
-            # ok 字段（有阻断项时为 False，且没有 error），必须作为数据交给前端，否则前端会把
-            # 它当成调用失败，只显示「未知错误」，看不到阻断原因。
-            if isinstance(result, dict) and "ok" in result and (result["ok"] or "error" in result):
-                return result
-            return {"ok": True, "data": result}
-        except Exception as exc:  # noqa: BLE001 — 桥不能抛，统一转错误
-            return {"ok":False,"error":str(exc),**({"diagnostics":exc.diagnostics} if getattr(exc,"diagnostics",None) else {})}
-    return wrapper
-
-
-class Api:
+class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
     def __init__(
         self,
         data_root: str | Path | None = None,
@@ -130,6 +99,8 @@ class Api:
         self._window = None
         self._update_health_path = Path(update_health_path) if update_health_path else None
         self._verification_sessions: dict[str, dict] = {}
+        self._qr_fetch_lock = threading.Lock()
+        self._qr_fetch_jobs = {}
         self._bindle_inspection_cache: dict | None = None
         self._launch_files = [launch_file] if launch_file else []
         from .services.native_drop import NativeDropRegistry
@@ -140,7 +111,7 @@ class Api:
         self._core_updater = CoreUpdateManager(self.data_root.updates_dir)
 
     def __dir__(self):
-        """只向 pywebview 暴露本类定义的公开方法。
+        """只向 pywebview 暴露 Api 及其职责类定义的公开方法。
 
         pywebview 6.x 会用 dir() 枚举并递归进入公开属性，若不限制，会把
         self.db / self.profiles / self.data_root 等仓储对象（乃至 Path.unlink
@@ -149,7 +120,7 @@ class Api:
         """
         internal = {"bind_window", "queue_launch_file", "enable_native_drop"}
         return [
-            name for name in vars(type(self))
+            name for base in type(self).__mro__ for name in vars(base)
             if not name.startswith("_")
             and name not in internal
             and callable(getattr(type(self), name))
@@ -184,19 +155,6 @@ class Api:
             if value not in self._launch_files:
                 self._launch_files.append(value)
 
-    def _preference_value(self, key: str, default: str = "") -> str:
-        row = self.db.conn.execute(
-            "SELECT value FROM meta WHERE key = ?", (key,)
-        ).fetchone()
-        return str(row["value"]) if row else default
-
-    def _set_preference_value(self, key: str, value: str) -> None:
-        self.db.conn.execute(
-            "INSERT INTO meta(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
-        self.db.conn.commit()
 
     def _invoice_verification_preferences(self) -> dict:
         return {
@@ -296,210 +254,6 @@ class Api:
         self.adapters.update_titles([p for p in (profiles or []) if str(p.get("name","")).strip()])
         return self.title_profiles()["data"]
 
-    @_guard
-    def list_schemes(self, include_disabled=False):
-        return self.adapters.list_schemes(include_disabled)
-
-    @_guard
-    def scheme_details(self, scheme_id=None):
-        scheme = self.adapters.get_scheme(scheme_id)
-        # 方案包自身给出的设置值（不含本地覆盖）：界面据此标出已自定义的项，并只保存真正改动的项。
-        baseline = self.adapters.package_baseline(scheme)
-        scheme["settings_baseline"] = baseline["effective_settings"]
-        # 抬头与材料要求同理：界面据此标出已自定义的项，并提供「恢复默认」。
-        scheme["titles_baseline"] = baseline["scheme"].get("titles", [])
-        scheme["requirements_baseline"] = self.adapters.requirements_of(baseline)
-        scheme["requirements"] = self.adapters.requirements_of(scheme["definition"])
-        return scheme
-
-    @_guard
-    def adapter_setup_state(self):
-        return self.adapters.setup_state()
-
-    @_guard
-    def complete_adapter_setup(self, scheme_id=None, legacy_preferences=None):
-        result = self.adapters.complete_adapter_setup(scheme_id,legacy_preferences)
-        self._sync_entry_statuses()
-        return result
-
-    @_guard
-    def inspect_adapter(self,path,operation_id=None):
-        return self.adapters.inspect_adapter(path,operation_id=operation_id)
-
-    @_guard
-    def choose_adapter_file(self,operation_id=None):
-        paths = self.pick_files(False,["报账方案 (*.tidoc-preset)"])
-        if not paths.get("ok"):
-            return paths
-        selected = paths.get("paths") or []
-        return self.adapters.inspect_adapter(selected[0],operation_id=operation_id) if selected else None
-
-    @_guard
-    def install_adapter(self,preview_id,options=None,operation_id=None):
-        return self.adapters.install_adapter(preview_id,options,operation_id=operation_id)
-
-    def adapter_operation_status(self,operation_id):
-        # Progress must remain readable while the mutation holds the API lock.
-        try:
-            return {"ok":True,"data":self.adapters.operation_status(operation_id)}
-        except Exception as exc:
-            return {"ok":False,"error":str(exc)}
-
-    def cancel_adapter_operation(self,operation_id):
-        try:
-            return {"ok":True,"data":self.adapters.cancel_operation(operation_id)}
-        except Exception as exc:
-            return {"ok":False,"error":str(exc)}
-
-    @_guard
-    def set_default_scheme(self,scheme_id):
-        return self.adapters.set_default_scheme(scheme_id)
-
-    @_guard
-    def enable_scheme(self,scheme_id):
-        return self.adapters.enable_scheme(scheme_id)
-
-    @_guard
-    def copy_scheme(self,scheme_id,name):
-        return self.adapters.copy_scheme(scheme_id,name)
-
-    @_guard
-    def disable_scheme(self,scheme_id):
-        return self.adapters.disable_scheme(scheme_id)
-
-    @_guard
-    def update_scheme(self,scheme_id,expected_revision,changes=None):
-        """一次保存方案的设置、抬头和材料要求，只生成一个新修订。"""
-        changes=changes or {}
-        unknown=set(changes)-{"settings","clear","titles","material_requirements"}
-        if unknown:
-            raise ValueError("方案更改包含未知项："+"、".join(sorted(unknown)))
-        return self.adapters.update_scheme(scheme_id,expected_revision,
-            settings=changes.get("settings"),clear=changes.get("clear"),
-            titles=changes.get("titles"),material_requirements=changes.get("material_requirements"))
-
-    @_guard
-    def update_scheme_settings(self,scheme_id,expected_revision,values,clear=None):
-        return self.adapters.update_scheme_settings(scheme_id,expected_revision,values,clear)
-
-    @_guard
-    def restore_scheme_defaults(self,scheme_id,expected_revision,keys=None):
-        return self.adapters.restore_setting_defaults(scheme_id,expected_revision,keys)
-
-    @_guard
-    def scheme_revision_history(self,scheme_id):
-        return self.adapters.revision_history(scheme_id)
-
-    @_guard
-    def rollback_scheme(self,scheme_id,revision_id,expected_revision=None):
-        return self.adapters.rollback_scheme(scheme_id,revision_id,expected_revision)
-
-    @_guard
-    def export_adapter(self,scheme_id,options=None):
-        return self.adapters.export_adapter(scheme_id,options or {})
-
-    @_guard
-    def preview_rebind(self,entry_ids,scheme_id,revision_id=None,mappings=None):
-        return self.adapters.preview_rebind(entry_ids,scheme_id,revision_id,mappings)
-
-    @_guard
-    def apply_rebind(self,preview_id,operation_id=None):
-        return self.adapters.apply_rebind(preview_id,operation_id=operation_id)
-
-    @_guard
-    def get_form_description(self,scope,owner_id,scheme_id=None,revision_id=None):
-        return self.adapters.get_form_description(scope,owner_id,scheme_id,revision_id)
-
-    @_guard
-    def preview_form_description(self,scope,owner_id,values,scheme_id=None,revision_id=None):
-        return self.adapters.preview_form_description(scope,owner_id,values,scheme_id,revision_id)
-
-    @_guard
-    def update_batch_output_settings(self,batch_id,values,expected_updated_at=None):
-        return self.adapters.update_batch_output_settings(batch_id,values,expected_updated_at)
-
-    @_guard
-    def save_extension_values(self,scope,owner_id,values,scheme_id=None,expected_version=None,revision_id=None):
-        return self.adapters.save_extension_values(scope,owner_id,values,scheme_id,expected_version,revision_id)
-
-    @_guard
-    def batch_save_extension_values(self,entry_ids,field_id,value):
-        forms = [self.adapters.get_form_description("entry",eid) for eid in dict.fromkeys(entry_ids or [])]
-        definitions = [next((f for f in form["fields"] if f["id"]==field_id),None) for form in forms]
-        if not definitions or any(f is None for f in definitions) or any((f["type"],f.get("options"),form["package_id"]) != (definitions[0]["type"],definitions[0].get("options"),forms[0]["package_id"]) for f,form in zip(definitions,forms)):
-            raise ValueError("所选条目的字段定义不兼容，请按方案分别填写。")
-        with self.db.transaction():
-            for form in forms:
-                self.adapters.extensions.save_values("entry",form["owner_id"],form["scheme_id"],form["revision_id"],{field_id:value},commit=False)
-                self.entries.recompute_status(form["owner_id"],commit=False)
-        return {"changed":len(forms)}
-
-    @_guard
-    def list_payees(self):
-        return self.adapters.list_payees()
-
-    @_guard
-    def save_payee(self,payee_id=None,values=None):
-        return self.adapters.save_payee(payee_id,values)
-
-    @_guard
-    def delete_payee(self,payee_id):
-        return self.adapters.payees.delete(payee_id)
-
-    @_guard
-    def set_payee_mapping(self,scheme_id,profile_id,payee_id):
-        return self.adapters.set_payee_mapping(scheme_id,profile_id,payee_id)
-
-    @_guard
-    def set_scheme_payee(self,scheme_id,payee_id):
-        return self.adapters.set_scheme_payee(scheme_id,payee_id)
-
-    @_guard
-    def set_batch_payee(self,batch_id,scheme_id,payee_id):
-        return self.adapters.payees.set_batch(batch_id,scheme_id,payee_id)
-
-    def _export_planner(self):
-        if self._export_planner_instance is None:
-            from .services.export_plan import ExportPlanner
-            self._export_planner_instance = ExportPlanner(self.db,self.data_root,self.adapters)
-            self._export_planner_instance.recover_jobs()
-        return self._export_planner_instance
-
-    @_guard
-    def preview_export(self,entry_ids,output_ids=None,options=None):
-        self._require_adapter_ready()
-        return self._export_planner().preview(entry_ids,output_ids,options)
-
-    @_guard
-    def run_export(self,plan_id,output_dir=None):
-        self._require_adapter_ready()
-        return self._export_planner().run(plan_id,output_dir)
-
-    def cancel_export(self,plan_id):
-        # Cancellation may run while the guarded rendering request is in progress.
-        try:
-            return {"ok":True,"data":self._export_planner().cancel(plan_id)}
-        except Exception as exc:
-            return {"ok":False,"error":str(exc)}
-
-    def get_export_progress(self,job_id):
-        try:
-            planner=self._export_planner_instance
-            return {"ok":True,"data":planner.get_progress(job_id) if planner else None}
-        except Exception as exc:
-            return {"ok":False,"error":str(exc)}
-
-    @_guard
-    def list_export_jobs(self):
-        return self._export_planner().list_jobs()
-
-    @_guard
-    def get_export_job(self,job_id):
-        return self._export_planner().get_job(job_id)
-
-    @_guard
-    def regenerate_export(self,job_id):
-        return self._export_planner().regenerate(job_id)
 
     @_guard
     def take_launch_file(self):
@@ -655,6 +409,12 @@ class Api:
                 # 条目中已锁定或人工修正的发票总额仍是校验权威值；重新识别
                 # 不静默覆盖实付、备注或人工修正过的关键字段。购买方税号可由
                 # 新版本地解析规则纠正，并由仓储层留痕。
+                self.entries.set_invoice_evidence(entry_id, parsed)
+                parsed.total_present = bool(str(entry.get("total") or "").strip())
+                if "seller_tax_id" in self.entries.human_modified_locked_fields(entry_id):
+                    parsed.seller_tax_id = entry.get("seller_tax_id") or ""
+                else:
+                    self.entries.update_recognized_buyer_tax_id(entry_id, parsed.seller_tax_id, field="seller_tax_id")
                 parsed.total = d(entry.get("total"))
                 if "buyer_tax_id" in self.entries.human_modified_locked_fields(entry_id):
                     parsed.buyer_tax_id = entry.get("buyer_tax_id") or ""
@@ -1552,340 +1312,6 @@ class Api:
         _reveal_local_path(att["abs_path"])
         return {"revealed": att["abs_path"]}
 
-    # ------------------------------------------------------------ 在线查验
-    @_guard
-    def invoice_verification_info(self, entry_id):
-        """从已有发票材料准备官网查验表单，但不主动联网。"""
-        from .services.invoice_verification import build_verification_info
-
-        entry = self.entries.get(entry_id)
-        if not entry:
-            raise FileNotFoundError(f"条目不存在：{entry_id}")
-        return build_verification_info(entry)
-
-    @_guard
-    def start_invoice_verification(self, entry_id, fields=None):
-        """用户主动打开税务官网，预填发票信息并创建结果保存会话。"""
-        import webview
-
-        from .services.invoice_verification import (
-            TAX_VERIFICATION_URL,
-            build_verification_info,
-            make_prefill_script,
-            make_print_compatibility_script,
-            new_session_snapshot,
-            snapshot_pdfs,
-            verification_print_title,
-        )
-
-        entry = self.entries.get(entry_id)
-        if not entry:
-            raise FileNotFoundError(f"条目不存在：{entry_id}")
-        info = build_verification_info(entry)
-        for key in ("invoice_no", "invoice_date", "verification_value"):
-            if fields and fields.get(key) is not None:
-                info[key] = str(fields[key]).strip()
-        if not info["invoice_no"]:
-            raise ValueError("缺少发票号码，请先在条目详情补正发票号码。")
-        if not info["invoice_date"]:
-            raise ValueError("缺少开票日期，请先在条目详情补正开票日期。")
-
-        session_id = uuid.uuid4().hex
-        snapshot = new_session_snapshot()
-        verification_preferences = self._invoice_verification_preferences()
-        custom_watch = verification_preferences["watch_directory"]
-        if custom_watch:
-            custom_watch_path = Path(custom_watch).expanduser()
-            if not custom_watch_path.is_dir():
-                raise ValueError("设置中的查验单归档目录不存在，请重新选择。")
-            custom_watch_path = custom_watch_path.resolve()
-            if _is_inside(self.data_root.root, custom_watch_path):
-                raise ValueError("查验单归档目录不能位于 tidoc 数据目录内。")
-            if custom_watch_path not in snapshot["watch_directories"]:
-                snapshot["watch_directories"].append(custom_watch_path)
-                snapshot["before"].update(snapshot_pdfs([custom_watch_path]))
-        session = {
-            "id": session_id,
-            "entry_id": entry_id,
-            "invoice_no": info["invoice_no"],
-            "window": None,
-            "window_closed": False,
-            "attached": None,
-            "candidate_sizes": {},
-            "seen_candidates": set(),
-            "last_message": "",
-            "result_message": "",
-            "cleanup_warning": "",
-            "source_trashed": False,
-            "trash_source_after_archive": verification_preferences[
-                "trash_source_after_archive"
-            ],
-            **snapshot,
-        }
-        self._verification_sessions[session_id] = session
-        try:
-            self._install_verification_landscape_print()
-            window = webview.create_window(
-                "tidoc · 发票查验",
-                url=TAX_VERIFICATION_URL,
-                width=1360,
-                height=860,
-                min_size=(1000, 680),
-                text_select=True,
-                zoomable=True,
-            )
-            if window is None:
-                raise RuntimeError("无法打开查验平台窗口。")
-            window._tidoc_print_title = verification_print_title(  # type: ignore[attr-defined]
-                info["invoice_no"]
-            )
-            session["window"] = window
-
-            def on_window_closed() -> None:
-                with self._api_lock:
-                    session["window_closed"] = True
-
-            window.events.closed += on_window_closed
-            script = make_prefill_script(info)
-            print_compatibility_script = make_print_compatibility_script(
-                info["invoice_no"]
-            )
-
-            def install_print_compatibility() -> None:
-                if session["window_closed"]:
-                    return
-                try:
-                    window.evaluate_js(print_compatibility_script)
-                except Exception:  # noqa: BLE001 - 不阻断官网正常浏览
-                    session["last_message"] = (
-                        "官网已打开，但打印兼容处理失败；可关闭后重新打开查验窗口。"
-                    )
-
-            # 官网查验成功后会导航到结果页；每次页面加载都重新安装打印兼容处理。
-            window.events.loaded += install_print_compatibility
-
-            def prefill_when_loaded() -> None:
-                if window.events.loaded.wait(30):
-                    try:
-                        window.evaluate_js(script)
-                        install_print_compatibility()
-                    except Exception:  # noqa: BLE001 - 官网仍可供用户手动填写
-                        session["last_message"] = "官网已打开，但自动填写失败，请在官网手动填写。"
-
-            threading.Thread(target=prefill_when_loaded, daemon=True).start()
-        except Exception:
-            self._verification_sessions.pop(session_id, None)
-            raise
-
-        return {
-            "session_id": session_id,
-            "watch_directories": [str(path) for path in session["watch_directories"]],
-            "info": info,
-        }
-
-    @_guard
-    def invoice_verification_status(self, session_id):
-        """检测用户刚保存的官网查验单，确认归属后直接绑定到当前条目。"""
-        from .db import TYPE_INSPECTION
-        from .services.folder_import import (
-            classify_pdf_attachment_type,
-            extract_pdf_invoice_no,
-        )
-        from .services.invoice_verification import changed_pdf_candidates
-
-        session = self._verification_sessions.get(str(session_id))
-        if not session:
-            raise ValueError("查验会话已结束，请重新打开查验平台。")
-        if session["attached"]:
-            return {
-                "state": "attached",
-                "attachment": session["attached"],
-                "message": (
-                    session.get("result_message")
-                    or "查验单已保存到当前条目。"
-                ),
-                "cleanup_warning": session.get("cleanup_warning", ""),
-                "source_trashed": bool(session.get("source_trashed")),
-            }
-
-        candidates = changed_pdf_candidates(
-            session["watch_directories"],
-            session["before"],
-            session["started_ns"],
-        )
-        waiting_for_write = False
-        for path in candidates:
-            key = str(path)
-            if key in session["seen_candidates"]:
-                continue
-            try:
-                size = path.stat().st_size
-            except OSError:
-                continue
-            previous_size = session["candidate_sizes"].get(key)
-            session["candidate_sizes"][key] = size
-            if previous_size != size or size == 0:
-                waiting_for_write = True
-                continue
-            session["seen_candidates"].add(key)
-            try:
-                if classify_pdf_attachment_type(path) != TYPE_INSPECTION:
-                    continue
-                detected_invoice_no = extract_pdf_invoice_no(path)
-                if (detected_invoice_no and session["invoice_no"]
-                        and detected_invoice_no != session["invoice_no"]):
-                    session["last_message"] = (
-                        f"发现一份其他发票的查验单（{detected_invoice_no}），未绑定。"
-                    )
-                    continue
-                if session["invoice_no"] and not detected_invoice_no:
-                    session["last_message"] = (
-                        "发现一份查验单，但未能确认发票号码，未自动绑定。"
-                        "原 PDF 已保留，请手动选择这份文件。"
-                    )
-                    continue
-                self._validate_attachment_for_entry(
-                    session["entry_id"], path, TYPE_INSPECTION
-                )
-                attachment = self.attachments.add(
-                    session["entry_id"], path, TYPE_INSPECTION,
-                    note="由全国增值税发票查验平台原生打印保存",
-                )
-                self.entries.recompute_status(session["entry_id"])
-                session["attached"] = attachment
-                result_message = "查验单已保存到当前条目。"
-                cleanup_warning = ""
-                source_trashed = False
-                if session.get("trash_source_after_archive"):
-                    try:
-                        send2trash(str(path))
-                        source_trashed = True
-                        result_message = (
-                            "查验单已保存，原 PDF 已移到废纸篓或回收站。"
-                        )
-                    except Exception as exc:  # noqa: BLE001 - 归档成功不应回滚
-                        cleanup_warning = (
-                            "原 PDF 未能移到废纸篓或回收站，仍保留在原位置："
-                            f"{exc}"
-                        )
-                        result_message = (
-                            "查验单已保存，但原 PDF 仍保留在原位置。"
-                        )
-                session["result_message"] = result_message
-                session["cleanup_warning"] = cleanup_warning
-                session["source_trashed"] = source_trashed
-                self._close_verification_window(session)
-                return {
-                    "state": "attached",
-                    "attachment": attachment,
-                    "message": result_message,
-                    "cleanup_warning": cleanup_warning,
-                    "source_trashed": source_trashed,
-                }
-            except Exception as exc:  # noqa: BLE001 - 继续等待用户保存正确文件
-                session["last_message"] = f"发现 PDF，但未能绑定：{exc}"
-
-        state = "processing" if waiting_for_write else (
-            "window_closed" if session["window_closed"] else "waiting"
-        )
-        return {
-            "state": state,
-            "message": session["last_message"],
-            "window_closed": session["window_closed"],
-        }
-
-    @_guard
-    def close_invoice_verification(self, session_id):
-        session = self._verification_sessions.pop(str(session_id), None)
-        if session:
-            self._close_verification_window(session)
-        return {"closed": bool(session)}
-
-    def _close_verification_window(self, session: dict) -> None:
-        window = session.get("window")
-        if window is None or session.get("window_closed"):
-            return
-        try:
-            window.destroy()
-        except Exception:  # noqa: BLE001 - 用户可能已先关闭窗口
-            pass
-        session["window_closed"] = True
-
-    @staticmethod
-    def _configure_verification_print_info(info) -> None:
-        """把当前原生打印任务固定为横向。"""
-        if sys.platform != "darwin":
-            return
-        try:
-            import AppKit
-        except ImportError:
-            return
-        info.setOrientation_(AppKit.NSPaperOrientationLandscape)
-
-    def _install_verification_landscape_print(self) -> None:
-        """只为查验窗口包装 pywebview 的原生打印入口。"""
-        if sys.platform != "darwin":
-            return
-        try:
-            from webview.platforms.cocoa import BrowserView
-        except ImportError:
-            return
-
-        current = BrowserView.print_webview
-        if getattr(current, "_tidoc_landscape_print", False):
-            return
-        original = current
-
-        def print_webview_landscape(native_webview):
-            window = getattr(native_webview, "pywebview_window", None)
-            if getattr(window, "title", "") != "tidoc · 发票查验":
-                return original(native_webview)
-            job_title = getattr(window, "_tidoc_print_title", "查验单")
-            return self._run_macos_verification_print(native_webview, job_title)
-
-        print_webview_landscape._tidoc_landscape_print = True
-        BrowserView.print_webview = staticmethod(print_webview_landscape)
-
-    @staticmethod
-    def _run_macos_verification_print(native_webview, job_title: str) -> None:
-        """创建带横向设置和明确任务名的 macOS 原生打印任务。"""
-        import AppKit
-        import Foundation
-
-        info = AppKit.NSPrintInfo.sharedPrintInfo().copy()
-        Api._configure_verification_print_info(info)
-        info.setHorizontalPagination_(AppKit.NSFitPagination)
-        info.setHorizontallyCentered_(Foundation.NO)
-        info.setVerticallyCentered_(Foundation.NO)
-
-        imageable_bounds = info.imageablePageBounds()
-        paper_size = info.paperSize()
-        if Foundation.NSWidth(imageable_bounds) > paper_size.width:
-            imageable_bounds.origin.x = 0
-            imageable_bounds.size.width = paper_size.width
-        if Foundation.NSHeight(imageable_bounds) > paper_size.height:
-            imageable_bounds.origin.y = 0
-            imageable_bounds.size.height = paper_size.height
-
-        info.setBottomMargin_(Foundation.NSMinY(imageable_bounds))
-        info.setTopMargin_(
-            paper_size.height
-            - Foundation.NSMinY(imageable_bounds)
-            - Foundation.NSHeight(imageable_bounds)
-        )
-        info.setLeftMargin_(Foundation.NSMinX(imageable_bounds))
-        info.setRightMargin_(
-            paper_size.width
-            - Foundation.NSMinX(imageable_bounds)
-            - Foundation.NSWidth(imageable_bounds)
-        )
-
-        print_operation = native_webview._printOperationWithPrintInfo_(info)
-        print_operation.setJobTitle_(job_title)
-        print_operation.runOperationModalForWindow_delegate_didRunSelector_contextInfo_(
-            native_webview.window(), None, None, None
-        )
-
     # ------------------------------------------------------------ 汇总 / 绑定包
     @_guard
     def build_summary(self, entry_ids):
@@ -2184,195 +1610,6 @@ class Api:
         )
         return result.to_dict()
 
-    # ------------------------------------------------------------ 联网更新（腾讯云 COS）
-    def _update_channel(self) -> str:
-        from .services.updater import CHANNEL_BETA, CHANNEL_STABLE
-        return CHANNEL_BETA if self._preference_value(UPDATE_CHANNEL_PREF_KEY, CHANNEL_STABLE) == CHANNEL_BETA else CHANNEL_STABLE
-
-    def _load_update_manifest(self):
-        from .services.updater import load_update_manifest
-        return load_update_manifest(self._update_channel())
-
-    @_guard
-    def update_channel(self):
-        return {"channel": self._update_channel()}
-
-    @_guard
-    def set_update_channel(self, channel):
-        """选择更新通道：stable 只收正式版，beta 同时收测试版（预发布）。"""
-        from .services.updater import CHANNEL_BETA, CHANNEL_STABLE
-        value = CHANNEL_BETA if str(channel) == CHANNEL_BETA else CHANNEL_STABLE
-        self._set_preference_value(UPDATE_CHANNEL_PREF_KEY, value)
-        # 换通道后，之前的检查结果不再适用，下次立即重新检查。
-        self._set_preference_value(UPDATE_LAST_CHECK_KEY, "0")
-        self._set_preference_value(UPDATE_LAST_RESULT_KEY, "")
-        if value == CHANNEL_STABLE:
-            # 退出测试版通道：已下载还没安装的测试版包不再提示安装。
-            self._core_updater.discard_prerelease()
-        return {"channel": value}
-
-    @_guard
-    def check_updates(self):
-        from .services.updater import check_updates
-        status = check_updates(
-            self.data_root.components_dir, updates_dir=self.data_root.updates_dir, channel=self._update_channel(),
-        )
-        return self._record_update_check(status)
-
-    @_guard
-    def core_update_status(self):
-        return self._core_updater.status()
-
-    @_guard
-    def start_core_update_download(self):
-        from .services.updater import COMPONENT_CORE, get_platform_asset
-
-        # 自动检查已经把完整资源信息写入缓存。优先复用它，点击下载后便可
-        # 立即启动后台任务，不再先同步请求一次 manifest。
-        asset = next((
-            item.get("asset")
-            for item in (self._cached_update_result().get("updates") or [])
-            if item.get("component") == COMPONENT_CORE
-            and item.get("available")
-            and (item.get("asset") or {}).get("auto_update")
-        ), None)
-        if not asset:
-            asset = get_platform_asset(self._load_update_manifest(), COMPONENT_CORE)
-        return self._core_updater.start(asset)
-
-    @_guard
-    def install_core_update(self):
-        result = self._core_updater.install()
-
-        def close_window():
-            try:
-                if self._window is not None:
-                    self._window.destroy()
-            except Exception:
-                pass
-
-        timer = threading.Timer(1.2, close_window)
-        timer.name = "tidoc-update-exit"
-        timer.daemon = True
-        timer.start()
-        return result
-
-    @_guard
-    def auto_check_updates(self):
-        """按用户偏好执行低频启动检查；只检查，不下载或安装。"""
-        if self._preference_value(AUTO_UPDATE_PREF_KEY, "1") != "1":
-            return {"checked": False, "reason": "disabled", "updates": []}
-
-        now = int(time.time())
-        try:
-            last_check = int(self._preference_value(UPDATE_LAST_CHECK_KEY, "0") or 0)
-        except ValueError:
-            last_check = 0
-        if last_check and now - last_check < AUTO_UPDATE_INTERVAL_SECONDS:
-            cached = self._cached_update_result()
-            return {
-                **cached,
-                "checked": False,
-                "reason": "recent",
-                "checked_at": last_check,
-                "next_check_at": last_check + AUTO_UPDATE_INTERVAL_SECONDS,
-            }
-
-        from .services.updater import check_updates
-        try:
-            status = check_updates(
-                self.data_root.components_dir,
-                updates_dir=self.data_root.updates_dir,
-                channel=self._update_channel(),
-            )
-        except Exception as exc:
-            # 启动检查失败时仍恢复上次发现的更新入口，并尽快重试；自动检查
-            # 不应因为一次临时网络错误把已有更新提示一并藏掉。
-            return {
-                **self._cached_update_result(),
-                "checked": False,
-                "reason": "error",
-                "error": str(exc),
-                "checked_at": last_check,
-                "next_check_at": now + 10 * 60,
-            }
-        status = self._record_update_check(status, now)
-        status.update({
-            "checked": True,
-            "reason": "due",
-            "next_check_at": now + AUTO_UPDATE_INTERVAL_SECONDS,
-        })
-        return status
-
-    @_guard
-    def startup_update_state(self):
-        """记录已启动版本，并在真正升级后的首次启动返回本次变化。"""
-        from .services.updater import version_gt
-        from .release_info import RELEASE_NOTES, RELEASE_VERSION
-
-        previous = self._preference_value(APP_LAST_SEEN_VERSION_KEY, "")
-        upgraded = bool(previous and version_gt(__version__, previous))
-        if not previous or version_gt(__version__, previous):
-            self._set_preference_value(APP_LAST_SEEN_VERSION_KEY, __version__)
-
-        notes: list[str] = []
-        cached = self._cached_update_result()
-        if upgraded:
-            for item in cached.get("updates") or []:
-                if item.get("component") != "core" or item.get("latest_version") != __version__:
-                    continue
-                raw_notes = (item.get("asset") or {}).get("notes") or []
-                notes = raw_notes if isinstance(raw_notes, list) else [str(raw_notes)]
-                break
-            # 安装包升级或旧缓存尚未刷新时，缓存里可能没有当前版本说明。
-            # 当前版本的说明随核心程序一起打包，保证任何升级路径都能展示。
-            if not notes and RELEASE_VERSION == __version__:
-                notes = [str(note) for note in RELEASE_NOTES if str(note).strip()]
-            # A cached result belongs to the old binary. Normalize it immediately
-            # so the settings indicator cannot remain orange after a real upgrade.
-            self._set_preference_value(
-                UPDATE_LAST_RESULT_KEY,
-                json.dumps(self._normalize_cached_update_result(cached), ensure_ascii=False),
-            )
-        return {
-            "upgraded": upgraded,
-            "first_launch": not previous,
-            "previous_version": previous,
-            "current_version": __version__,
-            "notes": notes,
-        }
-
-    @_guard
-    def download_core_update(self):
-        from .services.updater import COMPONENT_CORE, download_update, launch_core_update_package
-        manifest = self._load_update_manifest()
-        result = download_update(manifest, COMPONENT_CORE, self.data_root.updates_dir)
-        launch_core_update_package(result.file_path)
-        data = result.to_dict()
-        data["launched"] = True
-        return data
-
-    @_guard
-    def open_downloaded_core_update(self):
-        from .services.updater import open_downloaded_core_update
-        info = open_downloaded_core_update(self.data_root.updates_dir)
-        return {"launched": True, **info}
-
-    @_guard
-    def install_print_component(self):
-        from .services.updater import install_print_component
-        manifest = self._load_update_manifest()
-        result = install_print_component(
-            manifest, self.data_root.components_dir, self.data_root.updates_dir
-        )
-        data=result.to_dict()
-        data["template_validation"]=self.adapters.revalidate_templates()
-        return data
-
-    @_guard
-    def revalidate_adapter_templates(self,component_fingerprint=None):
-        return self.adapters.revalidate_templates(component_fingerprint or '')
-
     # ------------------------------------------------------------ 临时文件维护
     def storage_maintenance_status(self):
         """Scan a captured data root without holding the database/API lock."""
@@ -2528,10 +1765,6 @@ class Api:
             "updates": str(self.data_root.updates_dir),
         }
 
-    def _operator_profile_for_print(self) -> dict:
-        selected=self.adapters.payees.get_default(self.adapters.default_binding()[0]) or {}
-        return {"person_name":selected.get("name",""),"student_id":selected.get("personnel_id",""),"contact":selected.get("contact",""),"bank_name":selected.get("bank_name",""),"bank_card":selected.get("account_number","")}
-
     def _preference_value(self, key: str, default: str = "") -> str:
         row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
@@ -2595,13 +1828,13 @@ class Api:
         try:
             self.db.conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
             self.db.conn.commit()
-        except Exception as exc:  # noqa: BLE001 - 返回给原始导入错误统一报告
+        except sqlite3.Error as exc:
             errors.append(f"记录未删除：{exc}")
         entry_dir = self.data_root.attachments_dir / entry_id
         try:
             if entry_dir.is_dir():
                 shutil.rmtree(entry_dir)
-        except Exception as exc:  # noqa: BLE001 - 返回给原始导入错误统一报告
+        except OSError as exc:
             errors.append(f"附件未删除：{exc}")
         return "；".join(errors)
 
@@ -2635,7 +1868,7 @@ class Api:
                 )
                 source.rename(quarantine)
                 moved.append((source, quarantine))
-        except Exception:
+        except BaseException:  # Restore staged files even if the operation is interrupted.
             for source, quarantine in reversed(moved):
                 if quarantine.exists() and not source.exists():
                     quarantine.rename(source)
@@ -2648,7 +1881,7 @@ class Api:
                 self.db.conn.commit()
             else:
                 deleted = self.entries.delete_many(existing_ids)
-        except Exception:
+        except BaseException:  # Keep database and attachment paths in sync on cancellation.
             self.db.conn.rollback()
             restore_errors = []
             for source, quarantine in reversed(moved):
@@ -2767,51 +2000,6 @@ class Api:
         webbrowser.open(text)
         return {"opened": text}
 
-    def fetch_invoice_by_qr(self, image_path, options=None):
-        """二维码取票：识别图片里的税务平台取票二维码，联网取回发票 XML / PDF，暂存到拖入中转区。
-
-        只在用户把二维码图片交给软件时联网，访问二维码里的税务平台链接，不访问其他地址。
-        成功返回 {paths, files, host, invoice_no, warnings}；paths 可直接交给 scan_files /
-        批量导入。失败返回 {ok:false, error, code, stage, open_url?}，open_url 是已通过校验的取票链接，
-        可交给 open_external_url 让用户在浏览器里下载后手工导入。options.preview_only 只识别、不联网。
-        联网可能持续数十秒，因此不走 _guard，不占用全局调用锁。
-        """
-        from .services import qr_fetch
-
-        link = None
-        try:
-            data = qr_fetch.read_image_file(image_path)
-            link = qr_fetch.find_invoice_link(data)
-            if (options or {}).get("preview_only"):
-                return {"ok": True, "data": {"preview_only": True, "host": link.host, "invoice_no": link.invoice_no}}
-            result = qr_fetch.fetch_invoice_files(link)
-            self.data_root.dropped_dir.mkdir(parents=True, exist_ok=True)
-            files = []
-            try:
-                for item in result.files:
-                    dest = self._staged_drop_path(item.filename)
-                    files.append({"kind": item.kind, "name": item.filename, "path": str(dest), "size": len(item.data)})
-                    dest.write_bytes(item.data)
-            except BaseException:
-                for item in files:
-                    Path(item["path"]).unlink(missing_ok=True)
-                    _remove_empty_dropped_parent(self.data_root.dropped_dir, Path(item["path"]).parent)
-                raise
-            return {"ok": True, "data": {
-                "host": result.host,
-                "invoice_no": result.invoice_no,
-                "paths": [item["path"] for item in files],
-                "files": files,
-                "warnings": result.warnings,
-            }}
-        except qr_fetch.QrFetchError as exc:
-            error = {"ok": False, "error": str(exc), "code": exc.code, "stage": exc.stage, "detail": exc.detail}
-            if link is not None and exc.code in qr_fetch.BROWSER_FALLBACK_CODES:
-                error["open_url"] = link.delivery_url
-            return error
-        except Exception as exc:  # noqa: BLE001 — 桥不能抛，统一转错误
-            return {"ok": False, "error": str(exc)}
-
 
 def _file_dialog_kind(webview_module, modern_name: str, legacy_name: str):
     file_dialog = getattr(webview_module, "FileDialog", None)
@@ -2852,14 +2040,6 @@ def _directory_size(folder: Path) -> int:
     return total
 
 
-def _is_inside(root: Path, path: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
-
-
 def _cleanup_old_dropped_files(folder: Path, max_age_seconds: int = 24 * 60 * 60) -> None:
     if not folder.exists():
         return
@@ -2868,15 +2048,6 @@ def _cleanup_old_dropped_files(folder: Path, max_age_seconds: int = 24 * 60 * 60
         if path.is_file() and path.stat().st_mtime < cutoff:
             path.unlink()
             _remove_empty_dropped_parent(folder, path.parent)
-
-
-def _remove_empty_dropped_parent(root: Path, folder: Path) -> None:
-    if folder.resolve() == root.resolve() or not _is_inside(root, folder):
-        return
-    try:
-        folder.rmdir()
-    except OSError:
-        pass
 
 
 def _open_local_path(path: str | Path) -> None:

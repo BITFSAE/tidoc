@@ -41,7 +41,9 @@ const sandbox = {document, assert, makeNode, setTimeout, console, process,
   window: {matchMedia: () => ({}), addEventListener() {}},
 };
 vm.createContext(sandbox);
-vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), sandbox);
+for (const name of ['qr-ticket.js', 'bindle-ui.js', 'app.js']) {
+  vm.runInContext(fs.readFileSync(require('path').join(require('path').dirname(process.argv[1]), name), 'utf8'), sandbox, {filename: name});
+}
 vm.runInContext(`
   State.entries = Array.from({length: 2000}, (_, index) => ({id: 'entry-' + index}));
   State.entries.forEach((entry, index) => {

@@ -30,6 +30,11 @@
 from __future__ import annotations
 
 import io
+import http.client
+import socket
+import threading
+from contextvars import ContextVar
+from contextlib import contextmanager, nullcontext
 import json
 import os
 import re
@@ -48,6 +53,64 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from .updater import USER_AGENT, _is_certificate_error
+
+class FetchCancellation:
+    """Cancel the next request and interrupt any registered socket or process."""
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.lock = threading.Lock()
+        self.abort = None
+
+    def check(self):
+        if self.event.is_set():
+            raise QrFetchError("cancelled", "cancelled by user")
+
+    def cancel(self):
+        self.event.set()
+        with self.lock:
+            abort = self.abort
+        if abort:
+            try:
+                abort()
+            except OSError:
+                pass  # The response may already have closed on the worker thread.
+
+    @contextmanager
+    def watching(self, abort):
+        with self.lock:
+            self.abort = abort
+        try:
+            if self.event.is_set():
+                abort()
+            self.check()
+            yield
+            self.check()
+        finally:
+            with self.lock:
+                self.abort = None
+
+
+_cancellation = ContextVar("qr_fetch_cancellation", default=None)
+
+
+def _check_cancelled():
+    token = _cancellation.get()
+    if token:
+        token.check()
+
+
+def _abort_response(response):
+    # Shutdown wakes a blocked read; close alone may wait for that read's lock.
+    stream = getattr(getattr(response, "fp", None), "raw", None)
+    sock = getattr(stream, "_sock", None)
+    if sock:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    response.close()
+
 
 # ----------------------------------------------------------------------------- 限制
 
@@ -94,6 +157,7 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 # 文案先写中文；界面语言切换由前端按 code 翻译。
 ERROR_MESSAGES: dict[str, str] = {
+    "cancelled": "已取消取票。",
     "decoder_unavailable": "二维码识别组件不可用，请改为手动导入发票文件。",
     "image_unreadable": "无法读取这张图片，请换一张截图或照片再试。",
     "image_unsupported": "暂不支持这种图片格式（HEIC），请截图后再试，或转存为 JPG / PNG。",
@@ -111,6 +175,7 @@ ERROR_MESSAGES: dict[str, str] = {
 }
 
 ERROR_STAGES: dict[str, str] = {
+    "cancelled": "download",
     "decoder_unavailable": "decode",
     "image_unreadable": "decode",
     "image_unsupported": "decode",
@@ -453,7 +518,13 @@ def _read_limited(resp, max_bytes: int, deadline: float) -> bytes:
     chunks: list[bytes] = []
     total = 0
     while True:
-        chunk = resp.read(READ_CHUNK)
+        _check_cancelled()
+        try:
+            chunk = resp.read(READ_CHUNK)
+        except (OSError, ValueError, http.client.HTTPException):
+            _check_cancelled()
+            raise
+        _check_cancelled()
         if not chunk:
             break
         total += len(chunk)
@@ -475,15 +546,27 @@ def _urllib_once(url: str, body: bytes | None, max_bytes: int, deadline: float) 
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=body, headers=headers, method="POST" if body is not None else "GET")
     try:
+        _check_cancelled()
         with _build_opener().open(request, timeout=REQUEST_TIMEOUT) as resp:
+            token = _cancellation.get()
+            if token:
+                with token.watching(lambda: _abort_response(resp)):
+                    return _Response(resp.status, _lower_headers(resp.headers), _read_limited(resp, max_bytes, deadline))
             return _Response(resp.status, _lower_headers(resp.headers), _read_limited(resp, max_bytes, deadline))
     except urllib.error.HTTPError as exc:
+        token = _cancellation.get()
         try:
-            # 错误响应只读很小一段，用来区分“平台说不行”和“平台挡住了我们”。
-            data = b"" if exc.code in _REDIRECT_STATUSES else exc.read(READ_CHUNK)
-        except Exception:  # noqa: BLE001
-            data = b""
-        return _Response(exc.code, _lower_headers(exc.headers), data)
+            with token.watching(lambda: _abort_response(exc)) if token else nullcontext():
+                # 错误响应也可能读到一半停住，仍允许用户取消。
+                _check_cancelled()
+                try:
+                    data = b"" if exc.code in _REDIRECT_STATUSES else exc.read(READ_CHUNK)
+                except (OSError, ValueError, http.client.HTTPException):
+                    _check_cancelled()
+                    data = b""
+                return _Response(exc.code, _lower_headers(exc.headers), data)
+        finally:
+            exc.close()
 
 
 def _curl_once(url: str, body: bytes | None, max_bytes: int, deadline: float) -> _Response:
@@ -502,7 +585,13 @@ def _curl_once(url: str, body: bytes | None, max_bytes: int, deadline: float) ->
             command += ["-H", "Content-Type: application/json", "--data-binary", body.decode("utf-8")]
         command.append(url)
         try:
-            proc = subprocess.run(command, capture_output=True, timeout=total + 5, check=False)
+            token = _cancellation.get()
+            if token is None:
+                proc = subprocess.run(command, capture_output=True, timeout=total + 5, check=False)
+            else:
+                with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+                    with token.watching(proc.kill):
+                        proc.communicate(timeout=total + 5)
         except (OSError, subprocess.SubprocessError) as exc:
             raise QrFetchError("network", "curl failed") from exc
         if proc.returncode == 63:
@@ -535,12 +624,14 @@ def _request_once(url: str, body: bytes | None, max_bytes: int, deadline: float)
     except QrFetchError:
         raise
     except (urllib.error.URLError, ssl.SSLError, OSError) as exc:
+        _check_cancelled()
         if _is_certificate_error(exc):
             if sys.platform == "darwin":
                 return _curl_once(url, body, max_bytes, deadline)
             raise QrFetchError("network", "certificate verification failed") from exc
         raise QrFetchError("network", type(exc).__name__) from exc
-    except Exception as exc:  # noqa: BLE001 — http.client 的各种协议错误
+    except http.client.HTTPException as exc:
+        _check_cancelled()
         raise QrFetchError("network", type(exc).__name__) from exc
 
 
@@ -550,6 +641,7 @@ def _http_request(url: str, body: bytes | None = None, max_bytes: int | None = N
     max_bytes = MAX_DOWNLOAD_BYTES if max_bytes is None else max_bytes
     current = url
     for _hop in range(MAX_REDIRECTS + 1):
+        _check_cancelled()
         _require_allowed_url(current)
         response = _request_once(current, body, max_bytes, deadline)
         if response.status in _REDIRECT_STATUSES:
@@ -760,7 +852,18 @@ def _download_with_fallback(kind: str, state: dict) -> tuple[FetchedFile, bool]:
         raise
 
 
-def fetch_invoice_files(link: InvoiceLink) -> QrFetchResult:
+def fetch_invoice_files(link: InvoiceLink, cancellation: FetchCancellation | None = None) -> QrFetchResult:
+    token = _cancellation.set(cancellation)
+    try:
+        _check_cancelled()
+        result = _fetch_invoice_files(link)
+        _check_cancelled()
+        return result
+    finally:
+        _cancellation.reset(token)
+
+
+def _fetch_invoice_files(link: InvoiceLink) -> QrFetchResult:
     """联网取回发票 XML 和 PDF。XML 优先；只拿到其中一个时仍返回，并在 warnings 里说明。"""
     result = QrFetchResult(host=link.host, invoice_no=link.invoice_no)
     state: dict = {"link": link}
@@ -772,6 +875,7 @@ def fetch_invoice_files(link: InvoiceLink) -> QrFetchResult:
             if kind == "xml" and not verified:
                 result.warnings.append("发票 XML 中没有发票号码字段，无法与二维码核对，请导入后确认发票号码。")
         except QrFetchError as exc:
+            _check_cancelled()
             errors[kind] = exc
             # 链接无效、被拦截、网络故障时再请求 PDF 只会重复失败；内容类问题则值得再试另一种格式。
             if exc.code not in {"bad_content", "too_large"}:

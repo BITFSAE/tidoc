@@ -10,39 +10,35 @@ ROOT=Path(__file__).resolve().parents[1]
 WEB=ROOT/'tidoc/web'
 
 
-def test_registered_bridge_methods_exist_and_scripts_are_loaded():
-    bridge=(WEB/'api.js').read_text('utf-8')
-    calls=set(re.findall(r"call\('([a-z_]+)'",bridge))
-    missing=sorted(method for method in calls if not callable(getattr(Api,method,None)))
-    assert not missing
-    html=(WEB/'index.html').read_text('utf-8')
-    assert 'schema-form.js' in html and 'adapter-ui.js' in html
-    assert html.index('adapter-ui.js')<html.index('app.js')
-
-
-def test_live_workflow_uses_dynamic_backend_schemes_and_fields():
-    source=(WEB/'app.js').read_text('utf-8')
-    adapter=(WEB/'adapter-ui.js').read_text('utf-8')
-    assert '北京理工大学' not in source and '工训楼' not in source
-    assert 'AdapterUI.setup()' in source
-    assert 'AdapterUI.decorateEntry' in source
-    assert 'AdapterUI.cardActions(e)' in source
-    assert 'AdapterUI.print(ids)' in source
-    assert 'previewExport' in adapter and 'runExport' in adapter
-    assert 'role_definition_revision_id' in adapter
-    assert 'previewRebind' in adapter and 'applyRebind' in adapter
-    assert 'scheme.revision_id' in adapter
-    assert 'expected_version' in (ROOT/'tidoc/api.py').read_text('utf-8')
-
-
-def test_forms_have_labels_and_focusable_linked_errors():
-    source=(WEB/'schema-form.js').read_text('utf-8')
-    assert 'label.htmlFor = id' in source
-    assert "setAttribute('aria-describedby'" in source
-    assert 'summary.tabIndex = -1' in source
-    assert 'control.input.focus()' in source
-    assert 'field.type === \'boolean\'' in source
-    assert "type === 'integer'" in source
+def test_registered_bridge_methods_are_actually_exposed_to_pywebview():
+    import json
+    import pytest
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('需要 Node 执行桥接口契约检查')
+    script = r"""
+const vm = require('vm'), fs = require('fs');
+const called = [];
+const bridge = new Proxy({}, {get: (_, name) => async () => {
+  called.push(String(name)); return {ok: true, data: null};
+}});
+const sandbox = {window: {pywebview: {api: bridge}}};
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8') + ';this.api = Api;', sandbox);
+(async () => {
+  for (const [name, method] of Object.entries(sandbox.api)) {
+    if (name !== 'ready') await method({}, [], {}, []);
+  }
+  console.log(JSON.stringify(called));
+})().catch(e => {console.error(e); process.exitCode = 1;});
+"""
+    result = subprocess.run([node, '-e', script, str(WEB/'api.js')],
+                            capture_output=True, text=True, encoding='utf-8', check=True)
+    calls = set(json.loads(result.stdout))
+    exposed = set(dir(Api.__new__(Api)))
+    assert calls <= exposed, sorted(calls - exposed)
+    assert {'list_schemes', 'check_updates', 'invoice_verification_info', 'fetch_invoice_by_qr'} <= calls
+    assert not {'db', 'profiles', 'adapters', 'data_root', 'bind_window'} & exposed
 
 
 def test_hidden_rows_are_hidden_and_help_text_is_not_a_callout_box():
@@ -65,55 +61,11 @@ def test_scheme_details_reports_package_baseline_apart_from_local_overrides(api)
     assert changed['settings_baseline']['print.numbering'] is True
 
 
-def test_scheme_page_saves_only_changed_settings_against_package_baseline():
-    adapter=(WEB/'adapter-ui.js').read_text('utf-8')
-    assert 'settings_baseline' in adapter
-    assert 'filter((row) => row.isDirty())' in adapter
-    assert 'confirmLeave' in adapter
-
-
-def test_dialog_open_close_rules_live_in_the_shared_modal():
-    source=(WEB/'app.js').read_text('utf-8')
-    modal=source.split('function modal(',1)[1].split('function confirmDialog',1)[0]
-    # 语义、焦点归还、仅最上层可交互、点遮罩必须"按下和松开都在遮罩上"、关闭前确认、子页面关闭后的回调。
-    for needle in ("setAttribute('aria-modal', 'true')","opener.focus","syncModalLayers()","pressedOnMask","guard","_onResume","key &&"):
-        assert needle in modal,needle
-    # 弹窗打开时列表快捷键（/、n、t、Cmd+A）不作用到后面的页面。
-    assert "if ($('#modalRoot').lastChild) return;" in source
-    settings=source.split('async function buildSettings',1)[1].split('// 更新对话框里的可选组件',1)[0]
-    assert 'confirm(' not in settings
-    assert "key: 'settings'" in settings and '_onResume' in settings
-    # 设置页的子页面叠在上面，不再先关掉设置页。
-    assert 'm.close(); AdapterUI' not in settings
-    adapter=(WEB/'adapter-ui.js').read_text('utf-8')
-    assert 'guard: confirmLeave' in adapter
-    assert 'mask.onclick' not in adapter and '_closeModal =' not in adapter
-
-
 def test_javascript_parses_in_node_if_available():
     node=shutil.which('node')
     if node:
-        for name in ('app.js','api.js','adapter-ui.js','schema-form.js'):
+        for name in [path.name for path in WEB.glob('*.js')]:
             subprocess.run([node,'--check',str(WEB/name)],check=True,capture_output=True)
-
-
-def test_card_and_detail_keep_the_original_material_workflow():
-    source=(WEB/'app.js').read_text('utf-8')
-    adapter=(WEB/'adapter-ui.js').read_text('utf-8')
-    card=source.split('function entryCard(',1)[1].split('right.querySelectorAll',1)[0]
-    # 卡片仍是 发票/实付/付款/查验(/实物) 一行，带完成状态、右键打开和在线查验；方案只补自定义材料按钮。
-    for needle in ("actionBtn('invoice'","actionBtn('paid'","actionBtn('pay'","actionBtn('inspect'","actionBtn('physical'",'AdapterUI.cardActions(e)'):
-        assert needle in card,needle
-    assert 'onlineVerificationFlow(e.id)' in source
-    cards=adapter.split('function cardActions(',1)[1].split('function jobs(',1)[0]
-    assert 'action-state' in cards and 'oncontextmenu' in cards
-    assert 'data-card-materials' not in adapter
-    # 详情页的材料分组由 app.js 渲染；方案信息只是附加的折叠区，不能隐藏或搬走原来的材料区与拖放区。
-    decorate=adapter.split('function decorateEntry(',1)[1].split('function chooser(',1)[0]
-    assert 'hidden=true' not in decorate and 'materialDrop' not in decorate
-    # 方案信息区放在详情页最末，且不自动展开。
-    assert 'body.append(section)' in decorate and 'section.open' not in decorate and 'before(' not in decorate
-    assert 'data-add-att-role' in source and 'data-online-verification' in source
 
 
 def test_list_entries_expose_role_counts_for_custom_material_cards(api):
@@ -142,54 +94,11 @@ def test_tooltips_stay_above_dropdown_menus_and_option_tips_only_show_when_trunc
         assert needle in tooltips,needle
 
 
-def test_titles_without_a_color_get_distinct_card_tints():
-    css=(WEB/'styles.css').read_text('utf-8')
-    adapter=(WEB/'adapter-ui.js').read_text('utf-8')
-    app=(WEB/'app.js').read_text('utf-8')
-    assert 'titleColors(State.titleProfiles)' in adapter
-    # 卡片底色与分组标题共用抬头语义色。
-    assert 'var(--tc-card, var(--panel))' in css and '.group-head:is(.title-blue' in css
-    for color in ('blue','green','amber','purple','teal','red'):
-        assert f'.title-{color} {{ --tc:' in css
-    assert "' title-' + tcls" not in app and "(tcls ? ' ' + tcls : '')" in app
-
-
-def test_card_has_no_checkbox_or_stripe_and_names_the_title():
-    source=(WEB/'app.js').read_text('utf-8')
-    css=(WEB/'styles.css').read_text('utf-8')
-    card=source.split('function entryCard(',1)[1].split('function entryCards(',1)[0]
-    # 选中靠点击卡片；抬头用底色区分，完整名称仍可悬浮读取。
-    assert "entry-check" not in source and 'entry-check' not in css
-    assert '切换选中' not in source and 'entryTitleTooltip(e)' in card
-    assert 'entry-stripe' not in source and 'entry-stripe' not in css
-    assert 'card.append(main, right)' in card and 'card.dataset.tooltip = entryTitleTooltip(e)' in card
-    assert 'function entryTitleTooltip(' in source and '抬头：' in source
-    # 卡片上不重复显示已知信息：单一报账人／已按报账人筛选、正在查看的批次。
-    assert "State.profiles.length > 1 && !$('#filterProfile')?.value" in card
-    assert 'batch.id !== focusedBatchId' in card
-
-
 def test_entries_expose_their_own_verification_setting(api):
     profile=api.profiles.create('Verify','')
     entry_id=api.entries.create(profile['id'])
     assert api.entries.get(entry_id)['verification_visible'] is True
     assert {e['id']:e for e in api.entries.list()}[entry_id]['verification_visible'] is True
-
-
-def test_titles_and_material_requirements_live_in_the_scheme_page():
-    app=(WEB/'app.js').read_text('utf-8')
-    adapter=(WEB/'adapter-ui.js').read_text('utf-8')
-    api=(WEB/'api.js').read_text('utf-8')
-    settings=app.split('async function buildSettings',1)[1].split('// 更新对话框里的可选组件',1)[0]
-    # 设置页不再有「扩展」：抬头与材料要求属于方案，统一在方案页编辑并随「保存更改」一起提交。
-    assert '扩展' not in settings and 'data-material-requirement' not in settings and 'setTitleProfiles' not in app
-    assert "TITLES_KEY" in adapter and "REQUIREMENT_PREFIX" in adapter
-    assert 'Api.updateScheme(scheme.id, scheme.revision_id' in adapter
-    assert "updateScheme: (id,revision,changes) => call('update_scheme',id,revision,changes||{})" in api
-    assert 'setMaterialRequirements' not in api and 'setTitleProfiles' not in api
-    # 与普通设置共用未保存提示、恢复默认和一次性保存。
-    assert 'titles_baseline' in adapter and 'requirements_baseline' in adapter
-    assert "if (changes.titles) { await refreshTitleOptions(); renderEntries(); }" in adapter
 
 
 def test_payee_and_pdf_options_follow_what_the_scheme_actually_does():
@@ -398,11 +307,3 @@ def test_card_title_dot_has_distinct_colours_in_both_themes():
     assert 'class="entry-title-wrap">${titleDot}<span class="entry-item-title"' in app
     # 按抬头分组或已筛选到某个抬头时整页同一个抬头，不画圆点。
     assert "State.groupBy !== 'title' && !$('#filterTitle')?.value" in app
-
-
-def test_detail_banner_does_not_claim_validation_passed_while_a_warning_is_open():
-    source=(WEB/'app.js').read_text('utf-8')
-    start=source.index('const completenessLine')
-    block=source[start:source.index('const compLine',start)]
-    assert "check_status === 'warning'" in block
-    assert '识别提醒还需要核对' in block

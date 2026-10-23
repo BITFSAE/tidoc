@@ -25,11 +25,11 @@ VALUE_SOURCE_MANUAL = "manual"
 # These versions describe recognition rules, not the Tidoc release. Keep them
 # unchanged for ordinary app releases and bump only the affected value when its
 # local recognition logic or result contract changes.
-LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-09-14-1"
+LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-10-22-2"
 LOCAL_PAYMENT_RECOGNITION_VERSION = "payment-local-2026-09-06"
 PAYMENT_CHECK_PREFIX = "[付款截图识别]"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
-LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "invoice_date")
+LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "seller_tax_id", "invoice_date")
 # 阿里云 OCR 采用值写入关键信息时的留痕前缀（区别于人工修正）
 OCR_HISTORY_LABEL = "[阿里云OCR]"
 LOCAL_RECOGNITION_HISTORY_LABEL = "[本地重新识别]"
@@ -117,12 +117,13 @@ class EntryRepo:
             self.db.conn.execute(
                 """INSERT INTO entries(id, profile_id, title, invoice_no, invoice_date,
                    seller, total, buyer_name, buyer_tax_id, status, check_status,
-                   source, created_at, updated_at,scheme_id,scheme_revision_id,title_profile_id)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   source, created_at, updated_at,scheme_id,scheme_revision_id,title_profile_id,seller_tax_id,recognition_data)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (entry_id, profile_id, title or p.buyer_name, p.invoice_no, p.invoice_date,
                  p.seller, str(p.total) if parsed is not None and p.total_present is not False else "", p.buyer_name,
                  p.buyer_tax_id, status, "warning", p.source, now, now,
-                 scheme_id,scheme_revision_id,title_profile_id),
+                 scheme_id,scheme_revision_id,title_profile_id,p.seller_tax_id,
+                 json.dumps(p.to_dict(), ensure_ascii=False) if parsed else ""),
             )
             suggested_tags=(definition or {}).get('effective_settings',{}).get('entry.suggested_tags',[])
             if suggested_tags:
@@ -144,7 +145,7 @@ class EntryRepo:
                      str(money(item.unit_price)), str(money(item.total)), item.spec, i),
                 )
             self.db.conn.commit()
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             raise
         return entry_id
@@ -433,7 +434,10 @@ class EntryRepo:
             where.append(f"CAST(NULLIF(e.total, '') AS REAL) {operator} CAST(? AS REAL)")
             params.append(normalized)
 
-        sql = "SELECT e.* FROM entries e"
+        # Evidence belongs to detail/rechecking, not every card in a large list.
+        columns = [row[1] for row in self.db.conn.execute("PRAGMA table_info(entries)")
+                   if row[1] != "recognition_data"]
+        sql = "SELECT " + ",".join(f'e."{name}"' for name in columns) + " FROM entries e"
         if where:
             sql += " WHERE " + " AND ".join(where)
         # 排序
@@ -784,25 +788,27 @@ class EntryRepo:
         self.db.conn.commit()
         return self.get(entry_id)
 
-    def update_recognized_buyer_tax_id(self, entry_id: str, value: str) -> bool:
+    def update_recognized_buyer_tax_id(self, entry_id: str, value: str, *, field="buyer_tax_id") -> bool:
         """Apply a corrected local parser result unless the user edited this field."""
-        if "buyer_tax_id" in self.human_modified_locked_fields(entry_id):
+        if field not in {"buyer_tax_id", "seller_tax_id"}:
+            raise ValueError("不支持的税号字段。")
+        if field in self.human_modified_locked_fields(entry_id):
             return False
         row = self.db.conn.execute(
-            "SELECT buyer_tax_id FROM entries WHERE id = ?", (entry_id,)
+            f"SELECT {field} FROM entries WHERE id = ?", (entry_id,)
         ).fetchone()
         if row is None:
             raise ValueError("条目不存在。")
-        old_value = row["buyer_tax_id"] or ""
+        old_value = row[field] or ""
         new_value = str(value or "")
         if new_value == old_value:
             return False
         self.db.conn.execute(
-            "UPDATE entries SET buyer_tax_id = ? WHERE id = ?", (new_value, entry_id)
+            f"UPDATE entries SET {field} = ? WHERE id = ?", (new_value, entry_id)
         )
         self._log_history(
             entry_id,
-            f"{LOCAL_RECOGNITION_HISTORY_LABEL}buyer_tax_id",
+            f"{LOCAL_RECOGNITION_HISTORY_LABEL}{field}",
             old_value,
             new_value,
             "",
@@ -1025,6 +1031,34 @@ class EntryRepo:
             "SELECT check_message FROM entries WHERE id = ?", (entry_id,)
         ).fetchone()
         return self._payment_messages_from_text(row["check_message"] if row else "")
+
+    def set_invoice_evidence(self, entry_id: str, parsed: ParsedInvoice) -> None:
+        """Replace evidence only after reading the original invoice again."""
+        self.db.conn.execute(
+            "UPDATE entries SET recognition_data = ? WHERE id = ?",
+            (json.dumps(parsed.to_dict(), ensure_ascii=False), entry_id),
+        )
+        self.db.conn.commit()
+
+    def parsed_for_check(self, entry_id: str, *, items=None) -> ParsedInvoice:
+        """Combine current authoritative values with the original parser evidence."""
+        entry = self.get(entry_id)
+        if not entry:
+            raise ValueError("条目不存在。")
+        parsed = ParsedInvoice.from_dict(json.loads(entry["recognition_data"])) if entry.get("recognition_data") else ParsedInvoice()
+        for name in ("invoice_no", "invoice_date", "seller", "seller_tax_id", "buyer_name", "buyer_tax_id"):
+            setattr(parsed, name, entry.get(name) or "")
+        parsed.total = d(entry.get("total"))
+        parsed.total_present = bool(str(entry.get("total") or "").strip())
+        if items is None:
+            from ..engine.models import ParsedItem
+            items = [ParsedItem(
+                name=item.get("name") or "", actual_name=item.get("actual_name") or "",
+                unit=item.get("unit") or "", quantity=d(item["quantity"]) if item.get("quantity") else None,
+                total=d(item.get("total")), spec=item.get("spec") or "",
+            ) for item in entry.get("items", [])]
+        parsed.items = items
+        return parsed
 
     def invoice_recognition_fingerprint(self, entry_id: str) -> str:
         rows = self.db.conn.execute(

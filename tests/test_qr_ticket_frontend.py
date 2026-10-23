@@ -235,7 +235,7 @@ const cleaned = [], updates = [], cancelable = [];
   assert.equal(result.report.failed[0].invoice_no, 'N3');
   // 每张发票只联网取一次，且不是预检模式；同时最多两个请求。
   assert.deepEqual(state.fetches.map((call) => call.name).sort(), ['a.png', 'b.png', 'c.png', 'd.png', 'e.png']);
-  assert.ok(state.fetches.every((call) => call.options === null));
+  assert.ok(state.fetches.every((call) => call.options.request_id && !call.options.preview_only));
   assert.ok(state.maxInflight <= 2);
   // 用完的二维码图片（含重复的）删掉，其余文件不动。
   assert.deepEqual(cleaned.map(baseName).sort(), ['a-copy.png', 'a.png', 'b.png', 'c.png', 'd.png', 'e.png']);
@@ -577,4 +577,31 @@ globalThis.Api = { appPreference: async () => '', setAppPreference: async (k, v)
   await loadQrTipPreference();
   assert.equal(State.qrTipDismissed, false);
 })().catch((error) => { console.error(error); process.exitCode = 1; });
+""")
+
+
+def test_retry_opens_the_normal_preview_and_a_failed_retry_keeps_the_action_available():
+    run_web(r"""
+(async () => {
+  const button = {disabled: false, setAttribute() {}, removeAttribute() {}};
+  const calls = [], previews = [], cleaned = [];
+  globalThis.Api = {
+    fetchInvoiceByQr: async (path, options) => {calls.push([path, options]); return {paths: ['/stage/retry.xml']};},
+    scanFiles: async paths => ({groups: [{files: paths}]}),
+  };
+  openBatchImportPreview = (...args) => previews.push(args);
+  cleanupDroppedPaths = async paths => cleaned.push(...paths);
+  toast = () => {};
+  const item = {open_url: 'https://dppt.example.chinatax.gov.cn:8443/v/token'};
+  await retryQrTicket(item, button);
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, '已取回');
+  assert.equal(calls[0][1].retry_url, item.open_url);
+  assert.deepEqual(previews[0][2].cleanupPaths, ['/stage/retry.xml']);
+  Api.scanFiles = async () => {throw new Error('scan failed');};
+  await retryQrTicket(item, button);
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, '重试');
+  assert.deepEqual(cleaned, ['/stage/retry.xml']);
+})().catch(e => {console.error(e); process.exitCode = 1;});
 """)

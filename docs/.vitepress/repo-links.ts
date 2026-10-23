@@ -24,7 +24,6 @@ export function repoLinks(repo: string) {
     if (rel === 'CHANGELOG.md') return `/update/changelog${hash}`
     if (rel === 'CONTRIBUTING.md') return `/dev/contributing${hash}`
     if (rel === 'docs/UPDATE.md') return `/dev/release${hash}`
-    if (rel === 'docs/TEAM_ADAPTER_PLAN.md') return github(rel, hash)
     const adapter = rel.match(/^docs\/adapters\/([^/]+)\.md$/)
     if (adapter) return `/dev/adapters/${adapter[1]}${hash}`
     // docs/ 里其它页面按原位置解析；docs/ 之外的文件和目录指向 GitHub。

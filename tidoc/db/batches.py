@@ -53,7 +53,7 @@ class BatchRepo:
         try:
             self._set_entries_batch(entry_ids or [], batch_id, now)
             self.db.conn.commit()
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             raise
         return self.get(batch_id)
@@ -111,7 +111,7 @@ class BatchRepo:
             changed = self._set_entries_batch(entry_ids or [], batch_id, _now())
             self.db.conn.commit()
             return changed
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             raise
 
@@ -152,7 +152,7 @@ class BatchRepo:
             moved = self._set_entries_batch(source_ids, target_batch_id, _now())
             self.db.conn.commit()
             return {"added": moved, "removed": moved}
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             raise
 
@@ -166,7 +166,7 @@ class BatchRepo:
             changed = self._set_entries_batch(entry_ids or [], target_batch_id, _now())
             self.db.conn.commit()
             return {"changed": changed, "batch_id": target_batch_id or ""}
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             raise
 
@@ -185,7 +185,7 @@ class BatchRepo:
         try:
             changed = self._set_entries_batch([entry_id], target_batch_id, _now())
             self.db.conn.commit()
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             raise
         return {
@@ -211,7 +211,7 @@ class BatchRepo:
             )
             self._touch(batch_id)
             self.db.conn.commit()
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             raise
         return self.get(batch_id)
@@ -374,7 +374,7 @@ class BatchRepo:
                WHERE be.batch_id = ?""",
             (batch_id,),
         ).fetchall()
-        from decimal import Decimal
+        from decimal import Decimal, InvalidOperation
 
         total = Decimal("0")
         by_person: dict[str, dict] = {}
@@ -383,7 +383,7 @@ class BatchRepo:
         for r in rows:
             try:
                 amt = Decimal(r["total"] or "0")
-            except Exception:
+            except InvalidOperation:
                 amt = Decimal("0")
             total += amt
             pname = r["profile_name"] or "未知报账人"

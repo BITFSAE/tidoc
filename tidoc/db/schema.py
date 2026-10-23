@@ -27,7 +27,8 @@ import sqlite3
 # v9：云识别改为软件结果优先，并撤回历史上自动覆盖的销售方。
 # v10：OCR 结果记录实际 API 调用页数，多页 PDF 不再按一张误计。
 # v11：报账批次改为单一归属，历史重复归属保留最后一次装入的批次。
-SCHEMA_VERSION = 12
+# v13：保存销售方税号和本地解析证据，关键值重算时保留票面核对提醒。
+SCHEMA_VERSION = 13
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -57,6 +58,8 @@ CREATE TABLE IF NOT EXISTS entries (
     invoice_no    TEXT DEFAULT '',
     invoice_date  TEXT DEFAULT '',
     seller        TEXT DEFAULT '',
+    seller_tax_id TEXT DEFAULT '',
+    recognition_data TEXT DEFAULT '',
     total         TEXT DEFAULT '',            -- 价税合计，字符串存 Decimal
     buyer_name    TEXT DEFAULT '',
     buyer_tax_id  TEXT DEFAULT '',
@@ -434,7 +437,7 @@ def init_db(conn: sqlite3.Connection, *, backup_path=None):
         filename = conn.execute('PRAGMA database_list').fetchone()[2]
         if filename:
             target = Path(backup_path) if backup_path else Path(filename).parent / 'backups' / (
-                'tidoc-before-v12-' + datetime.now().strftime('%Y%m%dT%H%M%S%f') + '.sqlite')
+                f'tidoc-before-v{SCHEMA_VERSION}-' + datetime.now().strftime('%Y%m%dT%H%M%S%f') + '.sqlite')
             target.parent.mkdir(parents=True, exist_ok=True)
             from .database import backup_connection
             backup = backup_connection(conn, target)
@@ -448,6 +451,10 @@ def init_db(conn: sqlite3.Connection, *, backup_path=None):
         _execute_schema(conn, SCHEMA.replace('CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_entries_entry ON batch_entries(entry_id);',''))
         _legacy_migrations(conn, previous_version)
         _migrate_v12(conn)
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(entries)')}
+        for name in ('seller_tax_id', 'recognition_data'):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE entries ADD COLUMN {name} TEXT DEFAULT ''")
         _execute_schema(conn, SCHEMA)
         if list(conn.execute('PRAGMA foreign_key_check')):
             raise ValueError('数据库存在失效关联，升级已撤回，请检查迁移前备份。')

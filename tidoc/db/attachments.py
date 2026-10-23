@@ -77,7 +77,7 @@ class AttachmentRepo:
             )
             self._touch_entry(entry_id)
             self.db.conn.commit()
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             if dest.exists():
                 dest.unlink()
@@ -191,7 +191,7 @@ class AttachmentRepo:
             self.db.conn.execute("DELETE FROM attachments WHERE id = ?", (att_id,))
             self._touch_entry(att["entry_id"])
             self.db.conn.commit()
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             if moved and quarantine.exists():
                 quarantine.rename(abs_path)
@@ -262,7 +262,7 @@ class AttachmentRepo:
             dest = dest_dir / stored_name
             try:
                 shutil.copy2(src, dest)
-            except Exception:
+            except BaseException:  # Restore the transaction on cancellation as well.
                 if dest.exists():
                     dest.unlink()
                 _remove_empty_dir(dest_dir)
@@ -300,7 +300,7 @@ class AttachmentRepo:
             )
             self._touch_entry(att["entry_id"])
             self.db.conn.commit()
-        except Exception:
+        except BaseException:  # Restore the transaction on cancellation as well.
             self.db.conn.rollback()
             if rollback_rename and new_abs and new_abs.exists():
                 new_abs.rename(old_abs)

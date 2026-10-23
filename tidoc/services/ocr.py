@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unicodedata
 from pathlib import Path
+from pypdf.errors import DependencyError, PyPdfError
 
 from ..db.attachments import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
 from ..db.entries import EntryRepo
@@ -48,7 +49,7 @@ def pdf_page_count(path: str | Path) -> int:
         from pypdf import PdfReader
 
         return max(1, len(PdfReader(str(file_path)).pages))
-    except Exception:  # noqa: BLE001 — actual recognition will report unreadable PDFs
+    except (OSError, ValueError, PyPdfError, DependencyError):  # Recognition reports unreadable PDFs.
         return 1
 
 
@@ -61,7 +62,7 @@ def component_status(components_dir: str | Path | None = None) -> dict:
     if not frozen:
         try:
             import tidoc_ocr
-        except Exception:  # noqa: BLE001
+        except ImportError:
             tidoc_ocr = None
         if tidoc_ocr is not None and tidoc_ocr.is_available():
             return {
@@ -403,18 +404,11 @@ def _ocr_items_to_parsed(normalized: dict):
 def refresh_entry_check(entries_repo: EntryRepo, entry_id: str) -> None:
     """关键值变化后重算校验状态（明细合计、抬头与购买方税号）。"""
     from ..engine import check_invoice
-    from ..engine.models import ParsedInvoice
 
     entry = entries_repo.get(entry_id)
     if not entry:
         return
-    parsed = ParsedInvoice(
-        invoice_no=entry.get("invoice_no") or "",
-        buyer_name=entry.get("buyer_name") or "",
-        buyer_tax_id=entry.get("buyer_tax_id") or "",
-        total=d(entry.get("total")),
-        items=_entry_items_to_parsed(entry.get("items") or []),
-    )
+    parsed = entries_repo.parsed_for_check(entry_id)
     check = check_invoice(parsed, expected_title=entry.get("title") or "",context=entries_repo.policy_context(entry_id))
     entries_repo.set_check(entry_id, check.status, check.message)
     entries_repo.recompute_status(entry_id)
@@ -456,19 +450,12 @@ def apply_plan(entries_repo: EntryRepo, entry_id: str, plan: dict, normalized: d
 
 def _replace_items(entries_repo: EntryRepo, entry_id: str, normalized: dict) -> None:
     from ..engine import check_invoice
-    from ..engine.models import ParsedInvoice
 
     entry = entries_repo.get(entry_id)
     if not entry:
         raise ValueError("条目不存在。")
     parsed_items = _ocr_items_to_parsed(normalized)
-    parsed = ParsedInvoice(
-        invoice_no=entry.get("invoice_no") or "",
-        buyer_name=entry.get("buyer_name") or "",
-        buyer_tax_id=entry.get("buyer_tax_id") or "",
-        total=d(entry.get("total")),  # 条目总额是权威值，明细向总额对齐
-        items=parsed_items,
-    )
+    parsed = entries_repo.parsed_for_check(entry_id, items=parsed_items)
     check = check_invoice(parsed, expected_title=entry.get("title") or "",context=entries_repo.policy_context(entry_id))
     entries_repo.replace_recognized_items(
         # OCR 只替换明细，不改变条目识别来源；否则后续再识别会误以为
@@ -763,7 +750,7 @@ def _infer_legacy_applied_changes(
             after = normalized.get("items") or []
             if not _items_same(before, after):
                 items = {"before": _snapshot_items(before), "after": _snapshot_items(after)}
-        except Exception:  # noqa: BLE001 - legacy detail recovery must not break the detail page
+        except (OSError, ValueError, PyPdfError, DependencyError):  # Historical files may be missing or corrupt.
             items = None
 
     if not fields and not items:

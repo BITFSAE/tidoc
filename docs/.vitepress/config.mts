@@ -186,8 +186,8 @@ export default defineConfig({
     return head
   },
 
-  // 团队适配计划是实施与验收记录，不放进文档站；README 只是仓库入口。
-  srcExclude: ['TEAM_ADAPTER_PLAN.md', 'README.md', 'node_modules/**'],
+  // README 是仓库入口，不作为站点页面。
+  srcExclude: ['README.md', 'node_modules/**'],
 
   // 源文件保持原位置（命令行工具和仓库内链接都依赖它），站内地址放到「开发相关」下。
   rewrites: {

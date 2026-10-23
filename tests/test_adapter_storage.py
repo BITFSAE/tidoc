@@ -6,6 +6,8 @@ import sqlite3
 
 import pytest
 
+from tidoc.db.schema import SCHEMA_VERSION
+
 from tidoc.adapters.loader import load_package
 from tidoc.adapters.models import AdapterPackage
 from tidoc.adapters.resolver import resolve_definition
@@ -95,7 +97,7 @@ def test_migration_real_v11_backup_and_constraints(tmp_path):
     conn.execute("INSERT INTO meta VALUES('wal_visible','committed')")
     conn.commit()
     db=Database(path)
-    assert db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]=='12'
+    assert db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]==str(SCHEMA_VERSION)
     assert db.conn.execute("SELECT role_id FROM attachments WHERE id='a'").fetchone()[0]=='invoice'
     assert db.conn.execute('SELECT note FROM batch_entries').fetchone()[0]=='Keep note'
     assert not list(db.conn.execute('PRAGMA foreign_key_check'))

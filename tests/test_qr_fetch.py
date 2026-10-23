@@ -761,3 +761,56 @@ def test_api_handles_a_missing_file(api, tmp_path):
 
 def test_api_method_is_exposed_to_the_bridge(api):
     assert "fetch_invoice_by_qr" in dir(api)
+
+
+@pytest.mark.parametrize('response_kind', ['eof', 'closed_stream', 'http_error'])
+def test_cancel_interrupts_an_open_response_and_stops_the_second_download(monkeypatch, response_kind):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    entered, stopped = Event(), Event()
+
+    class BlockingResponse(FakeResponse):
+        def read(self, size=-1):
+            entered.set()
+            assert stopped.wait(3), 'cancel did not close the active response'
+            if response_kind != 'eof':
+                raise ValueError('read of closed file')
+            return b''
+
+        def close(self):
+            stopped.set()
+
+    def response(request):
+        body = BlockingResponse(headers={'Content-Type': 'application/pdf'})
+        if response_kind == 'http_error':
+            return urllib.error.HTTPError(request.full_url, 412, 'blocked', body.headers, body)
+        return body
+
+    opener = install(monkeypatch, response)
+    token = qr.FetchCancellation()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(qr.fetch_invoice_files, link(), token)
+        try:
+            assert entered.wait(2)
+            token.cancel()
+            with pytest.raises(qr.QrFetchError) as caught:
+                future.result(timeout=2)
+            assert caught.value.code == 'cancelled'
+        finally:
+            stopped.set()
+    assert len(opener.requests) == 1
+
+
+def test_already_cancelled_fetch_never_opens_a_connection():
+    token = qr.FetchCancellation()
+    token.cancel()
+    with pytest.raises(qr.QrFetchError) as caught:
+        qr.fetch_invoice_files(link(), token)
+    assert caught.value.code == 'cancelled'
+
+
+def test_retry_url_is_validated_again_before_any_network_access(api):
+    result = api.fetch_invoice_by_qr('', {'retry_url': 'https://example.com/invoice'})
+    assert result['ok'] is False
+    assert result['code'] == 'not_invoice_link'
+    assert api._qr_fetch_jobs == {}

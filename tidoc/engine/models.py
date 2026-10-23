@@ -99,7 +99,58 @@ class ParsedInvoice:
     total_source: str = ""                   # TOTAL_SOURCE_*；空表示未标注来源
     total_read: Decimal | None = None        # 解析时读到的总额；total 被外部覆盖后据此识别
     tax_rates: list = field(default_factory=list)  # 票面出现的税率（百分数），0 表示免税 / 不征税
+    source_warnings: list[str] = field(default_factory=list)
     field_checks: dict = field(default_factory=dict)  # 字段名 -> FieldCheck
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ParsedInvoice:
+        """Restore persisted parser evidence without losing Decimal precision."""
+        if not isinstance(data, dict):
+            raise ValueError("发票识别记录必须是对象。")
+        values = {name: data[name] for name in cls.__dataclass_fields__ if name in data}
+        for name in ("invoice_no", "invoice_date", "seller", "buyer_name", "buyer_tax_id",
+                     "seller_tax_id", "source", "total_words_text", "total_source"):
+            if name in values and not isinstance(values[name], str):
+                raise ValueError(f"发票识别记录中的 {name} 必须是文本。")
+        if data.get("total_present") is not None and type(data["total_present"]) is not bool:
+            raise ValueError("发票总额读取标记无效。")
+        for name in ("items", "tax_rates", "source_warnings"):
+            if not isinstance(data.get(name, []), list):
+                raise ValueError(f"发票识别记录中的 {name} 必须是列表。")
+        if any(not isinstance(warning, str) for warning in data.get("source_warnings", [])):
+            raise ValueError("发票来源提醒必须是文本。")
+        if not isinstance(data.get("field_checks", {}), dict):
+            raise ValueError("发票字段核对记录必须是对象。")
+
+        def decimal(value):
+            number = Decimal(str(value))
+            if not number.is_finite():
+                raise ValueError("发票识别记录中存在无效金额。")
+            return number
+
+        for name in ("total", "subtotal", "tax_total", "total_in_words", "total_read"):
+            if name in values and values[name] is not None:
+                values[name] = decimal(values[name])
+        if values.get("total", Decimal(0)) is None:
+            raise ValueError("发票识别记录缺少总额。")
+        values["tax_rates"] = [decimal(rate) for rate in data.get("tax_rates", [])]
+        for check in data.get("field_checks", {}).values():
+            if (not isinstance(check, dict) or not isinstance(check.get("candidates", {}), dict)
+                    or any(not isinstance(value, str) for value in check.get("candidates", {}).values())
+                    or not isinstance(check.get("value", ""), str)
+                    or not isinstance(check.get("flags", []), (list, tuple))):
+                raise ValueError("发票字段核对记录无效。")
+        for item in data.get("items", []):
+            if not isinstance(item, dict) or any(not isinstance(item.get(name, ""), str)
+                                                for name in ("name", "actual_name", "unit", "spec")):
+                raise ValueError("发票识别明细无效。")
+        values["field_checks"] = {name: FieldCheck(**check) for name, check in data.get("field_checks", {}).items()}
+        values["items"] = [ParsedItem(
+            name=item["name"], actual_name=item["actual_name"], unit=item["unit"],
+            quantity=decimal(item["quantity"]) if item.get("quantity") not in (None, "") else None,
+            total=decimal(item["total"]), spec=item.get("spec", ""),
+        ) for item in data.get("items", [])]
+        return cls(**values)
 
     def to_dict(self) -> dict:
         return {
@@ -118,6 +169,8 @@ class ParsedInvoice:
             "total_in_words": None if self.total_in_words is None else str(self.total_in_words),
             "total_words_text": self.total_words_text,
             "total_source": self.total_source,
+            "total_read": None if self.total_read is None else str(self.total_read),
+            "source_warnings": list(self.source_warnings),
             "tax_rates": [str(rate) for rate in self.tax_rates],
             "field_checks": {name: check.to_dict() for name, check in self.field_checks.items()},
         }

@@ -257,6 +257,10 @@ tidoc App
 
 #### 解析流程
 
+PDF 版面文本保留分页边界。品名列中的数字续行可以补入型号；跨页后先跳过重复的票号、购销双方信息，再从明细表头恢复续接，规格列续行不拼入品名。数量与高精度单价粘连时，先按金额闭合拆分；若只有一种拆分与独立读取的票面金额相差不超过一分钱，也可采用该数量。单价和金额均粘连、没有独立金额时仍要求严格闭合，不用容差猜测金额。
+
+本地解析证据（票面合计、大写金额、字段候选及来源提醒）和当前采用值分别保存。改总额或采用云识别明细时，用当前字段、明细和原始证据重算提醒；重新识别才替换证据。销售方税号与购买方税号一起保存，绑定包携带证据但不迁移本机识别缓存标记。XML 与 PDF 同时提供时比较关键字段，保留 XML 值并记录差异，PDF 读取失败也保留 XML 并提醒。这些检查保持为非阻断提醒，人工核对后仍可继续输出。
+
 导入即自动解析（优先 XML，其次 PDF 文本），提取发票号码、日期、销售方、价税合计、抬头、税号、明细；检查明细识别完整性、抬头一致性，以及已配置抬头对应的购买方税号是否存在且正确。warning 在界面称为「识别提醒」，用于缺明细、明细识别合计与发票总额不一致、抬头未识别、购买方税号缺失 / 错误 / 与抬头矛盾等自动提醒，不阻断材料齐备；blocked 在界面称为「严重问题」，仅用于抬头分区冲突等会造成材料混入的问题。在顶部「识别提醒」快捷视图中，批量操作栏按需显示「重新识别」，用条目已有的原发票 PDF / XML 原子替换识别明细并刷新提醒；用户修改过的实际物资名称、实付和备注保持不变。
 
 #### 附件归属校验
@@ -432,11 +436,19 @@ tidoc App
 
 `python -m tidoc.adapter_tools` 提供源目录初始化、校验、规则说明、fixture 渲染、样例测试、定义差异和严格打包。打包含 DOCX 的适配包时必须安装打印依赖，并以 fixture 完成真实渲染。自动渲染检查不替代在 Windows、macOS 办公软件中人工检查版式。
 
+### 维护边界
+
+桥接接口按报账方案、官网查验、软件更新和二维码取票拆分，由 `Api` 汇集并显式暴露继承方法。前端的取票流程与绑定包导入独立成脚本，共用现有窗口状态；绑定包写入分为单条恢复、批次分配和外层事务。异常按可恢复的文件、格式、网络错误捕获；桥接入口、逐条批处理和系统组件边界保留兜底并报告错误。事务和文件补偿捕获 `BaseException` 后回滚并重新抛出，防止中断留下半份材料。
+
+前端回归优先在 Node 中运行真实函数并检查状态、交互与桥接调用。源码断言仅用于资源打包、脚本加载顺序、样式约束等明确契约，不再以函数体的字符串片段代替行为测试。打印组件能力查询只缓存确定结果；超时和启动失败在下次查询重试。
+
+取票任务各自持有取消信号，下载读取时检查，取消会关闭活动响应或终止系统 curl。连接建立前仍受网络超时约束，已发出的平台请求无法撤回；前端忽略迟到结果并回收文件。重试沿用已校验的取票链接，再次检查地址限制，不增加后台请求。
+
 ## 16. 文档站
 
 - 定位：面向使用者的文档站（https://tidoc.bitfsae.com）含简介、开始使用、使用指南、更新与组件和常见问题，另设「开发相关」给开发者。读者大多不了解内部逻辑、代码和内部术语，写作规则见 [AGENTS.md](AGENTS.md) 的 Documentation site 一节。
 - 技术：VitePress，源码在 `docs/`，依赖只写在 `docs/package.json`，不改变 Python 应用结构；`node_modules` 和构建产物不提交。
-- 内容归属：使用说明只写在站点页面（`docs/intro`、`start`、`guide`、`update`、`faq`），截图放 `docs/public/images/`，只用虚构数据。设计取舍留在本文档，发布与运维细节留在 [docs/UPDATE.md](docs/UPDATE.md)。`DESIGN.md`、`CONTRIBUTING.md` 在仓库根目录，由 `docs/dev/` 下的页面嵌入；`CHANGELOG.md` 也留在根目录，更新日志页在构建时解析它（`docs/update/changelog.data.ts`）并按版本显示成时间线，条目文字原样使用，不在站点里另存一份；`docs/adapters/` 与 `UPDATE.md` 留在原位，由站点配置的 rewrites 挂到「开发相关」下；`TEAM_ADAPTER_PLAN.md` 是实施与验收记录，不进站点。这些文件之间的相对链接在渲染时由 `docs/.vitepress/repo-links.ts` 改写为站内或 GitHub 地址，源文件不变。
+- 内容归属：使用说明只写在站点页面（`docs/intro`、`start`、`guide`、`update`、`faq`），截图放 `docs/public/images/`，只用虚构数据。设计取舍留在本文档，发布与运维细节留在 [docs/UPDATE.md](docs/UPDATE.md)。`DESIGN.md`、`CONTRIBUTING.md` 在仓库根目录，由 `docs/dev/` 下的页面嵌入；`CHANGELOG.md` 也留在根目录，更新日志页在构建时解析它（`docs/update/changelog.data.ts`）并按版本显示成时间线，条目文字原样使用，不在站点里另存一份；`docs/adapters/` 与 `UPDATE.md` 留在原位，由站点配置的 rewrites 挂到「开发相关」下；实施状态以 README 状态清单为准，历史实施记录通过 Git 历史查阅。这些文件之间的相对链接在渲染时由 `docs/.vitepress/repo-links.ts` 改写为站内或 GitHub 地址，源文件不变。
 - 部署：腾讯云 EdgeOne Pages 连接 GitHub 仓库，Root Directory 为 `docs`，构建配置在 `docs/edgeone.json`，`main` 更新后自动构建发布。不使用 GitHub Pages，也不经过官网服务器。项目、域名和证书由维护者在腾讯云配置。
 - 下载入口：「下载与安装」页的下载按钮（组件 `docs/.vitepress/theme/components/TidocDownload.vue`）指向官网的下载网关 `https://www.bitfsae.com/api/downloads/tidoc-core/{windows|macos}`。网关读取 `img.bitfsae.com/tidoc/manifest.json` 后跳转到最新版安装包，所以发新版时文档站不用改。`manifest.json` 没有开放跨域读取，页面因此不显示版本号和文件大小；需要时由维护者在对象存储上开放跨域，再让组件读取清单。GitHub Releases 和官网首页入口保留为备用。
 - 构建检查：死链接和缺失的截图会使构建失败，修改文档后先运行 `cd docs && npm ci && npm run build`；`.github/workflows/docs.yml` 在文档相关文件变化时用同一命令构建一遍，合并前暴露这些问题。

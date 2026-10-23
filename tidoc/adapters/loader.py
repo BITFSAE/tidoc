@@ -373,7 +373,7 @@ def load_package(path, *, verify_templates=True) -> AdapterPackage:
         try:
             sums=json.loads(files['checksums.json'].decode('utf-8'))
             if not isinstance(sums,dict) or any(not isinstance(k,str) or not isinstance(v,str) or not re.fullmatch(r'[0-9a-f]{64}',v) for k,v in sums.items()): sums=None
-        except Exception: sums=None
+        except (ValueError, UnicodeError): sums=None
         expected={n:hashlib.sha256(b).hexdigest() for n,b in files.items() if n!='checksums.json'}
         if sums != expected: diagnostics.append(_diag('CHECKSUM_MISMATCH','checksums.json 与包资源摘要不一致。','checksums.json'))
     def arr(fn,key):return parsed.get(fn,{}).get(key,[])
@@ -429,7 +429,7 @@ def pack_package(source, out) -> Path:
             for n,b in sorted(files.items()):z.writestr(n,b)
         load_package(tmp)
         os.replace(tmp,target)
-    except Exception:
+    except BaseException:  # Never leave a partially written package.
         try:os.unlink(tmp)
         except OSError:pass
         raise

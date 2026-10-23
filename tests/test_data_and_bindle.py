@@ -1307,3 +1307,34 @@ def test_duplicate_member_names_are_still_reported_as_tampering(repos, tmp_path)
         zf.writestr("summary.json", b"{}")            # 与包内已有的成员重名
     preview = inspect_bindle(package, repos["entries"])
     assert any(str(name).startswith("duplicate:") for name in preview["tampered"])
+
+
+def test_bindle_interruption_rolls_back_database_and_extracted_files(repos, tmp_path, monkeypatch):
+    import pytest
+    from tidoc.services import bindle_import
+    profile = repos['profiles'].create('虚构报账人', '')
+    entry_id = repos['entries'].create(profile['id'])
+    material = tmp_path / 'material.txt'
+    material.write_text('fictional material')
+    repos['attachments'].add(entry_id, material, 'other')
+    package = export_bindle(repos['entries'], repos['attachments'], [entry_id],
+                            tmp_path / 'interrupt.tidoc', {profile['id']: profile})
+    root = DataRoot(tmp_path / 'interrupted')
+    db = Database(root.db_path)
+    entries = EntryRepo(db)
+    attachments = AttachmentRepo(db, root)
+    reached = []
+    def interrupt(*args, **kwargs):
+        reached.extend(root.attachments_dir.rglob('*.txt'))
+        raise KeyboardInterrupt('cancel test import')
+    monkeypatch.setattr(bindle_import, '_assign_batches', interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            import_bindle(entries, attachments, package, '')
+        assert reached, 'The interruption must happen after a material was extracted.'
+        assert entries.list() == []
+        assert db.conn.execute('SELECT COUNT(*) FROM profiles').fetchone()[0] == 0
+        assert not list(root.attachments_dir.rglob('*.txt'))
+        assert db.conn.in_transaction is False
+    finally:
+        db.close()

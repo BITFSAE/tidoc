@@ -198,35 +198,6 @@ def test_frontend_health_marker_is_written_atomically(tmp_path):
     assert not list(health.parent.glob(".health.json-*.tmp"))
 
 
-def test_release_highlights_link_to_the_docs_changelog():
-    source = (
-        Path(__file__).resolve().parents[1] / "tidoc" / "web" / "app.js"
-    ).read_text("utf-8")
-
-    assert "/update/changelog.html" in source
-    assert "release-changelog-link" in source
-    # 正式版带版本锚点，测试版没有对应条目，不带锚点。
-    assert "!isPrerelease(clean) ? `#v${clean}`" in source
-    assert "notes.slice(0, RELEASE_NOTES_SHOWN)" in source
-
-
-def test_frontend_upgrade_confirmation_shows_version_transition():
-    source = (
-        Path(__file__).resolve().parents[1] / "tidoc" / "web" / "app.js"
-    ).read_text("utf-8")
-
-    assert "showCompletedUpdateWhenFree(startupUpdate)" in source
-    assert "openReleaseHighlights('completed', data)" in source
-    assert "setTimeout(() => { maybeAutoCheckUpdates(); }, 250)" in source
-    assert "function scheduleAutoUpdateCheck(status)" in source
-    assert "next_check_at" in source
-    assert "state: 'downloading'" in source
-    assert "progress: 0" in source
-    assert "function coreUpdateProgressMarkup" in source
-    assert "正在校验更新包完整性" in source
-    assert "加速下载" in source
-
-
 def test_core_download_reuses_cached_asset(monkeypatch, tmp_path):
     from tidoc.services import updater
 

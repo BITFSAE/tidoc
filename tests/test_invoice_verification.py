@@ -93,7 +93,7 @@ def test_changed_pdf_candidates_only_returns_session_changes(tmp_path):
 def test_verification_status_auto_attaches_native_printed_pdf(
     api, tmp_path, monkeypatch
 ):
-    import tidoc.api as api_module
+    import tidoc.api_verification as api_module
     from tidoc.services import folder_import, invoice_verification
 
     profile = api.create_profile("张三", "李老师")["data"]
@@ -163,7 +163,7 @@ def test_verification_status_auto_attaches_native_printed_pdf(
 def test_verification_trash_failure_keeps_successful_attachment(
     api, tmp_path, monkeypatch
 ):
-    import tidoc.api as api_module
+    import tidoc.api_verification as api_module
     from tidoc.services import folder_import, invoice_verification
 
     profile = api.create_profile("张三", "李老师")["data"]

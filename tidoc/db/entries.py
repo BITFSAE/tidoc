@@ -25,7 +25,7 @@ VALUE_SOURCE_MANUAL = "manual"
 # These versions describe recognition rules, not the Tidoc release. Keep them
 # unchanged for ordinary app releases and bump only the affected value when its
 # local recognition logic or result contract changes.
-LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-10-22-2"
+LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-10-23-1"
 LOCAL_PAYMENT_RECOGNITION_VERSION = "payment-local-2026-09-06"
 PAYMENT_CHECK_PREFIX = "[付款截图识别]"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
@@ -531,6 +531,10 @@ class EntryRepo:
             entry["attachment_count"] = sum(by_type.values())
             entry["attachment_types"] = by_type
             entry["has_invoice"] = bool(by_type.get("invoice_pdf") or by_type.get("invoice_xml"))
+            entry["invoice_recognition_outdated"] = bool(
+                entry["has_invoice"]
+                and entry.get("recognition_version") != LOCAL_INVOICE_RECOGNITION_VERSION
+            )
             entry["has_payment"] = bool(by_type.get("payment_screenshot"))
             entry["has_physical"] = bool(by_type.get("physical_image"))
             entry["has_inspection"] = bool(by_type.get("inspection_pdf"))

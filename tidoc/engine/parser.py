@@ -545,6 +545,14 @@ def _extract_pdf_seller(lines: list[str], buyer_tax_id: str, buyer_name: str, co
     return ""
 
 
+def _normalize_item_tax_marker(line: str) -> str:
+    """Explicit exemption markers mean zero tax; a missing tax cell does not."""
+    return re.sub(
+        r"(?<!\S)(?:免税|不征税)(?:\s*(?:\*{3}|0(?:\.0+)?))?\s*$",
+        "0% 0.00", line,
+    )
+
+
 def _parse_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Decimal, int] | None:
     """从一行里抽出 (单位, 数量, 金额(不含税), 税额, 名称末尾位置)。
 
@@ -553,6 +561,7 @@ def _parse_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decimal, Dec
     名称、规格都可能是多段；下面用「税率% 税额」锚定行末，
     再向前倒推各列，对版面不齐的兼容性更好。
     """
+    line = _normalize_item_tax_marker(line)
     # 1) 完整版式：行首带星号分类，到行末固定 7 列尾巴
     m = re.search(
         r"(\*.+?)\s+(\S+)\s+(\S+)\s+(-?\d+(?:\.\d+)?)\s+"
@@ -651,7 +660,7 @@ def _parse_loose_amount_tax_line(line: str) -> tuple[str, Decimal | None, Decima
     """
     # A few issuers insert spaces around decimal points in the PDF text stream
     # (``23. 01`` / ``2. 99``), although the rendered invoice is normal.
-    compact = re.sub(r"(?<=\d)\s*\.\s*(?=\d)", ".", line)
+    compact = re.sub(r"(?<=\d)\s*\.\s*(?=\d)", ".", _normalize_item_tax_marker(line))
     compact = re.sub(r"\s+", " ", compact).strip()
 
     # Layout extraction can concatenate quantity, unit price, and amount into
@@ -826,6 +835,8 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
     allow_layout_suffix = False
     layout_blank_lines = 0
     awaiting_page_header = False
+    spec_columns: tuple[int, int] | None = None
+    item_heads: dict[int, tuple[str, tuple[int, int] | None, int]] = {}
 
     def layout_name_part(raw_line: str) -> str:
         stripped = raw_line.strip()
@@ -891,6 +902,9 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             ),
             total=money(amount + tax),
         )
+        item_heads[id(item)] = (
+            name, spec_columns, len(raw_line) - len(raw_line.lstrip())
+        )
         return item
 
     def is_item_boundary(line: str) -> bool:
@@ -903,6 +917,7 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             # invoice/buyer/seller fields from the previous product name.
             awaiting_page_header = last is not None
             allow_layout_suffix = False
+            spec_columns = None
             continue
         line = raw_line.strip()
         if not line:
@@ -912,6 +927,11 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
                     allow_layout_suffix = False
             continue
         layout_blank_lines = 0
+        if layout:
+            spec_header = re.search(r"规格\s*型号", raw_line)
+            unit_header = re.search(r"单\s*位", raw_line)
+            if spec_header and unit_header and spec_header.end() <= unit_header.start():
+                spec_columns = (spec_header.start(), unit_header.start())
         if awaiting_page_header:
             header = re.search(r"项目\s*名称", raw_line)
             if header and re.search(r"规格\s*型号", raw_line):
@@ -928,6 +948,9 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
         if is_item_boundary(line):
             allow_layout_suffix = False
             continue
+        if pending_name_parts and line.startswith("*"):
+            # An unreadable item must not consume the next item's numeric cells.
+            pending_name_parts = []
         if pending_name_parts:
             loose = _parse_loose_amount_tax_line(line)
             if loose:
@@ -960,10 +983,19 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             item_line,
         )
         if discount and last and clean_item_name(discount.group("name")) == last_base_name:
-            last.total = money(
-                last.total + d(discount.group("amount")) + d(discount.group("tax"))
-            )
-            allow_layout_suffix = False
+            if layout:
+                item = make_item(
+                    discount.group("name"), "", None,
+                    d(discount.group("amount")), d(discount.group("tax")),
+                )
+                items.append(item)
+                last = item
+                allow_layout_suffix = True
+            else:
+                last.total = money(
+                    last.total + d(discount.group("amount")) + d(discount.group("tax"))
+                )
+                allow_layout_suffix = False
             continue
         parsed = _parse_amount_tax_line(item_line)
         if parsed and (not parsed[0] or parsed[1] is None):
@@ -1026,9 +1058,9 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
             last.total = money(last.total + amount + tax)
             allow_layout_suffix = True
             continue
-        if not unit and last and base_name == last_base_name:
+        if not unit and last and base_name == last_base_name and not (layout and amount + tax < 0):
             last.total = money(last.total + amount + tax)
-            allow_layout_suffix = True
+            allow_layout_suffix = False
             continue
         item = make_item(raw_name, unit, quantity, amount, tax)
         items.append(item)
@@ -1036,6 +1068,37 @@ def _parse_pdf_items(lines: list[str], *, layout: bool = False) -> list[ParsedIt
         last_base_name = base_name
         allow_layout_suffix = True
 
+    if layout:
+        merged: list[ParsedItem] = []
+        for item in items:
+            if merged and item.total < 0 and not item.unit and item.quantity is None:
+                previous = merged[-1]
+                # Read all name continuations before matching a discount. A
+                # shared first line alone does not identify the same product.
+                if _normalize_name([previous.name]) == _normalize_name([item.name]):
+                    previous.total = money(previous.total + item.total)
+                    continue
+                head, columns, indent = item_heads[id(previous)]
+                discount_head = item_heads[id(item)][0]
+                # Some text layers fuse the model directly to the product name.
+                # Require both the specification-column position and the full
+                # wrapped discount name to corroborate removing that model.
+                if columns and head.startswith(discount_head) and previous.name.startswith(head):
+                    model = head[len(discount_head):]
+                    start = indent + len(discount_head)
+                    if (
+                        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9./*()+-]{0,31}", model)
+                        and columns[0] <= start < start + len(model) <= columns[1]
+                        and previous.name[len(head):] == item.name[len(discount_head):]
+                    ):
+                        previous.name = discount_head + previous.name[len(head):]
+                        previous.actual_name = clean_item_name(previous.name)
+                        previous.spec = model
+                        previous.total = money(previous.total + item.total)
+                        item_heads[id(previous)] = (discount_head, columns, indent)
+                        continue
+            merged.append(item)
+        return merged
     return items
 
 

@@ -112,6 +112,8 @@ const Api = (() => {
 
     parseFiles: (xml, pdf,scheme=null) => call('parse_files', xml, pdf,scheme),
     reparseEntries: (ids) => call('reparse_entries', ids || []),
+    invoiceRecognitionNotice: () => call('invoice_recognition_notice'),
+    dismissInvoiceRecognitionNotice: (version) => call('dismiss_invoice_recognition_notice', version),
     recognitionPreview: (ids) => call('recognition_preview', ids || []),
     rerecognizeMaterials: (ids, kinds) => call('rerecognize_materials', ids || [], kinds || []),
     createEntry: (args) => call('create_entry',

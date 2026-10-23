@@ -2,6 +2,57 @@
 from tests.test_selection_performance import run_selection
 
 
+def test_parser_update_notice_scopes_actions_and_persists_dismissal():
+    run_selection(r"""
+(async () => {
+  const saved = [], opened = [];
+  globalThis.Api = {dismissInvoiceRecognitionNotice: async version => {
+    saved.push(version); return {version, dismissed: true};
+  }};
+  batchReparse = async (...args) => opened.push(args);
+  State.entries = [{id: 'old', invoice_recognition_outdated: true}, {id: 'current'}];
+  State.selected = new Set(['current']);
+  State.invoiceRecognitionNotice = {version: 'v1', dismissed: false};
+  const node = document.querySelector('#invoiceRecognitionNotice');
+  renderInvoiceRecognitionNotice();
+  assert.equal(node.classList.contains('hidden'), false);
+  assert.ok(document.querySelector('#invoiceRecognitionNoticeText').textContent.includes('1 张'));
+  await document.querySelector('#invoiceRecognitionNoticeRun').onclick();
+  assert.deepEqual(opened, [[['old'], true]]);
+  assert.deepEqual([...State.selected], ['current']);
+  await document.querySelector('#invoiceRecognitionNoticeDismiss').onclick();
+  assert.deepEqual(saved, ['v1']);
+  assert.equal(node.classList.contains('hidden'), true);
+  renderInvoiceRecognitionNotice();
+  assert.equal(node.classList.contains('hidden'), true);
+  State.invoiceRecognitionNotice = {version: 'v2', dismissed: false};
+  renderInvoiceRecognitionNotice();
+  assert.equal(node.classList.contains('hidden'), false);
+  State.entries = [{id: 'current'}];
+  renderInvoiceRecognitionNotice();
+  assert.equal(node.classList.contains('hidden'), true);
+})().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
+def test_notice_dismissal_failure_remains_visible_and_retryable():
+    run_selection(r"""
+(async () => {
+  let errors = [];
+  globalThis.Api = {dismissInvoiceRecognitionNotice: async () => {throw new Error('写入失败');}};
+  toast = message => errors.push(message);
+  State.entries = [{id: 'old', invoice_recognition_outdated: true}];
+  State.invoiceRecognitionNotice = {version: 'v1', dismissed: false};
+  renderInvoiceRecognitionNotice();
+  const button = document.querySelector('#invoiceRecognitionNoticeDismiss');
+  await button.onclick();
+  assert.equal(button.disabled, false);
+  assert.equal(document.querySelector('#invoiceRecognitionNotice').classList.contains('hidden'), false);
+  assert.deepEqual(errors, ['写入失败']);
+})().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
 def test_theme_follows_system_and_persists_only_when_requested():
     run_selection(r"""
 document.documentElement.style = {};

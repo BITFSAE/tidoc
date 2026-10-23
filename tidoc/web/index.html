@@ -22,7 +22,7 @@
       document.documentElement.dataset.engine = /\b(Edg|Chrome)\//.test(navigator.userAgent) ? 'blink' : 'webkit';
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=0.1.41-beta.1" />
+  <link rel="stylesheet" href="styles.css?v=0.1.41" />
 </head>
 <body>
   <div id="app" class="app">
@@ -254,6 +254,12 @@
           </div>
         </div>
 
+        <div id="invoiceRecognitionNotice" class="recognition-notice hidden" role="status">
+          <span id="invoiceRecognitionNoticeText"></span>
+          <button type="button" class="btn small ghost" id="invoiceRecognitionNoticeRun">重新识别发票</button>
+          <button type="button" class="btn small ghost" id="invoiceRecognitionNoticeDismiss" title="本次识别方法不再提醒">关闭提醒</button>
+        </div>
+
         <div id="entryList" class="entry-list" data-density="comfortable" role="listbox" aria-label="报账条目" aria-multiselectable="true"></div>
 
         <div id="emptyState" class="empty-state" hidden>
@@ -269,12 +275,12 @@
   <div id="modalRoot"></div>
   <div id="toastRoot" class="toast-root" aria-live="polite"></div>
 
-  <script src="api.js?v=0.1.41-beta.1"></script>
-  <script src="select.js?v=0.1.41-beta.1"></script>
-  <script src="schema-form.js?v=0.1.41-beta.1"></script>
-  <script src="adapter-ui.js?v=0.1.41-beta.1"></script>
-  <script src="qr-ticket.js?v=0.1.41-beta.1"></script>
-  <script src="bindle-ui.js?v=0.1.41-beta.1"></script>
-  <script src="app.js?v=0.1.41-beta.1"></script>
+  <script src="api.js?v=0.1.41"></script>
+  <script src="select.js?v=0.1.41"></script>
+  <script src="schema-form.js?v=0.1.41"></script>
+  <script src="adapter-ui.js?v=0.1.41"></script>
+  <script src="qr-ticket.js?v=0.1.41"></script>
+  <script src="bindle-ui.js?v=0.1.41"></script>
+  <script src="app.js?v=0.1.41"></script>
 </body>
 </html>

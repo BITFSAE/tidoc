@@ -37,6 +37,7 @@ const State = {
   coreUpdateRuntime: null,
   showCreatedAt: false,
   qrTipDismissed: false, // 「可以拖入取票二维码」的说明是否已被关掉
+  invoiceRecognitionNotice: null,
   ocrStatus: null,      // 阿里云 OCR：组件安装 + 密钥配置状态（本地检查，不联网）
 };
 
@@ -1059,15 +1060,16 @@ function currentFilters() {
 let entryRefreshSequence = 0;
 async function refreshEntries() {
   const sequence = ++entryRefreshSequence;
-  let currentBatch = null, entries = [];
+  let currentBatch = null, entries = [], recognitionNotice = null;
   try {
     await refreshTitleOptions();
     if (sequence !== entryRefreshSequence) return;
     // 抬头选项可能重置筛选里的抬头，之后再按最终筛选并行读取批次和条目。
     const batchId = actualBatchId();
-    [currentBatch, entries] = await Promise.all([
+    [currentBatch, entries, recognitionNotice] = await Promise.all([
       batchId ? Api.getBatch(batchId) : null,
       Api.listEntries(currentFilters()),
+      Api.invoiceRecognitionNotice(),
     ]);
     if (State.quickView === 'incomplete') {
       entries = entries.filter((e) => (e.completeness?.status || e.status) !== 'complete');
@@ -1081,8 +1083,32 @@ async function refreshEntries() {
   if (sequence !== entryRefreshSequence) return;
   State.currentBatch = currentBatch;
   State.entries = entries;
+  State.invoiceRecognitionNotice = recognitionNotice;
+  renderInvoiceRecognitionNotice();
   renderEntries();
   syncFilterControlStates();
+}
+
+function renderInvoiceRecognitionNotice() {
+  const node = $('#invoiceRecognitionNotice');
+  const notice = State.invoiceRecognitionNotice;
+  const ids = State.entries.filter((entry) => entry.invoice_recognition_outdated).map((entry) => entry.id);
+  node.classList.toggle('hidden', !ids.length || !notice || notice.dismissed);
+  if (!ids.length || !notice || notice.dismissed) return;
+  $('#invoiceRecognitionNoticeText').textContent = `发票识别方法已更新，当前列表有 ${ids.length} 张可重新识别。本机处理，无需再次云识别。`;
+  $('#invoiceRecognitionNoticeRun').onclick = () => batchReparse(ids, true);
+  const dismiss = $('#invoiceRecognitionNoticeDismiss');
+  dismiss.onclick = async () => {
+    dismiss.disabled = true;
+    try {
+      const saved = await Api.dismissInvoiceRecognitionNotice(notice.version);
+      if (State.invoiceRecognitionNotice?.version === saved.version) {
+        State.invoiceRecognitionNotice = saved;
+        renderInvoiceRecognitionNotice();
+      }
+    } catch (e) { toast(e.message, 'err'); }
+    finally { dismiss.disabled = false; }
+  };
 }
 
 // ------------------------------------------------------------------ 渲染列表
@@ -6323,8 +6349,9 @@ async function batchDelete() {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-async function batchReparse() {
-  const ids = [...State.selected];
+async function batchReparse(entryIds, invoiceOnly = false) {
+  const explicitIds = Array.isArray(entryIds);
+  const ids = explicitIds ? [...entryIds] : [...State.selected];
   if (!ids.length) return;
   let preview;
   try { preview = await Api.recognitionPreview(ids); }
@@ -6339,10 +6366,10 @@ async function batchReparse() {
         <input type="checkbox" id="recognizeInvoice" ${invoice.pending ? 'checked' : ''} ${invoice.total ? '' : 'disabled'}/>
         <span><b>发票</b><small>${invoice.pending || 0} 条待识别${invoice.current ? `，${invoice.current} 条已处理` : ''}</small></span>
       </label>
-      <label class="recognition-choice${payment.total && payment.enabled ? '' : ' disabled'}">
+      ${invoiceOnly ? '' : `<label class="recognition-choice${payment.total && payment.enabled ? '' : ' disabled'}">
         <input type="checkbox" id="recognizePayment" ${payment.pending && payment.enabled ? 'checked' : ''} ${payment.total && payment.enabled ? '' : 'disabled'}/>
         <span><b>付款截图</b><small>${payment.enabled ? `${payment.pending || 0} 张待识别${payment.current ? `，${payment.current} 张已处理` : ''}` : '付款截图 OCR 已关闭，可在设置中开启'}</small></span>
-      </label>
+      </label>`}
     </div>`;
 
   const runBtn = mkBtn('开始识别', 'primary', async () => {
@@ -6382,7 +6409,7 @@ async function batchReparse() {
         progress.update(`已完成 ${index + 1}/${ids.length} 条 · ${kindLabel}`);
       }
       m.close();
-      State.selected.clear();
+      if (!explicitIds) State.selected.clear();
       await refreshEntries();
       const parts = [];
       if (result.invoice) {
@@ -6406,7 +6433,7 @@ async function batchReparse() {
   });
   const m = modal({
     title: '重新识别',
-    subhead: `已选择 ${ids.length} 条，可分别处理发票和付款截图`,
+    subhead: invoiceOnly ? `当前列表中 ${ids.length} 张发票可更新，仅处理发票` : `已选择 ${ids.length} 条，可分别处理发票和付款截图`,
     body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), runBtn],
   });

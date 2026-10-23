@@ -1191,6 +1191,24 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
         return amount, True
 
     @_guard
+    def invoice_recognition_notice(self):
+        """Return the local parser notice state without parsing or changing invoices."""
+        from .db.entries import LOCAL_INVOICE_RECOGNITION_VERSION
+        return {
+            "version": LOCAL_INVOICE_RECOGNITION_VERSION,
+            "dismissed": self._preference_value("tidoc.invoiceRecognitionNoticeDismissed")
+            == LOCAL_INVOICE_RECOGNITION_VERSION,
+        }
+
+    @_guard
+    def dismiss_invoice_recognition_notice(self, version):
+        from .db.entries import LOCAL_INVOICE_RECOGNITION_VERSION
+        if version != LOCAL_INVOICE_RECOGNITION_VERSION:
+            raise ValueError("识别方法已变化，请刷新列表后再操作。")
+        self._set_preference_value("tidoc.invoiceRecognitionNoticeDismissed", version)
+        return {"version": version, "dismissed": True}
+
+    @_guard
     def recognition_preview(self, entry_ids):
         """预览本地重新识别任务；已由当前规则处理的材料会自动跳过。"""
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT

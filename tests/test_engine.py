@@ -374,6 +374,141 @@ def test_layout_item_name_continuation_joins_name_column_and_merges_discount():
     assert items[0].total == Decimal("15.47")
 
 
+def test_pdf_keeps_nontaxable_item_between_taxable_rows(monkeypatch, tmp_path):
+    layout = "\n".join([
+        "*运输服务*测试客票款     个 1412.8440366972477 412.84 9% 37.16",
+        "*代收民航发展基金*测试民航     个 1 50 50.00 不征税",
+        "发展基金",
+        "*运输服务*测试燃油附加     个 136.697247706422 36.70 9% 3.30",
+        "费",
+        "价税合计（小写）¥540.00",
+    ])
+    monkeypatch.setattr(parser_module, "_pdf_text", lambda _: layout)
+    monkeypatch.setattr(parser_module, "_pdf_layout_text", lambda _: layout)
+
+    invoice = parse_pdf(tmp_path / "nontaxable.pdf")
+
+    assert [i.actual_name for i in invoice.items] == [
+        "测试客票款", "测试民航发展基金", "测试燃油附加费",
+    ]
+    assert [i.quantity for i in invoice.items] == [Decimal("1")] * 3
+    assert [i.total for i in invoice.items] == [Decimal("450"), Decimal("50"), Decimal("40")]
+    assert sum(i.total for i in invoice.items) == invoice.total
+
+
+@pytest.mark.parametrize("marker", ["免税 ***", "免税", "免税 0.00", "不征税 ***"])
+def test_pdf_exempt_item_interleaved_with_headers(monkeypatch, tmp_path, marker):
+    layout = (
+        "*印刷品*测试明信片项目名称 规格型号 单 位件 数 量1 单 价405 "
+        f"405.00金 额税率/征收率{marker.split()[0]} 税 额{' '.join(marker.split()[1:])}\n"
+        "价税合计（小写）¥405.00"
+    )
+    # The normal text stream can be in an unusable cell order. Layout must
+    # recover the complete item, including the explicit zero-tax marker.
+    monkeypatch.setattr(parser_module, "_pdf_text", lambda _: "价税合计（小写）¥405.00")
+    monkeypatch.setattr(parser_module, "_pdf_layout_text", lambda _: layout)
+
+    invoice = parse_pdf(tmp_path / "exempt.pdf")
+
+    assert [(i.actual_name, i.unit, i.quantity, i.total) for i in invoice.items] == [
+        ("测试明信片", "件", Decimal("1"), Decimal("405")),
+    ]
+    assert invoice.items[0].total == invoice.total
+
+
+@pytest.mark.parametrize("tail", ["", "13%", "免税 1.00", "不征税 2.00"])
+def test_missing_or_conflicting_tax_cell_is_not_assumed_zero(tail):
+    assert parser_module._parse_loose_amount_tax_line(
+        f"*印刷品*测试明信片 件 1 405 405.00 {tail}"
+    ) is None
+
+
+def test_unreadable_item_does_not_swallow_next_item():
+    items = _parse_pdf_items([
+        "*日用品*未识别商品    件 1 50 50.00 读不到税额",
+        "*电子元件*测试芯片    个 2 1.00 2.00 13% 0.26",
+    ], layout=True)
+
+    assert [(i.actual_name, i.quantity, i.total) for i in items] == [
+        ("测试芯片", Decimal("2"), Decimal("2.26")),
+    ]
+
+
+def _fused_model_discount_lines(discount_name="测试布基胶带", suffix="可手撕影视胶带 25"):
+    name = "*橡胶制品*测试布基胶带"
+    # Model and product text share one token, but the printed table supplies
+    # an independent specification-column boundary.
+    return [
+        "项目名称".ljust(len(name)) + "规格型号".ljust(10) + "单位 数量 单价 金额 税率 税额",
+        f"{name}4687           个 1 23.72 23.72 13% 3.08",
+        "可手撕影视胶带 25",
+        "",
+        "",
+        f"*橡胶制品*{discount_name}                  -1.56 13% -0.20",
+        suffix,
+    ]
+
+
+def test_layout_merges_wrapped_discount_with_model_fused_into_product(monkeypatch, tmp_path):
+    layout = "\n".join(_fused_model_discount_lines() + ["价税合计（小写）¥25.04"])
+    monkeypatch.setattr(parser_module, "_pdf_text", lambda _: "价税合计（小写）¥25.04")
+    monkeypatch.setattr(parser_module, "_pdf_layout_text", lambda _: layout)
+
+    invoice = parse_pdf(tmp_path / "discount.pdf")
+
+    assert len(invoice.items) == 1
+    item = invoice.items[0]
+    assert item.actual_name == "测试布基胶带可手撕影视胶带 25"
+    assert item.spec == "4687"
+    assert item.unit == "个"
+    assert item.quantity == Decimal("1")
+    assert item.total == invoice.total == Decimal("25.04")
+
+
+@pytest.mark.parametrize("name,suffix", [
+    ("另一款胶带", "可手撕影视胶带 25"),
+    ("测试布基胶带", "另一种续行"),
+])
+def test_layout_does_not_merge_different_discount_product(name, suffix):
+    items = _parse_pdf_items(_fused_model_discount_lines(name, suffix), layout=True)
+
+    assert len(items) == 2
+    assert [i.total for i in items] == [Decimal("26.80"), Decimal("-1.76")]
+
+
+def test_layout_requires_specification_column_to_remove_fused_model():
+    items = _parse_pdf_items(_fused_model_discount_lines()[1:], layout=True)
+
+    assert len(items) == 2
+
+
+def test_layout_discount_does_not_repeat_multi_line_product_name():
+    items = _parse_pdf_items([
+        "*日用杂品*测试长品名        个 1 10.00 10.00 13% 1.30",
+        "第二行",
+        "第三行",
+        "*日用杂品*测试长品名        -1.00 13% -0.13",
+        "第二行",
+        "第三行",
+    ], layout=True)
+
+    assert len(items) == 1
+    assert items[0].actual_name == "测试长品名第二行第三行"
+    assert items[0].total == Decimal("10.17")
+
+
+def test_layout_discount_requires_matching_continuations():
+    items = _parse_pdf_items([
+        "*日用杂品*测试长品名        个 1 10.00 10.00 13% 1.30",
+        "红色",
+        "*日用杂品*测试长品名        -1.00 13% -0.13",
+        "蓝色",
+    ], layout=True)
+
+    assert [i.actual_name for i in items] == ["测试长品名红色", "测试长品名蓝色"]
+    assert [i.total for i in items] == [Decimal("11.30"), Decimal("-1.13")]
+
+
 def test_layout_joined_numbers_support_multi_digit_quantity_and_amount():
     items = _parse_pdf_items(
         ["*电子元件*批量零件 个 1215.50186.00 13% 24.18"],

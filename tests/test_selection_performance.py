@@ -133,7 +133,8 @@ assert.deepEqual([...State.selected].sort(), ['entry-0', 'entry-5']);
 def test_a_slower_earlier_list_refresh_does_not_overwrite_the_latest_one():
     run_selection(r"""
 const pending = [];
-globalThis.Api = { listEntries: () => new Promise((resolve) => pending.push(resolve)), getBatch: async () => null };
+globalThis.Api = { listEntries: () => new Promise((resolve) => pending.push(resolve)), getBatch: async () => null,
+  invoiceRecognitionNotice: async () => ({version: 'test', dismissed: false}) };
 refreshTitleOptions = async () => {};
 currentFilters = () => ({});
 let renders = 0;

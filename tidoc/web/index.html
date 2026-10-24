@@ -22,7 +22,7 @@
       document.documentElement.dataset.engine = /\b(Edg|Chrome)\//.test(navigator.userAgent) ? 'blink' : 'webkit';
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=0.1.42-beta.1" />
+  <link rel="stylesheet" href="styles.css?v=0.1.42-beta.2" />
 </head>
 <body>
   <div id="app" class="app">
@@ -234,7 +234,7 @@
             <button class="btn small ghost hidden" id="batchReparseBtn" title="按当前规则重新识别所选条目的发票或付款截图">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M19 7v5h-5M5 17v-5h5M7.2 9A6 6 0 0 1 17.8 7M16.8 15A6 6 0 0 1 6.2 17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>重新识别</span>
             </button>
-            <button class="btn small ghost hidden" id="batchOcrBtn" data-ocr-ui title="用阿里云 OCR 识别所选发票（按量计费）">
+            <button class="btn small ghost hidden" id="batchOcrBtn" data-ocr-ui title="识别所选发票或付款截图（按量计费）">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M6.5 18a4.5 4.5 0 0 1-.4-8.98A6 6 0 0 1 17.7 8.1 4.5 4.5 0 0 1 17.5 18h-11z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8 13.5h8M8.5 13.5l1.5-1.8M8.5 13.5l1.5 1.8M15.5 13.5 14 11.7M15.5 13.5 14 15.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>云识别</span>
             </button>
             <span class="selection-divider"></span>
@@ -275,12 +275,13 @@
   <div id="modalRoot"></div>
   <div id="toastRoot" class="toast-root" aria-live="polite"></div>
 
-  <script src="api.js?v=0.1.42-beta.1"></script>
-  <script src="select.js?v=0.1.42-beta.1"></script>
-  <script src="schema-form.js?v=0.1.42-beta.1"></script>
-  <script src="adapter-ui.js?v=0.1.42-beta.1"></script>
-  <script src="qr-ticket.js?v=0.1.42-beta.1"></script>
-  <script src="bindle-ui.js?v=0.1.42-beta.1"></script>
-  <script src="app.js?v=0.1.42-beta.1"></script>
+  <script src="api.js?v=0.1.42-beta.2"></script>
+  <script src="select.js?v=0.1.42-beta.2"></script>
+  <script src="schema-form.js?v=0.1.42-beta.2"></script>
+  <script src="adapter-ui.js?v=0.1.42-beta.2"></script>
+  <script src="qr-ticket.js?v=0.1.42-beta.2"></script>
+  <script src="bindle-ui.js?v=0.1.42-beta.2"></script>
+  <script src="payment-ai-ui.js?v=0.1.42-beta.2"></script>
+  <script src="app.js?v=0.1.42-beta.2"></script>
 </body>
 </html>

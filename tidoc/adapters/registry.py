@@ -49,7 +49,7 @@ SETTINGS = {
     'print.sort_by': _setting('select', 'selection', enum=['invoice_date', 'invoice_no', 'claimant', 'seller', 'created_at', 'selection'], scopes=('scheme', 'batch', 'export')),
     'assist.cloud_ocr_visible': _setting('boolean', True),
     'assist.verification_visible': _setting('boolean', True),
-    # 本地识别效果有限、仅供参考：默认手动填写实付金额，需要时再在方案设置里改成本地识别。
+    # 旧方案兼容字段。付款截图 AI 由本机设置控制，不读取此项。
     'assist.payment_ocr': _setting('select', 'manual', enum=['local', 'cloud', 'manual']),
     'transfer.include_notes': _setting('boolean', True),
     'transfer.include_tags': _setting('boolean', True),

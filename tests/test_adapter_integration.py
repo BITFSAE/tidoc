@@ -81,36 +81,30 @@ def test_default_switch_does_not_rescan_existing_entries(tmp_path,monkeypatch):
     assert api.entries.get(existing)['scheme_revision_id']==old['scheme_revision_id']
 
 
-def test_payment_recognition_preview_and_execution_use_each_pinned_revision(tmp_path,monkeypatch):
-    from tidoc.services import folder_import
-    api=setup_api(tmp_path/'data')
-    person=api.create_profile('付款识别人员','')['data']
-    # 付款识别默认是手动填写；这里明确开启本地识别，才能和之后改回手动的修订对比。
-    scheme=api.adapters.get_scheme()
-    api.adapters.update_scheme_settings(scheme['id'],scheme['current_revision_id'],
-                                       {'assist.payment_ocr':'local'})
-    enabled=api.entries.create(person['id'],parsed=ParsedInvoice(total=Decimal('10.00')))
-    scheme=api.adapters.get_scheme()
-    api.adapters.update_scheme_settings(scheme['id'],scheme['current_revision_id'],
-                                       {'assist.payment_ocr':'manual'})
-    disabled=api.entries.create(person['id'],parsed=ParsedInvoice(total=Decimal('10.00')))
-    for entry_id in (enabled,disabled):
-        source=tmp_path/(entry_id+'.png');source.write_bytes(b'fixture payment')
-        api.attachments.add(entry_id,source,'payment_screenshot')
-    recognized=[]
+def test_payment_ai_opt_in_is_global_not_inherited_from_scheme(tmp_path, monkeypatch):
+    from tests.conftest import enable_payment_ai, payment_result
+    api = setup_api(tmp_path/'data')
+    person = api.create_profile('测试人员', '')['data']
+    scheme = api.adapters.get_scheme()
+    api.adapters.update_scheme_settings(scheme['id'], scheme['current_revision_id'], {'assist.payment_ocr': 'local'})
+    old = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('10.00')))
+    assert not api._payment_ai_enabled()
+    enable_payment_ai(api)
+    scheme = api.adapters.get_scheme()
+    api.adapters.update_scheme_settings(scheme['id'], scheme['current_revision_id'], {'assist.payment_ocr': 'manual'})
+    new = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('10.00')))
+    calls = []
     def recognize(path):
-        recognized.append(str(path))
-        return '10.00'
-    monkeypatch.setattr(folder_import,'extract_payment_image_amount',recognize)
-    assert api.recognition_preview([])['data']['payment']['enabled'] is False
-    assert api.recognition_preview(['missing',disabled,disabled])['data']['payment']['enabled'] is False
-    assert api.recognition_preview([enabled,disabled])['data']['payment']['enabled'] is True
-    result=api.rerecognize_materials([enabled,disabled],['payment'])
-    assert result['ok'],result
-    assert result['data']['payment']['processed']==1
-    assert len(recognized)==1
-    assert enabled in recognized[0]
-    assert api.attachments.list(disabled)[0]['recognition_version']==''
+        calls.append(path)
+        return payment_result('10.00')
+    monkeypatch.setattr(api, '_payment_ai_cached', recognize)
+    for eid in (old, new):
+        image = tmp_path/(eid+'.png'); image.write_bytes(b'fixture')
+        api.add_attachment(eid, str(image), 'payment_screenshot')
+    assert len(calls) == 2
+    assert api.recognition_preview([old, new])['data']['payment']['pending'] == 0
+    assert api.save_payment_ai_settings({'enabled': False})['ok']
+    assert not api.recognition_preview([old, new])['data']['payment']['enabled']
     api.db.close()
 
 
@@ -243,7 +237,7 @@ def test_payment_recognition_defaults_to_manual(tmp_path):
     api=setup_api(tmp_path/'data')
     for scheme in api.adapters.list_schemes():
         assert scheme['definition']['effective_settings']['assist.payment_ocr']=='manual'
-    assert api.app_preference('tidoc.paymentScreenshotOcr')['data']=='0'
+    assert api._payment_ai_enabled() is False
     api.db.close()
 
 

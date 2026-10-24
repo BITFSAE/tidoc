@@ -2288,3 +2288,19 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 }
 
 .settings-row[hidden], .settings-row-actions > button[hidden] { display: none; }
+
+.payment-ai-settings [hidden] { display: none !important; }
+.payment-ai-settings small { color: var(--ink-soft); font-weight: normal; }
+.payment-ai-settings .settings-block-title small { margin-left: 4px; font-size: 11px; }
+.payment-ai-settings .link-btn { margin-left: 4px; }
+.payment-ai-key { flex-wrap: wrap; }
+.payment-ai-key input { width: 180px; min-width: 120px; max-width: 100%; }
+.payment-ai-options { padding: 12px 0 4px; }
+.payment-ai-options > .form-row { margin-bottom: 10px; }
+.payment-ai-options input[type="number"] { max-width: 130px; }
+.payment-ai-options details > summary { cursor: pointer; margin-bottom: 10px; }
+.payment-ai-cost, .payment-ai-options .hint { background: none; border: 0; padding: 6px 0 0; }
+.payment-ai-cost { margin-top: 8px; font-variant-numeric: tabular-nums; }
+.task-meter { width: 100%; height: 3px; accent-color: var(--primary); }
+.toast.working.has-meter { flex-wrap: wrap; max-width: min(720px, calc(100vw - 32px)); }
+.attachment-ai-hint { display: block; margin-top: 4px; font-size: 12px; color: var(--ink-soft); }

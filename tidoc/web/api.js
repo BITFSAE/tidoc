@@ -91,8 +91,13 @@ const Api = (() => {
     getExportProgress: (id) => call('get_export_progress',id),
     regenerateExport: (id) => call('regenerate_export',id),
     deleteExportJob: (id,files=false) => call('delete_export_job',id,files),
-    reclassifyAttachment: (id,role) => call('reclassify_attachment',id,role),
+    reclassifyAttachment: (id,role,paymentAiJobId=null) => call('reclassify_attachment',id,role,'',paymentAiJobId),
 
+    paymentAiSettings: () => call('payment_ai_settings'),
+    savePaymentAiSettings: (values, key=null, clear=false) => call('save_payment_ai_settings', values, key, clear),
+    startPaymentAi: (paths=null, ids=null) => call('start_payment_ai', paths, ids),
+    paymentAiProgress: (id) => call('payment_ai_progress', id),
+    cancelPaymentAi: (id) => call('cancel_payment_ai', id),
     listProfiles: () => call('list_profiles'),
     createProfile: (name, reviewer, isDefault, opt) => call('create_profile', name, reviewer, isDefault, opt || {}),
     updateProfile: (id, fields) => call('update_profile', id, fields || {}),
@@ -119,7 +124,7 @@ const Api = (() => {
     createEntry: (args) => call('create_entry',
       args.profileId, args.title || '', args.xmlPath || null, args.pdfPath || null,
       args.paymentPaths || [], args.inspectionPath || null, args.status || 'draft',
-      args.physicalPaths || [],args.schemeId||null,args.batchId||null),
+      args.physicalPaths || [],args.schemeId||null,args.batchId||null,args.paymentAiJobId||null),
 
     listEntries: (filters) => call('list_entries', filters || {}),
     listTitles: () => call('list_titles'),

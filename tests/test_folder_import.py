@@ -232,29 +232,6 @@ def test_extract_invoice_no_accepts_ocr_spaced_digits(tmp_path):
     assert extract_pdf_invoice_no(pdf) == "26117000000609873879"
 
 
-def test_extract_payment_amount_from_ocr_text():
-    from tidoc.services.folder_import import _payment_amount_from_text
-
-    assert _payment_amount_from_text("全部账单\n-128.62\n支付成功") == "128.62"
-    assert _payment_amount_from_text("交易详情\n- ¥816.84\n余额¥4,640.69") == "816.84"
-    assert _payment_amount_from_text("深圳市立创电子商务有限公司\n- ￥45.74") == "45.74"
-    assert _payment_amount_from_text("全 部 账 单 先 用 后 付 一 128 · 62 支 付 成 功") == "128.62"
-    assert _payment_amount_from_text("账 单 管 理 一 83 ． 1 0 交 易 成 功") == "83.10"
-    assert _payment_amount_from_text(
-        "Ik**8\n-34.20\n支付成功\n光伏熔断器 ZTPV-25 熔芯R015"
-    ) == "34.20"
-    assert _payment_amount_from_text(
-        "Ik**8-34.20支付成功光伏熔断器ZTPV-25"
-    ) == "34.20"
-    assert _payment_amount_from_text(
-        "商品型号 ZTPV -25\n-34.20\n支付成功"
-    ) == "34.20"
-    assert _payment_amount_from_text(
-        "交易详情\nK-5204K导热硅胶\n卡夫**店\n-12.70\n交易成功\n"
-        "招商银行储蓄卡（0097）"
-    ) == "12.70"
-
-
 def test_material_binding_suggestion_requires_unique_match():
     from tidoc.services.folder_import import suggest_material_bindings
 
@@ -285,38 +262,11 @@ def test_payment_binding_has_no_false_warning_when_ocr_is_disabled():
     planned = suggest_material_bindings(
         [{"path": "pay.jpg", "type": "payment_screenshot", "paid_amount": ""}],
         [{"id": "a", "total": "32.29"}],
-        payment_ocr_enabled=False,
+        payment_ai_enabled=False,
     )
 
     assert planned[0]["suggested_entry_id"] == ""
     assert planned[0]["binding_reason"] == ""
-
-
-def test_windows_payment_ocr_runs_powershell_hidden(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-    from tidoc.services import folder_import
-
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        script_path = cmd[cmd.index("-File") + 1]
-        calls.append((cmd, kwargs, open(script_path, encoding="utf-8").read()))
-        return SimpleNamespace(stdout="-12.34", stderr="")
-
-    image = tmp_path / "付款截图.png"
-    image.write_bytes(b"img")
-    monkeypatch.setattr(folder_import.sys, "platform", "win32")
-    monkeypatch.setattr(folder_import.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
-    monkeypatch.setattr(folder_import.subprocess, "run", fake_run)
-
-    assert folder_import.extract_payment_image_amount(image) == "12.34"
-    cmd, kwargs, script = calls[0]
-    assert cmd[0] == "powershell.exe"
-    assert "-WindowStyle" in cmd
-    assert "Hidden" in cmd
-    assert kwargs["creationflags"] == 0x08000000
-    assert "Prepare-PaymentImage" in script
-    assert "$maxDimension = 2400.0" in script
 
 
 def test_windows_tax_verification_ocr_runs_powershell_hidden(monkeypatch, tmp_path):

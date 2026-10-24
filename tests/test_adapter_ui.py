@@ -125,11 +125,12 @@ const sandbox={console};vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(process.argv[1],'utf8')+';this.AdapterUI=AdapterUI;',sandbox);
 const A=sandbox.AdapterUI,cases=JSON.parse(process.argv[2]),out={};
 for(const [name,def] of Object.entries(cases))out[name]={uses:A.usesPayee(def),modes:[...A.payeeModes(def)].sort(),
-  payeeKey:A.settingApplies('print.payee_mode',def),pdfKey:A.settingApplies('print.numbering',def),titleKey:A.settingApplies('entry.default_title_id',def)};
+  legacyPaymentKey:A.settingApplies('assist.payment_ocr',def),payeeKey:A.settingApplies('print.payee_mode',def),pdfKey:A.settingApplies('print.numbering',def),titleKey:A.settingApplies('entry.default_title_id',def)};
 console.log(JSON.stringify(out));
 """
     result=subprocess.run([node,'-e',script,str(WEB/'adapter-ui.js'),json.dumps(cases)],capture_output=True,text=True,encoding='utf-8',check=True)
     found=json.loads(result.stdout)
+    assert all(not row['legacyPaymentKey'] for row in found.values())
     # BITFSAE 默认是统一收款：要收款对象，但不出现「分别收款」。
     assert found['bitfsae']['uses'] and found['bitfsae']['modes']==['single'] and found['bitfsae']['payeeKey']
     assert found['bitfsae']['pdfKey'] and found['bitfsae']['titleKey']

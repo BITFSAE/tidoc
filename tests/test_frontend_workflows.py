@@ -99,7 +99,7 @@ assert.equal(f.active_only, undefined);
 def test_payment_amount_mismatch_is_confirmed_and_manual_amount_is_preserved():
     run_selection(r"""
 (async () => {
-  State.paymentOcrEnabled = true;
+  State.paymentAiEnabled = true;
   const writes = [], prompts = [];
   const entry = {total: '100.00', fields: {paid_amount: {current: '100.00'}}};
   globalThis.Api = {getEntry: async () => entry,
@@ -152,4 +152,26 @@ State.titleProfiles = [{name: '示例大学'}];
 assert.equal(entryTitleTooltip({}), '抬头：未填写');
 assert.equal(entryTitleTooltip({title: '示例大学'}), '抬头：示例大学');
 assert.equal(entryTitleTooltip({title: '其他单位'}), '抬头：其他单位（方案里没有这个抬头）');
+""")
+
+
+def test_manual_amount_equal_to_invoice_and_refunds_still_require_deliberate_use():
+    run_selection(r"""
+(async () => {
+  State.paymentAiEnabled = true;
+  const writes = [], prompts = [];
+  const entry = {total:'27.00', fields:{paid_amount:{current:'27.00', value_source:'manual'}}};
+  globalThis.Api = {getEntry:async () => entry, setRecognizedPaidAmount:async (...args) => writes.push(args)};
+  askUseRecognizedPaymentAmount = async (...args) => {prompts.push(args); return 'keep';};
+  await settlePaymentAmountAfterAdd('e', [{paid_amount:'27.00'}]);
+  assert.equal(writes.length, 0);
+  assert.equal(prompts.length, 0);
+  entry.fields.paid_amount.value_source = '';
+  await settlePaymentAmountAfterAdd('e', [{paid_amount:'27.00',payment_ai:{needs_review:true,reason:'有退款，核对净支出'}}]);
+  assert.equal(writes.length, 0);
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0][4], '有退款，核对净支出');
+  assert.equal(moneyText('0.00'), '0.00');
+  assert.equal(moneyText(''), '');
+})().catch(e => {console.error(e); process.exitCode = 1;});
 """)

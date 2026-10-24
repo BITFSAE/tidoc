@@ -1,5 +1,7 @@
 """数据层、修改追踪、绑定包导出/导入/篡改检测的测试。"""
 
+from tests.conftest import payment_result, enable_payment_ai
+import time
 import os
 import zipfile
 import base64
@@ -491,59 +493,59 @@ def test_payment_ocr_is_off_by_default(api, tmp_path, monkeypatch):
     from tidoc.services import folder_import
 
     entry = _api_entry_with_total(api)
-    assert api.app_preference("tidoc.paymentScreenshotOcr")["data"] == "0"
+    assert api._payment_ai_enabled() is False
     payment = tmp_path / "付款截图.jpg"
     payment.write_bytes(b"fake image")
 
     def unexpected_ocr(path):
         raise AssertionError(f"付款截图识别默认应关闭：{path}")
 
-    monkeypatch.setattr(folder_import, "extract_payment_image_amount", unexpected_ocr)
+    monkeypatch.setattr(api, "_payment_ai_cached", unexpected_ocr)
     res = api.add_attachment(entry["id"], str(payment), "payment_screenshot")["data"]
 
-    assert "payment_ocr" not in res
+    assert "payment_ai" not in res
     updated = api.get_entry(entry["id"])["data"]
     assert updated["fields"]["paid_amount"]["current"] == "30.00"
-    assert updated["fields"]["paid_amount"]["value_source"] != "payment_ocr"
+    assert updated["fields"]["paid_amount"]["value_source"] != "payment_ai"
 
 
 def test_api_applies_payment_ocr_amount(api, tmp_path, monkeypatch):
     from tidoc.services import folder_import
 
-    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭，这里验证开启后的行为
+    enable_payment_ai(api)
     e = _api_entry_with_total(api, "30.00")
     assert e["fields"]["paid_amount"]["current"] == "30.00"
     payment = tmp_path / "付款截图.jpg"
     payment.write_bytes(b"fake image")
 
-    monkeypatch.setattr(folder_import, "extract_payment_image_amount", lambda path: "27.00")
+    monkeypatch.setattr(api, "_payment_ai_cached", lambda path: payment_result("27.00"))
     res = api.add_attachment(e["id"], str(payment), "payment_screenshot")["data"]
 
-    assert res["payment_ocr"] == {"paid_amount": "27.00", "applied": True}
+    assert res["payment_ai"] == {"paid_amount": "27.00", "applied": True, "needs_review": False}
     updated = api.get_entry(e["id"])["data"]
     assert updated["fields"]["paid_amount"]["current"] == "27.00"
     assert updated["fields"]["paid_amount"]["modified"] is False
-    assert updated["fields"]["paid_amount"]["value_source"] == "payment_ocr"
+    assert updated["fields"]["paid_amount"]["value_source"] == "payment_ai"
 
 
 def test_api_can_recognize_payment_ocr_without_applying(api, tmp_path, monkeypatch):
     from tidoc.services import folder_import
 
-    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭，这里验证开启后的行为
+    enable_payment_ai(api)
     e = _api_entry_with_total(api, "30.00")
     before = e["fields"]["paid_amount"]["current"]
     payment = tmp_path / "付款截图.jpg"
     payment.write_bytes(b"fake image")
 
-    monkeypatch.setattr(folder_import, "extract_payment_image_amount", lambda path: "27.00")
+    monkeypatch.setattr(api, "_payment_ai_cached", lambda path: payment_result("27.00"))
     res = api.add_attachment(
         e["id"],
         str(payment),
         "payment_screenshot",
-        options={"apply_payment_ocr": False},
+        options={"apply_payment_ai": False},
     )["data"]
 
-    assert res["payment_ocr"] == {"paid_amount": "27.00", "applied": False}
+    assert res["payment_ai"] == {"paid_amount": "27.00", "applied": False, "needs_review": False}
     updated = api.get_entry(e["id"])["data"]
     assert updated["fields"]["paid_amount"]["current"] == before
 
@@ -551,7 +553,7 @@ def test_api_can_recognize_payment_ocr_without_applying(api, tmp_path, monkeypat
 def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
     api, tmp_path, monkeypatch
 ):
-    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
+    enable_payment_ai(api)
     from tidoc.db import TYPE_INVOICE_XML
     from tidoc.engine.models import ParsedInvoice
     from tidoc.services import folder_import
@@ -574,16 +576,16 @@ def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
 
     def recognize(path):
         calls.append(str(path))
-        return "2.00" if "_02" in str(path) else "1.00"
+        return payment_result("2.00" if "_02" in str(path) else "1.00")
 
-    monkeypatch.setattr(folder_import, "extract_payment_image_amount", recognize)
+    monkeypatch.setattr(api, "_payment_ai_cached", recognize)
     api.add_attachment(
         entry["id"], str(first), "payment_screenshot",
-        options={"apply_payment_ocr": False},
+        options={"apply_payment_ai": False},
     )
     api.add_attachment(
         entry["id"], str(second), "payment_screenshot",
-        options={"apply_payment_ocr": False},
+        options={"apply_payment_ai": False},
     )
 
     refreshed = api.get_entry(entry["id"])["data"]
@@ -596,11 +598,14 @@ def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
     assert preview["payment"]["current"] == 2
 
     calls.clear()
+    monkeypatch.setattr(api._payment_ai_client, "recognize",
+                        lambda path, *args: calls.append(str(path)) or payment_result("1.00"))
     skipped = api.rerecognize_materials([entry["id"]], ["invoice", "payment"])["data"]
     assert skipped["invoice"]["processed"] == 0
     assert skipped["invoice"]["skipped_current"] == 1
-    assert skipped["payment"]["processed"] == 0
-    assert skipped["payment"]["skipped_current"] == 2
+    assert skipped["payment"] is None
+    job = api.start_payment_ai(entry_ids=[entry["id"]])["data"]
+    assert job["total"] == 0
     assert calls == []
 
     first_att = next(a for a in refreshed["attachments"] if a["original_name"] == first.name)
@@ -608,14 +613,18 @@ def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
         "UPDATE attachments SET recognition_version = '' WHERE id = ?", (first_att["id"],)
     )
     api.db.conn.commit()
-    rerun = api.rerecognize_materials([entry["id"]], ["payment"])["data"]
-    assert rerun["payment"]["processed"] == 1
-    assert rerun["payment"]["skipped_current"] == 1
+    job = api.start_payment_ai(entry_ids=[entry["id"]])["data"]
+    deadline = time.monotonic() + 5
+    while not api.payment_ai_progress(job["id"])["data"]["done"]:
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    rerun = api.payment_ai_progress(job["id"])["data"]
+    assert rerun["completed"] == 1 and rerun["skipped_current"] == 1
     assert len(calls) == 1
 
 
 def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypatch):
-    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
+    enable_payment_ai(api)
     from tidoc.engine.models import ParsedInvoice
     from tidoc.services import folder_import
 
@@ -627,7 +636,7 @@ def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypa
     entry = api.entries.get(entry_id)
     payment = tmp_path / "未识别付款.png"
     payment.write_bytes(b"unrecognized payment")
-    monkeypatch.setattr(folder_import, "extract_payment_image_amount", lambda _path: "")
+    monkeypatch.setattr(api, "_payment_ai_cached", lambda _path: payment_result(""))
 
     attachment = api.add_attachment(entry["id"], str(payment), "payment_screenshot")["data"]
     refreshed = api.get_entry(entry["id"])["data"]
@@ -641,7 +650,7 @@ def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypa
 
 
 def test_api_payment_ocr_preference_disables_recognition(api, tmp_path, monkeypatch):
-    from tidoc.api import PAYMENT_OCR_PREF_KEY
+    from tidoc.api_shared import PAYMENT_OCR_PREF_KEY
     from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]
@@ -653,21 +662,22 @@ def test_api_payment_ocr_preference_disables_recognition(api, tmp_path, monkeypa
     def unexpected_ocr(path):
         raise AssertionError(f"OCR should be disabled: {path}")
 
-    monkeypatch.setattr(folder_import, "extract_payment_image_amount", unexpected_ocr)
+    monkeypatch.setattr(api, "_payment_ai_cached", unexpected_ocr)
     classified = api.classify_material_files([str(payment)])["data"]
     attachment = api.add_attachment(entry["id"], str(payment), "payment_screenshot")["data"]
 
     assert classified[0]["paid_amount"] == ""
-    assert "payment_ocr" not in attachment
+    assert "payment_ai" not in attachment
 
 
 def test_api_default_paid_preference_is_independent_from_ocr(api):
-    from tidoc.api import DEFAULT_PAID_TO_INVOICE_PREF_KEY, PAYMENT_OCR_PREF_KEY
+    from tidoc.api import DEFAULT_PAID_TO_INVOICE_PREF_KEY
+    from tidoc.api_shared import PAYMENT_OCR_PREF_KEY
 
     api.set_app_preference(PAYMENT_OCR_PREF_KEY, "0")
     api.set_app_preference(DEFAULT_PAID_TO_INVOICE_PREF_KEY, "0")
 
-    assert api._payment_ocr_enabled() is False
+    assert api._payment_ai_enabled() is False
     assert api._default_paid_to_invoice() is False
 
 

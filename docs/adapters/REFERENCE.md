@@ -24,7 +24,7 @@
 | `print.sort_by` | `select` | `"selection"` | scheme, batch, export |
 | `assist.cloud_ocr_visible` | `boolean` | `true` | scheme |
 | `assist.verification_visible` | `boolean` | `true` | scheme |
-| `assist.payment_ocr` | `select` | `"manual"` | scheme |
+| `assist.payment_ocr` | `select` | `"manual"` | 旧包兼容字段，界面不再提供；付款截图 AI 由本机设置控制 |
 | `transfer.include_notes` | `boolean` | `true` | scheme |
 | `transfer.include_tags` | `boolean` | `true` | scheme |
 

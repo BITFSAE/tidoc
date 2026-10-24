@@ -21,12 +21,13 @@ from .database import Database
 # 可自由修改的字段（设计文档 8.5）
 EDITABLE_FIELDS = ("paid_amount", "actual_item_name", "notes")
 VALUE_SOURCE_PAYMENT_OCR = "payment_ocr"
+VALUE_SOURCE_PAYMENT_AI = "payment_ai"
 VALUE_SOURCE_MANUAL = "manual"
 # These versions describe recognition rules, not the Tidoc release. Keep them
 # unchanged for ordinary app releases and bump only the affected value when its
 # local recognition logic or result contract changes.
 LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-10-23-2"
-LOCAL_PAYMENT_RECOGNITION_VERSION = "payment-local-2026-09-06"
+PAYMENT_AI_RECOGNITION_VERSION = "payment-ai-2026-10-24"
 PAYMENT_CHECK_PREFIX = "[付款截图识别]"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
 LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "seller_tax_id", "invoice_date")
@@ -662,10 +663,11 @@ class EntryRepo:
         old_value = row["current"]
         new_value = str(value) if value is not None else ""
         if new_value == old_value:
-            if value_source and field == "paid_amount" and row["value_source"] != value_source:
+            same_source = VALUE_SOURCE_MANUAL if value_source is None else value_source
+            if field == "paid_amount" and row["value_source"] != same_source:
                 self.db.conn.execute(
                     "UPDATE entry_fields SET value_source = ? WHERE entry_id = ? AND field = ?",
-                    (value_source, entry_id, field),
+                    (same_source, entry_id, field),
                 )
                 self.db.conn.commit()
             return self._fields(entry_id)
@@ -673,7 +675,7 @@ class EntryRepo:
         if field == "paid_amount":
             source = VALUE_SOURCE_MANUAL if value_source is None else value_source
         # 一旦 current != origin 就永久标记（即使之后改回，标记不擦除）
-        if source == VALUE_SOURCE_PAYMENT_OCR:
+        if source in {VALUE_SOURCE_PAYMENT_OCR, VALUE_SOURCE_PAYMENT_AI}:
             modified = row["modified"]
         else:
             modified = 1 if new_value != row["origin"] else row["modified"]
@@ -690,7 +692,7 @@ class EntryRepo:
     def restore_paid_amount_after_last_payment(
         self, entry_id: str, removed_attachment_added_at: str = "", *, commit: bool = True
     ) -> dict:
-        """最后一张付款截图移除后，仅撤销仍由付款 OCR 控制的实付金额。"""
+        """最后一张付款截图移除后，仅撤销仍由付款识别控制的实付金额。"""
         has_payment = self.db.conn.execute(
             "SELECT 1 FROM attachments WHERE entry_id = ? "
             "AND type = 'payment_screenshot' LIMIT 1",
@@ -709,7 +711,7 @@ class EntryRepo:
             return {"reset": False, "value": ""}
 
         source = row["value_source"] or ""
-        should_reset = source == VALUE_SOURCE_PAYMENT_OCR
+        should_reset = source in {VALUE_SOURCE_PAYMENT_OCR, VALUE_SOURCE_PAYMENT_AI}
         if not should_reset and not source and removed_attachment_added_at:
             # v4 之前没有来源列。旧版 OCR 只会在附件写入后数秒内从
             # 空值/发票默认值自动改写；用时间与旧值条件保守识别已有自动值。
@@ -1112,7 +1114,7 @@ class EntryRepo:
         if not entry:
             return
         rows = self.db.conn.execute(
-            """SELECT recognition_version, recognition_status, recognized_value
+            """SELECT recognition_version, recognition_status, recognized_value, recognition_message
                  FROM attachments
                 WHERE entry_id = ? AND type = 'payment_screenshot'""",
             (entry_id,),
@@ -1124,11 +1126,11 @@ class EntryRepo:
         payment_messages: list[str] = []
         if rows:
             pending = sum(
-                row["recognition_version"] != LOCAL_PAYMENT_RECOGNITION_VERSION
+                not row["recognition_version"].startswith(PAYMENT_AI_RECOGNITION_VERSION)
                 for row in rows
             )
             failed = sum(
-                row["recognition_version"] == LOCAL_PAYMENT_RECOGNITION_VERSION
+                row["recognition_version"].startswith(PAYMENT_AI_RECOGNITION_VERSION)
                 and row["recognition_status"] in {"unrecognized", "error"}
                 for row in rows
             )
@@ -1140,6 +1142,9 @@ class EntryRepo:
                 payment_messages.append(
                     f"{PAYMENT_CHECK_PREFIX} {failed} 张付款截图未识别到金额，请核对。"
                 )
+            reviews = list(dict.fromkeys(row["recognition_message"] for row in rows
+                                        if row["recognition_message"] and row["recognition_status"] == "review"))
+            payment_messages.extend(f"{PAYMENT_CHECK_PREFIX} {msg}" for msg in reviews)
             if not pending and not failed:
                 try:
                     recognized_total = sum(

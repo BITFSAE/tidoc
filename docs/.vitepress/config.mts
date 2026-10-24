@@ -6,7 +6,7 @@ import { repo, repoLinks } from './repo-links'
 
 const siteUrl = 'https://tidoc.bitfsae.com'
 const siteName = 'Tidoc'
-const siteDescription = 'Tidoc 是一款整理报账发票和相关材料的桌面软件，支持 Windows 和 macOS，识别在本机完成。'
+const siteDescription = 'Tidoc 是一款整理报账发票和相关材料的桌面软件，支持 Windows 和 macOS，默认在本机解析发票，可选云识别。'
 const ogImage = `${siteUrl}/og-image.png`
 
 // 「开始使用」和「使用指南」共用一份侧栏，读完安装可以顺着往下读。

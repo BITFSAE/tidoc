@@ -11,6 +11,7 @@ description: 面向参与开发、发布软件或编写团队报账方案的人�
 
 - [参与贡献](/dev/contributing)：提交问题、改动流程和代码风格。
 - [设计文档](/dev/design)：整体架构、数据模型和主要功能的设计取舍。
+- [付款截图 AI 识别评测](/dev/payment-ai-benchmark)：比较金额、材料判断、延迟和并发。
 - 源码、问题反馈和版本下载在 [GitHub 仓库](https://github.com/BITFSAE/tidoc)，本地开发环境的搭建命令见仓库 README 的[开发一节](https://github.com/BITFSAE/tidoc#开发)。
 
 ## 发布

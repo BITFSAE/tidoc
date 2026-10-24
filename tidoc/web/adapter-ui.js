@@ -42,7 +42,8 @@ const AdapterUI = (() => {
     State.defaultPaidToInvoice = settings()['entry.default_paid_to_invoice'];
     State.defaultEntryTitle = State.titleProfiles.find(t => t.id === settings()['entry.default_title_id'])?.name || '';
     State.materialRequirements = await Api.materialRequirements();
-    State.paymentOcrEnabled = settings()['assist.payment_ocr'] !== 'manual';
+    const paymentAi = await Api.paymentAiSettings();
+    State.paymentAiEnabled = paymentAi.enabled && paymentAi.key_configured;
     applyOcrUiVisibility();
   }
   async function setup() {
@@ -167,7 +168,7 @@ const AdapterUI = (() => {
     }).join('');
     return `<section class="settings-block export-preview-files" aria-label="预计生成文件"><div class="settings-block-title">预计生成 · ${groups.length} 个文件</div><ul>${rows}</ul></section>`;
   }
-  const labels = { 'entry.default_title_id':'默认抬头', 'entry.default_paid_to_invoice':'实付初值取发票总额', 'entry.suggested_tags':'建议标签', 'profile.reviewer_required':'审核人必填', 'profile.reviewer_presentation':'审核人显示方式', 'profile.default_view':'初始报账人视图', 'payee.personnel_number_label':'人员编号名称', 'print.default_outputs':'默认输出', 'print.numbering':'材料编号', 'print.image_layout':'图片布局', 'print.content_order':'材料排序', 'print.amount_basis':'金额口径', 'print.payee_mode':'收款方式', 'print.sort_by':'条目排序', 'assist.cloud_ocr_visible':'显示云识别入口', 'assist.verification_visible':'显示查验入口', 'assist.payment_ocr':'付款截图金额识别（实验性）', 'transfer.include_notes':'绑定包包含备注', 'transfer.include_tags':'绑定包包含标签' };
+  const labels = { 'entry.default_title_id':'默认抬头', 'entry.default_paid_to_invoice':'实付初值取发票总额', 'entry.suggested_tags':'建议标签', 'profile.reviewer_required':'审核人必填', 'profile.reviewer_presentation':'审核人显示方式', 'profile.default_view':'初始报账人视图', 'payee.personnel_number_label':'人员编号名称', 'print.default_outputs':'默认输出', 'print.numbering':'材料编号', 'print.image_layout':'图片布局', 'print.content_order':'材料排序', 'print.amount_basis':'金额口径', 'print.payee_mode':'收款方式', 'print.sort_by':'条目排序', 'assist.cloud_ocr_visible':'显示发票云识别入口', 'assist.verification_visible':'显示查验入口', 'transfer.include_notes':'绑定包包含备注', 'transfer.include_tags':'绑定包包含标签' };
   const choiceLabels={visible:'显示',advanced:'高级选项',hidden:'隐藏',self:'本人报账',delegate:'代填',invoice:'发票金额',paid:'实付金额',single:'统一收款',by_claimant:'分别收款',none:'不含收款信息',entry:'按条目',role:'按材料',selection:'当前选择顺序',invoice_date:'发票日期',invoice_no:'发票号',claimant:'报账人',seller:'销售方',created_at:'创建时间',local:'本地识别',cloud:'云识别',manual:'手动填写',a4_portrait_1:'A4 纵向，每页 1 张',a4_portrait_2:'A4 纵向，每页 2 张',a4_portrait_4:'A4 纵向，每页 4 张',a4_landscape_1:'A4 横向，每页 1 张',a4_landscape_2:'A4 横向，每页 2 张',a4_landscape_4:'A4 横向，每页 4 张'};
   function outputSettingsForm(definition,catalog,keys,values={}) {
     const fields=keys.map(key=>{const spec=catalog[key];const policy=definition.scheme.settings[key]||{};const fixed='fixed' in policy||policy.editable===false;return {id:key,label:labels[key],type:'select',editable:!fixed,presentation:'visible',options:(spec.type==='boolean'?['true','false']:spec.enum||[]).map(value=>({value,label:value==='true'?'开启':value==='false'?'关闭':choiceLabels[value]||value})),help:fixed?'由方案固定。':'留空沿用方案或批次设置。'};});
@@ -182,7 +183,7 @@ const AdapterUI = (() => {
     { title: '条目录入', keys: ['entry.default_title_id', 'entry.default_paid_to_invoice', 'entry.suggested_tags'] },
     { title: '报账人与收款', keys: ['profile.default_view', 'profile.reviewer_required', 'profile.reviewer_presentation', 'payee.personnel_number_label'] },
     { title: '打印与导出', keys: ['print.default_outputs', 'print.amount_basis', 'print.payee_mode', 'print.sort_by', 'print.content_order', 'print.numbering', 'print.image_layout'] },
-    { title: '识别与查验', keys: ['assist.payment_ocr', 'assist.cloud_ocr_visible', 'assist.verification_visible'] },
+    { title: '识别与查验', keys: ['assist.cloud_ocr_visible', 'assist.verification_visible'] },
     { title: '绑定包', keys: ['transfer.include_notes', 'transfer.include_tags'] },
   ];
   const settingHelp = {
@@ -200,8 +201,7 @@ const AdapterUI = (() => {
     'print.content_order': '材料 PDF 按条目逐条排列，还是按材料类型归并。',
     'print.numbering': '在合并后的材料 PDF 页面上标注编号。',
     'print.image_layout': '图片类材料在材料 PDF 里的纸张方向与每页张数。',
-    'assist.payment_ocr': '默认手动填写实付金额，不读取截图。本地识别使用系统自带 OCR，效果有限，识别结果仅供参考，请核对后再使用。',
-    'assist.cloud_ocr_visible': '在条目里显示云识别入口。',
+    'assist.cloud_ocr_visible': '在云识别窗口中提供发票识别。',
     'assist.verification_visible': '在条目里显示发票查验入口。',
     'transfer.include_notes': '导出绑定包时带上条目备注、材料备注及备注修改记录。',
     'transfer.include_tags': '关闭后，导出的绑定包不带条目标签。',
@@ -890,6 +890,7 @@ const AdapterUI = (() => {
   const usesPayee = (definition = current?.definition) => payeeModes(definition).size > 0;
   // 设置项是否对这个方案有意义：它控制的功能方案根本没有时不显示，避免一屏无关选项。
   function settingApplies(key, definition) {
+    if (key === 'assist.payment_ocr') return false;
     const outputs = definition?.outputs || [];
     if (key === 'print.payee_mode' || key === 'payee.personnel_number_label') return supportsPayee(definition);
     if (['print.numbering', 'print.image_layout', 'print.content_order'].includes(key)) return outputs.some(output => output.type === 'pdf_bundle');

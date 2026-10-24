@@ -1,5 +1,6 @@
 """发票导入失败反馈、重复防护与半成品清理。"""
 
+from tests.conftest import payment_result, enable_payment_ai
 from decimal import Decimal
 from pathlib import Path
 
@@ -290,7 +291,7 @@ def test_entry_delete_removes_attachment_directory(api, tmp_path):
         entry["id"],
         str(payment),
         "payment_screenshot",
-        options={"skip_payment_ocr": True},
+        options={"skip_payment_ai": True},
     )
     entry_dir = api.data_root.attachments_dir / entry["id"]
     assert entry_dir.is_dir()
@@ -315,7 +316,7 @@ def test_batch_delete_removes_all_attachment_directories(api, tmp_path):
             entry["id"],
             str(payment),
             "payment_screenshot",
-            options={"skip_payment_ocr": True},
+            options={"skip_payment_ai": True},
         )
         entry_ids.append(entry["id"])
         entry_dirs.append(api.data_root.attachments_dir / entry["id"])
@@ -335,7 +336,7 @@ def test_delete_batch_can_keep_entries_or_remove_entries_and_files(api, tmp_path
     payment.write_bytes(b"payment")
     api.add_attachment(
         removed["id"], str(payment), "payment_screenshot",
-        options={"skip_payment_ocr": True},
+        options={"skip_payment_ai": True},
     )
     removed_dir = api.data_root.attachments_dir / removed["id"]
 
@@ -363,7 +364,7 @@ def test_delete_batch_with_entries_rolls_back_database_and_files(api, tmp_path, 
     payment.write_bytes(b"payment")
     api.add_attachment(
         entry["id"], str(payment), "payment_screenshot",
-        options={"skip_payment_ocr": True},
+        options={"skip_payment_ai": True},
     )
     batch = api.create_batch("待删除", entry_ids=[entry["id"]])["data"]
     entry_dir = api.data_root.attachments_dir / entry["id"]
@@ -397,7 +398,7 @@ def test_entry_delete_restores_attachment_directory_when_database_delete_fails(
         entry["id"],
         str(payment),
         "payment_screenshot",
-        options={"skip_payment_ocr": True},
+        options={"skip_payment_ai": True},
     )
     entry_dir = api.data_root.attachments_dir / entry["id"]
     stored_files = list(entry_dir.iterdir())
@@ -486,7 +487,7 @@ def test_reset_data_root_failure_restores_database_connection(api, tmp_path, mon
 
 
 def test_deleting_last_ocr_payment_restores_invoice_total(api, tmp_path, monkeypatch):
-    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
+    enable_payment_ai(api)
     from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]
@@ -494,7 +495,7 @@ def test_deleting_last_ocr_payment_restores_invoice_total(api, tmp_path, monkeyp
     payment = tmp_path / "错误付款截图.png"
     payment.write_bytes(b"payment")
     monkeypatch.setattr(
-        folder_import, "extract_payment_image_amount", lambda _path: "27.00"
+        api, "_payment_ai_cached", lambda _path: payment_result("27.00")
     )
 
     attachment = api.add_attachment(
@@ -502,7 +503,7 @@ def test_deleting_last_ocr_payment_restores_invoice_total(api, tmp_path, monkeyp
     )["data"]
     recognized = api.get_entry(entry_id)["data"]["fields"]["paid_amount"]
     assert recognized["current"] == "27.00"
-    assert recognized["value_source"] == "payment_ocr"
+    assert recognized["value_source"] == "payment_ai"
 
     deleted = api.delete_attachment(attachment["id"])["data"]
     restored = api.get_entry(entry_id)["data"]["fields"]["paid_amount"]
@@ -520,7 +521,7 @@ def test_deleting_ocr_payment_preserves_later_manual_amount(api, tmp_path, monke
     payment = tmp_path / "付款截图.png"
     payment.write_bytes(b"payment")
     monkeypatch.setattr(
-        folder_import, "extract_payment_image_amount", lambda _path: "27.00"
+        api, "_payment_ai_cached", lambda _path: payment_result("27.00")
     )
     attachment = api.add_attachment(
         entry_id, str(payment), "payment_screenshot"
@@ -539,7 +540,7 @@ def test_deleting_ocr_payment_preserves_later_manual_amount(api, tmp_path, monke
 
 
 def test_paid_amount_waits_until_last_payment_is_deleted(api, tmp_path, monkeypatch):
-    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
+    enable_payment_ai(api)
     from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]
@@ -549,7 +550,7 @@ def test_paid_amount_waits_until_last_payment_is_deleted(api, tmp_path, monkeypa
     first.write_bytes(b"payment-one")
     second.write_bytes(b"payment-two")
     monkeypatch.setattr(
-        folder_import, "extract_payment_image_amount", lambda _path: "27.00"
+        api, "_payment_ai_cached", lambda _path: payment_result("27.00")
     )
     first_att = api.add_attachment(
         entry_id, str(first), "payment_screenshot"
@@ -558,7 +559,7 @@ def test_paid_amount_waits_until_last_payment_is_deleted(api, tmp_path, monkeypa
         entry_id,
         str(second),
         "payment_screenshot",
-        options={"skip_payment_ocr": True},
+        options={"skip_payment_ai": True},
     )["data"]
 
     first_deleted = api.delete_attachment(first_att["id"])["data"]
@@ -571,7 +572,7 @@ def test_paid_amount_waits_until_last_payment_is_deleted(api, tmp_path, monkeypa
 
 
 def test_reclassifying_last_payment_restores_invoice_total(api, tmp_path, monkeypatch):
-    api.set_app_preference("tidoc.paymentScreenshotOcr", "1")  # 付款识别默认关闭；这里验证开启本地识别后的行为
+    enable_payment_ai(api)
     from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]
@@ -579,7 +580,7 @@ def test_reclassifying_last_payment_restores_invoice_total(api, tmp_path, monkey
     payment = tmp_path / "误分类截图.png"
     payment.write_bytes(b"payment")
     monkeypatch.setattr(
-        folder_import, "extract_payment_image_amount", lambda _path: "27.00"
+        api, "_payment_ai_cached", lambda _path: payment_result("27.00")
     )
     attachment = api.add_attachment(
         entry_id, str(payment), "payment_screenshot"
@@ -602,7 +603,7 @@ def test_legacy_ocr_value_is_conservatively_restored(api, tmp_path):
         entry_id,
         str(payment),
         "payment_screenshot",
-        options={"skip_payment_ocr": True},
+        options={"skip_payment_ai": True},
     )["data"]
     api.entries.update_field(
         entry_id,

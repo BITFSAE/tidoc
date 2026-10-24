@@ -38,7 +38,6 @@ from .db import (
 from .api_shared import (
     AUTO_UPDATE_PREF_KEY,
     UPDATE_CHANNEL_PREF_KEY,
-    PAYMENT_OCR_PREF_KEY,
     OCR_ACCESS_KEY_ID_PREF_KEY,
     OCR_ACCESS_KEY_SECRET_PREF_KEY,
     DEFAULT_PAID_TO_INVOICE_PREF_KEY,
@@ -64,6 +63,7 @@ from .api_schemes import SchemeApi
 from .api_verification import InvoiceVerificationApi
 from .api_updates import UpdateApi
 from .api_qr import QrTicketApi
+from .api_payment_ai import PaymentAiApi
 
 
 def _mask_access_key(key_id: str) -> str:
@@ -76,7 +76,7 @@ def _mask_access_key(key_id: str) -> str:
     return text[:6] + "****"
 
 
-class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
+class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiApi):
     def __init__(
         self,
         data_root: str | Path | None = None,
@@ -84,7 +84,11 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
         update_health_path: str | Path | None = None,
     ):
         self._api_lock = threading.RLock()
+        from .services.payment_ai import PaymentClient
+        self._payment_ai_lock = threading.Lock()
+        self._payment_ai_jobs = {}
         self.data_root = DataRoot(data_root, manage_pointer=True)
+        self._payment_ai_client = PaymentClient(self.data_root.root / "payment-ai-cache")
         self.db = Database(self.data_root.db_path)
         self.profiles = ProfileRepo(self.db)
         self.entries = EntryRepo(self.db)
@@ -198,10 +202,10 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
     @_guard
     def app_preference(self, key, default=""):
         scheme=self.adapters.get_scheme()
-        setting_aliases={DEFAULT_PAID_TO_INVOICE_PREF_KEY:"entry.default_paid_to_invoice",PAYMENT_OCR_PREF_KEY:"assist.payment_ocr",BINDLE_INCLUDE_NOTES_PREF_KEY:"transfer.include_notes",BINDLE_INCLUDE_TAGS_PREF_KEY:"transfer.include_tags"}
+        setting_aliases={DEFAULT_PAID_TO_INVOICE_PREF_KEY:"entry.default_paid_to_invoice",BINDLE_INCLUDE_NOTES_PREF_KEY:"transfer.include_notes",BINDLE_INCLUDE_TAGS_PREF_KEY:"transfer.include_tags"}
         if str(key) in setting_aliases:
             result=scheme["definition"]["effective_settings"].get(setting_aliases[str(key)])
-            return "1" if (result is True or key==PAYMENT_OCR_PREF_KEY and result!="manual") else "0"
+            return "1" if result is True else "0"
         if str(key)==DEFAULT_ENTRY_TITLE_PREF_KEY:
             return self._default_entry_title()
         if str(key).startswith("tidoc.operator."):
@@ -332,6 +336,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
             "paths": paths,
             "app_info": self.app_info()["data"],
             "preferences": {key: self._preference_value(key, default) for key, default in defaults.items()},
+            "payment_ai": self.payment_ai_settings()["data"],
             "verification": self._invoice_verification_preferences(),
             "channel": self._update_channel(),
         }
@@ -454,7 +459,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
     @_guard
     def create_entry(self, profile_id, title="", xml_path=None, pdf_path=None,
                      payment_paths=None, inspection_path=None, status="draft",
-                     physical_paths=None,scheme_id=None,batch_id=None):
+                     physical_paths=None,scheme_id=None,batch_id=None,payment_ai_job_id=None):
         """从上传文件创建条目：解析 → 校验 → 落库 → 复制附件。"""
         from .engine import check_invoice, parse_invoice_files
 
@@ -507,7 +512,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
                 self.entries.mark_invoice_recognized(entry_id)
             for pp in (payment_paths or []):
                 attachment = self.attachments.add(entry_id, pp, TYPE_PAYMENT)
-                self._maybe_apply_payment_ocr_amount(entry_id, attachment)
+                self._maybe_apply_payment_ai_amount(entry_id, attachment, apply=False, job_id=payment_ai_job_id)
             for physical_path in (physical_paths or []):
                 self._validate_attachment_for_entry(entry_id, physical_path, TYPE_PHYSICAL_IMAGE)
                 self.attachments.add(entry_id, physical_path, TYPE_PHYSICAL_IMAGE)
@@ -629,7 +634,6 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
         from .engine import parse_invoice_files
         from .services.folder_import import (
             classify_pdf_attachment_type,
-            extract_payment_image_amount,
             extract_pdf_invoice_no,
         )
 
@@ -658,8 +662,6 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
                             warning = "未识别到发票号码"
                 elif suffix in image_ext:
                     att_type = TYPE_PAYMENT
-                    if self._payment_ocr_enabled():
-                        paid_amount = extract_payment_image_amount(path)
             except Exception as exc:  # noqa: BLE001 - 分类阶段只提示，后续添加时仍会校验
                 warning = str(exc)
             out.append({
@@ -691,7 +693,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
         if candidate_ids:
             entries = [entry for entry in entries if entry.get("id") in candidate_ids]
         return suggest_material_bindings(
-            infos or [], entries, payment_ocr_enabled=self._payment_ocr_enabled()
+            infos or [], entries, payment_ai_enabled=self._payment_ai_enabled()
         )
 
     @_guard
@@ -818,14 +820,14 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
 
     @_guard
     def set_recognized_paid_amount(self, entry_id, value):
-        from .db.entries import VALUE_SOURCE_PAYMENT_OCR
+        from .db.entries import VALUE_SOURCE_PAYMENT_AI
 
         result = self.entries.update_field(
             entry_id,
             "paid_amount",
             value,
             "",
-            value_source=VALUE_SOURCE_PAYMENT_OCR,
+            value_source=VALUE_SOURCE_PAYMENT_AI,
         )
         self.entries.recompute_status(entry_id)
         return result
@@ -990,38 +992,28 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
         att = self.attachments.add(entry_id, src_path, att_type, note,role_id=role_id or options.get("role_id"))
         if att_type in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}:
             self.entries.clear_invoice_recognition(entry_id)
-        if att_type == TYPE_PAYMENT and not options.get("skip_payment_ocr", False):
-            amount, applied = self._maybe_apply_payment_ocr_amount(
-                entry_id,
-                att,
-                apply=options.get("apply_payment_ocr", True),
-            )
+        if att_type == TYPE_PAYMENT and not options.get("skip_payment_ai", False):
+            amount, applied = self._maybe_apply_payment_ai_amount(
+                entry_id, att, apply=options.get("apply_payment_ai", True),
+                job_id=options.get("payment_ai_job_id"))
+            att = self.attachments.get(att["id"])
             if amount:
-                att["payment_ocr"] = {"paid_amount": amount, "applied": applied}
-        elif att_type == TYPE_PAYMENT and options.get("payment_ocr_attempted", False):
-            from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION
-
-            amount = str(options.get("recognized_payment_amount") or "").strip()
-            self.attachments.set_recognition(
-                att["id"],
-                LOCAL_PAYMENT_RECOGNITION_VERSION,
-                "recognized" if amount else "unrecognized",
-                amount,
-                "" if amount else "未识别到付款金额",
-            )
-            self.entries.refresh_payment_check(entry_id)
+                att["payment_ai"] = {"paid_amount": amount, "applied": applied,
+                                     "needs_review": att.get("recognition_status") == "review"}
         elif att_type == TYPE_PAYMENT:
             self.entries.clear_payment_check(entry_id)
         self.entries.recompute_status(entry_id)
         return att
 
     @_guard
-    def reclassify_attachment(self,attachment_id,role_id,actor_id=""):
+    def reclassify_attachment(self,attachment_id,role_id,actor_id="",payment_ai_job_id=None):
         previous = self.attachments.get(attachment_id)
         result = self.attachments.reclassify(attachment_id,role_id,actor_id)
         if previous.get("type") == "payment_screenshot" and result.get("type") != "payment_screenshot":
             self.entries.restore_paid_amount_after_last_payment(result["entry_id"],previous.get("added_at") or "")
-            self.entries.refresh_payment_check(result["entry_id"])
+            self._refresh_payment_ai_check(result["entry_id"])
+        if previous.get("type") != "payment_screenshot" and result.get("type") == "payment_screenshot":
+            self._maybe_apply_payment_ai_amount(result["entry_id"], result, apply=False, job_id=payment_ai_job_id)
         self.entries.recompute_status(result["entry_id"])
         return result
 
@@ -1037,7 +1029,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
                 paid_reset = self.entries.restore_paid_amount_after_last_payment(
                     att["entry_id"], att.get("added_at") or ""
                 )
-                self.entries.refresh_payment_check(att["entry_id"])
+                self._refresh_payment_ai_check(att["entry_id"])
             elif att.get("type") in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}:
                 self.entries.clear_invoice_recognition(att["entry_id"])
             self.entries.recompute_status(att["entry_id"])
@@ -1075,9 +1067,10 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
                 if att.get("type") == TYPE_PAYMENT and (
                     fields.get("src_path") or current.get("type") != TYPE_PAYMENT
                 ):
-                    self._maybe_apply_payment_ocr_amount(att["entry_id"], att, apply=False)
+                    self._maybe_apply_payment_ai_amount(
+                        att["entry_id"], att, apply=False, job_id=fields.get("payment_ai_job_id"))
                 else:
-                    self.entries.refresh_payment_check(att["entry_id"])
+                    self._refresh_payment_ai_check(att["entry_id"])
             if (
                 current.get("type") in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}
                 or att.get("type") in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}
@@ -1140,53 +1133,29 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
             if invoice_no:
                 _validate_same_invoice(entry, invoice_no, path.name)
 
-    def _maybe_apply_payment_ocr_amount(self, entry_id, attachment, apply: bool = True) -> tuple[str, bool]:
-        from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION, VALUE_SOURCE_PAYMENT_OCR
-        from .services.folder_import import extract_payment_image_amount
-
-        if not self._payment_ocr_enabled(entry_id):
+    def _maybe_apply_payment_ai_amount(self, entry_id, attachment, apply: bool = True, job_id=None) -> tuple[str, bool]:
+        """采用后台任务或本机缓存里的结果；这里不联网，没有结果时留待「云识别」处理。"""
+        from .db.entries import VALUE_SOURCE_PAYMENT_AI
+        if not self._payment_ai_enabled():
             self.entries.clear_payment_check(entry_id)
             return "", False
         att = attachment if isinstance(attachment, dict) else None
         if not att:
-            raise ValueError("付款截图附件不存在。")
-        try:
-            amount = extract_payment_image_amount(att["abs_path"])
-            self.attachments.set_recognition(
-                att["id"],
-                LOCAL_PAYMENT_RECOGNITION_VERSION,
-                "recognized" if amount else "unrecognized",
-                amount,
-                "" if amount else "未识别到付款金额",
-            )
-        except Exception as exc:  # noqa: BLE001 - 识别失败不撤销已添加的截图
-            self.attachments.set_recognition(
-                att["id"], LOCAL_PAYMENT_RECOGNITION_VERSION, "error", "", str(exc)
-            )
+            raise ValueError("付款截图附件不存在")
+        value = self._prepared_payment_ai_value(job_id, att) or self._payment_ai_cached(att["abs_path"])
+        if value is None:
             self.entries.refresh_payment_check(entry_id)
             return "", False
-        if not amount:
-            self.entries.refresh_payment_check(entry_id)
-            return "", False
-        if not apply:
-            self.entries.refresh_payment_check(entry_id)
+        amount = self._save_payment_ai_result(entry_id, att, value)
+        if not amount or not apply or (value.get("result") or {}).get("needs_review"):
             return amount, False
         entry = self.entries.get(entry_id)
-        if not entry:
+        current = (((entry or {}).get("fields", {}).get("paid_amount") or {}).get("current") or "").strip()
+        total = str((entry or {}).get("total") or "").strip()
+        paid_field = (entry or {}).get("fields", {}).get("paid_amount") or {}
+        if not entry or (current and paid_field.get("value_source") == "manual") or (current and total and not _same_money(current, total)):
             return amount, False
-        fields = entry.get("fields") or {}
-        current = ((fields.get("paid_amount") or {}).get("current") or "").strip()
-        total = str(entry.get("total") or "").strip()
-        if current and total and not _same_money(current, total):
-            self.entries.refresh_payment_check(entry_id)
-            return amount, False
-        self.entries.update_field(
-            entry_id,
-            "paid_amount",
-            amount,
-            "",
-            value_source=VALUE_SOURCE_PAYMENT_OCR,
-        )
+        self.entries.update_field(entry_id, "paid_amount", amount, "", value_source=VALUE_SOURCE_PAYMENT_AI)
         self.entries.refresh_payment_check(entry_id)
         return amount, True
 
@@ -1210,12 +1179,12 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
 
     @_guard
     def recognition_preview(self, entry_ids):
-        """预览本地重新识别任务；已由当前规则处理的材料会自动跳过。"""
+        """预览重新识别任务；已由当前规则处理的材料会自动跳过。"""
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
-        from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION
 
         invoice_total = invoice_pending = payment_total = payment_pending = 0
-        payment_enabled = False
+        payment_enabled = self._payment_ai_enabled()
+        payment_version = self._payment_ai_version()
         seen = set()
         for entry_id in entry_ids or []:
             if not entry_id or entry_id in seen:
@@ -1224,7 +1193,6 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
             entry = self.entries.get(entry_id)
             if not entry:
                 continue
-            payment_enabled = payment_enabled or self._payment_ocr_enabled(entry_id)
             attachments = entry.get("attachments") or []
             if any(a["type"] in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML} for a in attachments):
                 invoice_total += 1
@@ -1233,7 +1201,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
             payments = [a for a in attachments if a["type"] == TYPE_PAYMENT]
             payment_total += len(payments)
             payment_pending += sum(
-                a.get("recognition_version") != LOCAL_PAYMENT_RECOGNITION_VERSION
+                (a.get("recognition_version") != payment_version or a.get("recognition_status") in {"error", "unrecognized"})
                 for a in payments
             )
         return {
@@ -1248,11 +1216,11 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
 
     @_guard
     def rerecognize_materials(self, entry_ids, kinds=None):
-        """按当前本地规则识别发票或付款截图，同版且文件未变的材料自动跳过。"""
-        from .db import TYPE_PAYMENT
-        from .db.entries import LOCAL_PAYMENT_RECOGNITION_VERSION
+        """按当前规则重新解析发票，同版且文件未变的条目自动跳过。
 
-        requested = set(kinds or []) & {"invoice", "payment"}
+        付款截图需要联网，走后台任务 start_payment_ai，不在这里处理。
+        """
+        requested = set(kinds or []) & {"invoice"}
         ids = list(dict.fromkeys(entry_id for entry_id in (entry_ids or []) if entry_id))
         result = {"invoice": None, "payment": None}
         if "invoice" in requested:
@@ -1269,47 +1237,6 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
             }
             invoice_result["skipped_current"] = len(candidates) - len(targets)
             result["invoice"] = invoice_result
-        if "payment" in requested:
-            if not any(self._payment_ocr_enabled(eid) for eid in ids):
-                result["payment"] = {
-                    "processed": 0, "recognized": 0, "unrecognized": 0,
-                    "failed": 0, "skipped_current": 0, "disabled": True,
-                }
-                return result
-            processed = recognized = unrecognized = failed = skipped_current = 0
-            affected_entries = set()
-            for entry_id in ids:
-                entry = self.entries.get(entry_id)
-                if not entry:
-                    continue
-                if not self._payment_ocr_enabled(entry_id):
-                    continue
-                for att in entry.get("attachments") or []:
-                    if att.get("type") != TYPE_PAYMENT:
-                        continue
-                    if att.get("recognition_version") == LOCAL_PAYMENT_RECOGNITION_VERSION:
-                        skipped_current += 1
-                        continue
-                    processed += 1
-                    affected_entries.add(entry_id)
-                    stored_att = self.attachments.get(att["id"])
-                    amount, _ = self._maybe_apply_payment_ocr_amount(entry_id, stored_att, apply=False)
-                    refreshed = self.attachments.get(att["id"])
-                    if amount:
-                        recognized += 1
-                    elif refreshed.get("recognition_status") == "error":
-                        failed += 1
-                    else:
-                        unrecognized += 1
-            for entry_id in affected_entries:
-                self.entries.refresh_payment_check(entry_id)
-            result["payment"] = {
-                "processed": processed,
-                "recognized": recognized,
-                "unrecognized": unrecognized,
-                "failed": failed,
-                "skipped_current": skipped_current,
-            }
         return result
 
     @_guard
@@ -1711,6 +1638,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
         选中目录后：关闭当前 DB 连接 → 移动全部数据 → 用新根重开连接与仓库。
         返回新的路径清单，供前端刷新设置页显示。
         """
+        self._ensure_payment_ai_idle()
         import webview
         result = self._window.create_file_dialog(
             _file_dialog_kind(webview, "FOLDER", "FOLDER_DIALOG")
@@ -1733,6 +1661,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
     @_guard
     def reset_data_root_to_default(self):
         """把数据迁回系统默认目录（清除迁移指针）。"""
+        self._ensure_payment_ai_idle()
         from .db.paths import default_data_root
         default = default_data_root()
         if str(self.data_root.root) == str(default):
@@ -1750,6 +1679,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
     def _rebuild_repos(self, root) -> None:
         """用给定数据根重建 DataRoot / Database 及各仓库（迁移后热切换）。"""
         self.data_root = DataRoot(root, manage_pointer=True)
+        self._payment_ai_client.cache_dir = self.data_root.root / "payment-ai-cache"
         self.db = Database(self.data_root.db_path)
         self.profiles = ProfileRepo(self.db)
         self.entries = EntryRepo(self.db)
@@ -1784,11 +1714,6 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi):
     def _preference_value(self, key: str, default: str = "") -> str:
         row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
-
-    def _payment_ocr_enabled(self,entry_id=None) -> bool:
-        entry=self.entries.get(entry_id) if entry_id else None
-        definition=self.adapters.context_for_entry(entry) if entry else self.adapters.get_scheme()["definition"]
-        return definition["effective_settings"].get("assist.payment_ocr") != "manual"
 
     def _default_paid_to_invoice(self,scheme_id=None) -> bool:
         return self.adapters.get_scheme(scheme_id)["definition"].get("effective_settings",{}).get("entry.default_paid_to_invoice",True)

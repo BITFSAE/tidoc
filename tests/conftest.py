@@ -76,3 +76,18 @@ def repos():
         "attachments": AttachmentRepo(db, root),
         "batches": BatchRepo(db),
     }
+
+
+def payment_result(amount="27.00", **changes):
+    """Validated provider-shaped payment response for bridge tests (no network)."""
+    from tidoc.services.payment_ai import normalize_fast_result, result_message
+    raw = dict(source="bank", kind="receipt", paid=amount or None, refund=None,
+               completed=True, currency="CNY", theme="light", issue="")
+    raw.update(changes)
+    result = normalize_fast_result(raw, ["wechat", "alipay", "bank"])
+    return {"result": result, "message": result_message(result), "cost": .001, "usage": {}, "cached": False}
+
+
+def enable_payment_ai(api):
+    result = api.save_payment_ai_settings({"enabled": True}, "test-key")
+    assert result["ok"], result

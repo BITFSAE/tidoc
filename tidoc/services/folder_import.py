@@ -28,17 +28,6 @@ _STEM_JUNK_RE = re.compile(r"[\s_\-+＋（）()\[\]【】{}.,，。]+")
 _INVOICE_NO_RE = re.compile(r"\d{8,30}")
 _LABELED_INVOICE_NO_RE = re.compile(r"发票号码[:：]?\s*(\d{20})")
 _SPACED_INVOICE_NO_RE = re.compile(r"(?<!\d)(?:\d[\s\u3000]*){20}(?!\d)")
-_PAYMENT_AMOUNT_RE = re.compile(
-    r"(?<![\d.])[-−－—一]\s*(?:[¥￥]\s*)?(\d{1,7}(?:[,，]\d{3})*(?:\.\d{1,2})?)(?![\d.])"
-)
-_STANDALONE_PAYMENT_AMOUNT_RE = re.compile(
-    r"(?<![\w.])[-−－—一]\s*(?:[¥￥]\s*)?(\d{1,7}(?:[,，]\d{3})*(?:\.\d{1,2})?)(?![\d.])"
-)
-_CONFIRMED_PAYMENT_AMOUNT_RE = re.compile(
-    r"[-−－—一]\s*(?:[¥￥]\s*)?(\d{1,7}(?:[,，]\d{3})*(?:\.\d{1,2})?)"
-    r"(?=支付成功|付款成功|交易成功|扣款成功)"
-)
-_PAYMENT_CONTEXT_WORDS = ("支付", "付款", "实付", "交易", "消费", "账单", "扣款")
 
 
 def _file_info(path: Path, att_type: str, invoice_no: str = "", warning: str = "") -> dict:
@@ -144,16 +133,8 @@ def extract_pdf_invoice_no(path: str | Path) -> str:
     return _macos_ocr_tax_verification_invoice_no(path) or _windows_ocr_tax_verification_invoice_no(path)
 
 
-def extract_payment_image_amount(path: str | Path) -> str:
-    path = Path(path)
-    if path.suffix.lower() not in _IMAGE_EXT:
-        return ""
-    text = _macos_ocr_image_text(path) or _windows_ocr_image_text(path)
-    return _payment_amount_from_text(text)
-
-
 def suggest_material_bindings(
-    infos: list[dict], entries: list[dict], payment_ocr_enabled: bool = True
+    infos: list[dict], entries: list[dict], payment_ai_enabled: bool = True
 ) -> list[dict]:
     """仅在归属唯一时给出自动绑定建议；其余材料返回明确的手动处理原因。"""
     planned = []
@@ -172,7 +153,9 @@ def suggest_material_bindings(
             else:
                 reason = "未识别到查验单发票号码"
         elif info.get("type") == "payment_screenshot":
-            if not payment_ocr_enabled:
+            if info.get("payment_ai", {}).get("needs_review"):
+                reason = info["payment_ai"].get("reason") or "付款信息待核对"
+            elif not payment_ai_enabled:
                 reason = ""
             else:
                 amount = _normalized_payment_amount(info.get("paid_amount"))
@@ -209,214 +192,6 @@ def _normalized_payment_amount(value) -> Decimal | None:
         return Decimal(text).quantize(Decimal("0.01"))
     except (InvalidOperation, ValueError):
         return None
-
-
-def _payment_amount_from_text(text: str) -> str:
-    def formatted_amount(match: re.Match) -> str:
-        raw = match.group(1).replace(",", "").replace("，", "")
-        try:
-            amount = Decimal(raw).quantize(Decimal("0.01"))
-        except (InvalidOperation, ValueError):
-            return ""
-        if amount > 0:
-            return f"{amount:.2f}"
-        return ""
-
-    compact = re.sub(r"\s+", "", text or "")
-    compact = re.sub(r"(?<=\d)[·．。](?=\d)", ".", compact)
-    # A success label immediately after the amount is the strongest signal and
-    # should win even if a product-model line appears earlier in OCR order.
-    for match in _CONFIRMED_PAYMENT_AMOUNT_RE.finditer(compact):
-        amount = formatted_amount(match)
-        if amount:
-            return amount
-
-    # Prefer a standalone negative amount line.  This avoids treating product
-    # models such as ``ZTPV-25`` as a ¥25 payment.
-    for raw_line in (text or "").splitlines():
-        normalized = re.sub(r"(?<=\d)\s*[·．。]\s*(?=\d)", ".", raw_line)
-        for match in _STANDALONE_PAYMENT_AMOUNT_RE.finditer(normalized):
-            amount = formatted_amount(match)
-            if amount:
-                return amount
-
-        # Some native OCR streams split every character with spaces and read
-        # the minus sign as ``一``.  Compact only a line that contains payment
-        # context, rather than compacting unrelated product descriptions.
-        compact_line = re.sub(r"\s+", "", normalized)
-        if any(word in compact_line for word in _PAYMENT_CONTEXT_WORDS):
-            for match in _CONFIRMED_PAYMENT_AMOUNT_RE.finditer(compact_line):
-                amount = formatted_amount(match)
-                if amount:
-                    return amount
-            for match in _PAYMENT_AMOUNT_RE.finditer(compact_line):
-                amount = formatted_amount(match)
-                if amount:
-                    return amount
-
-    for match in _PAYMENT_AMOUNT_RE.finditer(compact):
-        amount = formatted_amount(match)
-        if amount:
-            return amount
-    return ""
-
-
-def _macos_ocr_image_text(path: Path) -> str:
-    if sys.platform != "darwin":
-        return ""
-    try:
-        import objc
-        from Foundation import NSDictionary, NSURL
-
-        objc.loadBundle("Vision", globals(), bundle_path="/System/Library/Frameworks/Vision.framework")
-        req = VNRecognizeTextRequest.alloc().init()  # type: ignore[name-defined]
-        req.setRecognitionLevel_(0)
-        if hasattr(req, "setUsesLanguageCorrection_"):
-            req.setUsesLanguageCorrection_(False)
-        req.setRecognitionLanguages_(["zh-Hans", "en-US"])
-        handler = VNImageRequestHandler.alloc().initWithURL_options_(  # type: ignore[name-defined]
-            NSURL.fileURLWithPath_(str(path)),
-            NSDictionary.dictionary(),
-        )
-        result = handler.performRequests_error_([req], None)
-        if isinstance(result, tuple) and not result[0]:
-            return ""
-        lines: list[str] = []
-        for obs in req.results() or []:
-            candidates = obs.topCandidates_(1)
-            if candidates:
-                lines.append(str(candidates[0].string()))
-        return "\n".join(lines)
-    except Exception:
-        return ""
-
-
-def _windows_ocr_image_text(path: Path) -> str:
-    if not sys.platform.startswith("win"):
-        return ""
-    script = r"""
-param([string]$Path)
-[Console]::OutputEncoding = [Text.UTF8Encoding]::UTF8
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-Add-Type -AssemblyName System.Drawing
-$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
-$null = [Windows.Storage.Streams.IRandomAccessStreamWithContentType, Windows.Storage.Streams, ContentType = WindowsRuntime]
-$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
-$null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
-$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
-$null = [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType = WindowsRuntime]
-$null = [Windows.Globalization.Language, Windows.Foundation, ContentType = WindowsRuntime]
-function Await-Operation($Operation, [Type]$ResultType) {
-    $method = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
-        $_.Name -eq 'AsTask' -and $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 1
-    } | Select-Object -First 1
-    $task = $method.MakeGenericMethod($ResultType).Invoke($null, @($Operation))
-    $task.Wait()
-    return $task.Result
-}
-function Recognize-Image($ImagePath) {
-    $file = Await-Operation ([Windows.Storage.StorageFile]::GetFileFromPathAsync($ImagePath)) ([Windows.Storage.StorageFile])
-    $stream = Await-Operation ($file.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
-    $decoder = Await-Operation ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-    $bitmap = Await-Operation ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('zh-Hans'))
-    if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
-    if ($null -eq $engine) { return '' }
-    $result = Await-Operation ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-    return $result.Text
-}
-function Prepare-PaymentImage($ImagePath, $OutputPath, [double]$CropRatio, [double]$MaxUpscale) {
-    $src = [System.Drawing.Bitmap]::new($ImagePath)
-    $crop = $null
-    $scaled = $null
-    $cropGraphics = $null
-    $scaleGraphics = $null
-    try {
-        $cropHeight = [Math]::Max(1, [int]($src.Height * $CropRatio))
-        $crop = [System.Drawing.Bitmap]::new(
-            $src.Width,
-            $cropHeight,
-            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
-        )
-        $cropGraphics = [System.Drawing.Graphics]::FromImage($crop)
-        $cropGraphics.Clear([System.Drawing.Color]::White)
-        $cropGraphics.DrawImage($src, 0, 0, $src.Width, $src.Height)
-
-        # Windows.Media.Ocr 拒绝任一边超过 MaxImageDimension 的图片。
-        # 手机长截图很容易超过限制，因此先统一缩放到安全范围；顶部区域可适度放大。
-        $maxDimension = 2400.0
-        $scale = [Math]::Min(
-            $MaxUpscale,
-            [Math]::Min($maxDimension / $crop.Width, $maxDimension / $crop.Height)
-        )
-        $targetWidth = [Math]::Max(1, [int]($crop.Width * $scale))
-        $targetHeight = [Math]::Max(1, [int]($crop.Height * $scale))
-        $scaled = [System.Drawing.Bitmap]::new(
-            $targetWidth,
-            $targetHeight,
-            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
-        )
-        $scaleGraphics = [System.Drawing.Graphics]::FromImage($scaled)
-        $scaleGraphics.Clear([System.Drawing.Color]::White)
-        $scaleGraphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $scaleGraphics.DrawImage($crop, 0, 0, $targetWidth, $targetHeight)
-        $scaled.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Png)
-    } finally {
-        if ($null -ne $scaleGraphics) { $scaleGraphics.Dispose() }
-        if ($null -ne $cropGraphics) { $cropGraphics.Dispose() }
-        if ($null -ne $scaled) { $scaled.Dispose() }
-        if ($null -ne $crop) { $crop.Dispose() }
-        $src.Dispose()
-    }
-}
-$prepared = @()
-try {
-    $fullPath = Join-Path ([System.IO.Path]::GetDirectoryName($Path)) 'payment-full.png'
-    Prepare-PaymentImage $Path $fullPath 1.0 1.0
-    $prepared += $fullPath
-    $topPath = Join-Path ([System.IO.Path]::GetDirectoryName($Path)) 'payment-top.png'
-    Prepare-PaymentImage $Path $topPath 0.55 2.0
-    $prepared += $topPath
-} catch {
-    # 个别系统不支持的图片编码仍交给 WinRT 解码器直接尝试。
-    $prepared = @($Path)
-}
-foreach ($image in $prepared) {
-    try { Recognize-Image $image } catch { }
-}
-"""
-    try:
-        with tempfile.TemporaryDirectory(prefix="tidoc-ocr-") as tmp:
-            tmp_dir = Path(tmp)
-            image_path = tmp_dir / f"input{path.suffix.lower()}"
-            script_path = tmp_dir / "ocr-image.ps1"
-            shutil.copy2(path, image_path)
-            script_path.write_text(script, encoding="utf-8")
-            proc = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(script_path),
-                    "-Path",
-                    str(image_path),
-                ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                timeout=20,
-                check=False,
-                **hidden_window_options(),
-            )
-        return (proc.stdout or "") + "\n" + (proc.stderr or "")
-    except Exception:
-        return ""
 
 
 def _macos_ocr_tax_verification_invoice_no(path: Path) -> str:

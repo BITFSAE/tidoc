@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS entry_fields (
     origin      TEXT DEFAULT '',    -- 识别原值
     current     TEXT DEFAULT '',    -- 当前值
     modified    INTEGER NOT NULL DEFAULT 0,  -- 是否被人工改过（永久，不可擦除）
-    value_source TEXT DEFAULT '',   -- payment_ocr / manual / 空（初始或历史数据）
+    value_source TEXT DEFAULT '',   -- payment_ai / payment_ocr（历史） / manual / 空
     PRIMARY KEY (entry_id, field),
     FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
 );

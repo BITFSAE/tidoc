@@ -108,7 +108,7 @@ def test_client_cache_hashes_content_config_and_key_and_does_not_modify_images(m
     client.recognize(path, cfg(requirements='需有付款时间'), 'secret')
     client.recognize(path, cfg(), 'new-secret')
     assert len(calls) == 3 and path.read_bytes() == before
-    assert 'secret' not in ''.join(p.read_text() for p in (tmp_path/'cache').glob('*.json'))
+    assert 'secret' not in ''.join(p.read_text('utf-8') for p in (tmp_path/'cache').glob('*.json'))
     assert calls[0][2]['thinking'] == {'type': 'disabled'}
     assert calls[0][2]['stream']
 

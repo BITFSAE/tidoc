@@ -167,7 +167,7 @@ def run_one(image: Prepared, model: str, url: str, slots: queue.Queue, args) -> 
         cache = args.cache / (cache_id + ".json")
         if not args.no_cache and cache.exists():
             try:
-                saved = json.loads(cache.read_text())
+                saved = json.loads(cache.read_text("utf-8"))
                 validate_result(saved["result"], args.allowed_sources, getattr(args, "profile", "baseline"))
                 row.update(result=saved["result"], cached=True, resolved_model=saved.get("resolved_model"))
             except Exception as exc:
@@ -190,7 +190,7 @@ def run_one(image: Prepared, model: str, url: str, slots: queue.Queue, args) -> 
                         try:
                             args.cache.mkdir(parents=True, exist_ok=True)
                             temp = cache.with_suffix(".tmp-" + str(time.time_ns()))
-                            temp.write_text(json.dumps(completion, ensure_ascii=False, indent=2))
+                            temp.write_text(json.dumps(completion, ensure_ascii=False, indent=2), "utf-8")
                             temp.replace(cache)
                         except OSError:
                             row["cache_write_error"] = True
@@ -299,7 +299,7 @@ def main(argv=None) -> int:
         parser.error("invalid concurrency, image, timeout or retry setting")
     if args.repeats > 1 and not args.no_cache:
         parser.error("repeat stability tests require --no-cache")
-    manifest = json.loads(args.manifest.read_text())
+    manifest = json.loads(args.manifest.read_text("utf-8"))
     samples = manifest["samples"]
     if not samples or len({s["id"] for s in samples}) != len(samples):
         parser.error("samples must be nonempty with unique IDs")
@@ -351,7 +351,7 @@ def main(argv=None) -> int:
                                    "summary": summarize(rows, wall), "rows": rows}
         if args.repeats > 1:
             report["models"][model]["consensus"] = consensus(rows, args.repeats, wall)
-        args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+        args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
     return int(any(m["summary"]["errors"] for m in report["models"].values()))
 
 

@@ -116,7 +116,7 @@ def test_cache_scope_and_no_cache_timing(monkeypatch, tmp_path):
     args.no_cache = True
     run()
     assert len(calls) == 4
-    assert all("secret-one" not in p.read_text() for p in tmp_path.glob("*.json"))
+    assert all("secret-one" not in p.read_text("utf-8") for p in tmp_path.glob("*.json"))
     assert bench.summarize([first], 3)["api_success_per_minute"] == 20
 
 

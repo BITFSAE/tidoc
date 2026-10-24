@@ -5263,7 +5263,7 @@ async function openInboundBindle(infos, cleanupPaths, progress = null) {
   if (!State.currentProfileId) throw new Error('请先创建报账人，再导入绑定包。');
   progress?.update('正在检查绑定包完整性…');
   const info = packages[0];
-  const insp = await Api.inspectBindle(info.path);
+  const insp = await Api.inspectBindle(info.path, State.scheme?.id);
   await openBindleImportPreview(info.path, insp, {
     onClose: () => cleanupDroppedPaths(cleanupPaths || [info.path]),
   });

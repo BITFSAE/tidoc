@@ -56,7 +56,7 @@ class _EntryRestorer:
                 target_scheme_id, target_revision_id = self.adapter_service.default_binding()
             except ValueError:
                 pass
-        if source_adapter and not e.get("scheme_revision_id"):
+        if source_adapter and not target_revision_id:
             status = "partial" if status == "complete" else status
             check_status = "warning" if check_status not in {"blocked", "fail"} else check_status
             check_message = storage._merge_text(check_message, "来自其他报账方案的材料；本机尚未绑定该方案规则。")
@@ -172,26 +172,10 @@ class _EntryRestorer:
                 raise ValueError(
                     f"附件 {att.get('original_name') or stored_name} 校验失败。"
                 )
-            from ..adapters.transfer import role_id as get_role_id
-            source_role = get_role_id(att)
             mapping = self.role_mappings_by_entry.get(str(entry_index), self.role_mappings_by_entry)
-            mapped_role = mapping.get(source_role) if isinstance(mapping, dict) else None
-            if source_role=='invoice' and target_revision_id:
-                mapped_role='invoice'
-            target_revision = ""
-            mapped_type=att.get('type','other')
-            if mapped_role and target_revision_id:
-                from ..db.adapters import AdapterRepo
-                target_definition = AdapterRepo(self.entries_repo.db).get_revision(target_revision_id)
-                role_rows = target_definition.get("materials", [])
-                role_rows = role_rows.get("roles", []) if isinstance(role_rows, dict) else role_rows
-                if mapped_role not in {r.get("id") for r in role_rows}:
-                    raise ValueError(f"材料角色映射目标不存在：{mapped_role}")
-                stored_role, role_revision = mapped_role, target_revision_id
-                mapped_type=storage._validated_material_mapping(self.entries_repo,new_id,target_revision_id,source_role,mapped_role,mapped_type,att.get('original_name') or stored_name)
-            else:
-                stored_role = source_role
-                role_revision = exchange_revision_id or None
+            stored_role, role_revision, mapped_type = storage._import_material_mapping(
+                self.entries_repo, new_id, target_revision_id, att,
+                mapping if isinstance(mapping, dict) else {}, exchange_revision_id)
             self.conn.execute(
                 """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
                    sha256, note, added_at, role_id, role_definition_revision_id) VALUES(?,?,?,?,?,?,?,?,?,?)""",

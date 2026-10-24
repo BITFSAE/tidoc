@@ -748,6 +748,10 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapte
     snapshots = _import_preview_snapshots(
         entries_repo, {entry_id for entry_id in matches if entry_id}
     )
+    target_revision_id = ""
+    if target_scheme_id and adapter_service:
+        target = adapter_service.get_scheme(target_scheme_id)
+        target_revision_id = target.get("current_revision_id") or target.get("revision_id") or ""
     for entry, existing_id in zip(entries, matches):
         source_adapter = entry.get("adapter") or {}
         entry["adapter_compatibility"] = {"available": bool(source_adapter.get("definition")),
@@ -766,6 +770,9 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapte
             public_package = source_adapter.get("definition", {}).get("manifest", {}).get("package_id", "")
             entry["extension_merge_preview"] = _extension_merge_preview(entries_repo, existing_id,
                                                                            source_adapter, public_package)
+        # A merge keeps the existing entry's rules, regardless of the new-entry scheme.
+        revision_id = (snapshots.get(existing_id) or {}).get("scheme_revision_id") if existing_id else target_revision_id
+        entry["role_mapping_preview"] = _role_mapping_preview(entries_repo, entry, revision_id)
         if not existing_id:
             entry["import_action"] = "new"
             counts["new"] += 1
@@ -776,9 +783,6 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapte
         entry["existing_batches"] = existing.get("batches") or []
         entry["merge_preview"] = preview
         entry["import_action"] = "merge" if preview["has_changes"] else "unchanged"
-        entry["role_mapping_preview"] = _role_mapping_preview(entries_repo, existing_id, entry,
-                                                                 adapter_service=adapter_service,
-                                                                 target_scheme_id=target_scheme_id)
         counts[entry["import_action"]] += 1
     inspected["import_plan"] = counts
 
@@ -927,31 +931,23 @@ def _merge_extension_data(entries_repo, entry_id, source_adapter):
     return changed
 
 
-def _role_mapping_preview(entries_repo, existing_id, entry, *, adapter_service=None, target_scheme_id=None):
+def _role_mapping_preview(entries_repo, entry, revision_id):
+    from ..adapters.transfer import builtin_material_mapping, role_id
     incoming = entry.get("attachments") or []
-    roles = sorted({str(a.get("role_id") or "other") for a in incoming})
-    local = (entries_repo.db.conn.execute(
-        "SELECT scheme_id,scheme_revision_id FROM entries WHERE id=?", (existing_id,)
-    ).fetchone() if existing_id else None)
-    revision_id = (local["scheme_revision_id"] or "") if local else ""
-    if target_scheme_id and adapter_service:
-        try:
-            target = adapter_service.get_scheme(target_scheme_id)
-            revision_id = target.get("current_revision_id") or target.get("revision_id") or revision_id
-        except (ValueError, KeyError):
-            pass
-    target_roles = []
+    roles = sorted({role_id(a) for a in incoming})
+    definition = {}
     if revision_id:
         try:
-            from ..db.adapters import AdapterRepo
-            definition = AdapterRepo(entries_repo.db).get_revision(revision_id)
-            material = definition.get("materials", [])
-            target_roles = [r.get("id") for r in (material.get("roles", []) if isinstance(material, dict) else material)]
+            definition = entries_repo._definition(revision_id)
         except (ValueError, KeyError):
-            target_roles = []
+            definition = {}
+    material = definition.get("materials", [])
+    target_roles = [r.get("id") for r in (material.get("roles", []) if isinstance(material, dict) else material)]
+    automatic_roles = {role for role in roles if all(
+        builtin_material_mapping(a, definition) == role for a in incoming if role_id(a) == role)}
     return {"source_roles": roles, "target_roles": target_roles,
-            # Names and IDs are not proof of semantic equivalence across revisions.
-            "requires_explicit_mapping": [role for role in roles if role != "invoice"]}
+            # Custom role names and IDs do not prove equivalence across revisions.
+            "requires_explicit_mapping": [role for role in roles if role != "invoice" and role not in automatic_roles]}
 
 
 def preview_bindle_transfer(entries_repo: EntryRepo, entry_ids: list[str], adapter_service=None) -> dict:
@@ -1031,6 +1027,37 @@ def _validated_material_mapping(entries_repo, entry_id, revision_id, source_role
         if count>=limit:
             raise ValueError('材料数量达到目标方案上限。')
     return att_type if invoice else 'other' if target_role.startswith('custom:') else target_role
+
+
+def _import_material_mapping(entries_repo, entry_id, revision_id, attachment, mappings, external_revision_id):
+    """Use a local built-in role when compatible; retain unmatched source material."""
+    from ..adapters.transfer import builtin_material_mapping, role_id
+    from ..db.adapters import AdapterRepo
+
+    source_role = role_id(attachment)
+    att_type = str(attachment.get("type") or "other")
+    mapped_role = (mappings or {}).get(source_role)
+    explicit = bool(mapped_role)
+    if revision_id:
+        definition = AdapterRepo(entries_repo.db).get_revision(revision_id)
+        if source_role == "invoice":
+            mapped_role = "invoice"
+            explicit = True
+        elif source_role not in (mappings or {}):
+            mapped_role = builtin_material_mapping(attachment, definition)
+        if mapped_role:
+            try:
+                mapped_type = _validated_material_mapping(
+                    entries_repo, entry_id, revision_id, source_role, mapped_role, att_type,
+                    attachment.get("original_name") or attachment.get("stored_path") or "")
+            except ValueError:
+                if explicit:
+                    raise
+            else:
+                return mapped_role, revision_id, mapped_type
+    elif mapped_role:
+        raise ValueError("请先为条目选择报账方案。")
+    return source_role, external_revision_id or None, att_type
 
 
 def _validated_recognition_data(value) -> str:
@@ -1179,26 +1206,9 @@ def _merge_existing_entry(
             str(attachment.get("original_name") or "") or stored_path
         ).suffix
         att_type = str(attachment.get("type") or "other")
-        from ..adapters.transfer import role_id as get_role_id
-        incoming_role = get_role_id(attachment)
-        mapped_role = (role_mappings or {}).get(incoming_role)
-        if incoming_role=='invoice' and existing.get('scheme_revision_id'):
-            mapped_role='invoice'
-        if mapped_role:
-            target_revision = str(existing.get("scheme_revision_id") or "")
-            target_definition = None
-            if target_revision:
-                from ..db.adapters import AdapterRepo
-                target_definition = AdapterRepo(entries_repo.db).get_revision(target_revision)
-            roles = (target_definition or {}).get("materials", [])
-            roles = roles.get("roles", []) if isinstance(roles, dict) else roles
-            if mapped_role not in {r.get("id") for r in roles}:
-                raise ValueError(f"材料角色映射目标不存在：{mapped_role}")
-            final_role, role_revision = mapped_role, target_revision or None
-            att_type=_validated_material_mapping(entries_repo,entry_id,target_revision,incoming_role,mapped_role,att_type,attachment.get('original_name') or stored_path)
-        else:
-            final_role = incoming_role
-            role_revision = _external_revision_id(entries_repo, incoming.get("adapter")) or None
+        final_role, role_revision, att_type = _import_material_mapping(
+            entries_repo, entry_id, existing.get("scheme_revision_id"), attachment,
+            role_mappings, _external_revision_id(entries_repo, incoming.get("adapter")))
         dest_dir = attachments_repo.data_root.entry_dir(entry_id)
         stored_name = attachments_repo._unique_name(dest_dir, entry_id, att_type, suffix)
         dest = dest_dir / stored_name

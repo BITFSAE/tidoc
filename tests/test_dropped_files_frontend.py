@@ -3,6 +3,26 @@
 from tests.test_selection_performance import run_selection
 
 
+def test_bindle_entry_points_preview_the_scheme_used_for_import():
+    run_selection(r"""
+State.currentProfileId = 'person';
+State.scheme = {id: 'selected-scheme'};
+const calls = [];
+globalThis.Api = {inspectBindle: async (path, scheme) => {
+  calls.push([path, scheme]); return {entries: []};
+}};
+taskProgress = () => ({close() {}});
+openBindleImportPreview = async () => {};
+(async () => {
+  await importBindleFlow('/chosen.tidoc');
+  await openInboundBindle([{type: 'bindle_package', path: '/dropped.tidoc'}], []);
+  assert.deepEqual(calls, [
+    ['/chosen.tidoc', 'selected-scheme'], ['/dropped.tidoc', 'selected-scheme']
+  ]);
+})().catch(error => {console.error(error); process.exitCode = 1;});
+""")
+
+
 def test_dropped_files_use_native_paths_without_reading_their_content():
     run_selection(r"""
 const calls = [];

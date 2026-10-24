@@ -474,7 +474,7 @@ async function importBindleFlow(path) {
   if (!State.currentProfileId) { toast('请先创建报账人', 'err'); return; }
   const progress = taskProgress('正在检查绑定包完整性…');
   try {
-    const insp = await Api.inspectBindle(path);
+    const insp = await Api.inspectBindle(path, State.scheme?.id);
     progress.close();
     await openBindleImportPreview(path, insp);
   } finally {

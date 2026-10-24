@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 from collections import defaultdict
+from pathlib import Path
 from typing import Iterable, Mapping
 
 TRANSFER_CAPABILITY = "bindle.v5"
@@ -52,6 +53,22 @@ def role_id(attachment: Mapping) -> str:
     if value:
         return str(value)
     return _BUILTIN_ROLES.get(str(attachment.get("type") or ""), "other")
+
+
+def builtin_material_mapping(attachment: Mapping, definition: dict) -> str | None:
+    """Built-in processing types have stable meanings across scheme revisions."""
+    source_role = role_id(attachment)
+    natural_role = _BUILTIN_ROLES.get(str(attachment.get("type") or ""))
+    if source_role != natural_role:
+        return None
+    target = next((role for role in _roles(definition) if role.get("id") == source_role), None)
+    if target is None:
+        return None
+    extensions = target.get("extensions") or []
+    filename = attachment.get("original_name") or attachment.get("stored_path") or ""
+    if extensions and Path(filename).suffix.lower() not in extensions:
+        return None
+    return source_role
 
 
 def _copy_keys(value, keys):

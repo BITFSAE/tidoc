@@ -7,6 +7,7 @@ from tidoc.adapters.transfer import (
 )
 import json
 import zipfile
+import pytest
 
 from tidoc.services import bindle as bindle_service
 
@@ -625,6 +626,151 @@ def test_other_material_cannot_map_to_invoice(tmp_path):
         bindle_service._validated_material_mapping(source.entries,eid,entry['scheme_revision_id'],
             'other','invoice','other','forged.pdf')
     source.db.close()
+
+
+@pytest.mark.parametrize('merge', [False, True])
+@pytest.mark.parametrize('legacy', [False, True])
+def test_import_builtin_materials_keep_their_groups_and_satisfy_requirements(tmp_path, merge, legacy):
+    from tidoc.api import Api
+    from tidoc.engine.models import ParsedInvoice
+
+    source, person, eid, _path = _transfer_source(tmp_path)
+    target = Api(tmp_path / 'target')
+    try:
+        for role, suffix in [('payment_screenshot', '.png'), ('physical_image', '.jpg'),
+                             ('inspection_pdf', '.pdf'), ('other', '.txt')]:
+            material = tmp_path / f'{role}{suffix}'
+            material.write_bytes(f'fictional {role}'.encode())
+            source.attachments.add(eid, material, role)
+        path = bindle_service.export_bindle(source.entries, source.attachments, [eid],
+            tmp_path / 'materials.tidoc', {person['id']: person})
+        if legacy:
+            def downgrade(payload, manifest):
+                payload['bindle_version'] = manifest['bindle_version'] = 4
+                for entry in payload['entries']:
+                    entry.pop('adapter', None)
+                    for attachment in entry['attachments']:
+                        attachment.pop('role_id', None)
+                        attachment.pop('role_definition_revision_id', None)
+            path = _rewrite_signed_archive(path, tmp_path / 'legacy.tidoc', downgrade)
+
+        scheme = target.adapters.get_scheme()
+        target.adapters.complete_adapter_setup(scheme['id'])
+        scheme = target.adapters.update_scheme(scheme['id'], scheme['current_revision_id'],
+            material_requirements={'payment_screenshot': True})
+        claimant = target.profiles.create(person['name'], '')
+        if merge:
+            target.entries.create(claimant['id'], parsed=ParsedInvoice(invoice_no='PORTABLE-1'))
+        preview = target.inspect_bindle(path, scheme['id'])['data']
+        mapping = preview['entries'][0]['role_mapping_preview']
+        assert mapping['requires_explicit_mapping'] == []
+
+        result = target.import_bindle(path, claimant['id'], options={'scheme_id': scheme['id']})
+        assert result['ok'], result
+        entry_id = (result['data']['updated_entry_ids'] if merge else result['data']['entry_ids'])[0]
+        entry = target.entries.get(entry_id)
+        assert {att['role_id'] for att in entry['attachments']} == {
+            'invoice', 'payment_screenshot', 'physical_image', 'inspection_pdf', 'other'}
+        assert all(att['role_definition_revision_id'] == entry['scheme_revision_id']
+                   for att in entry['attachments'])
+        assert entry['completeness']['ready'], entry['completeness']
+        assert '本机尚未绑定该方案规则' not in entry['check_message']
+        listed = next(row for row in target.entries.list() if row['id'] == entry_id)
+        assert listed['role_counts']['payment_screenshot'] == 1
+        repeated = target.import_bindle(path, claimant['id'], options={'scheme_id': scheme['id']})
+        assert repeated['ok'], repeated
+        assert repeated['data']['updated'] == repeated['data']['imported'] == 0
+    finally:
+        source.db.close()
+        target.db.close()
+
+
+@pytest.mark.parametrize('merge', [False, True])
+@pytest.mark.parametrize('explicit', [False, True])
+def test_custom_material_requires_explicit_mapping_even_when_it_is_an_image(tmp_path, merge, explicit):
+    from tidoc.api import Api
+    from tidoc.engine.models import ParsedInvoice
+
+    source, person, eid, _path = _transfer_source(tmp_path)
+    target = Api(tmp_path / 'target')
+    custom_role = 'custom:org.tidoc.generic:receipt'
+    try:
+        image = tmp_path / 'receipt.png'
+        image.write_bytes(b'fictional custom receipt')
+        source.attachments.add(eid, image, 'other')
+        original = bindle_service.export_bindle(source.entries, source.attachments, [eid],
+            tmp_path / 'original.tidoc', {person['id']: person})
+        def customize(payload, _manifest):
+            entry = payload['entries'][0]
+            entry['attachments'][-1]['role_id'] = custom_role
+            materials = entry['adapter']['definition']['materials']
+            materials.append({**next(role for role in materials if role['id'] == 'other'),
+                'id': custom_role, 'label': '回执', 'extensions': ['.png']})
+            entry['adapter']['definition']['manifest']['requires']['capabilities'].append('material-roles.v1')
+        path = _rewrite_signed_archive(original, tmp_path / 'custom.tidoc', customize)
+        scheme = target.adapters.get_scheme()
+        target.adapters.complete_adapter_setup(scheme['id'])
+        claimant = target.profiles.create(person['name'], '')
+        if merge:
+            target.entries.create(claimant['id'], parsed=ParsedInvoice(invoice_no='PORTABLE-1'))
+        inspected = target.inspect_bindle(path, scheme['id'])
+        assert inspected['ok'], inspected
+        preview = inspected['data']
+        assert preview['entries'][0]['role_mapping_preview']['requires_explicit_mapping'] == [custom_role]
+        options = {'scheme_id': scheme['id']}
+        if explicit:
+            options['role_mappings'] = {'0': {custom_role: 'payment_screenshot'}}
+        result = target.import_bindle(path, claimant['id'], options=options)
+        assert result['ok'], result
+        entry_id = (result['data']['updated_entry_ids'] if merge else result['data']['entry_ids'])[0]
+        entry = target.entries.get(entry_id)
+        attachment = next(att for att in entry['attachments'] if att['original_name'] == image.name)
+        assert attachment['role_id'] == ('payment_screenshot' if explicit else custom_role)
+        assert attachment['type'] == ('payment_screenshot' if explicit else 'other')
+        assert (attachment['role_definition_revision_id'] == entry['scheme_revision_id']) is explicit
+    finally:
+        source.db.close()
+        target.db.close()
+
+
+@pytest.mark.parametrize('constraint', ['missing', 'extension', 'maximum'])
+def test_automatic_material_mapping_retains_files_outside_target_limits(tmp_path, constraint):
+    from copy import deepcopy
+    from tidoc.api import Api
+
+    source, person, eid, _path = _transfer_source(tmp_path)
+    target = Api(tmp_path / 'target')
+    try:
+        image = tmp_path / 'payment.png'
+        image.write_bytes(b'fictional payment')
+        source.attachments.add(eid, image, 'payment_screenshot')
+        path = bindle_service.export_bindle(source.entries, source.attachments, [eid],
+            tmp_path / 'payment.tidoc', {person['id']: person})
+        scheme = target.adapters.get_scheme()
+        target.adapters.complete_adapter_setup(scheme['id'])
+        definition = deepcopy(scheme['definition'])
+        role = next(role for role in definition['materials'] if role['id'] == 'payment_screenshot')
+        if constraint == 'missing':
+            definition['materials'].remove(role)
+            definition['outputs'] = []
+            definition['scheme']['default_outputs'] = []
+        elif constraint == 'extension':
+            role['extensions'] = ['.jpg']
+        else:
+            role['max_count'] = 0
+        revision = target.adapters.packages.store_revision(definition,
+            target.adapters.packages.revision_record(scheme['current_revision_id'])['content_hash'])
+        target.adapters.packages.set_current_revision(scheme['id'], revision)
+        claimant = target.profiles.create(person['name'], '')
+        result = target.import_bindle(path, claimant['id'], options={'scheme_id': scheme['id']})
+        assert result['ok'], result
+        entry = target.entries.get(result['data']['entry_ids'][0])
+        attachment = next(att for att in entry['attachments'] if att['type'] == 'payment_screenshot')
+        assert attachment['role_definition_revision_id'] != entry['scheme_revision_id']
+        assert (target.data_root.attachments_dir / attachment['stored_path']).read_bytes() == image.read_bytes()
+    finally:
+        source.db.close()
+        target.db.close()
 
 
 def test_bundle_preview_does_not_report_skipped_extension_values_for_new_entries():

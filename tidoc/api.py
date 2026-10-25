@@ -64,7 +64,7 @@ from .api_schemes import SchemeApi
 from .api_verification import InvoiceVerificationApi
 from .api_updates import UpdateApi
 from .api_qr import QrTicketApi
-from .api_payment_ai import PaymentAiApi
+from .api_payment_ai import PaymentAiApi, payment_result_current
 
 
 class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiApi):
@@ -102,6 +102,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         self._native_drops = NativeDropRegistry()
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
         self._sync_entry_statuses()
+        self._sync_payment_checks()
         from .services.updater import CoreUpdateManager
         self._core_updater = CoreUpdateManager(self.data_root.updates_dir)
 
@@ -1203,10 +1204,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                     invoice_pending += 1
             payments = [a for a in attachments if a["type"] == TYPE_PAYMENT]
             payment_total += len(payments)
-            payment_pending += sum(
-                (a.get("recognition_version") != payment_version or a.get("recognition_status") in {"error", "unrecognized"})
-                for a in payments
-            )
+            payment_pending += sum(not payment_result_current(a, payment_version) for a in payments)
         return {
             "invoice": {"total": invoice_total, "pending": invoice_pending, "current": invoice_total - invoice_pending},
             "payment": {
@@ -1700,6 +1698,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         from .services.updater import CoreUpdateManager
         self._core_updater = CoreUpdateManager(self.data_root.updates_dir)
         self._sync_entry_statuses()
+        self._sync_payment_checks()
 
     def _sync_entry_statuses(self) -> None:
         """Recompute only outdated engine caches, always using the bound revision."""

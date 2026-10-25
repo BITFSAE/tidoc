@@ -21,6 +21,20 @@ def _same_money(a, b) -> bool:
         return False
 
 
+# 付款截图提醒的生成规则；规则或本机识别设置变了，就给所有带付款截图的条目重算一次提醒。
+PAYMENT_CHECK_RULES = "payment-check-3"
+PAYMENT_CHECK_STATE_KEY = "tidoc.paymentAi.checkState"
+
+
+def payment_result_current(attachment, version) -> bool:
+    """这张截图已有可用结论、不必再上传：本机按当前设置识别过，或随绑定包带来的同规则结果。"""
+    saved = str(attachment.get("recognition_version") or "")
+    if attachment.get("recognition_status") in {"", None, "error", "unrecognized"}:
+        return False
+    imported = saved.endswith(":imported") and saved.split(":")[0] == version.split(":")[0]
+    return saved == version or imported
+
+
 class PaymentAiApi:
     def _ensure_payment_ai_idle(self):
         with self._payment_ai_lock:
@@ -55,6 +69,17 @@ class PaymentAiApi:
         else:
             self.entries.clear_payment_check(entry_id)
 
+    def _sync_payment_checks(self):
+        state = f"{PAYMENT_CHECK_RULES}|{int(self._payment_ai_available())}|{int(self._payment_ai_enabled())}"
+        if self._preference_value(PAYMENT_CHECK_STATE_KEY) == state:
+            return
+        rows = self.db.conn.execute(
+            "SELECT DISTINCT entry_id FROM attachments WHERE type = 'payment_screenshot'"
+        ).fetchall()
+        for row in rows:
+            self._refresh_payment_ai_check(row["entry_id"])
+        self._set_preference_value(PAYMENT_CHECK_STATE_KEY, state)
+
     def _payment_ai_version(self):
         cfg = self._payment_ai_config()
         facts = [cfg[k] for k in ('provider', 'base_url', 'model', 'requirements')]
@@ -85,7 +110,8 @@ class PaymentAiApi:
     @_guard
     def save_payment_ai_settings(self, values=None, key=None, clear_key=False):
         old = self._payment_ai_config()
-        cfg = vision.validate_config({**old, **(values or {})})
+        # 清除 Key 时自动识别一并关闭，否则会因「开着却没有 Key」被拒绝。
+        cfg = vision.validate_config({**old, **(values or {}), **({'enabled': False} if clear_key else {})})
         # 只切换自动识别开关不影响正在进行的识别；换服务商、Key 等要等识别结束。
         changed = {k for k in cfg if cfg[k] != old[k]} - {'enabled'}
         with self._payment_ai_lock:
@@ -102,6 +128,8 @@ class PaymentAiApi:
         with self.db.transaction():
             self.db.conn.execute('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)', (slot, stored))
             self.db.conn.execute('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)', (vision.CONFIG_KEY, json.dumps(cfg, ensure_ascii=False)))
+        # 清除 Key、开关自动识别后，其他条目上的付款截图提醒也跟着变。
+        self._sync_payment_checks()
         return self.payment_ai_settings()['data']
 
     def _record_payment_ai_usage(self):
@@ -222,7 +250,7 @@ class PaymentAiApi:
                 for item in entry.get('attachments') or []:
                     if item['type'] != 'payment_screenshot':
                         continue
-                    if item.get('recognition_version') == version and item.get('recognition_status') not in {'error', 'unrecognized'}:
+                    if payment_result_current(item, version):
                         skipped += 1
                         continue
                     att = self.attachments.get(item['id'])

@@ -1001,7 +1001,7 @@ def test_api_ocr_status_credentials_and_preview(api, monkeypatch):
     api.save_ocr_credentials("LTAI5tFakeKeyId12345", "fake-secret")
     status = api.ocr_component_status()["data"]
     assert status["credentials_configured"] is True
-    assert status["access_key_id_masked"] == "LT****45"
+    assert status["access_key_id_masked"] == "LTAI5t****2345"
     assert "fake-secret" not in status["access_key_id_masked"]
 
     parsed = ParsedInvoice(invoice_no="24122000000012345678", seller="销售方",

@@ -641,7 +641,7 @@ def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypa
     attachment = api.add_attachment(entry["id"], str(payment), "payment_screenshot")["data"]
     refreshed = api.get_entry(entry["id"])["data"]
     assert refreshed["check_status"] == "warning"
-    assert "未识别付款.png 未识别到付款金额" in refreshed["check_message"]
+    assert "付款截图未识别到金额" in refreshed["check_message"]
 
     api.delete_attachment(attachment["id"])
     cleared = api.get_entry(entry["id"])["data"]
@@ -1370,3 +1370,8 @@ def test_bindle_carries_payment_screenshot_recognition(repos, tmp_path):
     saved = target_entries.get(result["entry_ids"][0])["attachments"][0]
     assert (saved["recognition_status"], saved["recognized_value"], saved["recognition_message"]) == (
         "review", "12.50", "有退款，核对净支出")
+    # 对方用别的服务商时也不重新上传：导入的结果按同规则的已识别处理。
+    from tidoc.api_payment_ai import payment_result_current
+    assert saved["recognition_version"] == "payment-ai-test:imported"
+    assert payment_result_current(saved, "payment-ai-test:another-provider")
+    assert not payment_result_current(saved, "payment-ai-next:another-provider")

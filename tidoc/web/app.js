@@ -225,6 +225,16 @@ const FIELD_LABEL = {
   invoice_no: '发票号码', total: '价税合计', buyer_name: '购买方抬头',
   buyer_tax_id: '税号', title: '抬头',
 };
+// 修改记录里自动写入的字段带来源前缀，例如「[阿里云OCR]total」，显示成「价税合计 · 采用阿里云 OCR」。
+const HISTORY_SOURCE_LABEL = {
+  '阿里云OCR': '采用阿里云 OCR', '本地重新识别': '本机重新识别', '人工修正': '人工修正', '付款截图识别': '付款截图识别填写',
+};
+function historyFieldLabel(field) {
+  const match = /^\[(.+?)\](.+)$/.exec(String(field || ''));
+  const name = match ? match[2] : field;
+  const label = FIELD_LABEL[name] || OCR_FIELD_LABEL[name] || name;
+  return match ? `${label} · ${HISTORY_SOURCE_LABEL[match[1]] || match[1]}` : label;
+}
 const OCR_FIELD_LABEL = {
   invoice_no: '发票号码', invoice_date: '发票日期', seller: '销售方',
   total: '价税合计', buyer_name: '购买方抬头', buyer_tax_id: '购买方税号',
@@ -1400,7 +1410,7 @@ function entryCard(e) {
 
   // 校验状态：仅在 warning/blocked 时突出显示（pass 不占视觉）
   const checkBadge = (e.check_status && e.check_status !== 'pass')
-    ? `<span class="badge ${e.check_status}"${e.check_message ? ` data-tooltip="${esc(e.check_message)}"` : ''}>${CHECK_LABEL[e.check_status] || ''}</span>` : '';
+    ? `<span class="badge ${e.check_status}"${e.check_message ? ` data-tooltip="${esc(checkMessageLines(e.check_message).join('\n'))}"` : ''}>${CHECK_LABEL[e.check_status] || ''}</span>` : '';
 
   const fields = e.fields || {};
   const notesCur = fields.notes ? fields.notes.current : '';
@@ -1410,9 +1420,9 @@ function entryCard(e) {
   const modified = paidDiff
     ? `<span class="badge modified" data-tooltip="${esc(entryModifiedTooltip(e))}">${iconPencil(11)}已修改</span>` : '';
   const ocrBadge = e.ocr_pending
-    ? `<button class="badge ocr badge-action" data-card-ocr="1" data-tooltip="阿里云识别存在待确认差异，点击查看">OCR</button>` : '';
+    ? `<button class="badge ocr badge-action" data-card-ocr="1" data-tooltip="阿里云 OCR 结果与当前值有差异待确认，点击查看">OCR</button>` : '';
   const recognizedBadge = (e.ocr_recognized && !e.ocr_pending)
-    ? `<button class="badge ocr badge-action" data-card-ocr="1" data-tooltip="已用阿里云识别，点击查看">已识别</button>` : '';
+    ? `<button class="badge ocr badge-action" data-card-ocr="1" data-tooltip="已用阿里云 OCR 识别，点击查看结果">已识别</button>` : '';
   // 已按报账人筛选、或只有一个报账人时，每张卡片都带同一个名字是重复信息，不再显示。
   const owner = (State.profiles.length > 1 && !$('#filterProfile')?.value) ? State.profileById[e.profile_id] : null;
   const ownerBadge = owner
@@ -1700,12 +1710,19 @@ function entryHasPaidDifference(entry) {
   return !!String(paid ?? '').trim() && !sameMoney(paid, entry?.total);
 }
 
+// 识别提醒在库里用「；」连成一串，付款截图的几条带「[付款截图识别]」前缀（句子本身已写明是付款截图）；显示时逐条分行、去掉前缀。
+function checkMessageLines(message) {
+  return String(message || '').split('；').map((part) => part.trim()).filter(Boolean)
+    .map((part) => part.startsWith('[付款截图识别]') ? part.slice('[付款截图识别]'.length).trim() : part);
+}
+
 function entryModifiedTooltip(entry) {
   const fields = entry?.fields || {};
   const changes = [];
   const paid = fields.paid_amount;
   if (entryHasPaidDifference(entry)) {
-    changes.push(`实付金额：${fmtMoney(paid?.origin || entry?.total)} → ${fmtMoney(paid?.current)}`);
+    const by = ['payment_ai', 'payment_ocr'].includes(paid?.value_source) ? '（由付款截图识别填写）' : '';
+    changes.push(`实付金额：${fmtMoney(paid?.origin || entry?.total)} → ${fmtMoney(paid?.current)}${by}`);
   }
   const describeText = (key, label) => {
     const row = fields[key];
@@ -3637,7 +3654,7 @@ async function buildSettings(options = {}) {
 
       <!-- 开发者选项：需要自备服务账号、按量计费或面向方案维护的功能 -->
       <details class="settings-block dev-options" id="setDevOptions">
-        <summary class="settings-block-title">开发者选项<small>报账方案、云端识别；默认用不到</small></summary>
+        <summary class="settings-block-title">开发者选项<small>报账方案、付款截图 AI 识别、发票阿里云 OCR</small></summary>
         <section class="dev-subsection" aria-label="报账方案">
           <div class="settings-row">
             <div class="settings-row-copy">
@@ -4786,7 +4803,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const reclassifiableRoles = roles.filter((role) => role.id !== 'invoice' && role.reclassifiable !== false);
   const attRow = (a, byRole) => `
       <div class="attach-item">
-        <span class="attach-name" title="${esc(a.abs_path || a.stored_path)}">${esc(a.original_name)}${a.type === 'payment_screenshot' ? paymentAttachmentBadge(a) : ''}${a.type === 'payment_screenshot' && a.recognition_message ? `<small class="attachment-ai-hint">${esc(a.recognition_message)}</small>` : ''}</span>
+        <span class="attach-name" data-tooltip-overflow="${esc(a.original_name)}">${esc(a.original_name)}${a.type === 'payment_screenshot' ? paymentAttachmentBadge(a) : ''}${a.type === 'payment_screenshot' && a.recognition_message ? `<small class="attachment-ai-hint">${esc(a.recognition_message)}</small>` : ''}</span>
         <div class="attach-actions">
           ${byRole
             ? `<select class="attach-type-select" data-att-role="${a.id}" aria-label="调整材料角色">
@@ -4881,7 +4898,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const history = (e.history || []).map((h) => `
     <div class="hitem">
       <span class="h-time">${esc(h.changed_at)}</span>
-      <span class="h-field">${esc(FIELD_LABEL[h.field] || h.field)}</span>
+      <span class="h-field">${esc(historyFieldLabel(h.field))}</span>
       <span class="h-val">「${esc(h.old_value || '空')}」→「${esc(h.new_value || '空')}」</span>
     </div>`).join('')
     || '<div class="attach-item" style="color:var(--ink-soft)">暂无修改记录</div>';
@@ -4914,7 +4931,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
             <button type="button" class="btn small ghost profile-create-btn" data-create-profile data-profile-target="#deProfile">新建</button>
           </span>
         </div>
-        ${e.check_message ? `<p class="hint warn compact-hint">${esc(e.check_message)}</p>` : ''}
+        ${e.check_message ? `<ul class="hint warn compact-hint check-lines">${checkMessageLines(e.check_message).map((line) => `<li>${esc(line)}</li>`).join('')}</ul>` : ''}
       </div>
 
       <div class="detail-section">
@@ -5287,7 +5304,8 @@ function paymentAttachmentBadge(a) {
   if (!a.recognition_status) return '';
   const warn = a.recognition_status !== 'recognized';
   const text = a.recognized_value ? fmtMoney(a.recognized_value) : PAY_AI_STATUS[a.recognition_status] || '';
-  return `<span class="attachment-ai-amount${warn ? ' warn' : ''}" title="AI 识别结果">${text}${warn && a.recognized_value ? ' · 需核对' : ''}</span>`;
+  const tip = `付款截图 AI 识别：${PAY_AI_STATUS[a.recognition_status] || a.recognition_status}${a.recognized_value ? ` ${fmtMoney(a.recognized_value)}` : ''}`;
+  return `<span class="attachment-ai-amount${warn ? ' warn' : ''}" data-tooltip="${esc(tip)}">${text}${warn && a.recognized_value ? ' · 需核对' : ''}</span>`;
 }
 
 const PAY_AI_STATUS = {
@@ -5301,7 +5319,8 @@ async function loadPaymentAiDetail(container, mm, entryId) {
     return;
   }
   const items = view.items || [];
-  const rows = items.map((item) => `<tr>
+  const rows = items.map((item, index) => `<tr>
+      <td class="num">${index + 1}</td>
       <td class="pay-ai-name" data-tooltip-overflow="${esc(item.name)}">${esc(item.name)}</td>
       <td class="num">${item.amount ? fmtMoney(item.amount) : '—'}</td>
       <td><span class="pay-ai-status ${esc(item.status)}">${PAY_AI_STATUS[item.status] || esc(item.status)}</span></td>
@@ -5319,7 +5338,7 @@ async function loadPaymentAiDetail(container, mm, entryId) {
   container.innerHTML = `
     ${items.length > 1 ? '<div class="hint">多张付款截图按金额累加后与实付比对。</div>' : ''}
     <table class="ocr-diff-table pay-ai-table">
-      <thead><tr><th>截图</th><th class="num">识别金额</th><th>状态</th><th>说明</th></tr></thead>
+      <thead><tr><th class="num">#</th><th>截图</th><th class="num">识别金额</th><th>状态</th><th>说明</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     ${compare}
@@ -6159,7 +6178,11 @@ async function openOcrDialog(ids) {
 
   const cloudInvoice = body.querySelector('#cloudInvoice');
   const cloudPayment = body.querySelector('#cloudPayment');
-  body.querySelector('#cloudSettings').onclick = () => { m.close(); openSettings(); };
+  body.querySelector('#cloudSettings').onclick = () => {
+    // 从这里进设置就是为了改 Key 或费用，直接展开开发者选项。
+    try { localStorage.setItem('tidoc.settings.devOptionsOpen', '1'); } catch (_) { /* 忽略 */ }
+    m.close(); openSettings();
+  };
   body.querySelector('#cloudInstallOcr')?.addEventListener('click', (event) => {
     event.preventDefault(); m.close(); openUpdateDialog();
   });

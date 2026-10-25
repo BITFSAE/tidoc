@@ -143,12 +143,12 @@
           <div class="batch-folders" id="batchFolders"></div>
           <div class="view-presets" id="viewPresets" role="group" aria-label="状态">
             <button class="preset-btn active" data-view="all">全部</button>
-            <button class="preset-btn" data-view="incomplete">待补材料</button>
-            <button class="preset-btn" data-view="warning">识别提醒</button>
-            <button class="preset-btn hidden" data-view="ocr" data-ocr-ui>已识别</button>
-            <button class="preset-btn hidden" data-view="ocr_pending" title="存在阿里云识别差异待确认的条目" data-ocr-ui>OCR 待确认</button>
-            <button class="preset-btn" data-view="modified">已修改</button>
-            <button class="preset-btn" data-view="complete">齐备</button>
+            <button class="preset-btn" data-view="incomplete" title="缺少方案要求的材料，或实付还没确认的条目">待补材料</button>
+            <button class="preset-btn" data-view="warning" title="发票或付款截图的识别结果需要核对的条目">识别提醒</button>
+            <button class="preset-btn hidden" data-view="ocr" title="已用阿里云 OCR 识别过的条目" data-ocr-ui>已识别</button>
+            <button class="preset-btn hidden" data-view="ocr_pending" title="阿里云 OCR 结果与当前值有差异、待确认的条目" data-ocr-ui>OCR 待确认</button>
+            <button class="preset-btn" data-view="modified" title="实付金额与发票金额不一致的条目">已修改</button>
+            <button class="preset-btn" data-view="complete" title="材料齐全、实付已确认的条目">齐备</button>
           </div>
         </div>
 
@@ -231,10 +231,10 @@
             <button class="btn small ghost" id="changeProfileBtn" title="批量修改所选条目的报账人">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="9" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 19c.6-3.5 2.5-5.3 5.5-5.3 1.5 0 2.7.4 3.6 1.2M16 12v7m-3.5-3.5h7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>报账人</span>
             </button>
-            <button class="btn small ghost hidden" id="batchReparseBtn" title="按当前规则重新识别所选条目的发票或付款截图">
+            <button class="btn small ghost hidden" id="batchReparseBtn" title="在本机按当前规则重新识别所选条目的发票，不联网、不计费">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M19 7v5h-5M5 17v-5h5M7.2 9A6 6 0 0 1 17.8 7M16.8 15A6 6 0 0 1 6.2 17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>重新识别</span>
             </button>
-            <button class="btn small ghost hidden" id="batchOcrBtn" data-ocr-ui title="识别所选发票或付款截图（按量计费）">
+            <button class="btn small ghost hidden" id="batchOcrBtn" data-ocr-ui title="用阿里云 OCR 识别发票，或用 AI 识别付款截图金额；按量计费">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M6.5 18a4.5 4.5 0 0 1-.4-8.98A6 6 0 0 1 17.7 8.1 4.5 4.5 0 0 1 17.5 18h-11z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8 13.5h8M8.5 13.5l1.5-1.8M8.5 13.5l1.5 1.8M15.5 13.5 14 11.7M15.5 13.5 14 15.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>云识别</span>
             </button>
             <span class="selection-divider"></span>

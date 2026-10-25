@@ -684,7 +684,9 @@ class EntryRepo:
             "WHERE entry_id = ? AND field = ?",
             (new_value, modified, source, entry_id, field),
         )
-        self._log_history(entry_id, field, old_value, new_value, profile_id)
+        # 识别填写的实付在修改记录里标明来源，与人工修改区分开。
+        history_field = f"{PAYMENT_CHECK_PREFIX}{field}" if source == VALUE_SOURCE_PAYMENT_AI else field
+        self._log_history(entry_id, history_field, old_value, new_value, profile_id)
         self._touch(entry_id)
         self.db.conn.commit()
         return self._fields(entry_id)
@@ -1192,20 +1194,22 @@ class EntryRepo:
             payment_messages.append(
                 f"{PAYMENT_CHECK_PREFIX} {pending} 张付款截图尚未按当前规则识别，请重新识别。"
             )
-        for item in items:
-            name, reason = clean(item["name"]), clean(item["message"])
+        # 用顺序指代截图（与详情「付款截图识别」表格一致），不写文件名：手机截图的文件名多是一串数字。
+        for index, item in enumerate(items, 1):
+            label = "付款截图" if len(items) == 1 else f"第 {index} 张付款截图"
+            reason = clean(item["message"])
             if item["status"] == "error":
                 payment_messages.append(
-                    f"{PAYMENT_CHECK_PREFIX} {name} 识别失败（{reason or '原因未知'}），可稍后重新识别或手动核对。"
+                    f"{PAYMENT_CHECK_PREFIX} {label}识别失败（{reason or '原因未知'}），可稍后重新识别或手动核对。"
                 )
             elif item["status"] == "unrecognized" or (item["status"] == "review" and not item["amount"]):
                 payment_messages.append(
-                    f"{PAYMENT_CHECK_PREFIX} {name} 未识别到付款金额："
+                    f"{PAYMENT_CHECK_PREFIX} {label}未识别到金额："
                     + (f"{reason}。" if reason else "请换成付款账单截图或手动核对。")
                 )
             elif item["status"] == "review":
                 payment_messages.append(
-                    f"{PAYMENT_CHECK_PREFIX} {name} 识别到 {item['amount']}，但{reason or '付款信息待核对'}，请核对。"
+                    f"{PAYMENT_CHECK_PREFIX} {label}识别到 {item['amount']}，但{reason or '付款信息待核对'}，请核对。"
                 )
         if overview.get("mismatch"):
             target = "实付" if overview["compare_to"] == "paid" else "发票金额"

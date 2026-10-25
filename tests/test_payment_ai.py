@@ -363,7 +363,7 @@ def test_non_payment_screenshot_and_paid_mismatch_are_named_in_reminders(api, mo
     monkeypatch.setattr(ai, 'request_completion', lambda *args: complete(raw(kind='order', completed=False)))
     job = wait(api, api.start_payment_ai(entry_ids=[eid])['data'])
     message = api.entries.get(eid)['check_message']
-    assert 'order.png 未识别到付款金额：订单页，请用付款账单截图' in message
+    assert '付款截图未识别到金额：订单页，请用付款账单截图' in message
     assert job['entries'][0]['applied'] == '' and job['entries'][0]['notes']
 
     other = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('50.00')))
@@ -402,10 +402,11 @@ def test_switch_only_controls_automatic_recognition(api, monkeypatch, tmp_path):
     assert calls == [1] and api.entries.get(eid)['fields']['paid_amount']['current'] == '43.20'
 
 
-def test_secret_mask_shows_two_characters_at_each_end():
+def test_secret_mask_skips_the_common_prefix():
     from tidoc.api_shared import mask_secret
-    assert mask_secret('sk-abcdef123456xy') == 'sk****xy'
-    assert mask_secret('LTAI5t') == 'L****'
+    assert mask_secret('sk-abcdef123456xy') == 'sk-ab****56xy'
+    assert mask_secret('sk-proj-abcdef123456xy') == 'sk-proj-ab****56xy'
+    assert mask_secret('sk-short') == 'sk-s****'
     assert mask_secret('') == ''
 
 
@@ -421,3 +422,21 @@ def test_secret_mask_shows_two_characters_at_each_end():
 def test_review_reason_names_what_is_wrong(changes, reason):
     result = ai.normalize_fast_result(raw(**changes), list(ai.ALLOWED_SOURCES))
     assert result['needs_review'] and ai.result_message(result).startswith(reason)
+
+
+def test_clearing_key_updates_reminders_on_every_entry_and_ai_fill_is_labelled(api, monkeypatch, tmp_path):
+    enable_payment_ai(api)
+    person = api.create_profile('测试人员', '测试审核人')['data']
+    eid = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('50.00')))
+    api.attachments.add(eid, image(tmp_path), 'payment_screenshot')
+    monkeypatch.setattr(ai, 'request_completion', lambda *args: complete())
+    wait(api, api.start_payment_ai(entry_ids=[eid])['data'])
+    assert '不一致' in api.entries.get(eid)['check_message']
+    assert api.save_payment_ai_settings({}, clear_key=True)['ok']
+    assert '付款截图' not in api.entries.get(eid)['check_message']
+
+    enable_payment_ai(api)
+    assert '不一致' in api.entries.get(eid)['check_message']
+    assert api.apply_payment_ai_total(eid)['ok']
+    fields = [row['field'] for row in api.entries.get(eid)['history']]
+    assert '[付款截图识别]paid_amount' in fields

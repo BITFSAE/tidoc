@@ -2334,3 +2334,5 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .cloud-summary-title { margin: 12px 0 6px; font-size: 12px; font-weight: 600; color: var(--ink-soft); }
 .cloud-summary-title:first-child { margin-top: 0; }
 .entry-list.is-refreshing { opacity: .55; transition: opacity .12s; pointer-events: none; }
+.check-lines { padding-left: 26px; }
+.check-lines li + li { margin-top: 2px; }

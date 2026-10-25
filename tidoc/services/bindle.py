@@ -53,7 +53,8 @@ def _imported_payment_recognition(attachment: dict, att_type: str) -> tuple[str,
         return empty
     if value and not re.fullmatch(r"(0|[1-9][0-9]{0,11})\.[0-9]{2}", value):
         return empty
-    return version, status, value, message[:300]
+    # 标成导入的结果：同一识别规则下视为已识别，不因对方用了别的服务商而重新上传计费。
+    return version.split(":")[0] + ":imported", status, value, message[:300]
 
 def _serialize_entry(
     entry: dict,

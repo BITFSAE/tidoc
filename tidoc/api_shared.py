@@ -28,13 +28,17 @@ MAX_DROPPED_TOTAL_BYTES = 500 * 1024 * 1024
 
 
 def mask_secret(value: str) -> str:
-    """密钥展示用：只露前两位和后两位，方便核对是哪一把 Key，又不显示整串。"""
+    """密钥展示用：跳过人人相同的开头（sk-、sk-proj-、阿里云的 LTAI），
+    露出其后两位和末尾四位，足够分辨是哪一把 Key，又不显示整串。"""
+    import re
     text = str(value or "").strip()
     if not text:
         return ""
-    if len(text) <= 6:
-        return text[:1] + "****"
-    return f"{text[:2]}****{text[-2:]}"
+    prefix = re.match(r"(sk-proj-|sk-|LTAI)?", text).group(0)
+    rest = text[len(prefix):]
+    if len(rest) < 10:
+        return prefix + rest[:1] + "****"
+    return f"{prefix}{rest[:2]}****{rest[-4:]}"
 
 
 class DuplicateInvoiceError(ValueError):

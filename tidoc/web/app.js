@@ -297,6 +297,17 @@ function filenameTimestamp(date = new Date()) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}-${pad(date.getHours())}-${pad(date.getMinutes())}`;
 }
 
+function exportDefaultName(ids) {
+  const selected = new Set(ids);
+  const entries = State.entries.filter(entry => selected.has(entry.id));
+  const batchIds = new Set(entries.map(entry => entry.batch_id || entry.batches?.[0]?.id));
+  if (entries.length === selected.size && batchIds.size === 1 && !batchIds.has(undefined) && !batchIds.has(null)) {
+    const batch = State.batches.find(batch => batch.id === [...batchIds][0]);
+    if (batch?.name) return batch.name;
+  }
+  return '报账导出-' + filenameTimestamp();
+}
+
 // inline SVG icons (no emoji)
 const I = {
   pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m4 20 4-1 11-11-3-3L5 16l-1 4z"/><path d="m14 5 3 3"/></svg>',
@@ -4573,7 +4584,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
             ${f.warning ? `<span class="bi-warning">${esc(f.warning)}</span>` : ''}
           </div>`).join('')}
         ${(g.warnings || []).length ? `<div class="bi-warning">${g.warnings.map(esc).join('；')}</div>` : ''}
-        ${g.error ? `<div class="bi-error"><b>未创建：</b>${esc(g.error)}</div>` : ''}
+        ${g.error ? `<div class="bi-error"><b>未创建：</b>${esc(g.error)}${g.existingEntryId ? ` <button type="button" class="link-btn" data-bi-existing="${esc(g.existingEntryId)}">查看已有条目</button>` : ''}</div>` : ''}
       </div>`).join('') || '<div class="hint">没有找到可导入的发票 PDF 或有效 XML。可以先导入 XML，打印票面前补充 PDF。</div>';
 
     const ungroupedRows = ungrouped.length ? `
@@ -4649,6 +4660,9 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
       if (selectedImportBatchId === NEW_IMPORT_BATCH) newBatchInput.focus();
     };
     newBatchInput.oninput = () => { newImportBatchName = newBatchInput.value; };
+    body.querySelectorAll('[data-bi-existing]').forEach(button => {
+      button.onclick = () => openEntryDetail(button.dataset.biExisting).catch(e => toast(e.message, 'err'));
+    });
 
     body.querySelectorAll('[data-bi-group]').forEach((cb) => {
       cb.onchange = () => {
@@ -4753,6 +4767,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
             const failure = failedByKey.get(group.key) || failedByKey.get(group.label);
             if (failure) {
               group.error = failure.error || '导入失败';
+              group.existingEntryId = failure.existing_entry_id || '';
               group.selected = false;
             } else if (createdKeys.has(group.key) || payload.some((item) => item.key === group.key)) {
               group.created = true;
@@ -6023,29 +6038,30 @@ async function doExport(ids) {
   if (!ids || !ids.length) { toast('请先选择要导出的条目', 'err'); return; }
   const transferPreview = await Api.previewBindleTransfer(ids);
   const body = el('div');
-  const defaultName = '报账导出-' + filenameTimestamp();
+  const defaultName = exportDefaultName(ids);
+  const formats = [
+    {id: 'bindle', label: '绑定包', suffix: '.tidoc', tail: '-绑定包', help: '包含条目、附件和报账人；备注与标签按设置导出。'},
+    {id: 'excel', label: '总览 Excel', suffix: '.xlsx', tail: '-总览', help: '核对条数、金额、材料状态和备注。'},
+    {id: 'archive', label: '规范命名附件包', suffix: '.zip', tail: '-附件', help: '按条目分文件夹整理附件并压缩。'},
+  ];
   body.innerHTML = `
-    <div class="form-row">
-      <label>导出名称</label>
-      <input id="exName" value="${esc(defaultName)}"/>
-    </div>
     <div class="export-options">
-      <label class="export-option">
-        <input type="checkbox" data-export="bindle" checked/>
-        <span><b>绑定包</b><small>包含条目、附件、报账人和签名清单；备注与标签按设置导出。</small></span>
-      </label>
-      <label class="export-option">
-        <input type="checkbox" data-export="excel"/>
-        <span><b>总览 Excel</b><small>给负责人核对条数、金额、材料状态和备注。</small></span>
-      </label>
-      <label class="export-option">
-        <input type="checkbox" data-export="archive"/>
-        <span><b>规范命名附件包</b><small>按“序号_发票号_销售方_金额”分文件夹整理附件并压缩。</small></span>
-      </label>
+      ${formats.map(format => `<div class="export-choice">
+        <label class="export-option">
+          <input type="checkbox" data-export="${format.id}" ${format.id === 'bindle' ? 'checked' : ''}/>
+          <span><b>${format.label}</b><small>${format.help}</small></span>
+        </label>
+        <label class="export-filename-row" ${format.id === 'bindle' ? '' : 'hidden'}><span>文件名</span><input data-export-name="${format.id}" aria-label="${format.label}文件名" value="${esc(defaultName + format.tail)}" ${format.id === 'bindle' ? '' : 'disabled'}/><span>${format.suffix}</span></label>
+      </div>`).join('')}
     </div>
     ${(transferPreview.ask_fields||[]).map(field=>`<label class="chk"><input type="checkbox" data-transfer-field="${esc(field.key||field.field_key)}"/>包含 ${esc(field.label)}（${field.record_count||field.count||0} 条）</label>`).join('')}
-    <p class="hint">绑定包版本 5 需要接收方使用支持报账方案的新版本。</p>
-    <div class="hint" style="margin-top:12px">当前选择 <b>${ids.length}</b> 条。导出的文件会放在设置里的“导出目录”。</div>`;
+    <p class="hint export-note">当前选择 <b>${ids.length}</b> 条，导出的文件会放在设置里的“导出目录”。<br/>绑定包版本 5 需要接收方使用支持报账方案的新版本。</p>`;
+  // 文件名只在勾选后出现，未勾选的格式保持一行高。
+  const syncNameRow = id => {
+    const input = body.querySelector(`[data-export-name="${id}"]`);
+    input.disabled = !body.querySelector(`[data-export="${id}"]`).checked;
+    input.closest('.export-filename-row').hidden = input.disabled;
+  };
   const m = modal({
     title: '导出',
     wide: true,
@@ -6053,32 +6069,51 @@ async function doExport(ids) {
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
       mkBtn('开始导出', 'primary', async () => {
-        const name = body.querySelector('#exName').value.trim() || defaultName;
         const chosen = [...body.querySelectorAll('[data-export]:checked')].map((x) => x.dataset.export);
         if (!chosen.length) { toast('请选择至少一种导出内容', 'err'); return; }
+        for (const id of chosen) {
+          const input = body.querySelector(`[data-export-name="${id}"]`);
+          if (!input.value.trim()) { toast('请填写文件名', 'err'); input.focus(); return; }
+        }
         const progress = taskProgress(`正在准备 ${ids.length} 条报账数据…`);
+        const outputs = [];
         try {
-          const outputs = [];
           if (chosen.includes('bindle')) {
             progress.update('正在生成绑定包…');
-            outputs.push(await Api.exportBindle(ids, name + '-绑定包',{include_ask_fields:$$('[data-transfer-field]:checked',body).map(input=>input.dataset.transferField)}));
+            outputs.push(await Api.exportBindle(ids, body.querySelector('[data-export-name="bindle"]').value.trim(),{include_ask_fields:$$('[data-transfer-field]:checked',body).map(input=>input.dataset.transferField)}));
           }
           if (chosen.includes('excel')) {
             progress.update('正在生成总览 Excel…');
-            outputs.push(await Api.exportOverviewExcel(ids, name + '-总览'));
+            outputs.push(await Api.exportOverviewExcel(ids, body.querySelector('[data-export-name="excel"]').value.trim()));
           }
           if (chosen.includes('archive')) {
             progress.update('正在整理并压缩附件…');
-            outputs.push(await Api.exportAttachmentArchive(ids, name + '-附件'));
+            outputs.push(await Api.exportAttachmentArchive(ids, body.querySelector('[data-export-name="archive"]').value.trim()));
           }
           m.close();
           showExportResult(outputs);
           toast(`已导出 ${outputs.length} 个文件`, 'ok');
-        } catch (e) { toast(e.message, 'err'); }
+        } catch (e) {
+          // A later output can fail (including a name conflict); keep completed files accessible.
+          for (const id of chosen.slice(0, outputs.length)) {
+            body.querySelector(`[data-export="${id}"]`).checked = false;
+            syncNameRow(id);
+          }
+          if (outputs.length) showExportResult(outputs);
+          toast(e.message, 'err');
+        }
         finally { progress.close(); }
       }),
     ],
   });
+  body.querySelectorAll('[data-export]').forEach(checkbox => {
+    checkbox.onchange = () => {
+      syncNameRow(checkbox.dataset.export);
+      if (checkbox.checked) body.querySelector(`[data-export-name="${checkbox.dataset.export}"]`).focus({preventScroll: true});
+    };
+  });
+  const nameInput = body.querySelector('[data-export-name="bindle"]');
+  nameInput.focus(); nameInput.select();
 }
 
 function showExportResult(outputs) {

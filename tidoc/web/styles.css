@@ -1371,13 +1371,22 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .summary-strip > div { border: 1px solid var(--line-soft); background: var(--panel-raised); border-radius: 9px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
 .summary-strip span { font-size: 11px; color: var(--ink-soft); }
 .summary-strip b { font-family: var(--font-display); font-weight: 500; color: var(--ink); }
-.export-options { display: grid; gap: 10px; }
-.export-option { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; border: 1px solid var(--line-soft); background: var(--panel-raised); border-radius: 10px; padding: 12px; cursor: pointer; }
-.export-option:hover { border-color: var(--primary); }
-.export-option input { margin-top: 2px; width: 16px; height: 16px; accent-color: var(--primary); }
-.export-option span { display: flex; flex-direction: column; gap: 3px; }
+.export-options { display: grid; gap: 8px; }
+.export-choice { border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel-raised); transition: border-color .15s; }
+.export-choice:hover, .export-choice:focus-within { border-color: var(--primary-line); }
+.export-option { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; padding: 10px 12px; cursor: pointer; }
+.export-option input { margin-top: 1px; width: 16px; height: 16px; accent-color: var(--primary); }
+.export-option span { display: flex; flex-direction: column; gap: 2px; }
 .export-option b { font-size: 13px; color: var(--ink); }
 .export-option small { font-size: 12px; color: var(--ink-soft); line-height: 1.5; }
+.export-filename-row { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--ink-soft); font-size: 12px; }
+.export-filename-row[hidden] { display: none; }
+.export-filename-row input { flex: 1; min-width: 0; width: 100%; padding: 6px 9px; }
+.export-filename-row > span { flex-shrink: 0; }
+.export-filename-row > span:last-child { min-width: 42px; }
+.export-choice .export-filename-row { padding: 0 12px 10px 40px; }
+.export-options ~ .chk { margin: 10px 14px 0 0; }
+.export-note { margin: 10px 0 0; padding: 8px 12px; font-size: 12px; line-height: 1.55; }
 .import-choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .import-choice {
   min-height: 104px; text-align: left; border: 1px solid var(--line-soft);
@@ -1403,6 +1412,8 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .bi-ignore { font-size: 12px; color: var(--ink-soft); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .bi-warning { font-size: 11px; color: var(--warn); margin-top: 4px; line-height: 1.5; }
 .bi-error { font-size: 12px; color: var(--blocked); margin-top: 7px; line-height: 1.55; }
+.bi-error .link-btn { margin-left: 6px; font-weight: 600; white-space: nowrap; }
+.bi-error .link-btn:hover { text-decoration: underline; }
 .bi-muted-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .batch-import-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .batch-import-summary > div {
@@ -2271,11 +2282,6 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .diagnostic-list li + li { margin-top:6px; }
 .diagnostic-list li { overflow-wrap:anywhere; }
 .diagnostic-list small { display:block; margin-top:2px; color:var(--ink-soft); font-size:12px; }
-.export-preview-files ul { margin:0; padding:0; list-style:none; }
-.export-preview-files li { padding:8px 0; border-top:1px solid var(--line-soft); overflow-wrap:anywhere; font-size:12.5px; }
-.export-preview-files li:first-child { border-top:0; }
-.export-preview-files li > span { display:block; color:var(--ink); }
-.export-preview-files small { display:block; margin-top:2px; color:var(--ink-soft); font-size:12px; }
 
 /* ------------------------------------------------------------------ 打印导出弹窗 */
 /* 沿用设置页的 settings-block / settings-row：每个输出一行，勾选框在左，折叠区放次要内容。 */
@@ -2284,6 +2290,15 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .export-dialog .settings-row[hidden], .export-dialog .settings-block[hidden], .export-dialog .export-more > div[hidden] { display: none; }
 .export-dialog .settings-row-control { min-width: 0; }
 .export-dialog .settings-row select, .export-dialog .settings-row input[type="date"] { min-width: 190px; max-width: 280px; }
+.export-item { border-bottom: 1px solid var(--line-soft); }
+.export-item:last-child { border-bottom: 0; }
+.export-item > .export-output { border-bottom: 0; }
+.export-more > summary + .export-item > .export-output { padding-top: 14px; }
+.export-names { display: grid; gap: 6px; margin-top: -2px; padding: 0 0 10px 28px; }
+.export-names[hidden] { display: none; }
+.export-names .export-filename-row { gap: 6px; }
+.export-name-label { flex: 0 0 10em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-filename-row input[aria-invalid="true"] { border-color: var(--blocked); box-shadow: 0 0 0 3px var(--blocked-soft); }
 .export-output { justify-content: flex-start; gap: 12px; padding: 10px 0; cursor: pointer; }
 .export-output .export-kind { margin-left: auto; padding-left: 12px; color: var(--ink-faint); font-size: 12px; white-space: nowrap; }
 .export-output input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }

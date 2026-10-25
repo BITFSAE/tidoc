@@ -757,6 +757,9 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                     "code": "duplicate_invoice",
                     "error": str(exc),
                     "existing_entry_id": exc.existing.get("id") or "",
+                    "existing_batch_id": exc.existing.get("batch_id"),
+                    "existing_batch_name": exc.existing.get("batch_name") or "",
+                    "existing_batch_archived": bool(exc.existing.get("batch_archived")),
                     "invoice_no": exc.existing.get("invoice_no") or "",
                 })
             except Exception as exc:  # noqa: BLE001 — 单组失败不阻断其余
@@ -1273,7 +1276,8 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         from .services.bindle import export_bindle
 
         name = out_name or "绑定包"
-        out_path = self.data_root.exports_dir / f"{name}.tidoc"
+        from .services.export_names import export_path
+        out_path = export_path(self.data_root.exports_dir, name, ".tidoc")
         lookup = {p["id"]: p for p in self.profiles.list()}
         result = export_bindle(
             self.entries,
@@ -1292,7 +1296,8 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         from .services.exports import export_overview_xlsx
 
         name = out_name or "报账总览"
-        out_path = self.data_root.exports_dir / f"{name}.xlsx"
+        from .services.export_names import export_path
+        out_path = export_path(self.data_root.exports_dir, name, ".xlsx")
         lookup = {p["id"]: p for p in self.profiles.list()}
         result = export_overview_xlsx(self.entries, lookup, entry_ids, out_path)
         return {"path": str(result), "count": len(entry_ids)}
@@ -1302,7 +1307,8 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         from .services.exports import export_attachment_zip
 
         name = out_name or "附件整理包"
-        out_path = self.data_root.exports_dir / f"{name}.zip"
+        from .services.export_names import export_path
+        out_path = export_path(self.data_root.exports_dir, name, ".zip")
         lookup = {p["id"]: p for p in self.profiles.list()}
         result = export_attachment_zip(
             self.entries, self.data_root.attachments_dir, lookup, entry_ids, out_path
@@ -1766,7 +1772,16 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                     break
 
         if row is not None:
-            raise DuplicateInvoiceError({key: row[key] for key in row.keys()})
+            existing = dict(row)
+            batch = self.db.conn.execute(
+                """SELECT b.id, b.name, b.archived FROM batches b
+                   JOIN batch_entries be ON be.batch_id = b.id
+                   WHERE be.entry_id = ? LIMIT 1""", (existing["id"],)
+            ).fetchone()
+            existing.update(batch_id=batch["id"] if batch else None,
+                            batch_name=batch["name"] if batch else "",
+                            batch_archived=bool(batch["archived"]) if batch else False)
+            raise DuplicateInvoiceError(existing)
 
     def _discard_incomplete_entry(self, entry_id: str) -> str:
         """导入失败时清掉已落库的半成品记录和已复制附件。"""

@@ -146,6 +146,17 @@ for (const version of ['0.1.41-beta.1', '']) {
 """)
 
 
+def test_export_name_uses_one_common_batch_and_falls_back_for_mixed_selection():
+    run_selection(r"""
+State.batches = [{id:'a',name:'十月采购'}, {id:'b',name:'十一月采购'}];
+State.entries = [{id:'one',batch_id:'a'}, {id:'two',batches:[{id:'a'}]}, {id:'three',batch_id:'b'}, {id:'loose'}];
+assert.equal(exportDefaultName(['one','two']), '十月采购');
+assert.ok(exportDefaultName(['one','three']).startsWith('报账导出-'));
+assert.ok(exportDefaultName(['one','loose']).startsWith('报账导出-'));
+assert.ok(exportDefaultName(['missing']).startsWith('报账导出-'));
+""")
+
+
 def test_card_title_tooltip_explains_missing_and_unconfigured_titles():
     run_selection(r"""
 State.titleProfiles = [{name: '示例大学'}];

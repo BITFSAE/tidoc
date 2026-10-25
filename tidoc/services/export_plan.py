@@ -465,6 +465,24 @@ class ExportPlanner:
         if requested and requested-recognized:
             diagnostics.append(_diagnostic('UNKNOWN_OUTPUT','未知输出：'+', '.join(sorted(requested-recognized))))
         if not files:diagnostics.append(_diagnostic('NO_OUTPUT_SELECTED','请选择至少一种输出。'))
+        # Names are part of the saved plan so rendering, history and regeneration agree.
+        from .export_names import export_filename
+        custom_names = options.get('output_names_by_group') or {}
+        if not isinstance(custom_names, dict):
+            raise ValueError('输出文件名必须按生成文件分别填写。')
+        used_names = set()
+        for item, group in zip(files, groups):
+            group_id = item['group_id']
+            try:
+                if group_id in custom_names:
+                    item['filename'] = export_filename(custom_names[group_id], Path(item['filename']).suffix)
+                    group['filename'] = item['filename']
+                name_key = item['filename'].casefold()
+                if name_key in used_names:
+                    raise ValueError(f"文件名「{item['filename']}」重复，请分别命名。")
+                used_names.add(name_key)
+            except ValueError as exc:
+                diagnostics.append(_diagnostic('INVALID_OUTPUT_FILENAME', str(exc), group_id=group_id))
         plan_id=uuid.uuid4().hex
         ok=not any(diag.get('severity') in ('blocked','required') for diag in diagnostics)
         revisions=sorted({entry['scheme_revision_id'] for entry,definition in loaded})

@@ -50,9 +50,13 @@ class DuplicateInvoiceError(ValueError):
         seller = existing.get("seller") or "未识别销售方"
         claimant = existing.get("profile_name") or "未识别报账人"
         identity = f"发票号 {invoice_no} 已存在" if invoice_no else "相同发票文件已存在"
+        location = f"批次：{existing['batch_name']}" if existing.get("batch_name") else "未进批次"
+        if existing.get("batch_archived"):
+            location += "（已归档）"
         super().__init__(
-            f"{identity}（{seller}，报账人：{claimant}）。"
-            "如需调整归属，请修改原条目的报账人，不要重复创建。"
+            f"{identity}（{seller}，报账人：{claimant}，{location}）。"
+            "所有报账人和批次（含已归档）共用查重。"
+            "请在已有条目中补充材料或调整归属。"
         )
 
 

@@ -2,7 +2,30 @@
 
 import zipfile
 
+import pytest
+
 from tidoc.services.exports import export_attachment_zip, export_overview_xlsx
+
+
+@pytest.mark.parametrize('method,suffix', [
+    ('export_bindle', '.tidoc'), ('export_overview_excel', '.xlsx'),
+    ('export_attachment_archive', '.zip'),
+])
+def test_named_exports_keep_existing_files_and_reject_paths(api, method, suffix):
+    profile = api.create_profile('示例报账人', '示例审核人')['data']
+    eid = api.entries.create(profile['id'])
+    export = getattr(api, method)
+    first = export([eid], '十月交接')
+    assert first['ok'], first
+    from pathlib import Path
+    path = Path(first['data']['path'])
+    before = path.read_bytes()
+    assert path.name == '十月交接' + suffix
+    duplicate = export([eid], '十月交接')
+    assert not duplicate['ok'] and '已存在' in duplicate['error']
+    assert path.read_bytes() == before
+    invalid = export([eid], '../outside')
+    assert not invalid['ok'] and '文件名' in invalid['error']
 
 
 def test_overview_xlsx_is_valid_zip(repos, tmp_path):

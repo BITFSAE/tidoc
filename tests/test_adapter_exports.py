@@ -142,6 +142,52 @@ def test_planner_real_all_four_outputs_and_saved_snapshot(planner_setup,tmp_path
     assert planner.get_job(job['job_id'])['snapshot']==before
 
 
+def test_custom_output_name_is_used_in_preview_files_history_and_regeneration(planner_setup):
+    planner, entries, attachments, adapters, eid, root = planner_setup
+    initial = planner.preview([eid], ['generic_overview'])
+    group_id = initial['files'][0]['group_id']
+    plan = planner.preview([eid], ['generic_overview'], {
+        'output_names_by_group': {group_id: '十月采购-核对表'},
+    })
+    assert plan['ok'], plan['diagnostics']
+    assert plan['groups'][0]['filename'] == '十月采购-核对表.xlsx'
+    assert plan['files'][0]['filename'] == '十月采购-核对表.xlsx'
+    result = planner.run(plan['plan_id'])
+    assert result['status'] == 'completed', result['diagnostics']
+    assert Path(result['files'][0]['path']).name == '十月采购-核对表.xlsx'
+    assert Path(result['files'][0]['path']).is_file()
+    repeated = planner.regenerate(result['job_id'])
+    assert repeated['status'] == 'completed', repeated['diagnostics']
+    assert repeated['files'][0]['filename'] == '十月采购-核对表.xlsx'
+
+
+@pytest.mark.parametrize('name', ['', '../outside', 'folder/name', 'CON', 'a' * 121])
+def test_custom_output_name_is_checked_before_generating(planner_setup, name):
+    from tidoc.services.export_plan import ExportPreflightError
+    planner, entries, attachments, adapters, eid, root = planner_setup
+    initial = planner.preview([eid], ['generic_overview'])
+    plan = planner.preview([eid], ['generic_overview'], {
+        'output_names_by_group': {initial['files'][0]['group_id']: name},
+    })
+    assert not plan['ok']
+    assert any(item['code'] == 'INVALID_OUTPUT_FILENAME' for item in plan['diagnostics'])
+    with pytest.raises(ExportPreflightError):
+        planner.run(plan['plan_id'])
+    assert not (root.exports_dir / plan['plan_id']).exists()
+
+
+def test_custom_names_cannot_collide_with_other_planned_files(planner_setup):
+    planner, entries, attachments, adapters, eid, root = planner_setup
+    initial = planner.preview([eid], ['overview', 'generic_overview'])
+    plan = planner.preview([eid], ['overview', 'generic_overview'], {
+        'output_names_by_group': {file['group_id']: '同一份表格' for file in initial['files']},
+    })
+    assert len(plan['files']) == 2
+    assert not plan['ok']
+    assert any(item['code'] == 'INVALID_OUTPUT_FILENAME' and '重复' in item['message']
+               for item in plan['diagnostics'])
+
+
 def test_export_progress_and_cancel_remain_available_during_api_render(planner_setup,monkeypatch):
     from tidoc.api import Api
     from tidoc.services import export_plan

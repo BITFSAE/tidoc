@@ -53,6 +53,34 @@ def test_batch_duplicate_returns_specific_existing_entry(api, tmp_path, monkeypa
     assert len(api.entries.list()) == 1
 
 
+@pytest.mark.parametrize("archived", [False, True, None])
+def test_duplicate_reports_original_batch_across_claimants_and_target_batches(api, tmp_path, monkeypatch, archived):
+    parsed = _parsed()
+    _patch_invoice_engine(monkeypatch, parsed)
+    original = api.create_profile("示例甲", "示例审核人")["data"]
+    other = api.create_profile("示例乙", "示例审核人")["data"]
+    existing_id = api.entries.create(original["id"], parsed=parsed)
+    batch = None
+    if archived is not None:
+        batch = api.batches.create("十月材料", entry_ids=[existing_id])
+        api.batches.set_archived(batch["id"], archived)
+    target = api.batches.create("本次导入")
+    pdf = tmp_path / "重新收到的发票.pdf"
+    pdf.write_bytes(b"different file, same invoice number")
+    result = api.batch_create_entries(other["id"], [{"key": "again", "files": [
+        {"path": str(pdf), "type": "invoice_pdf"},
+    ]}], batch_id=target["id"])["data"]
+    failure = result["failed"][0]
+    assert result["created"] == 0
+    assert failure["existing_entry_id"] == existing_id
+    assert failure["existing_batch_id"] == (batch["id"] if batch else None)
+    assert failure["existing_batch_archived"] is bool(archived)
+    assert ("十月材料" if batch else "未进批次") in failure["error"]
+    assert ("（已归档）" in failure["error"]) is bool(archived)
+    assert "所有报账人和批次（含已归档）共用查重" in failure["error"]
+    assert api.entries.get(existing_id)["profile_id"] == original["id"]
+
+
 def test_drag_paste_batch_path_keeps_missing_tax_id_as_warning(api, tmp_path, monkeypatch):
     import tidoc.engine
 

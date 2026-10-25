@@ -153,7 +153,7 @@ def _run_adapter_ui(script, payload):
 const vm=require('vm'),fs=require('fs');
 const sandbox={console,esc:value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))};vm.createContext(sandbox);
 // 只在测试环境暴露内部渲染函数，生产界面不增加入口。
-const source=fs.readFileSync(process.argv[1],'utf8').replace('return {setup,','return {diagnosticsMarkup,exportPreviewMarkup,setup,');
+const source=fs.readFileSync(process.argv[1],'utf8').replace('return {setup,','return {diagnosticsMarkup,exportNameMarkup,setup,');
 vm.runInContext(source+';this.AdapterUI=AdapterUI;',sandbox);
 const A=sandbox.AdapterUI,input=JSON.parse(process.argv[2]);
 """+script
@@ -261,18 +261,19 @@ console.log(JSON.stringify({split,html:A.diagnosticsMarkup([...split.blocking,..
     assert 'class="hint' not in out['html']
 
 
-def test_export_preview_files_are_separate_from_warnings_and_escape_private_text():
+def test_export_names_are_inline_inputs_that_keep_typed_names_and_escape_private_text():
     out=_run_adapter_ui(r"""
-const candidate={groups:[{group_id:'one',filename:'材料<&>.docx',payee:{name:'张<三>',account_tail:'1234'}},{group_id:'two',filename:'无账号.pdf',payee:{name:'单位'}}],files:[{group_id:'one',type:'docx'},{group_id:'two',type:'pdf_bundle'}],diagnostics:[{code:'W',severity:'warning',message:'核对<&>'},{code:'I',severity:'info',message:'仅供参考'}]};
-console.log(JSON.stringify({files:A.exportPreviewMarkup(candidate),notes:A.diagnosticsMarkup(candidate.diagnostics),blocked:A.exportPreviewMarkup({...candidate,diagnostics:[{severity:'blocked'}]})}));
+const groups=[{group_id:'one',filename:'材料<&>.docx',title:{name:'示例<大学>'},payee:{name:'张<三>',account_tail:'1234'}},{group_id:'two',filename:'无账号.docx',payee:{name:'单位'}}];
+const warning=[{code:'W',severity:'warning',message:'核对<&>'},{code:'I',severity:'info',message:'仅供参考'}];
+console.log(JSON.stringify({many:A.exportNameMarkup(groups),single:A.exportNameMarkup([groups[1]]),typed:A.exportNameMarkup([groups[1]],{two:'我的"名称"'},new Set(['two'])),notes:A.diagnosticsMarkup(warning)}));
 """,{})
-    assert '预计生成 · 2 个文件' in out['files']
-    assert '材料&lt;&amp;&gt;.docx' in out['files'] and '张&lt;三&gt;' in out['files']
-    assert 'Word 文档' in out['files'] and '材料 PDF' in out['files']
-    assert '账号尾号 1234' in out['files'] and '账号尾号 </small>' not in out['files']
-    assert 'is-warning' not in out['files'] and 'class="hint' not in out['files']
+    assert out['many'].count('data-output-name=')==2
+    assert '材料&lt;&amp;&gt;' in out['many'] and '.docx' in out['many']
+    assert '示例&lt;大学&gt; · 张&lt;三&gt;' in out['many'] and '单位' in out['many']
+    assert 'export-name-label' not in out['single'] and 'value="无账号"' in out['single']
+    assert 'value="我的&quot;名称&quot;"' in out['typed'] and 'aria-invalid="true"' in out['typed']
+    assert 'aria-invalid' not in out['single']
     assert 'is-warning' in out['notes'] and 'is-info' in out['notes'] and '核对&lt;&amp;&gt;' in out['notes']
-    assert out['blocked']==''
 
 
 def test_merged_payee_diagnostics_name_every_missing_field():

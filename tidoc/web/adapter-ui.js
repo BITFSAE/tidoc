@@ -158,16 +158,16 @@ const AdapterUI = (() => {
       return `<section class="diagnostic-section is-${level}" aria-label="${labels[level]}"><b class="diagnostic-title">${labels[level]} · ${list.length} 项</b><ul class="diagnostic-list">${rows}</ul></section>`;
     }).join('');
   }
-  function exportPreviewMarkup(candidate) {
-    if ((candidate.diagnostics || []).some(item => ['required', 'blocked'].includes(item.severity))) return '';
-    const groups = candidate.groups || [];
-    if (!groups.length) return '';
-    const types = new Map((candidate.files || []).map(file => [file.group_id, file.type]));
-    const rows = groups.map(group => {
-      const detail = [outputTypeLabels[types.get(group.group_id)], group.payee ? '收款：' + group.payee.name : '', group.payee?.account_tail ? '账号尾号 ' + group.payee.account_tail : ''].filter(Boolean).join(' · ');
-      return `<li><span>${esc(group.filename || '')}</span>${detail ? `<small>${esc(detail)}</small>` : ''}</li>`;
+  // 输出行下方的文件名输入：一个输出生成几个文件就显示几行，只有一个文件时不加标签。
+  function exportNameMarkup(groups, typed = {}, invalid = new Set()) {
+    return groups.map(group => {
+      const filename = group.filename || '';
+      const dot = filename.lastIndexOf('.');
+      const stem = dot < 0 ? filename : filename.slice(0, dot);
+      const label = groups.length > 1 ? [group.title?.name, group.payee?.name].filter(Boolean).join(' · ') : '';
+      const value = Object.hasOwn(typed, group.group_id) ? typed[group.group_id] : stem;
+      return `<label class="export-filename-row">${label ? `<span class="export-name-label" title="${esc(label)}">${esc(label)}</span>` : ''}<input data-output-name="${esc(group.group_id)}" aria-label="${esc(label || filename)}文件名"${invalid.has(group.group_id) ? ' aria-invalid="true"' : ''} value="${esc(value)}"/><span>${esc(dot < 0 ? '' : filename.slice(dot))}</span></label>`;
     }).join('');
-    return `<section class="settings-block export-preview-files" aria-label="预计生成文件"><div class="settings-block-title">预计生成 · ${groups.length} 个文件</div><ul>${rows}</ul></section>`;
   }
   const labels = { 'entry.default_title_id':'默认抬头', 'entry.default_paid_to_invoice':'实付初值取发票总额', 'entry.suggested_tags':'建议标签', 'profile.reviewer_required':'审核人必填', 'profile.reviewer_presentation':'审核人显示方式', 'profile.default_view':'初始报账人视图', 'payee.personnel_number_label':'人员编号名称', 'print.default_outputs':'默认输出', 'print.numbering':'材料编号', 'print.image_layout':'图片布局', 'print.content_order':'材料排序', 'print.amount_basis':'金额口径', 'print.payee_mode':'收款方式', 'print.sort_by':'条目排序', 'assist.cloud_ocr_visible':'显示发票云识别入口', 'assist.verification_visible':'显示查验入口', 'transfer.include_notes':'绑定包包含备注', 'transfer.include_tags':'绑定包包含标签' };
   const choiceLabels={visible:'显示',advanced:'高级选项',hidden:'隐藏',self:'本人报账',delegate:'代填',invoice:'发票金额',paid:'实付金额',single:'统一收款',by_claimant:'分别收款',none:'不含收款信息',entry:'按条目',role:'按材料',selection:'当前选择顺序',invoice_date:'发票日期',invoice_no:'发票号',claimant:'报账人',seller:'销售方',created_at:'创建时间',local:'本地识别',cloud:'云识别',manual:'手动填写',a4_portrait_1:'A4 纵向，每页 1 张',a4_portrait_2:'A4 纵向，每页 2 张',a4_portrait_4:'A4 纵向，每页 4 张',a4_landscape_1:'A4 横向，每页 1 张',a4_landscape_2:'A4 横向，每页 2 张',a4_landscape_4:'A4 横向，每页 4 张'};
@@ -977,7 +977,10 @@ const AdapterUI = (() => {
         const note = supported ? (outputPayeeMode(definition, output) !== 'none' ? '含收款信息' : '') : '需要安装或更新打印导出组件';
         row.innerHTML = `<input type="checkbox" data-output-id="${esc(output.id)}"${binding ? ` data-output-binding="${esc(binding)}"` : ''}${checked && supported ? ' checked' : ''}${supported ? '' : ' disabled'}/><span class="settings-row-copy"><b>${esc(output.label)}</b></span>${note ? `<span class="export-kind${supported ? '' : ' export-warn'}">${esc(note)}</span>` : ''}`;
         meta.set($('input', row), { output, binding, definition });
-        return row;
+        const item = el('div', 'export-item');
+        item.append(row, el('div', 'export-names'));
+        item.lastChild.hidden = true;
+        return item;
       };
       // 生成内容：方案声明的输出。
       for (const { binding, schemeId, definition, name } of bindings.values()) {
@@ -1052,6 +1055,7 @@ const AdapterUI = (() => {
       const status = el('div', 'export-status'); status.dataset.exportStatus = ''; status.setAttribute('role', 'status'); status.tabIndex = -1; body.append(status);
 
       const note = el('span', 'modal-foot-note');
+      const outputNames = {};
       let m, plan = null, checking = false, generating = false, warned = false, formVersion = 0;
       const chosen = () => $$('[data-output-id]:checked', body);
       const sync = () => {
@@ -1085,6 +1089,7 @@ const AdapterUI = (() => {
         }
         return {
           date: $('[data-export-date]', body).value, payee_id: payeeSelect.value || null, output_options_by_binding: outputOptions,
+          output_names_by_group: { ...outputNames },
           batch_fields_by_binding: Object.fromEntries(batchForms.map(({ binding, form }) => [binding, form.values()])),
           export_fields_by_binding: Object.fromEntries(exportForms.map(({ binding, form }) => [binding, form.values()])),
           output_ids_by_binding: Object.fromEntries([...bindings.keys()].map(binding => [binding, chosen().filter(input => input.dataset.outputBinding === binding).map(input => input.dataset.outputId)])),
@@ -1093,22 +1098,61 @@ const AdapterUI = (() => {
       const showStatus = candidate => {
         const { blocking, warnings } = splitDiagnostics(candidate);
         // 检查结果出现时窗口高度平滑展开，而不是突然撑高。
-        morphModalHeight(m, () => { status.innerHTML = diagnosticsMarkup([...blocking, ...warnings], entries, '无法生成，请先处理') + exportPreviewMarkup(candidate); });
-        if (blocking.length) status.focus({ preventScroll: true });
+        morphModalHeight(m, () => { status.innerHTML = diagnosticsMarkup([...blocking, ...warnings], entries, '无法生成，请先处理'); applyNames(candidate); });
+        const badName = blocking.some(item => item.code === 'INVALID_OUTPUT_FILENAME') && $('[data-output-name][aria-invalid]', body);
+        if (badName) badName.focus({ preventScroll: true });
+        else if (blocking.length) status.focus({ preventScroll: true });
         status.scrollIntoView({ block: 'nearest' });
       };
-      const invalidate = () => { formVersion++; const previous = plan; plan = null; warned = false; run.textContent = '生成'; if (status.childElementCount) morphModalHeight(m, () => status.replaceChildren()); if (previous) Api.cancelExport(previous.plan_id).catch(() => {}); sync(); };
-      body.addEventListener('change', invalidate);
+      // 文件名属于每个输出：勾选后在输出行下方显示默认名称，由后台预览得出，改过的名称按分组保留。
+      const applyNames = candidate => {
+        const groups = candidate?.groups || [];
+        const invalid = new Set((candidate?.diagnostics || []).filter(item => item.code === 'INVALID_OUTPUT_FILENAME').map(item => item.group_id));
+        for (const input of $$('[data-output-id]', body)) {
+          const binding = input.dataset.outputBinding || '';
+          const mine = input.checked ? groups.filter(group => group.output_id === input.dataset.outputId && (group.scheme_id ? group.scheme_id + ':' + group.revision_id : '') === binding) : [];
+          const holder = input.closest('.export-item').lastElementChild;
+          holder.hidden = !mine.length;
+          holder.innerHTML = exportNameMarkup(mine, outputNames, invalid);
+        }
+      };
+      const renderNames = candidate => morphModalHeight(m, () => applyNames(candidate));
+      let namesTimer = 0, namesRequest = 0;
+      const stopNamePreview = () => { clearTimeout(namesTimer); namesRequest++; };
+      const loadNames = () => {
+        stopNamePreview();
+        const request = namesRequest;
+        if (!chosen().length) { renderNames(null); return; }
+        namesTimer = setTimeout(async () => {
+          if (request !== namesRequest || !body.isConnected || checking || generating) return;
+          const version = formVersion;
+          try {
+            const candidate = await Api.previewExport(ids, chosen().map(input => input.dataset.outputId), collect());
+            Api.cancelExport(candidate.plan_id).catch(() => {}); // 只取名称，不保留计划。
+            if (request === namesRequest && version === formVersion && body.isConnected && !checking && !generating) renderNames(candidate);
+          } catch (_) { /* 名称暂时取不到时不显示，点击生成会给出具体原因。 */ }
+        }, 200);
+      };
+      const invalidate = (reloadNames = true) => { formVersion++; const previous = plan; plan = null; warned = false; run.textContent = '生成'; if (status.childElementCount) morphModalHeight(m, () => status.replaceChildren()); if (previous) Api.cancelExport(previous.plan_id).catch(() => {}); sync(); if (reloadNames) loadNames(); };
+      body.addEventListener('change', event => { if (!event.target.matches('[data-output-name]')) invalidate(); });
+      body.addEventListener('input', event => {
+        if (!event.target.matches('[data-output-name]')) return;
+        outputNames[event.target.dataset.outputName] = event.target.value;
+        event.target.removeAttribute('aria-invalid');
+        invalidate(false);
+      });
       const check = async () => {
+        stopNamePreview();
         const version = formVersion; checking = true; sync(); run.textContent = '检查中…';
         try {
           const candidate = await Api.previewExport(ids, chosen().map(input => input.dataset.outputId), collect());
           if (version !== formVersion || !body.isConnected) { await Api.cancelExport(candidate.plan_id).catch(() => {}); return null; }
           plan = candidate; showStatus(candidate); return candidate;
         } catch (e) { showErrors(body, e); return null; }
-        finally { checking = false; run.textContent = warned ? '仍然生成' : '生成'; sync(); }
+        finally { checking = false; run.textContent = warned ? '仍然生成' : '生成'; sync(); if (!plan && body.isConnected) loadNames(); }
       };
       const execute = async () => {
+        stopNamePreview();
         const planId = plan.plan_id;
         generating = true; cancel.textContent = '取消生成'; sync();
         const disabledStates = new Map([...body.querySelectorAll('input,select,textarea,button')].map(control => [control, control.disabled]));
@@ -1146,8 +1190,8 @@ const AdapterUI = (() => {
       const manage = mkBtn('管理收款信息', 'small ghost', () => payees(entries[0]?.scheme_id, async () => { people = await Api.listPayees(); fillPayees(); payeeNote(); enhanceNativeSelects(payeeRow); invalidate(); }));
       payeeControl.append(payeeHolder, manage);
       if (!pending.mask.isConnected) return;
-      m = modal({ title: '打印导出', subhead: `已选 ${entries.length} 条发票`, key: 'print', replace: pending.mask, wide: true, body, footer: [note, cancel, run], onClose: () => { if (plan) Api.cancelExport(plan.plan_id).catch(() => {}); } });
-      enhanceNativeSelects(body); sync();
+      m = modal({ title: '打印导出', subhead: `已选 ${entries.length} 条发票`, key: 'print', replace: pending.mask, wide: true, body, footer: [note, cancel, run], onClose: () => { stopNamePreview(); if (plan) Api.cancelExport(plan.plan_id).catch(() => {}); } });
+      enhanceNativeSelects(body); sync(); loadNames();
       if (!run.disabled) run.focus({ preventScroll: true }); // 回车即按默认选择生成
     } catch (e) { if (pending.mask.isConnected) toast(e.message, 'err'); }
   }

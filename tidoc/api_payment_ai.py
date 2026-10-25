@@ -9,8 +9,16 @@ import threading
 import time
 import uuid
 
-from .api_shared import _guard
+from .api_shared import _guard, mask_secret
+from decimal import Decimal, InvalidOperation
 from .services import payment_ai as vision
+
+
+def _same_money(a, b) -> bool:
+    try:
+        return Decimal(str(a)).quantize(Decimal("0.01")) == Decimal(str(b)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        return False
 
 
 class PaymentAiApi:
@@ -31,14 +39,19 @@ class PaymentAiApi:
     def _payment_ai_key(self, cfg):
         return self._preference_value(self._payment_ai_key_slot(cfg))
 
-    def _payment_ai_enabled(self) -> bool:
+    def _payment_ai_available(self) -> bool:
+        """Key 已保存即可在「云识别」里手动识别；开关只决定添加截图时是否自动识别。"""
         cfg = self._payment_ai_config()
-        return cfg['enabled'] and bool(self._payment_ai_key(cfg))
+        return bool(cfg['base_url'] and cfg['model'] and self._payment_ai_key(cfg))
+
+    def _payment_ai_enabled(self) -> bool:
+        return self._payment_ai_config()['enabled'] and self._payment_ai_available()
 
     def _refresh_payment_ai_check(self, entry_id):
-        # With recognition off, screenshots are filled in by hand; no reminder to re-run it.
-        if self._payment_ai_enabled():
-            self.entries.refresh_payment_check(entry_id)
+        # Without a key, screenshots are filled in by hand: no reminders at all. With automatic
+        # recognition off, keep the results already recognized but do not ask to re-run the rest.
+        if self._payment_ai_available():
+            self.entries.refresh_payment_check(entry_id, remind_pending=self._payment_ai_enabled())
         else:
             self.entries.clear_payment_check(entry_id)
 
@@ -61,7 +74,9 @@ class PaymentAiApi:
         tokens = {'prompt_tokens': round(sample.get('input', 0)/count) if count else 3000,
                   'completion_tokens': round(sample.get('output', 0)/count) if count else 150}
         cost = vision.usage_cost(tokens, pricing)
-        return {**cfg, 'key_configured': bool(self._payment_ai_key(cfg)), 'pricing': pricing,
+        key = self._payment_ai_key(cfg)
+        return {**cfg, 'key_configured': bool(key), 'key_masked': mask_secret(key),
+                'available': self._payment_ai_available(), 'pricing': pricing,
                 'estimated_per_100': None if cost is None else cost*100,
                 'estimate_basis': 'recent' if count else 'budget',
                 'total_estimated_cost': sum(x.get('cost', 0) for x in stats.values()),
@@ -69,15 +84,14 @@ class PaymentAiApi:
 
     @_guard
     def save_payment_ai_settings(self, values=None, key=None, clear_key=False):
-        cfg = vision.validate_config({**self._payment_ai_config(), **(values or {})})
+        old = self._payment_ai_config()
+        cfg = vision.validate_config({**old, **(values or {})})
+        # 只切换自动识别开关不影响正在进行的识别；换服务商、Key 等要等识别结束。
+        changed = {k for k in cfg if cfg[k] != old[k]} - {'enabled'}
         with self._payment_ai_lock:
             active = any(not job['done'] for job in self._payment_ai_jobs.values())
-            if active and cfg['enabled']:
+            if active and (changed or key or clear_key):
                 raise ValueError('请等待识别完成后修改设置')
-            if not cfg['enabled']:
-                for job in self._payment_ai_jobs.values():
-                    if not job['done']:
-                        job['cancelled'] = True
         slot = self._payment_ai_key_slot(cfg)
         if key is not None and (not isinstance(key, str) or len(key) > 1000 or any(c.isspace() for c in key.strip())):
             raise ValueError('Key 格式有误')
@@ -132,17 +146,73 @@ class PaymentAiApi:
         status = 'review' if amount and result.get('needs_review') else 'recognized' if amount else 'unrecognized'
         if value.get('error'):
             status = 'error'
+        # 说明按当前规则从结果重新生成，缓存里的旧说明不再沿用。
+        message = vision.result_message(result) if result else value.get('message', '')
         self.attachments.set_recognition(att['id'], version or self._payment_ai_version(), status, amount,
-                                         value.get('error') or value.get('message', ''))
+                                         value.get('error') or message)
         self.entries.refresh_payment_check(entry_id)
         return amount
+
+    def _settle_paid_from_payment_ai(self, entry_id) -> str:
+        """识别合计可直接作实付时写入；已填的实付和对不上发票金额的合计都不自动写。"""
+        from .db.entries import VALUE_SOURCE_PAYMENT_AI, VALUE_SOURCE_PAYMENT_OCR
+        overview = self.entries.payment_ai_overview(entry_id)
+        amount = overview.get("recognized_total")
+        if not overview.get("settled") or overview.get("needs_review") or not amount:
+            return ""
+        paid, total, source = overview["paid"].strip(), overview["invoice_total"].strip(), overview["paid_source"]
+        # 只在实付空着（或上次就是识别填的）且识别合计等于发票金额时自动填；
+        # 金额对不上时不替用户做决定，留在识别提醒里，详情页可一键采用。
+        if paid and source not in {VALUE_SOURCE_PAYMENT_AI, VALUE_SOURCE_PAYMENT_OCR}:
+            return ""
+        if total and not _same_money(amount, total):
+            return ""
+        if paid and _same_money(paid, amount):
+            return ""
+        self.entries.update_field(entry_id, "paid_amount", amount, "", value_source=VALUE_SOURCE_PAYMENT_AI)
+        self.entries.refresh_payment_check(entry_id)
+        return amount
+
+    def _payment_ai_entry_summary(self, entry_id, applied=""):
+        overview = self.entries.payment_ai_overview(entry_id)
+        if not overview.get("items"):
+            return None
+        from .db.entries import PAYMENT_CHECK_PREFIX
+        entry = self.entries.get(entry_id) or {}
+        notes = [part[len(PAYMENT_CHECK_PREFIX):].strip()
+                 for part in str(entry.get("check_message") or "").split("；")
+                 if part.startswith(PAYMENT_CHECK_PREFIX)]
+        return {"entry_id": entry_id, "label": entry.get("invoice_no") and f"发票 {entry['invoice_no']}"
+                or entry.get("seller") or "条目", "recognized_total": overview["recognized_total"],
+                "count": len(overview["items"]), "paid": overview["paid"], "applied": applied, "notes": notes}
+
+    @_guard
+    def payment_ai_result(self, entry_id):
+        """详情页付款截图识别区块：逐张结果、识别合计与实付/发票金额比对。"""
+        overview = self.entries.payment_ai_overview(entry_id)
+        overview["enabled"] = self._payment_ai_enabled()
+        overview["available"] = self._payment_ai_available()
+        return overview
+
+    @_guard
+    def apply_payment_ai_total(self, entry_id):
+        """用户确认后把识别合计写入实付，留修改记录。"""
+        from .db.entries import VALUE_SOURCE_PAYMENT_AI
+        overview = self.entries.payment_ai_overview(entry_id)
+        if not overview.get("settled"):
+            raise ValueError("还有付款截图没有识别出金额，无法采用合计。")
+        self.entries.update_field(entry_id, "paid_amount", overview["recognized_total"], "",
+                                  value_source=VALUE_SOURCE_PAYMENT_AI)
+        self.entries.recompute_status(entry_id)
+        self._refresh_payment_ai_check(entry_id)
+        return self.entries.get(entry_id)
 
     @_guard
     def start_payment_ai(self, paths=None, entry_ids=None):
         cfg = self._payment_ai_config()
         key = self._payment_ai_key(cfg)
-        if not cfg['enabled'] or not key:
-            raise ValueError('请先在设置中开启付款截图 AI 识别')
+        if not self._payment_ai_available():
+            raise ValueError('请先在设置的开发者选项里填写付款截图 AI 识别的 Key')
         tasks, skipped, version = [], 0, self._payment_ai_version()
         if entry_ids is not None:
             for eid in dict.fromkeys(entry_ids):
@@ -170,7 +240,9 @@ class PaymentAiApi:
         job = {'id': job_id, 'total': len(tasks), 'completed': 0, 'recognized': 0, 'failed': 0,
                'unrecognized': 0, 'cached': 0, 'cancelled_count': 0, 'skipped_current': skipped, 'cost': 0.0,
                'unknown_cost': False, 'states': {}, 'results': [], 'done': False,
-               'cancelled': False, 'scope': self._payment_ai_client.scope(cfg, key), 'started': time.monotonic()}
+               'cancelled': False, 'scope': self._payment_ai_client.scope(cfg, key), 'started': time.monotonic(),
+               'entries': []}
+        requested_entries = list(dict.fromkeys(entry_ids)) if entry_ids is not None else []
         with self._payment_ai_lock:
             for old in list(self._payment_ai_jobs):
                 if len(self._payment_ai_jobs) < 20:
@@ -200,7 +272,7 @@ class PaymentAiApi:
                         value['cancelled'] = True
             if 'att_id' in task and not value.get('cancelled'):
                 with self._api_lock:
-                    if self.data_root.root == root and self._payment_ai_config()['enabled']:
+                    if self.data_root.root == root and self._payment_ai_available():
                         current = self.attachments.get(task['att_id'])
                         if current and current['type'] == 'payment_screenshot' and current['sha256'] == task['sha']:
                             self._save_payment_ai_result(task['entry_id'], current, value, version)
@@ -226,10 +298,22 @@ class PaymentAiApi:
                 with self._payment_ai_lock:
                     job['error'] = '识别任务中断，请重试'
             finally:
+                summaries = []
                 with self._api_lock:
                     if self.data_root.root == root:
                         self._record_payment_ai_usage()
+                        # 识别完按条目收尾：能直接作实付的写入，其余留在识别提醒里。
+                        if self._payment_ai_available() and not job['cancelled']:
+                            for eid in requested_entries:
+                                try:
+                                    applied = self._settle_paid_from_payment_ai(eid)
+                                    summary = self._payment_ai_entry_summary(eid, applied)
+                                except Exception:
+                                    summary = None
+                                if summary:
+                                    summaries.append(summary)
                 with self._payment_ai_lock:
+                    job['entries'] = summaries
                     job['done'] = True
         threading.Thread(target=run, daemon=True, name='payment-ai-job').start()
         return {'id': job_id, 'total': len(tasks)}

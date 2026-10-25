@@ -377,11 +377,35 @@ def make_payload(cfg, image):
     return result
 
 
+ALLOWED_SOURCES = ("wechat", "alipay", "bank")
+
+
+def review_reason(result):
+    """说清楚为什么要人工核对；从已保存的结果推出，旧缓存也能得到同样的说明。"""
+    kind = result["document_type"]
+    if kind == "order_page":
+        return "订单页，请用付款账单截图"
+    if kind == "refund" and not result.get("amount"):
+        return "退款记录，核对原付款"
+    if result["direction"] == "income":
+        return "收入记录，不是付款"
+    if kind == "other":
+        return "不是付款凭证"
+    if kind == "uncertain":
+        return "看不清是什么截图"
+    if result["source"] not in ALLOWED_SOURCES:
+        return "付款来源不是微信、支付宝或银行" if result["source"] == "other" else "看不出付款来源"
+    if result["currency"] != "CNY":
+        return "不是人民币付款"
+    if result["status"] != "success" and result["status"] != "refunded":
+        return "付款未完成或看不出是否完成"
+    return "付款信息待核对"
+
+
 def result_message(result):
     messages = []
     if result["needs_review"]:
-        labels = {"order_page": "请用付款账单截图", "refund": "退款记录，核对原付款", "other": "非付款凭证", "uncertain": "付款信息不清楚"}
-        messages.append(result["reason"] or labels.get(result["document_type"], "付款信息待核对"))
+        messages.append(result["reason"] or review_reason(result))
     if result["theme"] in {"dark", "mixed"} and result["document_type"] in {"payment_receipt", "refund"}:
         messages.append("建议用浅色截图，打印更省墨")
     return "；".join(messages)
@@ -413,7 +437,7 @@ class PaymentClient:
 
     def cached(self, path, cfg, key):
         """Return a stored result for this file without compressing or uploading it."""
-        if not cfg["enabled"] or not key:
+        if not key or not cfg["base_url"]:
             return None
         digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
         cached = self._read(self._cache_path(cfg, key, digest))
@@ -421,8 +445,8 @@ class PaymentClient:
 
     def recognize(self, path, cfg, key, on_stage=None):
         report = on_stage or (lambda stage: None)
-        if not cfg["enabled"] or not key:
-            raise ValueError("请先开启付款截图 AI 识别并填写 Key")
+        if not key or not cfg["base_url"]:
+            raise ValueError("请先填写付款截图 AI 识别的 Key")
         report("preparing")
         digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
         cache = self._cache_path(cfg, key, digest)

@@ -1105,62 +1105,119 @@ class EntryRepo:
             and row["recognition_fingerprint"] == self.invoice_recognition_fingerprint(entry_id)
         )
 
-    def refresh_payment_check(self, entry_id: str, *, commit: bool = True) -> None:
-        """把当前规则的付款截图识别结果合并进条目识别提醒。"""
+    def payment_ai_overview(self, entry_id: str) -> dict:
+        """当前付款截图识别结论：逐张状态、识别合计和与实付/发票金额的比对。"""
         entry = self.db.conn.execute(
-            "SELECT total, check_status, check_message FROM entries WHERE id = ?",
+            "SELECT total FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not entry:
+            return {}
+        paid_row = self.db.conn.execute(
+            "SELECT current, value_source FROM entry_fields WHERE entry_id = ? AND field = 'paid_amount'",
+            (entry_id,),
+        ).fetchone()
+        rows = self.db.conn.execute(
+            """SELECT id, original_name, recognition_version, recognition_status,
+                      recognized_value, recognition_message
+                 FROM attachments
+                WHERE entry_id = ? AND type = 'payment_screenshot'
+                ORDER BY added_at, id""",
+            (entry_id,),
+        ).fetchall()
+        items = []
+        for row in rows:
+            current = row["recognition_version"].startswith(PAYMENT_AI_RECOGNITION_VERSION)
+            items.append({
+                "attachment_id": row["id"],
+                "name": row["original_name"] or "付款截图",
+                "status": row["recognition_status"] if current else "pending",
+                "amount": row["recognized_value"] or "",
+                "message": row["recognition_message"] or "",
+            })
+        settled = bool(items) and all(
+            item["status"] in {"recognized", "review"} and item["amount"] for item in items
+        )
+        recognized_total = None
+        if settled:
+            try:
+                recognized_total = str(money(sum(
+                    (Decimal(str(item["amount"])) for item in items), Decimal("0")
+                )))
+            except (InvalidOperation, ValueError):
+                settled = False
+        paid = (paid_row["current"] if paid_row else "") or ""
+        total = str(entry["total"] or "")
+        compare_to, compare_value = ("paid", paid) if paid.strip() else ("invoice", total)
+        mismatch = False
+        if recognized_total is not None and compare_value.strip():
+            try:
+                mismatch = money(Decimal(recognized_total)) != money(Decimal(compare_value))
+            except (InvalidOperation, ValueError):
+                mismatch = True
+        return {
+            "items": items,
+            "settled": settled,
+            "recognized_total": recognized_total,
+            "paid": paid,
+            "paid_source": (paid_row["value_source"] if paid_row else "") or "",
+            "invoice_total": total,
+            "compare_to": compare_to,
+            "mismatch": mismatch,
+            "needs_review": any(item["status"] == "review" for item in items),
+        }
+
+    def refresh_payment_check(self, entry_id: str, *, commit: bool = True, remind_pending: bool = True) -> None:
+        """把当前规则的付款截图识别结果合并进条目识别提醒。
+
+        每张截图的问题单独写明（不是付款凭证、退款、识别失败），全部识别出金额后
+        再用识别合计比对实付；实付未填时比对发票金额。
+        """
+        entry = self.db.conn.execute(
+            "SELECT check_status, check_message FROM entries WHERE id = ?",
             (entry_id,),
         ).fetchone()
         if not entry:
             return
-        rows = self.db.conn.execute(
-            """SELECT recognition_version, recognition_status, recognized_value, recognition_message
-                 FROM attachments
-                WHERE entry_id = ? AND type = 'payment_screenshot'""",
-            (entry_id,),
-        ).fetchall()
+        overview = self.payment_ai_overview(entry_id)
+        items = overview.get("items") or []
         base_messages = [
             part for part in str(entry["check_message"] or "").split("；")
             if part and not part.startswith(PAYMENT_CHECK_PREFIX)
         ]
+        # 「；」是提醒之间的分隔符，单条提醒里改用逗号。
+        clean = lambda text: str(text or "").replace("；", "，").strip("，。 ")
         payment_messages: list[str] = []
-        if rows:
-            pending = sum(
-                not row["recognition_version"].startswith(PAYMENT_AI_RECOGNITION_VERSION)
-                for row in rows
+        pending = sum(item["status"] == "pending" for item in items)
+        if pending and remind_pending:
+            payment_messages.append(
+                f"{PAYMENT_CHECK_PREFIX} {pending} 张付款截图尚未按当前规则识别，请重新识别。"
             )
-            failed = sum(
-                row["recognition_version"].startswith(PAYMENT_AI_RECOGNITION_VERSION)
-                and row["recognition_status"] in {"unrecognized", "error"}
-                for row in rows
+        for item in items:
+            name, reason = clean(item["name"]), clean(item["message"])
+            if item["status"] == "error":
+                payment_messages.append(
+                    f"{PAYMENT_CHECK_PREFIX} {name} 识别失败（{reason or '原因未知'}），可稍后重新识别或手动核对。"
+                )
+            elif item["status"] == "unrecognized" or (item["status"] == "review" and not item["amount"]):
+                payment_messages.append(
+                    f"{PAYMENT_CHECK_PREFIX} {name} 未识别到付款金额："
+                    + (f"{reason}。" if reason else "请换成付款账单截图或手动核对。")
+                )
+            elif item["status"] == "review":
+                payment_messages.append(
+                    f"{PAYMENT_CHECK_PREFIX} {name} 识别到 {item['amount']}，但{reason or '付款信息待核对'}，请核对。"
+                )
+        if overview.get("mismatch"):
+            target = "实付" if overview["compare_to"] == "paid" else "发票金额"
+            value = overview["paid"] if overview["compare_to"] == "paid" else overview["invoice_total"]
+            try:
+                value = str(money(Decimal(str(value))))
+            except (InvalidOperation, ValueError):
+                pass
+            payment_messages.append(
+                f"{PAYMENT_CHECK_PREFIX} 付款截图识别合计 {overview['recognized_total']} "
+                f"与{target} {value} 不一致，请核对。"
             )
-            if pending:
-                payment_messages.append(
-                    f"{PAYMENT_CHECK_PREFIX} {pending} 张付款截图尚未按当前规则识别，请重新识别。"
-                )
-            if failed:
-                payment_messages.append(
-                    f"{PAYMENT_CHECK_PREFIX} {failed} 张付款截图未识别到金额，请核对。"
-                )
-            reviews = list(dict.fromkeys(row["recognition_message"] for row in rows
-                                        if row["recognition_message"] and row["recognition_status"] == "review"))
-            payment_messages.extend(f"{PAYMENT_CHECK_PREFIX} {msg}" for msg in reviews)
-            if not pending and not failed:
-                try:
-                    recognized_total = sum(
-                        (Decimal(str(row["recognized_value"] or "0")) for row in rows),
-                        Decimal("0"),
-                    )
-                    invoice_total = Decimal(str(entry["total"] or "0"))
-                    if money(recognized_total) != money(invoice_total):
-                        payment_messages.append(
-                            f"{PAYMENT_CHECK_PREFIX} 付款截图识别合计 {money(recognized_total)} "
-                            f"与发票总额 {money(invoice_total)} 不一致，请核对。"
-                        )
-                except (InvalidOperation, ValueError):
-                    payment_messages.append(
-                        f"{PAYMENT_CHECK_PREFIX} 付款截图金额无法汇总，请核对。"
-                    )
         message = "；".join([*base_messages, *payment_messages])
         if entry["check_status"] == "blocked":
             status = "blocked"

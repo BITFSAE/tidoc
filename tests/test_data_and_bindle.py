@@ -589,7 +589,7 @@ def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
     )
 
     refreshed = api.get_entry(entry["id"])["data"]
-    assert "付款截图识别合计 3.00 与发票总额" in refreshed["check_message"]
+    assert "付款截图识别合计 3.00 与实付 10.00 不一致" in refreshed["check_message"]
     assert refreshed["check_status"] == "warning"
 
     preview = api.recognition_preview([entry["id"]])["data"]
@@ -641,7 +641,7 @@ def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypa
     attachment = api.add_attachment(entry["id"], str(payment), "payment_screenshot")["data"]
     refreshed = api.get_entry(entry["id"])["data"]
     assert refreshed["check_status"] == "warning"
-    assert "1 张付款截图未识别到金额" in refreshed["check_message"]
+    assert "未识别付款.png 未识别到付款金额" in refreshed["check_message"]
 
     api.delete_attachment(attachment["id"])
     cleared = api.get_entry(entry["id"])["data"]
@@ -1348,3 +1348,25 @@ def test_bindle_interruption_rolls_back_database_and_extracted_files(repos, tmp_
         assert db.conn.in_transaction is False
     finally:
         db.close()
+
+
+def test_bindle_carries_payment_screenshot_recognition(repos, tmp_path):
+    profile = repos["profiles"].create("张三", "李老师")
+    entry_id = repos["entries"].create(
+        profile["id"], parsed=ParsedInvoice(invoice_no="26952000001672389999", total=Decimal("12.50"), source="xml"),
+    )
+    image = tmp_path / "付款.png"
+    image.write_bytes(b"payment screenshot")
+    att = repos["attachments"].add(entry_id, image, "payment_screenshot")
+    repos["attachments"].set_recognition(att["id"], "payment-ai-test", "review", "12.50", "有退款，核对净支出")
+    package = export_bindle(
+        repos["entries"], repos["attachments"], [entry_id], tmp_path / "付款识别.tidoc", {profile["id"]: profile},
+    )
+    target_root = DataRoot(tmp_path / "pay-target")
+    target_db = Database(target_root.db_path)
+    fallback = ProfileRepo(target_db).create("王五", "赵老师")
+    target_entries = EntryRepo(target_db)
+    result = import_bindle(target_entries, AttachmentRepo(target_db, target_root), package, fallback["id"])
+    saved = target_entries.get(result["entry_ids"][0])["attachments"][0]
+    assert (saved["recognition_status"], saved["recognized_value"], saved["recognition_message"]) == (
+        "review", "12.50", "有退款，核对净支出")

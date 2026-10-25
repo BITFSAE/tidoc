@@ -27,6 +27,16 @@ MAX_DROPPED_FILE_BYTES = 100 * 1024 * 1024
 MAX_DROPPED_TOTAL_BYTES = 500 * 1024 * 1024
 
 
+def mask_secret(value: str) -> str:
+    """密钥展示用：只露前两位和后两位，方便核对是哪一把 Key，又不显示整串。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 6:
+        return text[:1] + "****"
+    return f"{text[:2]}****{text[-2:]}"
+
+
 class DuplicateInvoiceError(ValueError):
     """导入命中了已有发票，携带可供前端定位原条目的结构化信息。"""
 

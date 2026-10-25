@@ -25,7 +25,8 @@ const State = {
   currentBatch: null,    // 当前批次详情（含批次级催办备注）
   allTags: [],           // 全库用过的标签
   multiClaimantMode: false,
-  paymentAiEnabled: false,
+  paymentAiEnabled: false,   // 添加付款截图时自动识别
+  paymentAiAvailable: false, // Key 已保存，可在「云识别」里手动识别
   defaultPaidToInvoice: true,
   defaultEntryTitle: '',
   materialRequirements: {},
@@ -386,7 +387,7 @@ function invoiceCloudOcrVisible() {
 
 // 「云识别」同时承载发票 OCR 和付款截图 AI；两者都不可用时不显示入口。
 function cloudRecognitionVisible() {
-  return invoiceCloudOcrVisible() || State.paymentAiEnabled;
+  return invoiceCloudOcrVisible() || State.paymentAiAvailable;
 }
 
 function applyOcrUiVisibility() {
@@ -1071,17 +1072,25 @@ function currentFilters() {
 
 // 连续筛选、输入搜索词时只采用最后一次请求的结果，较早的慢响应不覆盖新列表。
 let entryRefreshSequence = 0;
+let renderedListKey = '';
 async function refreshEntries() {
   const sequence = ++entryRefreshSequence;
-  let currentBatch = null, entries = [], recognitionNotice = null;
+  let currentBatch = null, entries = [], recognitionNotice = null, listKey = '';
+  // 后端忙时切换批次或搜索可能要等一会儿；稍等仍未返回就把列表标成刷新中，不让旧列表看起来像结果。
+  const list = $('#entryList');
+  const busyTimer = setTimeout(() => {
+    if (sequence === entryRefreshSequence) list.classList.add('is-refreshing');
+  }, 150);
   try {
     await refreshTitleOptions();
     if (sequence !== entryRefreshSequence) return;
     // 抬头选项可能重置筛选里的抬头，之后再按最终筛选并行读取批次和条目。
     const batchId = actualBatchId();
+    const filters = currentFilters();
+    listKey = JSON.stringify([filters, State.quickView, State.groupBy]);
     [currentBatch, entries, recognitionNotice] = await Promise.all([
       batchId ? Api.getBatch(batchId) : null,
-      Api.listEntries(currentFilters()),
+      Api.listEntries(filters),
       Api.invoiceRecognitionNotice(),
     ]);
     if (State.quickView === 'incomplete') {
@@ -1093,13 +1102,29 @@ async function refreshEntries() {
     currentBatch = null;
     entries = [];
   }
+  finally {
+    clearTimeout(busyTimer);
+    if (sequence === entryRefreshSequence) list.classList.remove('is-refreshing');
+  }
   if (sequence !== entryRefreshSequence) return;
   State.currentBatch = currentBatch;
   State.entries = entries;
   State.invoiceRecognitionNotice = recognitionNotice;
   renderInvoiceRecognitionNotice();
   renderEntries();
+  // 换了批次、搜索词或筛选就回到列表顶部，免得停在旧位置像没切换。
+  if (listKey !== renderedListKey) list.scrollTop = 0;
+  renderedListKey = listKey;
+  repaintEntryList(list);
   syncFilterControlStates();
+}
+
+// macOS 的 WebKit 在滚动容器整体换内容后偶尔沿用旧画面，直到鼠标移动或滚动才重绘。
+// 换完内容后让列表临时成为独立图层，下一帧再撤掉，强制它按新内容重画。
+function repaintEntryList(list) {
+  if (document.documentElement.dataset.engine !== 'webkit') return;
+  list.style.transform = 'translateZ(0)';
+  requestAnimationFrame(() => { list.style.transform = ''; });
 }
 
 function renderInvoiceRecognitionNotice() {
@@ -3461,13 +3486,6 @@ async function buildSettings(options = {}) {
   body.innerHTML = `
     <div class="settings-shell">
       <div class="settings-block">
-        <div class="settings-row">
-          <div class="settings-row-copy">
-            <b>报账方案</b>
-            <span id="setSchemeSummary">当前使用「${esc(State.scheme?.name || '未选择')}」</span>
-          </div>
-          <button class="btn small" id="setAdapters">管理</button>
-        </div>
         <div class="settings-row" id="setPayeeRow" ${AdapterUI.usesPayee() ? '' : 'hidden'}>
           <div class="settings-row-copy">
             <b>个人收款信息</b>
@@ -3592,40 +3610,6 @@ async function buildSettings(options = {}) {
         </details>
       </div>
 
-      ${PaymentAiUI.markup(paymentAi)}
-
-      <!-- 阿里云 OCR -->
-      <div class="settings-block">
-        <div class="settings-block-title">阿里云 OCR</div>
-        <div class="settings-row is-actionable" id="setOcrManage">
-          <div class="settings-row-copy">
-            <b>识别组件 ${ocrBadge}</b>
-            <span>补齐本地遗漏并提供云端结果比对；按量计费</span>
-          </div>
-          <button class="btn small ghost">管理</button>
-        </div>
-        <div class="settings-row ocr-key-row">
-          <div class="settings-row-copy">
-            <b>AccessKey</b>
-            <span id="setOcrKeyHint">${ocrStatus.credentials_configured
-              ? `已配置 ${esc(ocrStatus.access_key_id_masked)} · 本机累计调用 ${ocrStatus.total_calls} 次`
-              : `未配置 · 建议使用只授权「文字识别 OCR」的 RAM 账号 Key`}</span>
-          </div>
-          <div class="ocr-key-controls">
-            <input id="setOcrKeyId" placeholder="AccessKey ID" autocomplete="off"/>
-            <input id="setOcrKeySecret" type="password" placeholder="AccessKey Secret" autocomplete="new-password"/>
-            <button class="btn small" id="setOcrSaveKey">保存</button>
-            <button class="btn small ghost" id="setOcrClearKey" ${ocrStatus.credentials_configured ? '' : 'disabled'}>清除</button>
-          </div>
-        </div>
-        <div class="settings-row">
-          <div class="settings-row-copy">
-            <b>密钥说明</b>
-            <span>密钥仅保存在本机数据里，不随导出、绑定包外传；调用只在点击「云识别」时发生 <button class="link-btn" id="setOcrConsole">阿里云 OCR 控制台</button></span>
-          </div>
-        </div>
-      </div>
-
       <!-- 可选组件与更新 -->
       <div class="settings-block">
         <div class="settings-block-title">组件与更新</div>
@@ -3651,6 +3635,51 @@ async function buildSettings(options = {}) {
         </div>
       </div>
 
+      <!-- 开发者选项：需要自备服务账号、按量计费或面向方案维护的功能 -->
+      <details class="settings-block dev-options" id="setDevOptions">
+        <summary class="settings-block-title">开发者选项<small>报账方案、云端识别；默认用不到</small></summary>
+        <section class="dev-subsection" aria-label="报账方案">
+          <div class="settings-row">
+            <div class="settings-row-copy">
+              <b>报账方案</b>
+              <span id="setSchemeSummary">当前使用「${esc(State.scheme?.name || '未选择')}」</span>
+            </div>
+            <button class="btn small" id="setAdapters">管理</button>
+          </div>
+        </section>
+        ${PaymentAiUI.markup(paymentAi)}
+        <section class="dev-subsection" aria-label="阿里云 OCR">
+          <div class="dev-subsection-title">发票阿里云 OCR</div>
+          <div class="settings-row is-actionable" id="setOcrManage">
+            <div class="settings-row-copy">
+              <b>识别组件 ${ocrBadge}</b>
+              <span>补齐本地遗漏并提供云端结果比对；按量计费</span>
+            </div>
+            <button class="btn small ghost">管理</button>
+          </div>
+          <div class="settings-row ocr-key-row">
+            <div class="settings-row-copy">
+              <b>AccessKey</b>
+              <span id="setOcrKeyHint">${ocrStatus.credentials_configured
+                ? `已保存 ${esc(ocrStatus.access_key_id_masked)} · 本机累计调用 ${ocrStatus.total_calls} 次`
+                : `未配置 · 建议使用只授权「文字识别 OCR」的 RAM 账号 Key`}</span>
+            </div>
+            <div class="ocr-key-controls">
+              <input id="setOcrKeyId" placeholder="AccessKey ID" autocomplete="off"/>
+              <input id="setOcrKeySecret" type="password" placeholder="AccessKey Secret" autocomplete="new-password"/>
+              <button class="btn small" id="setOcrSaveKey">保存</button>
+              <button class="btn small ghost" id="setOcrClearKey" ${ocrStatus.credentials_configured ? '' : 'disabled'}>清除</button>
+            </div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-copy">
+              <b>密钥说明</b>
+              <span>密钥仅保存在本机数据里，不随导出、绑定包外传；调用只在点击「云识别」时发生 <button class="link-btn" id="setOcrConsole">阿里云 OCR 控制台</button></span>
+            </div>
+          </div>
+        </section>
+      </details>
+
       <!-- 关于 -->
       <div class="settings-block about">
         <img src="assets/tidoc-logo-128.png" alt="" id="setRepoLogo" title="打开 GitHub 仓库" />
@@ -3667,6 +3696,11 @@ async function buildSettings(options = {}) {
         </div>
       </div>
     </div>`;
+
+  // 开发者选项默认收起；展开过就保持展开，便于反复调试。
+  const devOptions = body.querySelector('#setDevOptions');
+  try { devOptions.open = localStorage.getItem('tidoc.settings.devOptionsOpen') === '1'; } catch (_) { /* 无存储时保持收起 */ }
+  devOptions.ontoggle = () => { try { localStorage.setItem('tidoc.settings.devOptionsOpen', devOptions.open ? '1' : '0'); } catch (_) { /* 忽略 */ } };
 
   // 偏好回填
   const selectDefaultTitle = (select, value) => {
@@ -4019,7 +4053,7 @@ const UPDATE_COMPONENTS = {
   },
   ocr: {
     name: 'OCR 识别组件',
-    description: '负责调用阿里云发票识别，补齐本地遗漏并提供结果比对；需要在设置的「阿里云 OCR」里填写密钥后使用；独立版本。',
+    description: '负责调用阿里云发票识别，补齐本地遗漏并提供结果比对；需要在「设置 › 开发者选项」里填写密钥后使用；独立版本。',
     busy: '正在下载、校验并安装 OCR 识别组件…',
     install: () => Api.installOcrComponent(),
   },
@@ -4752,7 +4786,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const reclassifiableRoles = roles.filter((role) => role.id !== 'invoice' && role.reclassifiable !== false);
   const attRow = (a, byRole) => `
       <div class="attach-item">
-        <span class="attach-name" title="${esc(a.abs_path || a.stored_path)}">${esc(a.original_name)}${a.type === 'payment_screenshot' && a.recognition_message ? `<small class="attachment-ai-hint">${esc(a.recognition_message)}</small>` : ''}</span>
+        <span class="attach-name" title="${esc(a.abs_path || a.stored_path)}">${esc(a.original_name)}${a.type === 'payment_screenshot' ? paymentAttachmentBadge(a) : ''}${a.type === 'payment_screenshot' && a.recognition_message ? `<small class="attachment-ai-hint">${esc(a.recognition_message)}</small>` : ''}</span>
         <div class="attach-actions">
           ${byRole
             ? `<select class="attach-type-select" data-att-role="${a.id}" aria-label="调整材料角色">
@@ -4917,6 +4951,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
       <div class="ocr-detail-body" id="deOcrBody"><div class="hint">正在读取识别结果…</div></div>
     </details>` : ''}
 
+    ${paymentAiSectionHtml(e)}
     <details class="detail-section minor-section">
       <summary>修改记录</summary>
       <div class="history-list">${history}</div>
@@ -5233,6 +5268,84 @@ async function openEntryDetail(entryId, currentDetail = null) {
     if (e.ocr_pending) ocrSection.open = true;
     loadOcrDetail(body.querySelector('#deOcrBody'), mm, entryId, e.items || []);
   }
+  const payAiBody = body.querySelector('#dePayAiBody');
+  if (payAiBody) loadPaymentAiDetail(payAiBody, mm, entryId);
+}
+
+// ---- 付款截图识别：逐张结果、识别合计与实付比对；有提醒时默认展开
+function paymentAiSectionHtml(e) {
+  const payments = (e.attachments || []).filter((a) => a.type === 'payment_screenshot');
+  if (!payments.length || !(State.paymentAiAvailable || payments.some((a) => a.recognition_status))) return '';
+  const flagged = String(e.check_message || '').includes('[付款截图识别]');
+  return `<details class="detail-section minor-section" id="dePayAiSection"${flagged ? ' open' : ''}>
+      <summary>付款截图识别${flagged ? ' <span class="badge warning">需核对</span>' : ''}</summary>
+      <div class="ocr-detail-body" id="dePayAiBody"><div class="hint">正在读取识别结果…</div></div>
+    </details>`;
+}
+
+function paymentAttachmentBadge(a) {
+  if (!a.recognition_status) return '';
+  const warn = a.recognition_status !== 'recognized';
+  const text = a.recognized_value ? fmtMoney(a.recognized_value) : PAY_AI_STATUS[a.recognition_status] || '';
+  return `<span class="attachment-ai-amount${warn ? ' warn' : ''}" title="AI 识别结果">${text}${warn && a.recognized_value ? ' · 需核对' : ''}</span>`;
+}
+
+const PAY_AI_STATUS = {
+  recognized: '已识别', review: '需核对', unrecognized: '未识别到金额', error: '识别失败', pending: '未识别',
+};
+
+async function loadPaymentAiDetail(container, mm, entryId) {
+  let view;
+  try { view = await Api.paymentAiResult(entryId); } catch (e) {
+    container.innerHTML = `<div class="hint warn">${esc(e.message)}</div>`;
+    return;
+  }
+  const items = view.items || [];
+  const rows = items.map((item) => `<tr>
+      <td class="pay-ai-name" data-tooltip-overflow="${esc(item.name)}">${esc(item.name)}</td>
+      <td class="num">${item.amount ? fmtMoney(item.amount) : '—'}</td>
+      <td><span class="pay-ai-status ${esc(item.status)}">${PAY_AI_STATUS[item.status] || esc(item.status)}</span></td>
+      <td>${esc(item.message || '')}</td>
+    </tr>`).join('');
+  const target = view.compare_to === 'paid' ? '实付' : '发票金额';
+  const compare = view.recognized_total != null ? `<div class="pay-ai-compare">
+      <span>识别合计 <b>${fmtMoney(view.recognized_total)}</b></span>
+      <span>实付 <b>${view.paid ? fmtMoney(view.paid) : '未填'}</b></span>
+      <span>发票金额 <b>${view.invoice_total ? fmtMoney(view.invoice_total) : '—'}</b></span>
+      ${view.mismatch ? `<span class="mismatch">识别合计与${target}不一致</span>` : '<span>与' + target + '一致</span>'}
+    </div>` : '';
+  const unsettled = items.some((item) => ['pending', 'error', 'unrecognized'].includes(item.status));
+  const canAdopt = view.settled && !sameMoney(view.paid || '', view.recognized_total || '');
+  container.innerHTML = `
+    ${items.length > 1 ? '<div class="hint">多张付款截图按金额累加后与实付比对。</div>' : ''}
+    <table class="ocr-diff-table pay-ai-table">
+      <thead><tr><th>截图</th><th class="num">识别金额</th><th>状态</th><th>说明</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${compare}
+    <div class="ocr-detail-actions">
+      ${canAdopt ? '<button class="btn small" id="dePayAiAdopt">用识别合计作实付</button>' : ''}
+      ${view.available && unsettled ? '<button class="btn small ghost" id="dePayAiRun">识别付款截图</button>' : ''}
+    </div>`;
+  container.querySelector('#dePayAiAdopt')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    try {
+      await Api.applyPaymentAiTotal(entryId);
+      toast(`实付已改为 ${fmtMoney(view.recognized_total)}，已记入修改记录`, 'ok');
+      await reopenEntryDetail(mm, entryId, { relist: true });
+    } catch (e) { toast(e.message, 'err'); btn.disabled = false; }
+  });
+  container.querySelector('#dePayAiRun')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    try {
+      const job = await PaymentAiUI.run({ entryIds: [entryId] });
+      const row = job.entries?.[0];
+      toast(row?.applied ? `已识别，实付填为 ${fmtMoney(row.applied)}` : row?.notes?.length ? '已识别，有需要核对的地方' : '已识别', row?.notes?.length ? '' : 'ok');
+      await reopenEntryDetail(mm, entryId, { relist: true });
+    } catch (e) { toast(e.message, 'err'); btn.disabled = false; }
+  });
 }
 
 const ATTACHMENT_TYPE_OPTS = [
@@ -6006,7 +6119,7 @@ async function openOcrDialog(ids) {
   State.ocrStatus = status;
   const invoiceAllowed = AdapterUI.settings()['assist.cloud_ocr_visible'] !== false;
   const invoiceReady = status.available && status.credentials_configured && invoiceAllowed;
-  const paymentReady = paymentAi.enabled && paymentAi.key_configured;
+  const paymentReady = paymentAi.available;
   const payment = recognition.payment || {};
   const entries = preview.entries || [];
   const withPdf = entries.filter((it) => it.has_invoice_pdf);
@@ -6014,29 +6127,35 @@ async function openOcrDialog(ids) {
   const existingCount = withPdf.filter((it) => it.existing_current_result).length;
   const canSkipExisting = ids.length > 1 && existingCount > 0;
   const noPdfCount = entries.length - withPdf.length;
-  const invoiceNote = invoiceReady ? `${withPdf.length} 张可识别`
+  // 只剩已识别过的发票时默认不勾，避免顺手点「开始识别」重复计费。
+  const invoiceFresh = withPdf.length - existingCount;
+  const invoiceNote = invoiceReady
+    ? (!withPdf.length ? '所选条目没有发票 PDF'
+      : !invoiceFresh ? `${withPdf.length} 张都已识别过，再识别会重复计费`
+      : `${invoiceFresh} 张未识别${existingCount ? ` · ${existingCount} 张已识别过` : ''}`)
     : !invoiceAllowed ? '方案未开启发票云识别'
     : !status.available ? `${status.needs_repair ? 'OCR 识别组件需要修复' : '需先安装 OCR 识别组件'} <button class="link-btn" type="button" id="cloudInstallOcr">${status.needs_repair ? '修复组件' : '安装组件'}</button>`
-    : '需在设置中填写阿里云 AccessKey';
+    : '未填写阿里云 AccessKey';
+  const paymentNote = !paymentReady ? '未填写 AI 识别 Key'
+    : !payment.total ? '所选条目没有付款截图'
+    : payment.pending ? `${payment.pending} 张待识别${payment.current ? ` · ${payment.current} 张已识别` : ''}`
+    : `${payment.current} 张都已识别`;
+  const invoiceDefault = invoiceReady && invoiceFresh > 0 && !(paymentReady && payment.pending);
 
   const body = el('div');
   body.innerHTML = `
     <div class="recognition-choice-list">
-      <label class="recognition-choice${invoiceReady ? '' : ' disabled'}"><input type="checkbox" id="cloudInvoice" ${invoiceReady && !(paymentReady && payment.pending) ? 'checked' : ''} ${invoiceReady ? '' : 'disabled'}/><span><b>发票 · 阿里云 OCR</b><small>${invoiceNote}</small></span></label>
-      <label class="recognition-choice${paymentReady ? '' : ' disabled'}"><input type="checkbox" id="cloudPayment" ${paymentReady && payment.pending ? 'checked' : ''} ${paymentReady && payment.pending ? '' : 'disabled'}/><span><b>付款截图 · AI</b><small>${paymentReady ? `${payment.pending || 0} 张待识别${payment.current ? ` · ${payment.current} 张已处理` : ''}` : '在设置中填写 Key 并开启'}</small></span></label>
+      <label class="recognition-choice${invoiceReady && withPdf.length ? '' : ' disabled'}"><input type="checkbox" id="cloudInvoice" ${invoiceDefault ? 'checked' : ''} ${invoiceReady && withPdf.length ? '' : 'disabled'}/><span><b>发票 · 阿里云 OCR</b><small>${invoiceNote}</small></span></label>
+      <label class="recognition-choice${paymentReady && payment.pending ? '' : ' disabled'}"><input type="checkbox" id="cloudPayment" ${paymentReady && payment.pending ? 'checked' : ''} ${paymentReady && payment.pending ? '' : 'disabled'}/><span><b>付款截图 · AI</b><small>${paymentNote}</small></span></label>
     </div>
-    <div class="hint" id="cloudPaymentEstimate" hidden></div>
-    <div id="cloudInvoiceOptions" hidden>
-    <div class="ocr-confirm-copy">
-      将识别 <b id="ocrInvoiceCount">0</b> 张发票，共调用 <b id="ocrCallCount">0</b> 次。${OCR_QUOTA_NOTE} <button class="link-btn" id="ocrQuotaLink">查看免费额度</button>
+    <div class="cloud-estimate" id="cloudInvoiceOptions" hidden>
+      <div>发票：识别 <b id="ocrInvoiceCount">0</b> 张，调用 <b id="ocrCallCount">0</b> 次 · 阿里云每月有免费额度，超出按量计费 <button class="link-btn" id="ocrQuotaLink">查看额度</button></div>
+      ${canSkipExisting ? `<label class="chk"><input type="checkbox" id="ocrSkipExisting" checked/> 跳过已识别过的 ${existingCount} 条</label>` : ''}
+      ${xmlCount ? `<label class="chk"><input type="checkbox" id="ocrIncludeXml"/> 包含已有 XML 的 ${xmlCount} 条（仅作比对，同样计费）</label>` : ''}
+      ${noPdfCount ? `<div class="hint">${noPdfCount} 条没有发票 PDF，自动跳过。</div>` : ''}
     </div>
-    <div class="ocr-confirm-notes">
-      ${canSkipExisting ? `<label class="chk"><input type="checkbox" id="ocrSkipExisting" checked/> 跳过当前发票已有识别结果的 ${existingCount} 条（避免重复计费）</label>` : ''}
-      ${xmlCount ? `<label class="chk"><input type="checkbox" id="ocrIncludeXml"/> 包含已有 XML 数据的 ${xmlCount} 条（结果仅作比对，同样计费）</label>` : ''}
-      ${!canSkipExisting && existingCount ? `<div class="hint">已有识别结果，再次识别会重复计费。</div>` : ''}
-      ${noPdfCount ? `<div class="hint">另有 ${noPdfCount} 条没有发票 PDF，自动跳过。</div>` : ''}
-    </div></div>
-    <button class="link-btn" id="cloudSettings">识别设置</button>`;
+    <div class="cloud-estimate" id="cloudPaymentEstimate" hidden></div>
+    <div class="cloud-settings-line">Key 和费用在「设置 › 开发者选项」 <button class="link-btn" id="cloudSettings">打开设置</button></div>`;
 
   const cloudInvoice = body.querySelector('#cloudInvoice');
   const cloudPayment = body.querySelector('#cloudPayment');
@@ -6064,7 +6183,7 @@ async function openOcrDialog(ids) {
     body.querySelector('#cloudInvoiceOptions').hidden = !cloudInvoice.checked;
     const estimate = body.querySelector('#cloudPaymentEstimate');
     estimate.hidden = !cloudPayment.checked;
-    estimate.textContent = `${paymentAi.pricing.period} · 预计 ${PaymentAiUI.money(paymentAi.estimated_per_100 == null ? null : paymentAi.estimated_per_100 * (payment.pending || 0) / 100)}`;
+    estimate.textContent = `付款截图：识别 ${payment.pending || 0} 张 · ${paymentAi.pricing.period}时段预计 ${PaymentAiUI.money(paymentAi.estimated_per_100 == null ? null : paymentAi.estimated_per_100 * (payment.pending || 0) / 100)} · 能确定的金额会直接填入实付`;
     if (runBtn) runBtn.disabled = !cloudInvoice.checked && !cloudPayment.checked;
     invoiceCountEl.textContent = String(eligible.length);
     countEl.textContent = String(eligible.reduce((sum, item) => sum + Math.max(1, Number(item.page_count) || 1), 0));
@@ -6084,7 +6203,7 @@ async function openOcrDialog(ids) {
     const targets = cloudInvoice.checked ? eligibleEntries().map((it) => it.entry_id) : [];
     if (!targets.length && !cloudPayment.checked) { toast('请选择可识别的材料', 'err'); runBtn.disabled = false; runBtn.textContent = '开始识别'; return; }
 
-    const progress = taskProgress(targets.length ? `正在识别 0/${targets.length}…` : '准备识别付款截图…');
+    const progress = taskProgress(targets.length ? `阿里云 OCR 识别发票 0/${targets.length} 张…` : '付款截图 AI 识别：准备中…');
     const rows = [];
     const skipped = [];
     let done = 0;
@@ -6102,12 +6221,12 @@ async function openOcrDialog(ids) {
         rows.push({ entry_id: entryId, ok: false, error: e.message });
       }
       done += 1;
-      progress.update(`正在识别 ${done}/${targets.length}…`);
+      progress.update(`阿里云 OCR 识别发票 ${done}/${targets.length} 张…`);
     }
+    let paymentJob = null;
     if (cloudPayment.checked) {
       try {
-        const job = await PaymentAiUI.run({entryIds: ids}, progress);
-        if (!job.failed && !job.cancelled_count) toast(`付款截图已识别 ${job.recognized} 张`, 'ok');
+        paymentJob = await PaymentAiUI.run({entryIds: ids}, progress);
       } catch (error) { toast(error.message, 'err'); }
     }
     progress.close();
@@ -6115,7 +6234,7 @@ async function openOcrDialog(ids) {
     State.selected.clear();
     await refreshEntries();
     refreshOcrStatus();
-    if (targets.length) showOcrSummary(rows, skipped, apiCalls);
+    if (targets.length || paymentJob?.entries?.length) showOcrSummary(targets.length ? rows : null, skipped, apiCalls, paymentJob);
   });
 
   const m = modal({
@@ -6126,16 +6245,16 @@ async function openOcrDialog(ids) {
   renderCount();
 }
 
-function showOcrSummary(rows, skipped, total) {
+function showOcrSummary(rows, skipped, total, paymentJob = null) {
   const labelFor = (entryId) => {
     const entry = State.entries.find((it) => it.id === entryId);
     if (!entry) return '条目';
     return entry.invoice_no ? `发票 ${entry.invoice_no}` : (entry.seller || '未识别销售方');
   };
-  const okCount = rows.filter((r) => r.ok).length;
-  const pendingCount = rows.filter((r) => r.ok && r.pending_count).length;
-  const failedCount = rows.filter((r) => !r.ok).length;
-  const rowHtml = rows.map((r) => {
+  const okCount = (rows || []).filter((r) => r.ok).length;
+  const pendingCount = (rows || []).filter((r) => r.ok && r.pending_count).length;
+  const failedCount = (rows || []).filter((r) => !r.ok).length;
+  const rowHtml = (rows || []).map((r) => {
     if (!r.ok) {
       return `<div class="ocr-summary-row err">
         <span class="ocr-summary-icon">✗</span>
@@ -6163,11 +6282,23 @@ function showOcrSummary(rows, skipped, total) {
       <span class="ocr-summary-label">${esc(labelFor(s.entry_id))}</span>
       <span class="ocr-summary-note">${esc(s.reason || '跳过')}</span>
     </div>`).join('');
+  const heads = [];
+  if (rows) heads.push(`发票调用 ${total} 次 · 成功 ${okCount}${pendingCount ? ` · 待确认 ${pendingCount}` : ''}${failedCount ? ` · 失败 ${failedCount}` : ''}`);
+  const paymentRows = PaymentAiUI.summaryRows(paymentJob);
+  if (paymentJob) {
+    const filled = (paymentJob.entries || []).filter((row) => row.applied).length;
+    const flagged = (paymentJob.entries || []).filter((row) => row.notes?.length).length;
+    heads.push(`付款截图识别 ${paymentJob.recognized} 张${filled ? ` · 填入实付 ${filled} 条` : ''}${flagged ? ` · 需核对 ${flagged} 条` : ''}${paymentJob.failed ? ` · 失败 ${paymentJob.failed} 张` : ''}`);
+  }
+  const section = (title, html) => `<div class="cloud-summary-title">${title}</div>${html}`;
+  const invoiceHtml = rows ? `<div class="ocr-summary-list">${rowHtml || '<div class="hint">没有识别结果。</div>'}</div>${skippedHtml ? `<div class="ocr-summary-list muted-list">${skippedHtml}</div>` : ''}` : '';
+  const paymentHtml = paymentRows ? `<div class="ocr-summary-list">${paymentRows}</div>` : '';
+  const both = invoiceHtml && paymentHtml;
   const m = modal({
-    title: '阿里云识别完成',
-    subhead: `调用 ${total} 次 · 发票成功 ${okCount}${pendingCount ? ` · 待确认 ${pendingCount}` : ''}${failedCount ? ` · 失败 ${failedCount}` : ''}`,
+    title: '云识别完成',
+    subhead: heads.join('；'),
     wide: true,
-    body: `<div class="ocr-summary-list">${rowHtml || '<div class="hint">没有识别结果。</div>'}</div>${skippedHtml ? `<div class="ocr-summary-list muted-list">${skippedHtml}</div>` : ''}`,
+    body: both ? section('发票', invoiceHtml) + section('付款截图', paymentHtml) : invoiceHtml || paymentHtml,
     footer: [mkBtn('完成', 'primary', () => m.close())],
   });
   m.body.querySelectorAll('[data-ocr-goto]').forEach((btn) => {
@@ -6186,7 +6317,7 @@ async function runOcrFromDetail(mm, entryId) {
   } catch (_) { /* 识别调用会返回实际错误 */ }
   const pageNote = pageCount > 1 ? `这张发票共 ${pageCount} 页，将调用 ${pageCount} 次。` : '将调用 1 次。';
   if (!confirm(`${pageNote}${xmlNote}按量计费，继续？`)) return;
-  const progress = taskProgress('正在调用阿里云识别…');
+  const progress = taskProgress('阿里云 OCR 正在识别这张发票…');
   try {
     const r = await Api.runOcrRecognition([entryId], { include_xml: true });
     progress.close();
@@ -6387,7 +6518,8 @@ async function batchDelete() {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-async function batchReparse(entryIds, invoiceOnly = false) {
+// 「重新识别」只在本机重新读发票文件，不联网、不计费；付款截图 AI 识别在「云识别」里。
+async function batchReparse(entryIds, fromNotice = false) {
   const explicitIds = Array.isArray(entryIds);
   const ids = explicitIds ? [...entryIds] : [...State.selected];
   if (!ids.length) return;
@@ -6402,64 +6534,38 @@ async function batchReparse(entryIds, invoiceOnly = false) {
     <div class="recognition-choice-list">
       <label class="recognition-choice${invoice.total ? '' : ' disabled'}">
         <input type="checkbox" id="recognizeInvoice" ${invoice.pending ? 'checked' : ''} ${invoice.total ? '' : 'disabled'}/>
-        <span><b>发票</b><small>${invoice.pending || 0} 条待识别${invoice.current ? `，${invoice.current} 条已处理` : ''}</small></span>
+        <span><b>发票</b><small>${invoice.total ? `${invoice.pending || 0} 条待识别${invoice.current ? `，${invoice.current} 条已处理` : ''}` : '所选条目没有发票文件'}</small></span>
       </label>
-      ${invoiceOnly ? '' : `<label class="recognition-choice${payment.total && payment.enabled ? '' : ' disabled'}">
-        <input type="checkbox" id="recognizePayment" ${payment.pending && payment.enabled ? 'checked' : ''} ${payment.total && payment.enabled ? '' : 'disabled'}/>
-        <span><b>付款截图</b><small>${payment.enabled ? `${payment.pending || 0} 张待识别${payment.current ? `，${payment.current} 张已处理` : ''}` : 'AI 识别未开启，在设置中填写 Key'}</small></span>
-      </label>`}
-    </div>`;
+    </div>
+    <div class="cloud-settings-line">在本机重新读取发票文件，不联网、不计费。${payment.total && cloudRecognitionVisible() ? '付款截图请用「云识别」识别。' : ''}</div>`;
 
   const runBtn = mkBtn('开始识别', 'primary', async () => {
-    const kinds = [];
-    if (body.querySelector('#recognizeInvoice')?.checked) kinds.push('invoice');
-    if (body.querySelector('#recognizePayment')?.checked) kinds.push('payment');
-    if (!kinds.length) { toast('请选择要重新识别的材料', 'err'); return; }
+    if (!body.querySelector('#recognizeInvoice')?.checked) { toast('没有需要重新识别的发票', 'err'); return; }
     runBtn.disabled = true;
     runBtn.textContent = '识别中…';
-    const progress = taskProgress(kinds.includes('invoice') ? `正在识别发票 0/${ids.length} 条` : '准备识别付款截图…');
+    const progress = taskProgress(`本机重新识别发票 0/${ids.length} 条`);
     try {
-      const result = {
-        invoice: kinds.includes('invoice') ? {
-          processed: 0, resolved: 0, remaining: 0, failed: [], results: [], skipped_current: 0,
-        } : null,
-        payment: kinds.includes('payment') ? {
-          processed: 0, recognized: 0, unrecognized: 0, failed: 0, skipped_current: 0,
-        } : null,
-      };
-      // 发票逐条本地解析；付款截图需要联网，交给后台任务统一并发处理。
-      for (let index = 0; result.invoice && index < ids.length; index++) {
-        progress.update(`正在识别发票 ${index + 1}/${ids.length} 条`);
+      const result = { processed: 0, resolved: 0, remaining: 0, failed: [], results: [], skipped_current: 0 };
+      for (let index = 0; index < ids.length; index++) {
+        progress.update(`本机重新识别发票 ${index + 1}/${ids.length} 条`);
         await new Promise((resolve) => setTimeout(resolve, 0));
         const part = await Api.rerecognizeMaterials([ids[index]], ['invoice']);
         if (part.invoice) {
           ['processed', 'resolved', 'remaining', 'skipped_current'].forEach((key) => {
-            result.invoice[key] += Number(part.invoice[key] || 0);
+            result[key] += Number(part.invoice[key] || 0);
           });
-          result.invoice.failed.push(...(part.invoice.failed || []));
-          result.invoice.results.push(...(part.invoice.results || []));
+          result.failed.push(...(part.invoice.failed || []));
+          result.results.push(...(part.invoice.results || []));
         }
-      }
-      if (result.payment) {
-        const job = await PaymentAiUI.run({ entryIds: ids }, progress);
-        Object.assign(result.payment, { processed: job.completed, recognized: job.recognized,
-          unrecognized: job.unrecognized, failed: job.failed, skipped_current: job.skipped_current });
       }
       m.close();
       if (!explicitIds) State.selected.clear();
       await refreshEntries();
       const parts = [];
-      if (result.invoice) {
-        if (result.invoice.processed) parts.push(`发票 ${result.invoice.processed} 条`);
-        if (result.invoice.skipped_current) parts.push(`发票跳过 ${result.invoice.skipped_current} 条`);
-      }
-      if (result.payment) {
-        if (result.payment.recognized) parts.push(`付款截图识别 ${result.payment.recognized} 张`);
-        if (result.payment.unrecognized) parts.push(`${result.payment.unrecognized} 张未识别到金额`);
-        if (result.payment.skipped_current) parts.push(`付款截图跳过 ${result.payment.skipped_current} 张`);
-      }
-      const failed = (result.invoice?.failed?.length || 0) + (result.payment?.failed || 0);
-      toast(parts.join('，') || '当前规则已处理，无需重复识别', failed ? 'err' : 'ok');
+      if (result.processed) parts.push(`发票 ${result.processed} 条`);
+      if (result.skipped_current) parts.push(`跳过 ${result.skipped_current} 条已是最新`);
+      if (result.failed.length) parts.push(`${result.failed.length} 条失败`);
+      toast(parts.join('，') || '当前规则已处理，无需重复识别', result.failed.length ? 'err' : 'ok');
     } catch (e) {
       toast(e.message, 'err');
       runBtn.disabled = false;
@@ -6469,8 +6575,8 @@ async function batchReparse(entryIds, invoiceOnly = false) {
     }
   });
   const m = modal({
-    title: '重新识别',
-    subhead: invoiceOnly ? `当前列表中 ${ids.length} 张发票可更新，仅处理发票` : `已选择 ${ids.length} 条，可分别处理发票和付款截图`,
+    title: '重新识别发票',
+    subhead: fromNotice ? `当前列表中 ${ids.length} 张发票可更新` : `已选择 ${ids.length} 条`,
     body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), runBtn],
   });

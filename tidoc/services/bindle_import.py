@@ -176,12 +176,18 @@ class _EntryRestorer:
             stored_role, role_revision, mapped_type = storage._import_material_mapping(
                 self.entries_repo, new_id, target_revision_id, att,
                 mapping if isinstance(mapping, dict) else {}, exchange_revision_id)
+            # 识别结论只在文件没被改过时沿用。
+            recognition = (storage._imported_payment_recognition(att, mapped_type)
+                           if actual_digest == expected_digest else ("", "", "", ""))
             self.conn.execute(
                 """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
-                   sha256, note, added_at, role_id, role_definition_revision_id) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                   sha256, note, added_at, role_id, role_definition_revision_id,
+                   recognition_version, recognition_status, recognized_value, recognition_message)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (uuid.uuid4().hex, new_id, mapped_type,
                  att.get("original_name", ""), f"{new_id}/{stored_name}",
-                 actual_digest, att.get("note", ""), att.get("added_at", self.now), stored_role, role_revision),
+                 actual_digest, att.get("note", ""), att.get("added_at", self.now), stored_role, role_revision,
+                 *recognition),
             )
         storage._retain_adapter_source(self.entries_repo, new_id, source_adapter)
         storage._merge_extension_data(self.entries_repo, new_id, source_adapter)

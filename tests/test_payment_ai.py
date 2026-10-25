@@ -245,7 +245,9 @@ def test_disabling_stops_queued_uploads_and_migration_waits_for_jobs(api, monkey
         assert entered.wait(2)
         with pytest.raises(ValueError, match='迁移'): api._ensure_payment_ai_idle()
         assert not api.save_payment_ai_settings({'concurrency': 4})['ok']
+        # 关闭自动识别不打断手动发起的识别；要停下得点取消。
         assert api.save_payment_ai_settings({'enabled': False})['ok']
+        assert api.cancel_payment_ai(job['id'])['data']['cancelled']
     finally: release.set()
     assert wait(api, job)['cancelled'] and len(calls) == 1
     api._ensure_payment_ai_idle()
@@ -328,3 +330,94 @@ def test_macos_context_adds_system_roots(monkeypatch):
     monkeypatch.setattr(ai.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout='-----BEGIN CERTIFICATE-----x'))
     assert isinstance(ai.ssl_context(), Context) and loaded == ['-----BEGIN CERTIFICATE-----x']
     monkeypatch.setattr(ai, '_SSL_CONTEXT', None)
+
+
+def test_cloud_run_fills_empty_paid_and_reports_each_entry(api, monkeypatch, tmp_path):
+    enable_payment_ai(api)
+    person = api.create_profile('测试人员', '测试审核人')['data']
+    eid = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('43.20')))
+    api.update_field(eid, 'paid_amount', '')
+    api.attachments.add(eid, image(tmp_path), 'payment_screenshot')
+    monkeypatch.setattr(ai, 'request_completion', lambda *args: complete())
+    job = wait(api, api.start_payment_ai(entry_ids=[eid])['data'])
+    entry = api.entries.get(eid)
+    assert entry['fields']['paid_amount']['current'] == '43.20'
+    assert entry['fields']['paid_amount']['value_source'] == 'payment_ai'
+    assert job['entries'] == [{'entry_id': eid, 'label': '条目', 'recognized_total': '43.20', 'count': 1,
+                               'paid': '43.20', 'applied': '43.20', 'notes': []}]
+
+    # 实付按发票金额默认填好、识别合计对不上时，不自动改，只提醒。
+    other = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('50.00')))
+    api.attachments.add(other, image(tmp_path, 'b.png', 'blue'), 'payment_screenshot')
+    job = wait(api, api.start_payment_ai(entry_ids=[other])['data'])
+    entry = api.entries.get(other)
+    assert entry['fields']['paid_amount']['current'] == '50.00' and job['entries'][0]['applied'] == ''
+    assert '识别合计 43.20 与实付 50.00 不一致' in entry['check_message']
+
+
+def test_non_payment_screenshot_and_paid_mismatch_are_named_in_reminders(api, monkeypatch, tmp_path):
+    enable_payment_ai(api)
+    person = api.create_profile('测试人员', '测试审核人')['data']
+    eid = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('43.20')))
+    api.attachments.add(eid, image(tmp_path, 'order.png', 'gray'), 'payment_screenshot')
+    monkeypatch.setattr(ai, 'request_completion', lambda *args: complete(raw(kind='order', completed=False)))
+    job = wait(api, api.start_payment_ai(entry_ids=[eid])['data'])
+    message = api.entries.get(eid)['check_message']
+    assert 'order.png 未识别到付款金额：订单页，请用付款账单截图' in message
+    assert job['entries'][0]['applied'] == '' and job['entries'][0]['notes']
+
+    other = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('50.00')))
+    api.attachments.add(other, image(tmp_path, 'paid.png', 'white'), 'payment_screenshot')
+    api.update_field(other, 'paid_amount', '50.00')
+    monkeypatch.setattr(ai, 'request_completion', lambda *args: complete())
+    wait(api, api.start_payment_ai(entry_ids=[other])['data'])
+    entry = api.entries.get(other)
+    assert entry['fields']['paid_amount']['current'] == '50.00'
+    assert '识别合计 43.20 与实付 50.00 不一致' in entry['check_message']
+    # 改实付以后立即重新比对；采用识别合计也会留下修改记录。
+    api.update_field(other, 'paid_amount', '43.20')
+    assert '不一致' not in api.entries.get(other)['check_message']
+    api.update_field(other, 'paid_amount', '40.00')
+    assert api.apply_payment_ai_total(other)['ok']
+    entry = api.entries.get(other)
+    assert entry['fields']['paid_amount']['current'] == '43.20' and '不一致' not in entry['check_message']
+    view = api.payment_ai_result(other)['data']
+    assert view['settled'] and view['items'][0]['name'] == 'paid.png'
+
+
+def test_switch_only_controls_automatic_recognition(api, monkeypatch, tmp_path):
+    enable_payment_ai(api)
+    assert api.save_payment_ai_settings({'enabled': False})['ok']
+    settings = api.payment_ai_settings()['data']
+    assert settings['available'] and not settings['enabled']
+    assert settings['key_masked'].startswith(settings['key_masked'][:2]) and '****' in settings['key_masked']
+    calls = []
+    monkeypatch.setattr(ai, 'request_completion', lambda *args: calls.append(1) or complete())
+    person = api.create_profile('测试人员', '测试审核人')['data']
+    eid = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('43.20')))
+    api.add_attachment(eid, str(image(tmp_path)), 'payment_screenshot')
+    assert calls == [] and '付款截图' not in api.entries.get(eid)['check_message']
+    assert api.recognition_preview([eid])['data']['payment']['enabled']
+    wait(api, api.start_payment_ai(entry_ids=[eid])['data'])
+    assert calls == [1] and api.entries.get(eid)['fields']['paid_amount']['current'] == '43.20'
+
+
+def test_secret_mask_shows_two_characters_at_each_end():
+    from tidoc.api_shared import mask_secret
+    assert mask_secret('sk-abcdef123456xy') == 'sk****xy'
+    assert mask_secret('LTAI5t') == 'L****'
+    assert mask_secret('') == ''
+
+
+@pytest.mark.parametrize('changes,reason', [
+    (dict(source='other'), '付款来源不是微信、支付宝或银行'),
+    (dict(source='uncertain'), '看不出付款来源'),
+    (dict(currency='other'), '不是人民币付款'),
+    (dict(completed=False), '付款未完成或看不出是否完成'),
+    (dict(kind='order', completed=False), '订单页，请用付款账单截图'),
+    (dict(kind='income'), '收入记录，不是付款'),
+    (dict(kind='other', paid=None), '不是付款凭证'),
+])
+def test_review_reason_names_what_is_wrong(changes, reason):
+    result = ai.normalize_fast_result(raw(**changes), list(ai.ALLOWED_SOURCES))
+    assert result['needs_review'] and ai.result_message(result).startswith(reason)

@@ -37,6 +37,24 @@ EXCLUSIVE_TAG_GROUPS = (
 )
 
 
+
+PAYMENT_RECOGNITION_KEYS = ("recognition_version", "recognition_status", "recognized_value", "recognition_message")
+_PAYMENT_RECOGNITION_STATUSES = {"recognized", "review", "unrecognized", "error"}
+
+
+def _imported_payment_recognition(attachment: dict, att_type: str) -> tuple[str, str, str, str]:
+    """包里的付款截图识别结论；格式不对或已不是付款截图时丢弃，按未识别处理。"""
+    import re
+    empty = ("", "", "", "")
+    if att_type != "payment_screenshot":
+        return empty
+    version, status, value, message = (str(attachment.get(key) or "") for key in PAYMENT_RECOGNITION_KEYS)
+    if status not in _PAYMENT_RECOGNITION_STATUSES or not version or len(version) > 80:
+        return empty
+    if value and not re.fullmatch(r"(0|[1-9][0-9]{0,11})\.[0-9]{2}", value):
+        return empty
+    return version, status, value, message[:300]
+
 def _serialize_entry(
     entry: dict,
     *,
@@ -63,6 +81,10 @@ def _serialize_entry(
                       "role_id", "role_definition_revision_id")
         }
         serialized_attachment["note"] = attachment.get("note", "") if include_notes else ""
+        # 付款截图的 AI 识别结论随包走，对方不用为同一张截图再付费识别。
+        if attachment.get("type") == "payment_screenshot" and attachment.get("recognition_status"):
+            for key in PAYMENT_RECOGNITION_KEYS:
+                serialized_attachment[key] = attachment.get(key) or ""
         attachments.append(serialized_attachment)
 
     return {
@@ -1190,6 +1212,14 @@ def _merge_existing_entry(
         duplicate = by_hash.get(digest) if digest else None
         incoming_note = str(attachment.get("note") or "")
         if duplicate:
+            recognition = _imported_payment_recognition(attachment, str(duplicate.get("type") or ""))
+            if recognition[1] and not duplicate.get("recognition_status") and duplicate.get("id"):
+                conn.execute(
+                    """UPDATE attachments SET recognition_version = ?, recognition_status = ?,
+                       recognized_value = ?, recognition_message = ? WHERE id = ?""",
+                    (*recognition, duplicate["id"]),
+                )
+                changes.append("付款截图识别结果")
             merged_note = _merge_text(str(duplicate.get("note") or ""), incoming_note)
             if merged_note != str(duplicate.get("note") or ""):
                 conn.execute(
@@ -1216,14 +1246,17 @@ def _merge_existing_entry(
         actual_digest = _extract_archive_member(archive, arcname, dest)
         if digest and actual_digest != digest and not tampered:
             raise ValueError(f"附件 {attachment.get('original_name') or stored_name} 校验失败。")
+        recognition = _imported_payment_recognition(attachment, att_type) if actual_digest == digest else ("", "", "", "")
         conn.execute(
             """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
-               sha256, note, added_at, role_id, role_definition_revision_id) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+               sha256, note, added_at, role_id, role_definition_revision_id,
+               recognition_version, recognition_status, recognized_value, recognition_message)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 uuid.uuid4().hex, entry_id, att_type,
                 str(attachment.get("original_name") or stored_name),
                 f"{entry_id}/{stored_name}", actual_digest, incoming_note,
-                str(attachment.get("added_at") or now), final_role, role_revision,
+                str(attachment.get("added_at") or now), final_role, role_revision, *recognition,
             ),
         )
         by_hash[actual_digest] = {"id": "", "sha256": actual_digest, "note": incoming_note}

@@ -43,7 +43,8 @@ const AdapterUI = (() => {
     State.defaultEntryTitle = State.titleProfiles.find(t => t.id === settings()['entry.default_title_id'])?.name || '';
     State.materialRequirements = await Api.materialRequirements();
     const paymentAi = await Api.paymentAiSettings();
-    State.paymentAiEnabled = paymentAi.enabled && paymentAi.key_configured;
+    State.paymentAiEnabled = paymentAi.enabled && paymentAi.available;
+    State.paymentAiAvailable = paymentAi.available;
     applyOcrUiVisibility();
   }
   async function setup() {
@@ -56,7 +57,7 @@ const AdapterUI = (() => {
     await refresh();
     if (!status.needs_selection) return;
     await new Promise(resolve => {
-      const body = el('div'); body.innerHTML = '<p class="hint">选择日常使用的报账方案。之后可在设置中切换，已有材料保留原规则。</p>';
+      const body = el('div'); body.innerHTML = '<p class="hint">选择日常使用的报账方案。之后可在「设置 › 开发者选项」中切换，已有材料保留原规则。</p>';
       let finished = false, m;
       const choose = async id => { try { await Api.completeAdapterSetup(id); await refresh(); finished = true; m.close(); resolve(); } catch (error) { toast(error.message, 'err'); } };
       for (const scheme of schemes.filter(s => ['org.tidoc.generic','org.bitfsae.reimbursement'].includes(s.package_id))) {

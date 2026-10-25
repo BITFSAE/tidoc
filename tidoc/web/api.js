@@ -98,6 +98,8 @@ const Api = (() => {
     startPaymentAi: (paths=null, ids=null) => call('start_payment_ai', paths, ids),
     paymentAiProgress: (id) => call('payment_ai_progress', id),
     cancelPaymentAi: (id) => call('cancel_payment_ai', id),
+    paymentAiResult: (id) => call('payment_ai_result', id),
+    applyPaymentAiTotal: (id) => call('apply_payment_ai_total', id),
     listProfiles: () => call('list_profiles'),
     createProfile: (name, reviewer, isDefault, opt) => call('create_profile', name, reviewer, isDefault, opt || {}),
     updateProfile: (id, fields) => call('update_profile', id, fields || {}),

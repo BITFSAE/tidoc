@@ -103,7 +103,10 @@ def test_payment_ai_opt_in_is_global_not_inherited_from_scheme(tmp_path, monkeyp
         api.add_attachment(eid, str(image), 'payment_screenshot')
     assert len(calls) == 2
     assert api.recognition_preview([old, new])['data']['payment']['pending'] == 0
+    # 关闭的只是添加时自动识别；Key 还在，「云识别」仍可手动识别。
     assert api.save_payment_ai_settings({'enabled': False})['ok']
+    assert api.recognition_preview([old, new])['data']['payment']['enabled']
+    assert api.save_payment_ai_settings({}, clear_key=True)['ok']
     assert not api.recognition_preview([old, new])['data']['payment']['enabled']
     api.db.close()
 

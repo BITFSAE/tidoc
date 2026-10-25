@@ -37,6 +37,7 @@ from .db import (
 
 from .api_shared import (
     AUTO_UPDATE_PREF_KEY,
+    mask_secret,
     UPDATE_CHANNEL_PREF_KEY,
     OCR_ACCESS_KEY_ID_PREF_KEY,
     OCR_ACCESS_KEY_SECRET_PREF_KEY,
@@ -64,16 +65,6 @@ from .api_verification import InvoiceVerificationApi
 from .api_updates import UpdateApi
 from .api_qr import QrTicketApi
 from .api_payment_ai import PaymentAiApi
-
-
-def _mask_access_key(key_id: str) -> str:
-    """AccessKey ID 展示用掩码：只露前几位，避免整串出现在界面里。"""
-    text = str(key_id or "").strip()
-    if not text:
-        return ""
-    if len(text) <= 6:
-        return text[:2] + "****"
-    return text[:6] + "****"
 
 
 class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiApi):
@@ -816,7 +807,18 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
     def update_field(self, entry_id, field, value, profile_id=""):
         result = self.entries.update_field(entry_id, field, value, profile_id)
         self.entries.recompute_status(entry_id)
+        if field == "paid_amount":
+            self._refresh_paid_comparison(entry_id)
         return result
+
+    def _refresh_paid_comparison(self, entry_id):
+        """实付改了以后，付款截图识别合计要重新和它比对。"""
+        has_payment = self.db.conn.execute(
+            "SELECT 1 FROM attachments WHERE entry_id = ? AND type = 'payment_screenshot' LIMIT 1",
+            (entry_id,),
+        ).fetchone()
+        if has_payment:
+            self._refresh_payment_ai_check(entry_id)
 
     @_guard
     def set_recognized_paid_amount(self, entry_id, value):
@@ -830,6 +832,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
             value_source=VALUE_SOURCE_PAYMENT_AI,
         )
         self.entries.recompute_status(entry_id)
+        self._refresh_paid_comparison(entry_id)
         return result
 
     @_guard
@@ -1137,7 +1140,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         """采用后台任务或本机缓存里的结果；这里不联网，没有结果时留待「云识别」处理。"""
         from .db.entries import VALUE_SOURCE_PAYMENT_AI
         if not self._payment_ai_enabled():
-            self.entries.clear_payment_check(entry_id)
+            self._refresh_payment_ai_check(entry_id)
             return "", False
         att = attachment if isinstance(attachment, dict) else None
         if not att:
@@ -1183,7 +1186,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
 
         invoice_total = invoice_pending = payment_total = payment_pending = 0
-        payment_enabled = self._payment_ai_enabled()
+        payment_enabled = self._payment_ai_available()
         payment_version = self._payment_ai_version()
         seen = set()
         for entry_id in entry_ids or []:
@@ -1355,6 +1358,9 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         finally:
             self._bindle_inspection_cache = None
         if result.get("imported") or result.get("updated"):
+            # 付款截图提醒按本机的识别设置重算，不沿用发送方电脑上的结论。
+            for entry_id in [*(result.get("entry_ids") or []), *(result.get("updated_entry_ids") or [])]:
+                self._refresh_paid_comparison(entry_id)
             self._sync_entry_statuses()
         return result
 
@@ -1419,7 +1425,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         key_id = self._preference_value(OCR_ACCESS_KEY_ID_PREF_KEY).strip()
         status.update({
             "credentials_configured": bool(key_id and self._preference_value(OCR_ACCESS_KEY_SECRET_PREF_KEY).strip()),
-            "access_key_id_masked": _mask_access_key(key_id),
+            "access_key_id_masked": mask_secret(key_id),
             "total_calls": self.ocr.count_calls(),
         })
         return status
@@ -1439,7 +1445,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         self._set_preference_value(OCR_ACCESS_KEY_SECRET_PREF_KEY, secret)
         return {
             "configured": True,
-            "access_key_id_masked": _mask_access_key(key_id),
+            "access_key_id_masked": mask_secret(key_id),
         }
 
     @_guard
@@ -1507,7 +1513,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
             missing = ", ".join(status.get("missing") or ["OCR 识别组件"])
             raise RuntimeError(f"OCR 识别组件未安装或缺少依赖：{missing}。")
         if not status.get("credentials_configured"):
-            raise RuntimeError("尚未配置阿里云 AccessKey，请先在设置的「阿里云 OCR」中填写。")
+            raise RuntimeError("尚未配置阿里云 AccessKey，请先在「设置 › 开发者选项」中填写。")
 
         credentials = {
             "access_key_id": self._preference_value(OCR_ACCESS_KEY_ID_PREF_KEY).strip(),

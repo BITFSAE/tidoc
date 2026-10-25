@@ -23,6 +23,7 @@ function makeNode(id = '') {
     classList: {
       contains(name) { if (name === 'selected') selectionReads++; return classes.has(name); },
       toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
+      add(name) { classes.add(name); },
       remove(name) { classes.delete(name); },
     },
     setAttribute(name, value) { attrs.set(name, value); },
@@ -36,7 +37,7 @@ const document = {documentElement: {dataset: {}}, querySelector(selector) {
   if (!controls.has(selector)) controls.set(selector, makeNode());
   return controls.get(selector);
 }};
-const sandbox = {document, assert, makeNode, setTimeout, console, process,
+const sandbox = {document, assert, makeNode, setTimeout, clearTimeout, console, process,
   resetReads: () => { selectionReads = 0; }, readCount: () => selectionReads,
   window: {matchMedia: () => ({}), addEventListener() {}},
 };

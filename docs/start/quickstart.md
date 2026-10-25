@@ -17,7 +17,7 @@ description: 用五步走完一遍 Tidoc：选择报账方案、导入发票、�
 
 首次打开 Tidoc 时：
 
-1. 选择日常使用的报账方案：「通用报账」或「BITFSAE 车队报账」。团队给了方案文件的，点「导入报账方案」。
+1. BITFSAE 车队队员选「BITFSAE 车队报账」，之后不用再改方案。其他团队选「通用报账」；团队给了方案文件的，点「导入报账方案」。
 2. 创建报账人，姓名填写发票的实际归属人。
 3. 多人报账时继续添加。添加第二位后，新建和导入时都可以选择归属。
 
@@ -65,5 +65,5 @@ description: 用五步走完一遍 Tidoc：选择报账方案、导入发票、�
 ## 接下来
 
 - 遇到问题先看[常见问题](/faq)。
-- 想少点几下：[省时间的操作](/guide/shortcuts)介绍拖放、右键菜单、批量处理和 Windows 看图工具；熟悉之后可以用[键盘快捷键](/guide/keyboard)。
+- 想少点几下：[省时间的操作](/guide/shortcuts)介绍拖放、双击打开绑定包、右键菜单、批量处理和 Windows 看图工具；熟悉之后可以用[键盘快捷键](/guide/keyboard)。
 - 遇到识别有问题的发票或有建议，欢迎发邮件到 `info@bitfsae.com`，或在 [GitHub Issues](https://github.com/BITFSAE/tidoc/issues) 提出。

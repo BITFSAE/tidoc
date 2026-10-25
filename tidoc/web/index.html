@@ -127,14 +127,26 @@
             <span>高级</span>
           </button>
 
-          <label class="chip-select chip-toggle sort-chip">
+          <div class="chip-toggle sort-chip">
             <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 6h11M8 12h8M8 18h5M4 5v14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-            <select id="sortSelect">
+            <select id="sortSelect" aria-label="排序">
               <option value="updated">最近更新</option>
               <option value="created">创建时间</option>
               <option value="date">发票日期</option>
-              <option value="amount">金额从高</option>
+              <option value="amount">金额</option>
               <option value="seller">销售方</option>
+            </select>
+            <button type="button" class="sort-dir-btn" id="sortDirBtn" data-dir="desc" title="从新到旧" aria-label="从新到旧">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 5v14m0 0-5-5m5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+
+          <label class="chip-select group-chip" title="分组浏览">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="4" y="4" width="16" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="4" y="14" width="16" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+            <select id="groupSelect" aria-label="分组浏览">
+              <option value="none">不分组</option>
+              <option value="profile">按报账人</option>
+              <option value="title">按抬头</option>
             </select>
           </label>
         </div>
@@ -158,7 +170,14 @@
       <div class="advanced-panel hidden" id="advancedPanel">
         <div class="adv-grid">
           <div class="adv-field">
-            <label>发票日期</label>
+            <div class="adv-field-head">
+              <label>发票日期</label>
+              <span class="adv-quick">
+                <button type="button" data-date-range="this_month">本月</button>
+                <button type="button" data-date-range="last_month">上月</button>
+                <button type="button" data-date-range="this_year">今年</button>
+              </span>
+            </div>
             <div class="adv-range">
               <input id="filterDateFrom" type="date" placeholder="起"/>
               <span>—</span>
@@ -178,7 +197,6 @@
             <select id="filterCheck">
               <option value="">全部</option>
               <option value="pass">通过</option>
-              <option value="warning">识别提醒</option>
               <option value="blocked">严重问题</option>
             </select>
           </div>
@@ -194,6 +212,7 @@
             <label>付款截图</label>
             <select id="filterPaymentCount">
               <option value="">全部</option>
+              <option value="none">没有付款截图</option>
               <option value="multiple">多张（2 张及以上）</option>
             </select>
           </div>

@@ -73,7 +73,7 @@ assert.equal(State.themeMode, 'system');
 
 def test_filters_keep_working_archived_and_unbatched_scopes_separate():
     run_selection(r"""
-for (const id of ['filterTitle', 'filterStatus', 'filterCheck', 'filterProfile', 'filterKeyword',
+for (const id of ['filterTitle', 'filterCheck', 'filterProfile', 'filterKeyword',
   'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo', 'sortSelect']) {
   document.querySelector('#' + id).value = '';
 }
@@ -174,4 +174,26 @@ def test_manual_amount_equal_to_invoice_and_refunds_still_require_deliberate_use
   assert.equal(moneyText('0.00'), '0.00');
   assert.equal(moneyText(''), '');
 })().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
+def test_sort_direction_follows_field_default_and_date_shortcuts_use_local_calendar():
+    run_selection(r"""
+document.querySelector('#sortSelect').value = 'seller';
+State.sortDir = SORT_DEFAULT_DIR.seller;
+syncSortDirButton();
+assert.equal(currentFilters().sort, 'seller');
+assert.equal(currentFilters().sort_dir, 'asc');
+assert.equal(document.querySelector('#sortDirBtn').getAttribute('aria-label'), '按名称正序');
+document.querySelector('#sortSelect').value = 'amount';
+State.sortDir = 'asc';
+syncSortDirButton();
+assert.equal(currentFilters().sort_dir, 'asc');
+assert.equal(document.querySelector('#sortDirBtn').getAttribute('aria-label'), '从低到高');
+document.querySelector('#sortSelect').value = '';
+assert.equal(currentFilters().sort, 'updated');
+const today = new Date(2026, 0, 15);
+assert.deepEqual(dateRangeOf('this_month', today), ['2026-01-01', '2026-01-31']);
+assert.deepEqual(dateRangeOf('last_month', today), ['2025-12-01', '2025-12-31']);
+assert.deepEqual(dateRangeOf('this_year', today), ['2026-01-01', '2026-12-31']);
 """)

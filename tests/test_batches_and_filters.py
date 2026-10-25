@@ -237,6 +237,7 @@ def test_multiple_payment_screenshot_filter_and_count(repos, tmp_path):
     matches = repos["entries"].list(payment_count="multiple")
     assert [entry["id"] for entry in matches] == [ids[1]]
     assert matches[0]["attachment_types"][TYPE_PAYMENT] == 2
+    assert [entry["id"] for entry in repos["entries"].list(payment_count="none")] == [ids[2]]
 
 
 def test_batch_filter_on_entries(repos, sample_xmls):
@@ -334,6 +335,25 @@ def test_amount_filter_and_sort_are_numeric(repos):
 
     assert [e["total"] for e in repos["entries"].list(sort="amount")] == ["100.00", "80.00", "9.00"]
     assert [e["total"] for e in repos["entries"].list(amount_min="10", amount_max="90")] == ["80.00"]
+
+
+def test_sort_direction_keeps_blanks_last(repos):
+    profile = repos["profiles"].create("张三", "李老师")
+    rows = (("9.00", "2026-09-02", "乙公司"), ("", "", ""), ("100.00", "2026-09-01", "甲公司"))
+    for total, date, seller in rows:
+        entry_id = repos["entries"].create(profile["id"])
+        repos["db"].conn.execute(
+            "UPDATE entries SET total = ?, invoice_date = ?, seller = ? WHERE id = ?",
+            (total, date, seller, entry_id),
+        )
+    repos["db"].conn.commit()
+    listed = lambda key, **kw: [e[key] for e in repos["entries"].list(**kw)]
+
+    assert listed("total", sort="amount") == ["100.00", "9.00", ""]
+    assert listed("total", sort="amount", sort_dir="asc") == ["9.00", "100.00", ""]
+    assert listed("invoice_date", sort="date", sort_dir="asc") == ["2026-09-01", "2026-09-02", ""]
+    assert listed("seller", sort="seller") == ["乙公司", "甲公司", ""]
+    assert listed("seller", sort="seller", sort_dir="desc") == ["甲公司", "乙公司", ""]
 
 
 def test_keyword_search_includes_invoice_and_paid_amount(repos):

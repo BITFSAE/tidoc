@@ -56,6 +56,14 @@ DEFAULT_MATERIAL_REQUIREMENTS = {
     "inspection_pdf": True,
     "paid_amount": True,
 }
+# 列表排序字段 -> (排序表达式, 缺省方向)
+SORT_COLUMNS = {
+    "updated": ("e.updated_at", "desc"),
+    "created": ("e.created_at", "desc"),
+    "date": ("e.invoice_date", "desc"),
+    "amount": ("CAST(NULLIF(REPLACE(e.total, ',', ''), '') AS REAL)", "desc"),
+    "seller": ("e.seller", "asc"),
+}
 PAID_AMOUNT_DIFF_SQL = """
 TRIM(COALESCE(ef.current, '')) <> ''
 AND ROUND(CAST(REPLACE(ef.current, ',', '') AS REAL) * 100)
@@ -372,10 +380,11 @@ class EntryRepo:
             where.append("EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id AND ef.field='notes' AND TRIM(ef.current) <> '')")
         elif has_notes is False or has_notes == "no":
             where.append("NOT EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id AND ef.field='notes' AND TRIM(ef.current) <> '')")
-        if filters.get("payment_count") == "multiple":
+        payment_count = {"none": "= 0", "multiple": ">= 2"}.get(filters.get("payment_count"))
+        if payment_count:
             where.append(
                 "(SELECT COUNT(*) FROM attachments a "
-                "WHERE a.entry_id = e.id AND a.type = 'payment_screenshot') >= 2"
+                f"WHERE a.entry_id = e.id AND a.type = 'payment_screenshot') {payment_count}"
             )
         # 标签维度：命中任一标签即可（tags 以 JSON 数组字符串存，用 LIKE 粗匹配带引号的标签值）
         tags = filters.get("tags")
@@ -441,16 +450,11 @@ class EntryRepo:
         sql = "SELECT " + ",".join(f'e."{name}"' for name in columns) + " FROM entries e"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        # 排序
-        sort = filters.get("sort") or "updated"
-        order = {
-            "updated": "e.updated_at DESC",
-            "created": "e.created_at DESC",
-            "amount": "CAST(NULLIF(e.total, '') AS REAL) DESC",
-            "date": "e.invoice_date DESC",
-            "seller": "e.seller ASC",
-        }.get(sort, "e.updated_at DESC")
-        sql += " ORDER BY " + order
+        # 排序：sort_dir 缺省时用各字段的常用方向；空值总排在最后，同值按最近更新排，列表顺序稳定。
+        column, default_dir = SORT_COLUMNS.get(filters.get("sort") or "updated", SORT_COLUMNS["updated"])
+        direction = "ASC" if (filters.get("sort_dir") or default_dir) == "asc" else "DESC"
+        sql += (f" ORDER BY ({column} IS NULL OR TRIM({column}) = '') ASC, {column} {direction},"
+                " e.updated_at DESC, e.id")
         rows = self.db.conn.execute(sql, params).fetchall()
 
         result = []

@@ -16,9 +16,10 @@ const State = {
   density: 'comfortable',
   themeMode: document.documentElement.dataset.themeMode || 'system',
   groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
+  sortDir: 'desc',       // 'asc' | 'desc' —— 换排序字段时回到该字段的常用方向
   tagFilter: '',         // 工具栏筛选：按标签
   notesFilter: '',       // 高级筛选：'' | 'yes' | 'no'（有 / 无记账备注）
-  paymentCountFilter: '', // 高级筛选：'' | 'multiple'（多张付款截图）
+  paymentCountFilter: '', // 高级筛选：'' | 'none' | 'multiple'（没有 / 多张付款截图）
   batchFilter: '',       // 当前聚焦的批次 id；'unbatched' 未进批次；'archived' 已归档
   batches: [],           // 批次列表缓存
   unbatchedCount: 0,     // 未进任何批次的条目数
@@ -853,10 +854,7 @@ function applyPreferences() {
     if (titleSel) titleSel.value = dt;
   }
   const dd = localStorage.getItem('tidoc.defaultDensity');
-  if (dd) {
-    State.density = dd;
-    $$('.density-btn').forEach((b) => b.classList.toggle('active', b.dataset.density === dd));
-  }
+  if (dd) State.density = dd;
 }
 
 async function refreshTagOptions() {
@@ -1039,11 +1037,36 @@ const focusedArchivedBatch = () => State.batches.find(
 ) || null;
 const inArchivedShelf = () => inArchivedView() || !!focusedArchivedBatch();
 
+// 各排序字段的常用方向：时间和金额先看新的、大的，销售方按名称正序。
+const SORT_DEFAULT_DIR = { updated: 'desc', created: 'desc', date: 'desc', amount: 'desc', seller: 'asc' };
+const SORT_DIR_LABEL = {
+  amount: { desc: '从高到低', asc: '从低到高' },
+  seller: { asc: '按名称正序', desc: '按名称倒序' },
+};
+
+function syncSortDirButton() {
+  const btn = $('#sortDirBtn');
+  if (!btn) return;
+  const sort = $('#sortSelect')?.value || 'updated';
+  const label = (SORT_DIR_LABEL[sort] || { desc: '从新到旧', asc: '从旧到新' })[State.sortDir];
+  btn.dataset.dir = State.sortDir;
+  btn.title = `${label}（点击切换）`;
+  btn.setAttribute('aria-label', label);
+}
+
+// 发票日期快捷范围，按本机日历计算，返回 [起, 止]（YYYY-MM-DD）。
+function dateRangeOf(range, today = new Date()) {
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const y = today.getFullYear(), m = today.getMonth();
+  if (range === 'last_month') return [ymd(new Date(y, m - 1, 1)), ymd(new Date(y, m, 0))];
+  if (range === 'this_year') return [ymd(new Date(y, 0, 1)), ymd(new Date(y, 11, 31))];
+  return [ymd(new Date(y, m, 1)), ymd(new Date(y, m + 1, 0))];
+}
+
 function currentFilters() {
   const val = (id) => $('#' + id)?.value || '';
   State.activeTitle = val('filterTitle');
   const f = { title: State.activeTitle || undefined };
-  const status = val('filterStatus');
   const check = val('filterCheck');
   const profile = val('filterProfile');
   const kw = val('filterKeyword').trim();
@@ -1051,7 +1074,7 @@ function currentFilters() {
   const amax = val('filterAmountMax');
   const dfrom = val('filterDateFrom');
   const dto = val('filterDateTo');
-  const sort = val('sortSelect');
+  const sort = val('sortSelect') || 'updated';
 
   if (State.quickView === 'warning') f.check_status = 'warning';
   else if (State.quickView === 'modified') f.modified_only = true;
@@ -1059,7 +1082,6 @@ function currentFilters() {
   else if (State.quickView === 'ocr') f.ocr_recognized = true;
   else if (State.quickView === 'ocr_pending') f.ocr_pending = true;
 
-  if (status) f.status = status;
   if (check) f.check_status = check;
   if (profile) f.profile_id = profile;
   if (kw) f.keyword = kw;
@@ -1067,7 +1089,8 @@ function currentFilters() {
   if (amax) f.amount_max = amax;
   if (dfrom) f.date_from = dfrom;
   if (dto) f.date_to = dto;
-  if (sort) f.sort = sort;
+  f.sort = sort;
+  f.sort_dir = State.sortDir;
   if (State.tagFilter) f.tags = [State.tagFilter];
   if (State.notesFilter) f.has_notes = State.notesFilter;
   if (State.paymentCountFilter) f.payment_count = State.paymentCountFilter;
@@ -1347,10 +1370,9 @@ async function refreshEntryCard(entryId, currentDetail = null) {
 
 async function syncEntryAfterChange(entryId, { searchable = false, notes = false, affectsStatus = false, relist = false } = {}, detail = null) {
   const keywordActive = !!$('#filterKeyword')?.value;
-  const statusActive = !!$('#filterStatus')?.value;
   const derivedViewActive = ['incomplete', 'warning', 'complete'].includes(State.quickView);
   if (relist || (searchable && keywordActive) || (notes && State.notesFilter) ||
-      (affectsStatus && (statusActive || derivedViewActive || State.paymentCountFilter))) {
+      (affectsStatus && ($('#filterCheck')?.value || derivedViewActive || State.paymentCountFilter))) {
     await refreshEntries();
     return;
   }
@@ -1784,7 +1806,7 @@ function renderEmptyState() {
   const hasFilter = hasAnyFilter();
   // 批次栏聚焦（含「已归档」）本身不算普通筛选；只有搜索/状态/日期等条件才应显示“没有匹配”。
   const hasNonBatchFilter = !!(
-    ($('#filterStatus')?.value || '') || $('#filterCheck').value || $('#filterProfile').value ||
+    $('#filterCheck').value || $('#filterProfile').value ||
     $('#filterTitle').value || $('#filterKeyword').value || $('#filterAmountMin').value ||
     $('#filterAmountMax').value || $('#filterDateFrom').value || $('#filterDateTo').value ||
     State.tagFilter || State.notesFilter || State.paymentCountFilter || State.quickView !== 'all'
@@ -1834,6 +1856,11 @@ function syncFilterControlStates() {
     const control = $('#' + id);
     control?.closest('.chip-select')?.classList.toggle('is-filtered', !!control.value);
   });
+  $('#groupSelect')?.closest('.chip-select')?.classList.toggle('is-filtered', State.groupBy !== 'none');
+  const dateRange = [$('#filterDateFrom')?.value || '', $('#filterDateTo')?.value || ''].join();
+  $$('[data-date-range]').forEach((btn) => {
+    btn.classList.toggle('active', dateRange === dateRangeOf(btn.dataset.dateRange).join());
+  });
 
   const advancedGroups = [
     ['filterDateFrom', 'filterDateTo'],
@@ -1859,7 +1886,7 @@ function syncFilterControlStates() {
 }
 
 function hasAnyFilter() {
-  return !!(($('#filterStatus')?.value || '') || $('#filterCheck').value || $('#filterProfile').value || $('#filterTitle').value ||
+  return !!($('#filterCheck').value || $('#filterProfile').value || $('#filterTitle').value ||
     $('#filterKeyword').value || $('#filterAmountMin').value || $('#filterAmountMax').value ||
     $('#filterDateFrom').value || $('#filterDateTo').value ||
     State.tagFilter || State.notesFilter || State.paymentCountFilter || State.batchFilter ||
@@ -1872,6 +1899,8 @@ function updateQuickViewButtons() {
 
 function setQuickView(v) {
   State.quickView = v || 'all';
+  // 「识别提醒」本身就是按校验结果筛选，再叠加高级里的校验条件只会互相覆盖。
+  if (State.quickView === 'warning') $('#filterCheck').value = '';
   updateQuickViewButtons();
   State.selected.clear();
   refreshEntries();
@@ -2951,7 +2980,7 @@ async function quickDelete(e) {
 // ------------------------------------------------------------------ 事件
 function bindEvents() {
   if ($('#profilePill')) $('#profilePill').onclick = () => openProfileManager(false);
-  $$('.chip-select select').forEach((select) => {
+  $$('.chip-select select, .sort-chip select').forEach((select) => {
     select.addEventListener('change', () => requestAnimationFrame(() => select.blur()));
   });
 
@@ -2963,11 +2992,21 @@ function bindEvents() {
   const relist = () => { State.selected.clear(); syncFilterControlStates(); return refreshEntries(); };
   const queueRelist = () => { clearTimeout(kwTimer); kwTimer = setTimeout(() => { kwTimer = null; relist(); }, 220); };
   const relistFromAdvanced = () => { State.selected.clear(); State.quickView = 'all'; updateQuickViewButtons(); syncFilterControlStates(); refreshEntries(); };
-  if ($('#filterStatus')) $('#filterStatus').onchange = relistFromAdvanced;
   $('#filterTitle').onchange = () => { State.activeTitle = $('#filterTitle').value; relist(); };
   $('#filterCheck').onchange = relistFromAdvanced;
   $('#filterProfile').onchange = relist;
-  $('#sortSelect').onchange = relist;
+  $('#sortSelect').onchange = () => { State.sortDir = SORT_DEFAULT_DIR[$('#sortSelect').value] || 'desc'; syncSortDirButton(); relist(); };
+  syncSortDirButton();
+  $('#sortDirBtn').onclick = () => { State.sortDir = State.sortDir === 'asc' ? 'desc' : 'asc'; syncSortDirButton(); relist(); };
+  $('#groupSelect').onchange = () => { State.groupBy = $('#groupSelect').value || 'none'; syncFilterControlStates(); renderEntries(); };
+  $$('[data-date-range]').forEach((btn) => {
+    btn.onclick = () => {
+      const [from, to] = dateRangeOf(btn.dataset.dateRange);
+      $('#filterDateFrom').value = from;
+      $('#filterDateTo').value = to;
+      relist();
+    };
+  });
   $('#filterKeyword').oninput = () => { showSearchHintIfEmpty(); syncFilterControlStates(); queueRelist(); };
   // 搜索框里按 ↓ 或 Enter：搜索词立即生效，焦点落到结果列表的当前卡片上。
   $('#filterKeyword').addEventListener('keydown', async (ev) => {
@@ -2997,14 +3036,6 @@ function bindEvents() {
   };
   $('#clearFilters').onclick = () => clearAllFilters();
 
-  $$('.density-btn').forEach((b) => {
-    b.onclick = () => {
-      $$('.density-btn').forEach((x) => x.classList.remove('active'));
-      b.classList.add('active');
-      State.density = b.dataset.density;
-      $('#entryList').dataset.density = State.density;
-    };
-  });
 
   $('#newEntryBtn').onclick = openNewEntry;
   $('#batchImportBtn').onclick = openBatchImport;
@@ -3034,16 +3065,6 @@ function bindEvents() {
   $('#batchExportBtn').onclick = () => doExport([...State.selected]);
   $('#batchPrintBtn').onclick = () => openPrintDialog([...State.selected]);
   $('#batchDeleteBtn').onclick = batchDelete;
-
-  // 分组浏览
-  $$('[data-group]').forEach((b) => {
-    b.onclick = () => {
-      $$('[data-group]').forEach((x) => x.classList.remove('active'));
-      b.classList.add('active');
-      State.groupBy = b.dataset.group;
-      renderEntries();
-    };
-  });
 
   // 新增筛选维度
   $('#filterTag').onchange = () => { State.tagFilter = $('#filterTag').value; relistFromAdvanced(); };
@@ -3080,7 +3101,7 @@ function bindEvents() {
 }
 
 function clearAllFilters() {
-  ['filterStatus', 'filterCheck', 'filterProfile', 'filterTitle', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo', 'filterTag', 'filterNotes', 'filterPaymentCount'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
+  ['filterCheck', 'filterProfile', 'filterTitle', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo', 'filterTag', 'filterNotes', 'filterPaymentCount'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
   State.quickView = 'all';
   updateQuickViewButtons();
   State.activeTitle = '';

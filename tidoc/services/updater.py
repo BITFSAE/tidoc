@@ -873,13 +873,18 @@ class CoreUpdateManager:
 
             expected = str(asset.get("sha256") or "").lower()
             downloaded_path = partial
-            if archive.is_file() and expected and sha256_file(archive).lower() == expected:
+            cached_hash = ""
+            if archive.is_file() and expected:
+                self._set(stage="verify")
+                cached_hash = sha256_file(archive).lower()
+            if cached_hash and cached_hash == expected:
                 downloaded_path = archive
                 size = archive.stat().st_size
                 on_progress(size, int(asset.get("size") or size), 0.0)
             else:
                 if archive.exists():
                     archive.unlink()
+                self._set(stage="download")
                 _download_core_archive(
                     str(asset.get("url") or ""),
                     partial,
@@ -889,7 +894,7 @@ class CoreUpdateManager:
                     mode_changed=lambda mode: self._set(download_mode=mode),
                 )
             self._set(stage="verify")
-            actual = sha256_file(downloaded_path).lower()
+            actual = cached_hash if downloaded_path == archive else sha256_file(downloaded_path).lower()
             if not expected or actual != expected:
                 if downloaded_path == partial:
                     try:
@@ -1279,10 +1284,11 @@ def _download_url_resumable(
             base = existing if append else 0
             response_total = _response_total_size(resp, base)
             expected_total = total_size or response_total
+            read_chunk = getattr(resp, "read1", resp.read)
             with out_path.open("ab" if append else "wb") as out:
                 done = base
                 while True:
-                    chunk = resp.read(DOWNLOAD_CHUNK_BYTES)
+                    chunk = read_chunk(DOWNLOAD_CHUNK_BYTES)
                     if not chunk:
                         break
                     out.write(chunk)
@@ -1292,12 +1298,9 @@ def _download_url_resumable(
                         progress(done, expected_total, max(0, done - base) / elapsed)
     except urllib.error.URLError as exc:
         if _is_certificate_error(exc):
-            fallback_started = time.monotonic()
-            _download_url_with_system_trust(url, out_path, timeout, exc)
-            size = out_path.stat().st_size
-            if progress:
-                elapsed = max(time.monotonic() - fallback_started, 0.001)
-                progress(size, total_size or size, size / elapsed)
+            _download_url_with_system_trust(
+                url, out_path, timeout, exc, progress=progress, total_size=total_size,
+            )
         else:
             raise
     final_size = out_path.stat().st_size
@@ -1411,8 +1414,9 @@ def _download_url(url: str, out_path: Path, timeout: int, progress=None) -> None
             total = int(resp.headers.get("Content-Length") or 0)
             done = 0
             started = time.monotonic()
+            read_chunk = getattr(resp, "read1", resp.read)
             while True:
-                chunk = resp.read(DOWNLOAD_CHUNK_BYTES)
+                chunk = read_chunk(DOWNLOAD_CHUNK_BYTES)
                 if not chunk:
                     break
                 out.write(chunk)
@@ -1422,10 +1426,7 @@ def _download_url(url: str, out_path: Path, timeout: int, progress=None) -> None
                     progress(done, total, done / elapsed)
     except urllib.error.URLError as exc:
         if _is_certificate_error(exc):
-            _download_url_with_system_trust(url, out_path, timeout, exc)
-            if progress:
-                size = out_path.stat().st_size
-                progress(size, size, 0.0)
+            _download_url_with_system_trust(url, out_path, timeout, exc, progress=progress)
             return
         raise
 
@@ -1459,16 +1460,46 @@ def _read_url_with_system_trust(url: str, timeout: int, original: BaseException)
     raise original
 
 
-def _download_url_with_system_trust(url: str, out_path: Path, timeout: int, original: BaseException) -> None:
+def _download_url_with_system_trust(
+    url: str,
+    out_path: Path,
+    timeout: int,
+    original: BaseException,
+    *,
+    progress=None,
+    total_size: int = 0,
+) -> None:
     if sys.platform == "darwin":
-        cmd = _curl_command(url, timeout) + ["--output", str(out_path)]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 5, check=False)
-        except Exception as exc:
-            raise RuntimeError(_cert_fallback_message(original, exc)) from exc
-        if proc.returncode == 0:
-            return
-        err = (proc.stderr or b"").decode("utf-8", errors="ignore").strip()
+        # Stream curl's body instead of waiting for it to write the whole file.
+        # Keep stderr off a pipe so an error response cannot block the download.
+        cmd = _curl_command(url, timeout) + ["--output", "-"]
+        started = time.monotonic()
+        done = 0
+        with tempfile.TemporaryFile() as stderr:
+            try:
+                with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr) as proc:
+                    try:
+                        with out_path.open("wb") as out:
+                            while chunk := proc.stdout.read1(64 * 1024):
+                                out.write(chunk)
+                                done += len(chunk)
+                                if progress:
+                                    elapsed = max(time.monotonic() - started, 0.001)
+                                    progress(done, total_size, done / elapsed)
+                        proc.wait(timeout=timeout + 5)
+                    except BaseException:
+                        proc.kill()
+                        proc.wait()
+                        raise
+            except Exception as exc:
+                raise RuntimeError(_cert_fallback_message(original, exc)) from exc
+            if proc.returncode == 0:
+                if progress:
+                    elapsed = max(time.monotonic() - started, 0.001)
+                    progress(done, total_size or done, done / elapsed)
+                return
+            stderr.seek(0)
+            err = stderr.read().decode("utf-8", errors="ignore").strip()
         raise RuntimeError(_cert_fallback_message(original, err or f"curl exit {proc.returncode}"))
     raise original
 

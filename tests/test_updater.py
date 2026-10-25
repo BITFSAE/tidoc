@@ -1,7 +1,10 @@
 import hashlib
+import http.server
 import io
 import json
+import shutil
 import ssl
+import threading
 import urllib.error
 import zipfile
 from pathlib import Path
@@ -125,6 +128,96 @@ def test_linear_download_resumes_existing_prefix(monkeypatch, tmp_path):
 
     assert output.read_bytes() == payload
     assert calls == ["bytes=9-"]
+
+
+@pytest.mark.parametrize("resumable", [False, True])
+@pytest.mark.parametrize("system_trust", [False, True])
+def test_download_reports_progress_before_the_server_finishes(monkeypatch, tmp_path, resumable, system_trust):
+    from tidoc.services import updater
+
+    if system_trust and not shutil.which("curl"):
+        pytest.skip("需要 curl 验证系统下载的实时进度")
+    payload = b"x" * (256 * 1024)
+    received_progress = threading.Event()
+    server_observed_progress = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload[:64 * 1024])
+            self.wfile.flush()
+            # The server holds back the rest until the client reports progress.
+            server_observed_progress.append(received_progress.wait(3))
+            self.wfile.write(payload[64 * 1024:])
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    failure = urllib.error.URLError(ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"))
+    if system_trust:
+        monkeypatch.setattr(updater.sys, "platform", "darwin")
+        monkeypatch.setattr(updater.urllib.request, "urlopen", lambda *_a, **_kw: (_ for _ in ()).throw(failure))
+    output = tmp_path / "update.zip.part"
+    progress = []
+
+    def report(done, total, speed):
+        progress.append((done, total, speed))
+        if 0 < done < len(payload):
+            received_progress.set()
+
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/update.zip"
+        if resumable:
+            updater._download_url_resumable(url, output, len(payload), 10, report)
+        else:
+            updater._download_url(url, output, 10, report)
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join()
+
+    assert output.read_bytes() == payload
+    assert server_observed_progress == [True]
+    assert progress[-1][:2] == (len(payload), len(payload))
+    assert all(total == (0 if system_trust and not resumable else len(payload)) for _, total, _ in progress[:-1])
+    assert all(speed > 0 for _, _, speed in progress)
+
+
+def test_system_trust_download_failure_does_not_report_completion(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    class FailedCurl:
+        stdout = io.BytesIO(b"partial")
+        returncode = 22
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def wait(self, **_kwargs):
+            return self.returncode
+
+    def spawn(_cmd, *, stdout, stderr):
+        stderr.write(b"HTTP 500")
+        return FailedCurl()
+
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.subprocess, "Popen", spawn)
+    progress = []
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        updater._download_url_with_system_trust(
+            "https://example.com/update.zip", tmp_path / "update.part", 10,
+            ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"),
+            progress=lambda done, total, speed: progress.append((done, total)),
+        )
+    assert progress == [(len(b"partial"), 0)]
 
 
 def test_windows_segmented_download_falls_back_to_single_stream(monkeypatch, tmp_path):
@@ -274,6 +367,36 @@ def test_core_update_manager_discards_complete_file_with_bad_checksum(monkeypatc
 
     assert manager.status()["state"] == "failed"
     assert not partial.exists()
+
+
+def test_cached_archive_is_shown_as_verifying_without_downloading_or_hashing_twice(monkeypatch, tmp_path):
+    from tidoc.services import updater
+
+    monkeypatch.setattr(updater, "current_platform", lambda: "windows")
+    root = tmp_path / "updates" / "core" / "windows" / "9.9.9"
+    root.mkdir(parents=True)
+    archive = root / "update.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("tidoc/tidoc.exe", b"new-core")
+    expected = sha256_file(archive)
+    manager = CoreUpdateManager(tmp_path / "updates")
+    manager._set(state="downloading", stage="download", version="9.9.9")
+    checked = []
+
+    def check_hash(path):
+        assert manager.status()["stage"] == "verify"
+        checked.append(path)
+        return sha256_file(path)
+
+    monkeypatch.setattr(updater, "sha256_file", check_hash)
+    monkeypatch.setattr(updater, "_download_core_archive", lambda *_a, **_kw: pytest.fail("不应重新下载已有完整包"))
+    manager._download_worker({
+        "filename": archive.name, "sha256": expected,
+        "size": archive.stat().st_size, "root_name": "tidoc",
+    }, "9.9.9")
+
+    assert checked == [archive]
+    assert manager.status()["state"] == "ready"
 
 
 def test_check_updates_from_file_manifest(tmp_path):

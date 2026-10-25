@@ -688,6 +688,8 @@ function coreUpdateStage(runtime = {}) {
   if (runtime.stage === 'verify') return { short: '校验', label: '正在校验更新包完整性' };
   if (runtime.stage === 'extract') return { short: '准备', label: '正在准备更新文件' };
   if (runtime.stage === 'install') return { short: '更新', label: '正在退出并更新' };
+  if (!(Number(runtime.downloaded_bytes) > 0)) return { short: '连接', label: '正在连接下载服务器' };
+  if (!(Number(runtime.total_bytes) > 0)) return { short: '下载', label: '正在下载更新' };
   return { short: `${Math.round((Number(runtime.progress) || 0) * 100)}%`, label: '正在下载更新' };
 }
 
@@ -697,6 +699,7 @@ function coreUpdateDownloadDetail(runtime = {}) {
   const total = Number(runtime.total_bytes) || 0;
   const speed = Number(runtime.speed_bps) || 0;
   if (total) bits.push(`${done ? fmtBytes(done) : '0 KB'} / ${fmtBytes(total)}`);
+  else if (done) bits.push(`已下载 ${fmtBytes(done)}`);
   if (speed) bits.push(`${fmtBytes(speed)}/秒`);
   if (runtime.download_mode === 'segmented') bits.push('加速下载');
   return bits.join(' · ');
@@ -704,9 +707,10 @@ function coreUpdateDownloadDetail(runtime = {}) {
 
 function coreUpdateProgressMarkup(runtime = {}) {
   const stage = coreUpdateStage(runtime);
-  if ((runtime.stage || 'download') === 'download' || runtime.stage === 'starting') {
+  const downloading = (runtime.stage || 'download') === 'download' || runtime.stage === 'starting';
+  const detail = downloading ? coreUpdateDownloadDetail(runtime) : '';
+  if (downloading && Number(runtime.downloaded_bytes) > 0 && Number(runtime.total_bytes) > 0) {
     const pct = Math.round((Number(runtime.progress) || 0) * 100);
-    const detail = coreUpdateDownloadDetail(runtime);
     return `<div class="update-operation-status" aria-busy="true">
       <div class="update-progress determinate" role="progressbar" aria-label="下载更新" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
       <div class="hint">${esc(stage.label)} · ${pct}%${detail ? ` · ${esc(detail)}` : ''}</div>
@@ -714,11 +718,34 @@ function coreUpdateProgressMarkup(runtime = {}) {
   }
   return `<div class="update-operation-status" aria-busy="true">
     <div class="update-progress" role="progressbar" aria-label="${esc(stage.label)}"><span></span></div>
-    <div class="hint">${esc(stage.label)}…</div>
+    <div class="hint">${esc(stage.label)}…${detail ? ` · ${esc(detail)}` : ''}</div>
   </div>`;
 }
 
+function renderCoreUpdateDialogRuntime() {
+  const row = $('#modalRoot [data-core-update]');
+  if (!row) return;
+  const runtime = State.coreUpdateRuntime || {};
+  const state = runtime.state;
+  const core = (State.updateStatus?.updates || []).find((item) => item.component === 'core' && item.available);
+  if (!core) return;
+  const active = ['downloading', 'ready', 'failed', 'installing'].includes(state);
+  if (!active && !(core.asset?.auto_update && runtime.install_supported)) return;
+  const stage = coreUpdateStage(runtime);
+  const busy = state === 'downloading' || state === 'installing';
+  const label = state === 'ready' ? '已下载' : state === 'failed' ? '下载失败' : busy ? stage.short : '可更新';
+  row.querySelector('[data-core-update-state]').innerHTML = `<span class="update-badge ${state === 'ready' ? 'pending' : 'available'}">${esc(label)}</span>`;
+  const action = row.querySelector('.update-component-action');
+  const text = state === 'ready' ? '重启更新' : state === 'failed' ? '重试下载' : busy ? stage.label.replace(/^正在/, '') : '下载更新';
+  action.innerHTML = `<button class="btn small" ${busy ? 'disabled' : state === 'ready' ? 'data-restart-core' : 'data-download-core'}>${esc(text)}</button>`;
+  if (!busy) action.querySelector('button').onclick = handleTopbarUpdateAction;
+  row.querySelector('[data-core-update-progress]').innerHTML = busy
+    ? coreUpdateProgressMarkup(runtime)
+    : state === 'failed' ? `<div class="hint warn">${esc(runtime.error || '更新下载失败')}</div>` : '';
+}
+
 function renderCoreUpdateAction(core = null) {
+  renderCoreUpdateDialogRuntime();
   const btn = $('#updateActionBtn');
   if (!btn) return;
   const runtime = State.coreUpdateRuntime || {};
@@ -736,7 +763,8 @@ function renderCoreUpdateAction(core = null) {
   const stage = coreUpdateStage(runtime);
   if (pct) pct.textContent = stage.short;
   const version = runtime.version || candidate?.latest_version || '';
-  const downloadDetail = coreUpdateDownloadDetail(runtime);
+  const downloadDetail = ['download', 'starting'].includes(runtime.stage || 'download')
+    ? coreUpdateDownloadDetail(runtime) : '';
   const labels = {
     downloading: `${stage.label} v${version}${downloadDetail ? ` · ${downloadDetail}` : ''}`,
     ready: `重启并更新到 v${version}`,
@@ -757,18 +785,20 @@ async function refreshCoreUpdateRuntime(core = null) {
 
 function startCoreUpdatePolling() {
   if (coreUpdatePollTimer) return;
-  coreUpdatePollTimer = setInterval(async () => {
+  const poll = async () => {
     try {
       State.coreUpdateRuntime = await Api.coreUpdateStatus();
       renderCoreUpdateAction();
       if (State.coreUpdateRuntime?.state !== 'downloading') {
-        clearInterval(coreUpdatePollTimer);
         coreUpdatePollTimer = null;
         if (State.coreUpdateRuntime?.state === 'ready') toast('更新已下载，可以重启更新', 'ok');
         if (State.coreUpdateRuntime?.state === 'failed') toast(State.coreUpdateRuntime.error || '更新下载失败', 'err');
+        return;
       }
     } catch (e) {}
-  }, 500);
+    coreUpdatePollTimer = setTimeout(poll, 500);
+  };
+  coreUpdatePollTimer = setTimeout(poll, 500);
 }
 
 async function handleTopbarUpdateAction() {
@@ -776,9 +806,15 @@ async function handleTopbarUpdateAction() {
   if (runtime.state === 'downloading' || runtime.state === 'installing') return;
   if (runtime.state === 'ready') {
     try {
+      State.coreUpdateRuntime = { ...runtime, state: 'installing', stage: 'install' };
+      renderCoreUpdateAction();
       State.coreUpdateRuntime = await Api.installCoreUpdate();
       renderCoreUpdateAction();
-    } catch (e) { toast(e.message, 'err'); }
+    } catch (e) {
+      State.coreUpdateRuntime = runtime;
+      renderCoreUpdateAction();
+      toast(e.message, 'err');
+    }
     return;
   }
   const core = (State.updateStatus?.updates || []).find(
@@ -794,6 +830,10 @@ async function handleTopbarUpdateAction() {
       state: 'downloading',
       version: core.latest_version || '',
       progress: 0,
+      downloaded_bytes: 0,
+      total_bytes: Number(core.asset.auto_update.size) || 0,
+      speed_bps: 0,
+      download_mode: 'starting',
       stage: 'starting',
       error: '',
     };
@@ -4172,15 +4212,6 @@ async function openUpdateDialogImpl(pending) {
         }
       } else if (!available) {
         action = '';
-      } else if (u.component === 'core' && State.coreUpdateRuntime?.state === 'ready') {
-        state = '<span class="update-badge pending">已下载</span>';
-        action = '<button class="btn small" data-restart-core>重启更新</button>';
-      } else if (u.component === 'core' && State.coreUpdateRuntime?.state === 'downloading') {
-        const stage = coreUpdateStage(State.coreUpdateRuntime);
-        state = `<span class="update-badge available">${esc(stage.short)}</span>`;
-        action = `<button class="btn small" disabled>${esc(stage.label.replace(/^正在/, ''))}</button>`;
-      } else if (u.component === 'core' && u.asset?.auto_update && State.coreUpdateRuntime?.install_supported) {
-        action = '<button class="btn small" data-download-core>下载更新</button>';
       } else if (u.downloaded) {
         state = '<span class="update-badge pending">已下载</span>';
         action = '<button class="btn small" data-open-core>打开更新包</button>';
@@ -4191,15 +4222,16 @@ async function openUpdateDialogImpl(pending) {
       const responsibility = installable
         ? `<span class="update-component-description">${installable.description}</span>`
         : '';
-      return `<div class="update-component">
+      return `<div class="update-component"${u.component === 'core' ? ' data-core-update' : ''}>
         <div class="update-component-main">
           <div class="update-component-copy">
-            <div class="update-component-title"><b>${esc(u.name || u.component)}</b>${state}${available && isPrerelease(u.latest_version) ? '<span class="update-badge beta">测试版</span>' : ''}</div>
+            <div class="update-component-title"><b>${esc(u.name || u.component)}</b>${u.component === 'core' ? `<span data-core-update-state>${state}</span>` : state}${available && isPrerelease(u.latest_version) ? '<span class="update-badge beta">测试版</span>' : ''}</div>
             <span>${meta}</span>
             ${responsibility}
           </div>
           <div class="update-component-action">${action}</div>
         </div>
+        ${u.component === 'core' ? '<div data-core-update-progress></div>' : ''}
         ${available && notes.length ? `<ul class="update-notes">${notes.slice(0, 3).map((note) => `<li>${esc(note)}</li>`).join('')}</ul>` : ''}
       </div>`;
     }).join('');
@@ -4227,26 +4259,6 @@ async function openUpdateDialogImpl(pending) {
     body.querySelector('[data-open-release]').onclick = openReleases;
     const coreBtn = body.querySelector('[data-download-core]');
     if (coreBtn) coreBtn.onclick = async () => {
-      const core = (status.updates || []).find((item) => item.component === 'core');
-      if (core?.asset?.auto_update && State.coreUpdateRuntime?.install_supported) {
-        try {
-          State.coreUpdateRuntime = await Api.startCoreUpdateDownload();
-          renderCoreUpdateAction(core);
-          const op = body.querySelector('#updateOperation');
-          while (State.coreUpdateRuntime?.state === 'downloading') {
-            if (op) op.innerHTML = coreUpdateProgressMarkup(State.coreUpdateRuntime);
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            State.coreUpdateRuntime = await Api.coreUpdateStatus();
-            renderCoreUpdateAction(core);
-          }
-          if (State.coreUpdateRuntime?.state === 'failed') throw new Error(State.coreUpdateRuntime.error || '更新下载失败');
-          await render('更新已下载，可以重启更新');
-        } catch (e) {
-          toast(e.message, 'err');
-          await render().catch((err) => renderError(err.message));
-        }
-        return;
-      }
       setBusy('正在下载并校验更新包，完成后会自动打开…');
       let ok = false;
       try {
@@ -4256,19 +4268,6 @@ async function openUpdateDialogImpl(pending) {
         ok = true;
       } catch (e) { toast(e.message, 'err'); }
       finally { if (!ok) await render().catch((e) => renderError(e.message)); }
-    };
-    const restartCoreBtn = body.querySelector('[data-restart-core]');
-    if (restartCoreBtn) restartCoreBtn.onclick = async () => {
-      restartCoreBtn.disabled = true;
-      restartCoreBtn.textContent = '正在退出…';
-      try {
-        State.coreUpdateRuntime = await Api.installCoreUpdate();
-        renderCoreUpdateAction();
-      } catch (e) {
-        restartCoreBtn.disabled = false;
-        restartCoreBtn.textContent = '重启更新';
-        toast(e.message, 'err');
-      }
     };
     const openCoreBtn = body.querySelector('[data-open-core]');
     if (openCoreBtn) openCoreBtn.onclick = async () => {
@@ -4297,6 +4296,7 @@ async function openUpdateDialogImpl(pending) {
         finally { if (!ok) await render().catch((e) => renderError(e.message)); }
       };
     });
+    renderCoreUpdateAction(coreUpdate);
   };
   try {
     await render();

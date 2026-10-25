@@ -169,9 +169,14 @@ class ExportPlanner:
         if out['type']=='pdf_bundle':
             pdf=out.setdefault('pdf',{})
             changed=overrides.get('pdf') or {}
+            skip_tails=changed.get('skip_blank_inspection_tails',False)
+            if not isinstance(skip_tails,bool):
+                raise ValueError('剔除查验单空白尾页选项应为开关。')
+            if 'skip_blank_inspection_tails' in changed:
+                pdf['skip_blank_inspection_tails']=skip_tails
             mapping={'numbering':'print.numbering','image_layout':'print.image_layout','content_order':'print.content_order'}
-            if set(changed)-set(mapping):
-                raise ValueError('本次导出只能覆盖编号、图片布局或材料顺序。')
+            if set(changed)-set(mapping)-{'skip_blank_inspection_tails'}:
+                raise ValueError('本次导出只能覆盖编号、图片布局、材料顺序或查验单空白尾页选项。')
             for name,key in mapping.items():
                 declared=pdf.get(name,SETTINGS[key]['default'])
                 resolved=setting(key,declared)
@@ -309,6 +314,7 @@ class ExportPlanner:
             status=component_status(self.data_root.components_dir)
             if not status.get('available'):add('PRINT_COMPONENT_REQUIRED','需要安装打印导出组件。')
             elif 2 not in status.get('ipc_versions',[]) or output['type'] not in status.get('renderers',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','打印导出组件缺少所需能力，请检查更新。')
+            elif output.get('pdf',{}).get('skip_blank_inspection_tails') and 'skip_blank_inspection_tails' not in status.get('pdf_features',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','剔除查验单空白尾页需要更新打印导出组件。')
         if template:
             try:
                 from tidoc_print.template_validation import validate_template

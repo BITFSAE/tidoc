@@ -1,4 +1,4 @@
-"""重新生成文档站首页和概念页用的界面截图。
+"""重新生成文档站首页、概念页和打印窗口的界面截图。
 
 用法（在仓库根目录）：
     python -m scripts.docs_screenshots [--out docs/public/images] [--chrome <浏览器路径>] [--only 名称 ...]
@@ -10,6 +10,7 @@ tidoc/web 前端接到真实的 Api 上，再用无界面的 Chrome 或 Edge 按
 产物（--out 目录下）：
 - main-overview.png / main-overview-dark.png   主界面，浅色与深色，1800×1293
 - hero-cards.png / hero-cards-dark.png         首页右上角三张卡片，849×627，四角透明
+- print-dialog.png                           打印窗口，裁去周围的主界面
 
 依赖：本机装有 Chrome 或 Edge，Python 里装有 Pillow（requirements-dev.txt）。浏览器路径也可以用
 环境变量 TIDOC_CHROME 指定。界面改动后这些图要重新生成，并检查改动是否符合预期再提交。
@@ -51,14 +52,17 @@ class Shot:
     name: str
     theme: str
     sprite: bool = False
+    dialog: str = ""
 
     @property
     def window(self) -> tuple[int, int]:
-        return SPRITE_WINDOW if self.sprite else WINDOW
+        if self.sprite:
+            return SPRITE_WINDOW
+        return (1200, 1400) if self.dialog else WINDOW
 
     @property
     def query(self) -> str:
-        return f"?theme={self.theme}" + ("&sprite=1" if self.sprite else "")
+        return f"?theme={self.theme}" + ("&sprite=1" if self.sprite else "") + (f"&dialog={self.dialog}" if self.dialog else "")
 
 
 SHOTS = [
@@ -66,6 +70,7 @@ SHOTS = [
     Shot("main-overview-dark", "dark"),
     Shot("hero-cards", "light", sprite=True),
     Shot("hero-cards-dark", "dark", sprite=True),
+    Shot("print-dialog", "light", dialog="print"),
 ]
 
 
@@ -91,11 +96,16 @@ def capture(chrome: str, url: str, shot: Shot, target: Path, env: dict[str, str]
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
 
 
-def save(raw: Path, final: Path, sprite: bool) -> None:
+def save(raw: Path, final: Path, sprite: bool, dialog: str = "") -> None:
     """卡片图保持完整色彩与透明；主界面图压成 256 色调色板，体积小得多。"""
     from PIL import Image
 
     image = Image.open(raw)
+    if dialog:
+        # 浅色弹窗比遮罩后的背景亮，裁去周围的主界面，只保留实际弹窗。
+        bounds = image.convert("L").point(lambda value: 255 if value > 225 else 0).getbbox()
+        if bounds:
+            image = image.crop(bounds)
     if sprite:
         image.save(final, optimize=True)
         return
@@ -139,7 +149,7 @@ def main(argv: list[str] | None = None) -> None:
             for shot in shots:
                 raw = temp / f"{shot.name}.png"
                 capture(chrome, url, shot, raw, browser_env)
-                save(raw, args.out / f"{shot.name}.png", shot.sprite)
+                save(raw, args.out / f"{shot.name}.png", shot.sprite, shot.dialog)
                 print(f"已生成 {args.out / (shot.name + '.png')}")
         finally:
             server.shutdown()

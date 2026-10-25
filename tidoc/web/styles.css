@@ -2296,6 +2296,10 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .export-more > summary + .export-item > .export-output { padding-top: 14px; }
 .export-names { display: grid; gap: 6px; margin-top: -2px; padding: 0 0 10px 28px; }
 .export-names[hidden] { display: none; }
+.export-pdf-options { padding: 0 0 10px 28px; }
+.export-pdf-options[hidden] { display: none; }
+.export-pdf-options .export-output { padding: 4px 0; }
+.export-pdf-options .settings-row-copy b { font-size: 13px; font-weight: 500; }
 .export-names .export-filename-row { gap: 6px; }
 .export-name-label { flex: 0 0 10em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .export-filename-row input[aria-invalid="true"] { border-color: var(--blocked); box-shadow: 0 0 0 3px var(--blocked-soft); }

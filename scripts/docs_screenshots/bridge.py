@@ -33,6 +33,16 @@ SHIM = """<script>(function () {
     };
   });
   window.pywebview = {api: api};
+  if (query.get("dialog") === "print") {
+    window.addEventListener("load", function () {
+      function open() {
+        var cards = document.querySelectorAll(".entry-card");
+        if (!cards.length) return setTimeout(open, 100);
+        AdapterUI.print([cards[0].dataset.entryId]);
+      }
+      open();
+    });
+  }
   if (!query.get("sprite")) return;
   var style = document.createElement("style");
   style.textContent = "html,body{background:transparent!important}body::before,body::after{display:none!important}";

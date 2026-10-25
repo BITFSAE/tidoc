@@ -53,7 +53,7 @@ def capabilities():
             legacy_available = False
     docx = schema_available and catalog_available and not any(name in missing for name in ('docx','docxtpl','jinja2'))
     pdf = schema_available and not any(name in missing for name in ('pypdf','PIL','reportlab'))
-    return {'component':'tidoc_print','version':__version__,'ipc_versions':(([1] if legacy_available else [])+[2]) if schema_available else [],'context_versions':[1] if schema_available else [], 'renderers':(['docx'] if docx else []) + (['pdf_bundle'] if pdf else []), 'adapter_capabilities':(['output.docx.v1'] if docx else []) + (['output.pdf.v1'] if pdf else []), 'missing':missing, 'limits':{'timeout_seconds':120,'context_bytes':16*1024*1024,'loop_depth':3},'cancel':True}
+    return {'component':'tidoc_print','version':__version__,'ipc_versions':(([1] if legacy_available else [])+[2]) if schema_available else [],'context_versions':[1] if schema_available else [], 'renderers':(['docx'] if docx else []) + (['pdf_bundle'] if pdf else []), 'pdf_features':(['skip_blank_inspection_tails'] if pdf else []), 'adapter_capabilities':(['output.docx.v1'] if docx else []) + (['output.pdf.v1'] if pdf else []), 'missing':missing, 'limits':{'timeout_seconds':120,'context_bytes':16*1024*1024,'loop_depth':3},'cancel':True}
 
 
 def _safe_relative(value):
@@ -118,6 +118,8 @@ def validate_request(request):
         output = item['output']
         if output.get('type') not in ('docx','pdf_bundle'):
             raise ProtocolError('打印组件只接收 Word 和材料 PDF')
+        if not isinstance((output.get('pdf') or {}).get('skip_blank_inspection_tails',False),bool):
+            raise ProtocolError('剔除查验单空白尾页选项应为开关。')
         context = item.get('context')
         if not isinstance(context,dict):raise ProtocolError('模板上下文必须为 JSON 对象')
         try:

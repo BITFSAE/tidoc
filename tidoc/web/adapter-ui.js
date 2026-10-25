@@ -971,15 +971,28 @@ const AdapterUI = (() => {
           if (ids.length) try { localStorage.setItem(OUTPUT_MEMORY_PREFIX + scope, JSON.stringify({ ids, base: JSON.stringify(configuredByScope.get(scope) ?? null) })); } catch (_) {}
         }
       };
+      const supportsSkipTails = component.pdf_features?.includes('skip_blank_inspection_tails');
       const outputRow = (output, binding, checked, definition = null) => {
         const supported = canRender(output.type);
         const row = el('label', 'settings-row export-output' + (supported ? '' : ' is-disabled'));
         const note = supported ? (outputPayeeMode(definition, output) !== 'none' ? '含收款信息' : '') : '需要安装或更新打印导出组件';
         row.innerHTML = `<input type="checkbox" data-output-id="${esc(output.id)}"${binding ? ` data-output-binding="${esc(binding)}"` : ''}${checked && supported ? ' checked' : ''}${supported ? '' : ' disabled'}/><span class="settings-row-copy"><b>${esc(output.label)}</b></span>${note ? `<span class="export-kind${supported ? '' : ' export-warn'}">${esc(note)}</span>` : ''}`;
-        meta.set($('input', row), { output, binding, definition });
+        const input = $('input', row);
+        const info = { output, binding, definition };
+        meta.set(input, info);
         const item = el('div', 'export-item');
         item.append(row, el('div', 'export-names'));
         item.lastChild.hidden = true;
+        if (output.type === 'pdf_bundle') {
+          const suffix = meta.size;
+          const holder = el('div', 'export-pdf-options');
+          const option = el('label', 'settings-row export-output' + (supportsSkipTails ? '' : ' is-disabled'));
+          option.innerHTML = `<input type="checkbox" data-skip-blank-inspection-tails aria-labelledby="skip-tails-label-${suffix}" aria-describedby="skip-tails-help-${suffix}"${supportsSkipTails ? '' : ' disabled'}/><span class="settings-row-copy"><b id="skip-tails-label-${suffix}">剔除查验单空白尾页</b><span id="skip-tails-help-${suffix}">${supportsSkipTails ? '原始材料保留；打印前请核对生成的 PDF。' : '需要更新打印导出组件后使用。'}</span></span>`;
+          option.title = '可剔除仅剩页眉页脚、空备注栏边框或标签的尾页，仅对这项输出生效。';
+          holder.append(option); item.append(holder);
+          holder.hidden = true;
+          info.skipTailsInput = $('input', option); info.skipTailsHolder = holder;
+        }
         return item;
       };
       // 生成内容：方案声明的输出。
@@ -1067,12 +1080,14 @@ const AdapterUI = (() => {
         payeeHolder.hidden = byClaimantOnly;
         options.hidden = dateRow.hidden && payeeRow.hidden;
         for (const { groups } of adjustForms) for (const { group, holder, binding } of groups) holder.hidden = !on.some(item => item.binding === binding && group.applies(item.output));
+        for (const [input, info] of meta) if (info.skipTailsHolder) info.skipTailsHolder.hidden = !input.checked;
         adjust.hidden = !adjustForms.some(f => f.groups.some(g => !g.holder.hidden));
         run.disabled = !on.length || checking || generating;
         note.textContent = on.length ? '' : '请先勾选要生成的内容';
       };
       const collect = () => {
         const outputOptions = {};
+        const genericOutputOptions = {};
         for (const { binding, definition, groups } of adjustForms) {
           for (const output of definition.outputs || []) {
             const configured = {};
@@ -1087,8 +1102,14 @@ const AdapterUI = (() => {
             (outputOptions[binding] ||= {})[output.id] = configured;
           }
         }
+        for (const [input, { output, binding, skipTailsInput }] of meta) {
+          if (!skipTailsInput) continue;
+          const owner = binding ? (outputOptions[binding] ||= {}) : genericOutputOptions;
+          ((owner[output.id] ||= {}).pdf ||= {}).skip_blank_inspection_tails = input.checked && skipTailsInput.checked;
+        }
         return {
           date: $('[data-export-date]', body).value, payee_id: payeeSelect.value || null, output_options_by_binding: outputOptions,
+          output_options: genericOutputOptions,
           output_names_by_group: { ...outputNames },
           batch_fields_by_binding: Object.fromEntries(batchForms.map(({ binding, form }) => [binding, form.values()])),
           export_fields_by_binding: Object.fromEntries(exportForms.map(({ binding, form }) => [binding, form.values()])),
@@ -1111,7 +1132,7 @@ const AdapterUI = (() => {
         for (const input of $$('[data-output-id]', body)) {
           const binding = input.dataset.outputBinding || '';
           const mine = input.checked ? groups.filter(group => group.output_id === input.dataset.outputId && (group.scheme_id ? group.scheme_id + ':' + group.revision_id : '') === binding) : [];
-          const holder = input.closest('.export-item').lastElementChild;
+          const holder = $('.export-names', input.closest('.export-item'));
           holder.hidden = !mine.length;
           holder.innerHTML = exportNameMarkup(mine, outputNames, invalid);
         }

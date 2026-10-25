@@ -119,6 +119,8 @@ def execute_print_request(request,components_dir=None,cancel_check=None):
     needed={item['output']['type'] for item in request['files']}
     if not needed.issubset(status.get('renderers',[])):
         raise RuntimeError('打印导出组件缺少所选输出能力，请检查更新。')
+    if any(item['output'].get('pdf',{}).get('skip_blank_inspection_tails') for item in request['files']) and 'skip_blank_inspection_tails' not in status.get('pdf_features',[]):
+        raise RuntimeError('剔除查验单空白尾页需要更新打印导出组件。')
     timeout=float(request.get('timeout_seconds',120))
     if not 0<timeout<=120: raise ValueError('导出超时应为 0–120 秒')
     with tempfile.TemporaryDirectory(prefix='tidoc-print-ipc-') as tmp:

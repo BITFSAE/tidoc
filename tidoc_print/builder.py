@@ -11,20 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from .models import PersonProfile, PrintEntry
-from .pdf_merge import images_to_pdf, merge_pdf_groups, merge_pdfs
-from .word_docs import generate_acceptance_doc, generate_reimburse_doc
 
 # 旧配置保留兼容；当前打印件只使用固定编号，不再展示发票号/姓名/金额。
 ANNOTATION_FIELDS = ("invoice_no", "invoice_date", "seller", "person_name", "paid_amount", "total")
-_ANNOTATION_LABEL = {
-    "invoice_no": "发票号", "invoice_date": "日期", "seller": "销售方",
-    "person_name": "报账人", "paid_amount": "实付", "total": "价税合计",
-}
 
 
 @dataclass
@@ -51,27 +43,6 @@ class PrintOptions:
 class PrintResult:
     title: str
     files: dict[str, str] = field(default_factory=dict)   # 文件类型 -> 路径
-
-
-def _annotation_for(entry: PrintEntry, fields: tuple[str, ...]) -> str:
-    """按勾选字段拼出一条页脚标注文字。"""
-    parts = []
-    for f in fields:
-        if f == "person_name":
-            val = entry.profile_name
-        elif f == "total":
-            val = f"¥{entry.total}"
-        else:
-            val = getattr(entry, f, "")
-        if val:
-            parts.append(f"{_ANNOTATION_LABEL.get(f, f)}：{val}")
-    return "   ".join(parts)
-
-
-def _safe_name(text: str) -> str:
-    import re
-    cleaned = re.sub(r'[\\/:*?"<>|]+', "_", text).strip()
-    return cleaned or "未命名"
 
 
 def build_print_package(

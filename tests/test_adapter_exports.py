@@ -727,3 +727,50 @@ def test_print_component_processes_never_open_a_console_window_on_windows(monkey
     printing._CAPABILITIES_CACHE.clear()
     printing._query_capabilities(exe)
     assert seen and seen[0]['creationflags'] == 0x08000000
+
+
+def test_pdf_tail_options_survive_export_and_regeneration(planner_setup):
+    from pypdf import PdfReader
+    from tests.pdf_fixtures import make_remark_overflow
+
+    planner, entries, attachments, _, eid, root = planner_setup
+    attachments.add(eid, make_remark_overflow(root.root/'inspection.pdf'), 'inspection_pdf')
+    entry = entries.get(eid)
+    binding = entry['scheme_id'] + ':' + entry['scheme_revision_id']
+    options = {
+        'output_options_by_binding': {binding: {'materials': {'pdf': {'skip_blank_inspection_tails': True}}}},
+        'output_options': {'generic_materials': {'pdf': {'skip_blank_inspection_tails': False}}},
+    }
+    plan = planner.preview([eid], ['materials', 'generic_materials'], options)
+    assert plan['ok'], plan['diagnostics']
+    job = planner.run(plan['plan_id'])
+    regenerated = planner.regenerate(job['job_id'])
+    for result in (job, regenerated):
+        assert result['status'] == 'completed', result['diagnostics']
+        pages = {item['output_id']: PdfReader(item['path']).pages for item in result['files']}
+        assert {key: len(value) for key, value in pages.items()} == {'materials': 2, 'generic_materials': 3}
+        assert 'No.1-2/2' in pages['materials'][-1].extract_text()
+        assert 'No.1-3/3' in pages['generic_materials'][-1].extract_text()
+
+
+def test_old_component_does_not_silently_ignore_option(planner_setup, monkeypatch):
+    from tidoc.services import printing
+    planner, _, _, _, eid, _ = planner_setup
+    status = printing.component_status()
+    status.pop('pdf_features')
+    monkeypatch.setattr(printing, 'component_status', lambda *_: status)
+    options = {'output_options': {'generic_materials': {'pdf': {'skip_blank_inspection_tails': True}}}}
+    plan = planner.preview([eid], ['generic_materials'], options)
+    assert not plan['ok']
+    assert any(d['code'] == 'PRINT_COMPONENT_UPDATE_REQUIRED' for d in plan['diagnostics'])
+    assert planner.preview([eid], ['generic_materials'])['ok']
+    # 历史任务重新生成不经过预检，调用组件前也必须检查能力。
+    with pytest.raises(RuntimeError, match='需要更新'):
+        printing.execute_print_request({'files': [{'output': {'type': 'pdf_bundle', 'pdf': {'skip_blank_inspection_tails': True}}}]})
+
+
+def test_pdf_tail_option_rejects_non_boolean_input(planner_setup):
+    planner, _, _, _, eid, _ = planner_setup
+    options = {'output_options': {'generic_materials': {'pdf': {'skip_blank_inspection_tails': 'false'}}}}
+    with pytest.raises(ValueError, match='开关'):
+        planner.preview([eid], ['generic_materials'], options)

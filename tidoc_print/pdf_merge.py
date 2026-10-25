@@ -244,7 +244,7 @@ def render_pdf_bundle(context, output, resources, resources_root, out_path, canc
                     orientation = settings.get('orientation') or ('portrait' if 'portrait' in layout else 'landscape')
                     per_page = settings.get('images_per_page') or (int(layout[-1]) if layout and layout[-1] in '124' else 2)
                     images_to_pdf(pending, dest, show_page_footer=False, orientation=orientation, images_per_page=per_page, margin_mm=settings.get('margin_mm',10), cancel_check=cancel_check)
-                    paths.append(dest); pending.clear()
+                    paths.append((dest, False)); pending.clear()
             previous_role = None
             for resource,path in group:
                 if cancel_check and cancel_check():
@@ -253,7 +253,7 @@ def render_pdf_bundle(context, output, resources, resources_root, out_path, canc
                     flush()
                 previous_role = resource['role_id']
                 if path.suffix.lower() == '.pdf':
-                    flush(); paths.append(path)
+                    flush(); paths.append((path, resource['role_id'] == 'inspection_pdf'))
                 else:
                     pending.append(path)
             flush()
@@ -262,11 +262,21 @@ def render_pdf_bundle(context, output, resources, resources_root, out_path, canc
         numbering = settings.get('numbering', True)
         writer = PdfWriter()
         for group_index, paths in enumerate(groups,1):
-            readers = [PdfReader(str(path)) for path in paths]
-            count = sum(len(reader.pages) for reader in readers)
+            page_groups = []
+            for path, inspection in paths:
+                if cancel_check and cancel_check():
+                    raise RuntimeError('任务已取消')
+                reader = PdfReader(str(path))
+                if inspection and settings.get('skip_blank_inspection_tails', False):
+                    from .blank_pages import inspection_pages
+                    pages = inspection_pages(reader, cancel_check=cancel_check)
+                else:
+                    pages = list(reader.pages)
+                page_groups.append(pages)
+            count = sum(len(pages) for pages in page_groups)
             index = 0
-            for reader in readers:
-                for page in reader.pages:
+            for pages in page_groups:
+                for page in pages:
                     if cancel_check and cancel_check():
                         raise RuntimeError('任务已取消')
                     index += 1

@@ -148,7 +148,7 @@ def test_archived_batch_entries_leave_working_surface(repos, sample_xmls):
 def test_focused_archived_batch_shows_full_membership(repos, sample_xmls):
     _, ids = _make_entries(repos, sample_xmls, 3)
     archived = repos["batches"].create("已交批", entry_ids=ids[:2])
-    active = repos["batches"].create("在办批", entry_ids=[ids[1]])
+    repos["batches"].create("在办批", entry_ids=[ids[1]])
     repos["batches"].set_archived(archived["id"], True)
 
     focused = {entry["id"] for entry in repos["entries"].list(batch_id=archived["id"])}
@@ -159,7 +159,7 @@ def test_focused_archived_batch_shows_full_membership(repos, sample_xmls):
 def test_batches_of_entry(repos, sample_xmls):
     _, ids = _make_entries(repos, sample_xmls, 1)
     b1 = repos["batches"].create("批一", entry_ids=ids)
-    b2 = repos["batches"].create("批二", entry_ids=ids)
+    repos["batches"].create("批二", entry_ids=ids)
     names = {x["name"] for x in repos["batches"].batches_of_entry(ids[0])}
     assert names == {"批二"}
     assert repos["batches"].get(b1["id"])["entry_ids"] == []

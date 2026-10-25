@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tidoc.api import Api
-from tidoc.engine import ParsedInvoice,RecognitionContext,PolicyContext,check_invoice
+from tidoc.engine import ParsedInvoice,RecognitionContext,check_invoice
 from tidoc.engine.parser import _parse_invoice_text,parse_xml
 
 

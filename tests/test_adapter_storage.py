@@ -9,15 +9,11 @@ import pytest
 from tidoc.db.schema import SCHEMA_VERSION
 
 from tidoc.adapters.loader import load_package
-from tidoc.adapters.models import AdapterPackage
 from tidoc.adapters.resolver import resolve_definition
 from tidoc.adapters.service import AdapterService
-from tidoc.db.adapters import AdapterRepo, encode
 from tidoc.db.database import Database
 from tidoc.db.export_jobs import ExportJobRepo
-from tidoc.db.extensions import ExtensionRepo
 from tidoc.db.paths import DataRoot
-from tidoc.db.payees import PayeeRepo
 from tidoc.db.profiles import ProfileRepo
 from tidoc.db.batches import BatchRepo
 
@@ -257,7 +253,7 @@ def test_updates_keep_local_override_new_defaults_and_old_entries(storage,tmp_pa
 
 def test_new_fixed_setting_conflict_requires_resolution(storage,tmp_path):
     _,_,service,scheme,_=storage
-    local=service.update_scheme_settings(scheme['id'],scheme['current_revision_id'],{'print.numbering':False})
+    service.update_scheme_settings(scheme['id'],scheme['current_revision_id'],{'print.numbering':False})
     path=write_package(tmp_path/'fixed','2.0.0',settings={'print.numbering':{'fixed':True,'editable':False,'presentation':'visible'}})
     preview=service.inspect_adapter(path)
     assert any(c['id']=='setting:print.numbering' for c in preview['conflicts'][scheme['id']])
@@ -481,7 +477,7 @@ def test_local_template_validation_cache_is_separate_from_immutable_package(stor
 def test_rebind_stale_and_atomic_failure(storage,monkeypatch):
     _,db,service,scheme,_=storage
     invoice=entry(db,scheme)
-    changed=service.update_scheme_settings(scheme['id'],scheme['current_revision_id'],{'print.numbering':False})
+    service.update_scheme_settings(scheme['id'],scheme['current_revision_id'],{'print.numbering':False})
     preview=service.preview_rebind([invoice],scheme['id'])
     db.conn.execute("UPDATE entry_fields SET current='changed' WHERE entry_id=? AND field='notes'",(invoice,));db.conn.commit()
     with pytest.raises(ValueError,match='已变化'):
@@ -505,7 +501,7 @@ def test_rebind_removed_fields_keeps_read_only_history(storage,tmp_path):
     invoice=entry(db,scheme)
     service.save_extension_values('entry',invoice,{'code':'Original'})
     p=service.inspect_adapter(write_package(tmp_path/'v3','3.0.0'))
-    updated=service.install_adapter(p['preview_id'],{'mode':'update','scheme_id':scheme['id'],'resolutions':{'fields:entry:code':'history'}})
+    service.install_adapter(p['preview_id'],{'mode':'update','scheme_id':scheme['id'],'resolutions':{'fields:entry:code':'history'}})
     rebind=service.preview_rebind([invoice],scheme['id'])
     assert rebind['entries'][0]['history_values'][0]['value']=='Original'
     service.apply_rebind(rebind['preview_id'])

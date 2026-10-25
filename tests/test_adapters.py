@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 import unittest
@@ -8,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 from tidoc.adapters.loader import load_package, pack_package, validate_package
-from tidoc.adapters.models import AdapterValidationError, FieldValidationError
+from tidoc.adapters.models import FieldValidationError
 from tidoc.adapters.policy import evaluate_condition, evaluate_policy, validate_field_value
 from tidoc.adapters.resolver import resolve_definition, revision_hash
 

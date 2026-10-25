@@ -9,7 +9,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from tidoc.services.export_context import build_export_context, decimal_text, title_key, safe_name
+from tidoc.services.export_context import build_export_context, decimal_text, safe_name
 from tidoc.services.exports import write_xlsx, write_attachment_zip
 
 

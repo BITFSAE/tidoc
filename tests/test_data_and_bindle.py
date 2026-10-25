@@ -490,7 +490,6 @@ def _api_entry_with_total(api, total="30.00"):
 
 
 def test_payment_ocr_is_off_by_default(api, tmp_path, monkeypatch):
-    from tidoc.services import folder_import
 
     entry = _api_entry_with_total(api)
     assert api._payment_ai_enabled() is False
@@ -510,7 +509,6 @@ def test_payment_ocr_is_off_by_default(api, tmp_path, monkeypatch):
 
 
 def test_api_applies_payment_ocr_amount(api, tmp_path, monkeypatch):
-    from tidoc.services import folder_import
 
     enable_payment_ai(api)
     e = _api_entry_with_total(api, "30.00")
@@ -529,7 +527,6 @@ def test_api_applies_payment_ocr_amount(api, tmp_path, monkeypatch):
 
 
 def test_api_can_recognize_payment_ocr_without_applying(api, tmp_path, monkeypatch):
-    from tidoc.services import folder_import
 
     enable_payment_ai(api)
     e = _api_entry_with_total(api, "30.00")
@@ -556,7 +553,6 @@ def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
     enable_payment_ai(api)
     from tidoc.db import TYPE_INVOICE_XML
     from tidoc.engine.models import ParsedInvoice
-    from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]
     entry_id = api.entries.create(
@@ -626,7 +622,6 @@ def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
 def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypatch):
     enable_payment_ai(api)
     from tidoc.engine.models import ParsedInvoice
-    from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]
     entry_id = api.entries.create(
@@ -651,7 +646,6 @@ def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypa
 
 def test_api_payment_ocr_preference_disables_recognition(api, tmp_path, monkeypatch):
     from tidoc.api_shared import PAYMENT_OCR_PREF_KEY
-    from tidoc.services import folder_import
 
     profile = api.create_profile("张三", "李老师")["data"]
     entry = api.create_entry(profile["id"])["data"]

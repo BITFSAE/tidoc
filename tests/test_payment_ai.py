@@ -2,9 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
-import hashlib
 import json
-from pathlib import Path
 import threading
 import time
 from urllib.error import HTTPError
@@ -319,7 +317,6 @@ def test_certificate_failure_is_reported_without_retry(monkeypatch, tmp_path):
 
 
 def test_macos_context_adds_system_roots(monkeypatch):
-    import subprocess
     from types import SimpleNamespace
     loaded = []
     class Context:

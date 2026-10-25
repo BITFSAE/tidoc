@@ -6,7 +6,6 @@ import unittest
 from scripts.benchmark_adapters import create_dataset
 from tidoc.adapters.service import AdapterService
 from tidoc.db.database import Database
-from tidoc.db.entries import EntryRepo
 
 
 class AdapterPerformanceTests(unittest.TestCase):

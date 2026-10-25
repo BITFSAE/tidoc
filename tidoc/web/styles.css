@@ -1480,6 +1480,24 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
   background: var(--blocked-soft); font-size: 12px; overflow-wrap: anywhere;
 }
 .bindle-integrity-warning label { color: var(--ink); display: flex; gap: 7px; align-items: center; margin-top: 3px; }
+/* 第一次点导入后：框出报账人和导入设置，上方列出将要发生的变化，再点一次才导入。 */
+.bindle-review {
+  display: grid; gap: 4px; padding: 10px 12px;
+  border: 1px solid var(--primary-line); border-radius: 8px; background: var(--primary-soft);
+  font-size: 12px; scroll-margin-top: 4px;
+}
+.bindle-review.hidden { display: none; }
+.bindle-review-head { display: grid; gap: 2px; }
+.bindle-review-head b { color: var(--primary); font-size: 13px; }
+.bindle-review-head span { color: var(--ink-soft); }
+.bindle-review p { margin: 0; }
+.bindle-review-note { color: var(--ink-soft); }
+.bindle-review-warn { color: var(--warn); font-weight: 600; }
+.bindle-import.reviewing [data-bindle-review-target] {
+  padding: 10px; margin: 0 -10px; border-radius: 10px;
+  box-shadow: 0 0 0 2px var(--primary-line); animation: bindleReviewPulse 1.2s ease 2;
+}
+@keyframes bindleReviewPulse { 50% { box-shadow: 0 0 0 4px var(--primary-ring); } }
 .bindle-entry-tools { display: flex; align-items: center; gap: 12px; }
 .bindle-entry-tools > label { display: none; }
 .bindle-entry-section.customizing .bindle-entry-tools > label { display: inline-flex; }

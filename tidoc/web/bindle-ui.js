@@ -45,6 +45,10 @@ async function openBindleImportPreview(path, insp, options = {}) {
     (matchingProfiles.length ? matchingProfiles : packageProfiles).map((profile) => profile.sourceId)
   );
   const activeBatches = (batches || []).filter((batch) => !batch.archived);
+  // 已归档批次也可以作为目标（例如补交材料），排在在办批次之后并标明，默认仍选在办批次。
+  const archivedBatches = (batches || []).filter((batch) => batch.archived);
+  const targetBatches = [...activeBatches, ...archivedBatches];
+  const batchOptionLabel = (batch) => `${batch.name} · ${batch.stats?.count || 0} 条${batch.archived ? ' · 已归档' : ''}`;
   const attachmentCount = entries.reduce((sum, entry) => sum + (entry.attachments || []).length, 0);
   const body = el('div', 'bindle-import');
   const profileRows = packageProfiles.map((profile) => `
@@ -54,8 +58,8 @@ async function openBindleImportPreview(path, insp, options = {}) {
       <input data-bind-profile-reviewer aria-label="审核人" value="${esc(profile.reviewer || '')}" placeholder="填写审核人"/>
       <span>${counts.get(profile.sourceId) || 0} 条</span>
     </div>`).join('');
-  const perEntryBatchOptions = activeBatches.map((batch) =>
-    `<option value="batch:${esc(batch.id)}">${esc(batch.name)} · ${batch.stats?.count || 0} 条</option>`
+  const perEntryBatchOptions = targetBatches.map((batch) =>
+    `<option value="batch:${esc(batch.id)}">${esc(batchOptionLabel(batch))}</option>`
   ).join('');
   const entryRows = entries.map((entry, entryIndex) => {
     const profile = packageProfiles.find((item) => item.sourceId === (entry.profile_id || '__fallback__'));
@@ -96,8 +100,8 @@ async function openBindleImportPreview(path, insp, options = {}) {
     </div>`;
   }).join('');
   const existingTagOptions = (tags || []).map((tag) => `<option value="${esc(tag)}"></option>`).join('');
-  const existingBatchOptions = activeBatches.map((batch) =>
-    `<option value="${esc(batch.id)}">${esc(batch.name)} · ${batch.stats?.count || 0} 条</option>`
+  const existingBatchOptions = targetBatches.map((batch) =>
+    `<option value="${esc(batch.id)}">${esc(batchOptionLabel(batch))}</option>`
   ).join('');
   const defaultBatchMode = activeBatches.length ? 'existing' : 'new';
   const suggestedBatchName = baseName(path).replace(/\.tidoc$/i, '').trim();
@@ -114,21 +118,22 @@ async function openBindleImportPreview(path, insp, options = {}) {
       <b>完整性校验未通过</b><span>${esc((insp.tampered || []).join('、'))}</span>
       <label><input type="checkbox" id="bindleAllowTampered"/> 我确认继续，导入后标记为严重问题</label>
     </div>`}
-    <section class="bindle-import-section">
+    <div class="bindle-review hidden" id="bindleReview" role="status" aria-live="polite"></div>
+    <section class="bindle-import-section" data-bindle-review-target>
       <div class="bindle-section-head"><h3>选择报账人</h3><label><input type="checkbox" id="bindleSelectAll" ${initiallySelected.size === packageProfiles.length ? 'checked' : ''}/> 全选</label></div>
       <div class="bindle-profile-list">
         <div class="bindle-profile-labels"><span></span><span>报账人</span><span>审核人</span><span>条目</span></div>
         ${profileRows}
       </div>
     </section>
-    <section class="bindle-import-section">
+    <section class="bindle-import-section" data-bindle-review-target>
       <h3>导入设置</h3>
       <div class="bindle-import-options">
         <div class="form-row bindle-batch-option">
           <label>报账批次</label>
           <div class="bindle-segments" role="radiogroup" aria-label="报账批次">
             <label><input type="radio" name="bindleBatchMode" value="none"/><span>不加入</span></label>
-            <label class="${activeBatches.length ? '' : 'disabled'}"><input type="radio" name="bindleBatchMode" value="existing" ${activeBatches.length ? 'checked' : 'disabled'}/><span>已有批次</span></label>
+            <label class="${targetBatches.length ? '' : 'disabled'}"><input type="radio" name="bindleBatchMode" value="existing" ${defaultBatchMode === 'existing' ? 'checked' : ''} ${targetBatches.length ? '' : 'disabled'}/><span>已有批次</span></label>
             <label><input type="radio" name="bindleBatchMode" value="new" ${defaultBatchMode === 'new' ? 'checked' : ''}/><span>新建批次</span></label>
           </div>
           <select id="bindleBatchSelect" class="${defaultBatchMode === 'existing' ? '' : 'hidden'}" aria-label="选择已有批次">${existingBatchOptions}</select>
@@ -236,6 +241,8 @@ async function openBindleImportPreview(path, insp, options = {}) {
   );
   const selectedEntryCount = () => selectedEntryRows().length;
   let importButton;
+  // 第一次点导入只进入核对：框出报账人和导入设置，列出将发生的变化，再点一次才真正导入。
+  let reviewing = false;
   const syncBindleSelection = () => {
     const selectedRows = selectedEntryRows();
     const selectedIndexes = new Set(selectedRows.map((row) => row.dataset.bindEntryIndex));
@@ -270,9 +277,11 @@ async function openBindleImportPreview(path, insp, options = {}) {
     entryAll.indeterminate = selectedRows.length > 0 && selectedRows.length < entryRowElements.length;
     body.querySelector('#bindleSelectionCount').textContent = `· 已选 ${selectedRows.length} / ${entries.length}`;
     if (importButton) {
-      importButton.textContent = selectedRows.length ? `导入 ${selectedRows.length} 条` : '请选择条目';
+      importButton.textContent = !selectedRows.length ? '请选择条目'
+        : reviewing ? `确认导入 ${selectedRows.length} 条` : `导入 ${selectedRows.length} 条`;
       importButton.disabled = !selectedRows.length;
     }
+    if (reviewing) renderReview();
   };
   body.querySelector('#bindleSelectAll').onchange = (ev) => {
     entryRowElements.forEach((row) => {
@@ -349,6 +358,111 @@ async function openBindleImportPreview(path, insp, options = {}) {
     }
   };
 
+  // 校验输入并整理导入参数；有问题时提示并返回 null。
+  const collectImport = () => {
+    const selected = selectedSourceIds();
+    const selectedIndexes = selectedEntryIndexes();
+    const selectedCount = selectedEntryCount();
+    if (!selectedCount) { toast('请选择要导入的条目', 'err'); return null; }
+    const tampered = body.querySelector('#bindleAllowTampered');
+    if (tampered && !tampered.checked) {
+      toast('请确认完整性异常后再导入', 'err');
+      return null;
+    }
+    const profileOverrides = {};
+    let invalidProfile = false;
+    body.querySelectorAll('[data-bind-profile]').forEach((row) => {
+      if (!selected.has(row.dataset.bindProfile)) return;
+      const name = row.querySelector('[data-bind-profile-name]').value.trim();
+      const reviewer = row.querySelector('[data-bind-profile-reviewer]').value.trim();
+      if (!name) invalidProfile = true;
+      profileOverrides[row.dataset.bindProfile] = { name, reviewer };
+    });
+    if (invalidProfile) { toast('请填写报账人姓名', 'err'); return null; }
+    const tag = tagInput.value.trim();
+    const batchMode = body.querySelector('[name="bindleBatchMode"]:checked').value;
+    const batchId = batchMode === 'existing' ? batchSelect.value : '';
+    const batchName = batchMode === 'new' ? newBatch.value.trim() : '';
+    if (batchMode === 'existing' && !batchId) { toast('请选择报账批次', 'err'); return null; }
+    if (batchMode === 'new' && !batchName) { toast('请填写新批次名称', 'err'); return null; }
+    const entryBatchOverrides = {};
+    let invalidEntryBatch = false;
+    selectedEntryRows().forEach((row) => {
+      const entryIndex = row.dataset.bindEntryIndex;
+      const entryBatch = row.querySelector('[data-bind-entry-batch]');
+      const mode = entryBatch.value;
+      if (mode === 'none') {
+        entryBatchOverrides[entryIndex] = { mode: 'none' };
+      } else if (mode.startsWith('batch:')) {
+        entryBatchOverrides[entryIndex] = {
+          mode: 'existing', batch_id: mode.slice('batch:'.length),
+        };
+      } else if (mode === 'new') {
+        const individualBatchName = row.querySelector('[data-bind-entry-new-batch]').value.trim();
+        if (!individualBatchName) invalidEntryBatch = true;
+        entryBatchOverrides[entryIndex] = { mode: 'new', batch_name: individualBatchName };
+      }
+    });
+    if (invalidEntryBatch) { toast('请填写逐条设置的新批次名称', 'err'); return null; }
+    const options = {
+      profile_overrides: profileOverrides,
+      tags: tag ? [tag] : [],
+      batch_id: batchId,
+      batch_name: batchName,
+      selected_profile_ids: [...selected],
+      selected_entry_indexes: [...selectedIndexes],
+      entry_batch_overrides: entryBatchOverrides,
+      scheme_id: sourceScheme || $('[data-import-scheme]',body)?.value || State.scheme?.id,
+      profile_mappings: Object.fromEntries($$('[data-bind-profile-mapping]',body).filter(input=>input.value).map(input=>[input.dataset.bindProfileMapping,input.value])),
+      role_mappings: Object.fromEntries(selectedEntryRows().map(row=>[row.dataset.bindEntryIndex,Object.fromEntries($$('[data-bind-role-source]',row).filter(input=>input.value).map(input=>[input.dataset.bindRoleSource,input.value]))])),
+    };
+    return { tampered, options };
+  };
+
+  const reviewBox = body.querySelector('#bindleReview');
+  // 只写框出的设置里看不出来的内容：条目构成，以及会进入已归档批次、留在未进批次等后果。
+  const renderReview = () => {
+    const rows = selectedEntryRows();
+    const actions = { new: 0, merge: 0, unchanged: 0 };
+    rows.forEach((row) => {
+      const action = entries[Number(row.dataset.bindEntryIndex)].import_action || 'new';
+      actions[action] = (actions[action] || 0) + 1;
+    });
+    const actionText = [['new', '新增'], ['merge', '补充'], ['unchanged', '已有']]
+      .filter(([key]) => actions[key]).map(([key, label]) => `${label} ${actions[key]}`).join(' · ');
+    const mode = body.querySelector('[name="bindleBatchMode"]:checked')?.value;
+    const archivedIds = new Set(archivedBatches.map((batch) => batch.id));
+    // 与导入逻辑一致：统一设置只作用于新增和补充的条目，「已有·无变化」的条目留在原批次，逐条设置才移动。
+    let individual = 0, withoutBatch = 0, intoArchived = 0, keepPlace = 0;
+    rows.forEach((row) => {
+      const value = row.querySelector('[data-bind-entry-batch]').value;
+      if (value !== 'default') individual += 1;
+      else if (entries[Number(row.dataset.bindEntryIndex)].import_action === 'unchanged') { keepPlace += 1; return; }
+      if (value === 'none' || (value === 'default' && mode === 'none')) withoutBatch += 1;
+      const target = value.startsWith('batch:') ? value.slice('batch:'.length)
+        : value === 'default' && mode === 'existing' ? batchSelect.value : '';
+      if (archivedIds.has(target)) intoArchived += 1;
+    });
+    const lines = [
+      intoArchived && ['warn', `${intoArchived} 条将进入已归档批次，不在「在办」列表显示，到「已归档」里查看。`],
+      withoutBatch && ['warn', `${withoutBatch} 条将留在「未进批次」。`],
+      individual && ['', `${individual} 条按逐条设置的批次导入。`],
+      keepPlace && ['', `${keepPlace} 条已有且无变化，留在原批次。`],
+    ].filter(Boolean);
+    reviewBox.innerHTML = `
+      <div class="bindle-review-head"><b>导入前请核对</b><span>将导入 ${rows.length} 条${actionText ? `（${esc(actionText)}）` : ''}。框出的报账人和导入设置会作用到这些条目，导入后要逐条改回。</span></div>
+      ${lines.map(([tone, text]) => `<p class="${tone ? 'bindle-review-warn' : 'bindle-review-note'}">${esc(text)}</p>`).join('')}`;
+  };
+  const startReview = () => {
+    reviewing = true;
+    body.classList.add('reviewing');
+    reviewBox.classList.remove('hidden');
+    syncBindleSelection();
+    reviewBox.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  };
+  body.addEventListener('input', () => { if (reviewing) renderReview(); });
+  body.addEventListener('change', () => { if (reviewing) renderReview(); });
+
   let m;
   m = modal({
     title: '导入绑定包',
@@ -357,71 +471,11 @@ async function openBindleImportPreview(path, insp, options = {}) {
     onClose: () => { if(!reopening&&options.onClose)options.onClose(); },
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
-      (importButton = mkBtn('确认导入', 'primary', async () => {
-        const selected = selectedSourceIds();
-        const selectedIndexes = selectedEntryIndexes();
-        const selectedCount = selectedEntryCount();
-        if (!selectedCount) { toast('请选择要导入的条目', 'err'); return; }
-        const tampered = body.querySelector('#bindleAllowTampered');
-        if (tampered && !tampered.checked) {
-          toast('请确认完整性异常后再导入', 'err');
-          return;
-        }
-        const profileOverrides = {};
-        let invalidProfile = false;
-        body.querySelectorAll('[data-bind-profile]').forEach((row) => {
-          if (!selected.has(row.dataset.bindProfile)) return;
-          const name = row.querySelector('[data-bind-profile-name]').value.trim();
-          const reviewer = row.querySelector('[data-bind-profile-reviewer]').value.trim();
-          if (!name) invalidProfile = true;
-          profileOverrides[row.dataset.bindProfile] = { name, reviewer };
-        });
-        if (invalidProfile) { toast('请填写报账人姓名', 'err'); return; }
-        const tag = tagInput.value.trim();
-        const batchMode = body.querySelector('[name="bindleBatchMode"]:checked').value;
-        const batchId = batchMode === 'existing' ? batchSelect.value : '';
-        const batchName = batchMode === 'new' ? newBatch.value.trim() : '';
-        if (batchMode === 'existing' && !batchId) { toast('请选择报账批次', 'err'); return; }
-        if (batchMode === 'new' && !batchName) { toast('请填写新批次名称', 'err'); return; }
-        const entryBatchOverrides = {};
-        let invalidEntryBatch = false;
-        let withoutBatchCount = 0;
-        selectedEntryRows().forEach((row) => {
-          const entryIndex = row.dataset.bindEntryIndex;
-          const entryBatch = row.querySelector('[data-bind-entry-batch]');
-          const mode = entryBatch.value;
-          if (mode === 'none') {
-            entryBatchOverrides[entryIndex] = { mode: 'none' };
-            withoutBatchCount += 1;
-          } else if (mode.startsWith('batch:')) {
-            entryBatchOverrides[entryIndex] = {
-              mode: 'existing', batch_id: mode.slice('batch:'.length),
-            };
-          } else if (mode === 'new') {
-            const individualBatchName = row.querySelector('[data-bind-entry-new-batch]').value.trim();
-            if (!individualBatchName) invalidEntryBatch = true;
-            entryBatchOverrides[entryIndex] = { mode: 'new', batch_name: individualBatchName };
-          } else if (batchMode === 'none') {
-            withoutBatchCount += 1;
-          }
-        });
-        if (invalidEntryBatch) { toast('请填写逐条设置的新批次名称', 'err'); return; }
-        if (withoutBatchCount) {
-          const confirmed = await confirmBindleWithoutBatch(withoutBatchCount);
-          if (!confirmed) return;
-        }
-        const options = {
-          profile_overrides: profileOverrides,
-          tags: tag ? [tag] : [],
-          batch_id: batchId,
-          batch_name: batchName,
-          selected_profile_ids: [...selected],
-          selected_entry_indexes: [...selectedIndexes],
-          entry_batch_overrides: entryBatchOverrides,
-          scheme_id: sourceScheme || $('[data-import-scheme]',body)?.value || State.scheme?.id,
-          profile_mappings: Object.fromEntries($$('[data-bind-profile-mapping]',body).filter(input=>input.value).map(input=>[input.dataset.bindProfileMapping,input.value])),
-          role_mappings: Object.fromEntries(selectedEntryRows().map(row=>[row.dataset.bindEntryIndex,Object.fromEntries($$('[data-bind-role-source]',row).filter(input=>input.value).map(input=>[input.dataset.bindRoleSource,input.value]))])),
-        };
+      (importButton = mkBtn('导入', 'primary', async () => {
+        const collected = collectImport();
+        if (!collected) return;
+        if (!reviewing) { startReview(); return; }
+        const { tampered, options } = collected;
         const progress = taskProgress('正在导入条目和附件…');
         try {
           const r = await Api.importBindle(path, State.currentProfileId, !!tampered, options);
@@ -438,36 +492,6 @@ async function openBindleImportPreview(path, insp, options = {}) {
     ],
   });
   syncBindleSelection();
-}
-
-function confirmBindleWithoutBatch(count) {
-  return new Promise((resolve) => {
-    let decided = false;
-    let confirmModal;
-    const finish = (value) => {
-      if (decided) return;
-      decided = true;
-      confirmModal.close();
-      resolve(value);
-    };
-    const body = el('div', 'archive-confirm');
-    body.innerHTML = `
-      <div class="archive-confirm-summary"><b>${count} 条将留在「未进批次」</b></div>`;
-    confirmModal = modal({
-      title: '确认不加入批次',
-      compact: true,
-      body,
-      onClose: () => {
-        if (decided) return;
-        decided = true;
-        resolve(false);
-      },
-      footer: [
-        mkBtn('返回选择批次', 'ghost', () => finish(false)),
-        mkBtn('仍然不加入', 'primary', () => finish(true)),
-      ],
-    });
-  });
 }
 
 async function importBindleFlow(path) {

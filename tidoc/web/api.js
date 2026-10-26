@@ -94,6 +94,7 @@ const Api = (() => {
     reclassifyAttachment: (id,role,paymentAiJobId=null) => call('reclassify_attachment',id,role,'',paymentAiJobId),
 
     paymentAiSettings: () => call('payment_ai_settings'),
+    paymentAiBalance: () => call('payment_ai_balance'),
     savePaymentAiSettings: (values, key=null, clear=false) => call('save_payment_ai_settings', values, key, clear),
     startPaymentAi: (paths=null, ids=null) => call('start_payment_ai', paths, ids),
     paymentAiProgress: (id) => call('payment_ai_progress', id),

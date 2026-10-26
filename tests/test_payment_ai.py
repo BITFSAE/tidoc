@@ -88,11 +88,40 @@ def test_key_is_masked_and_scoped_to_endpoint_and_provider(api):
     enable_payment_ai(api)
     snapshot = api.payment_ai_settings()['data']
     assert snapshot['key_configured'] and 'test-key' not in json.dumps(snapshot)
-    result = api.save_payment_ai_settings({'base_url': 'https://example.com'})
+    # Turning automatic recognition on for an endpoint without a key is refused.
+    result = api.save_payment_ai_settings({'base_url': 'https://example.com', 'enabled': True})
     assert not result['ok'] and 'Key' in result['error']
     assert api._payment_ai_config()['base_url'] == 'https://api.deepseek.com'
+    # Switching to a provider without a key keeps the old key but stops automatic uploads.
+    qwen = {'provider': 'qwen', **ai.PRESETS['qwen']}
+    moved = api.save_payment_ai_settings(qwen)['data']
+    assert not moved['key_configured'] and not moved['enabled'] and not api._payment_ai_available()
+    back = api.save_payment_ai_settings({'provider': 'deepseek', **ai.PRESETS['deepseek']})['data']
+    assert back['key_configured'] and back['key_masked'] == snapshot['key_masked'] and not back['enabled']
     assert api.save_payment_ai_settings({'enabled': False}, clear_key=True)['ok']
     assert not api._payment_ai_key(api._payment_ai_config())
+
+
+def test_custom_endpoint_is_remembered_and_prompt_is_shown(api):
+    custom = {'provider': 'custom', 'base_url': 'https://llm.example.com/v1', 'model': 'vision-1'}
+    assert api.save_payment_ai_settings(custom, 'custom-key')['ok']
+    api.save_payment_ai_settings({'provider': 'deepseek', **ai.PRESETS['deepseek']})
+    data = api.payment_ai_settings()['data']
+    assert (data['custom_base_url'], data['custom_model']) == ('https://llm.example.com/v1', 'vision-1')
+    assert api.save_payment_ai_settings(custom)['data']['key_configured']
+    assert api.save_payment_ai_settings({'requirements': '需有付款时间'})['ok']
+    data = api.payment_ai_settings()['data']
+    assert data['default_prompt'].startswith('识别付款截图') and not data['prompt']
+    # The built-in prompt is sent exactly as before, so earlier results stay current.
+    assert ai.prompt_text(data) == ai.FAST_PROMPT.format(requirements='需有付款时间')
+    version = api._payment_ai_version()
+    edited = api.save_payment_ai_settings({'prompt': data['default_prompt'] + '\n多看一眼金额'})['data']
+    assert edited['prompt'].endswith('多看一眼金额') and api._payment_ai_version() != version
+    assert ai.prompt_text(edited).endswith('多看一眼金额\n需有付款时间\n')
+    # Saving the default text, or an empty one, restores the default.
+    assert not api.save_payment_ai_settings({'prompt': data['default_prompt']})['data']['prompt']
+    assert api._payment_ai_version() == version
+    assert not api.save_payment_ai_settings({'provider': 'custom', 'base_url': ''}, 'another-key')['ok']
 
 
 def test_client_cache_hashes_content_config_and_key_and_does_not_modify_images(monkeypatch, tmp_path):
@@ -437,3 +466,50 @@ def test_clearing_key_updates_reminders_on_every_entry_and_ai_fill_is_labelled(a
     assert api.apply_payment_ai_total(eid)['ok']
     fields = [row['field'] for row in api.entries.get(eid)['history']]
     assert '[付款截图识别]paid_amount' in fields
+
+
+def test_estimate_uses_cached_tokens_and_falls_back_to_other_settings(api):
+    enable_payment_ai(api)
+    scope = api._payment_ai_client.scope(api._payment_ai_config(), 'test-key')
+    pricing = ai.price_info(api._payment_ai_config())
+    budget = api.payment_ai_settings()['data']
+    assert budget['estimate_basis'] == 'budget'
+    assert budget['estimated_per_100'] == pytest.approx(100*ai.usage_cost(
+        {'prompt_tokens': ai.BUDGET_INPUT, 'completion_tokens': ai.BUDGET_OUTPUT}, pricing))
+    api._payment_ai_client.usage_events.extend(
+        {'scope': scope, 'usage': {'prompt_tokens': 1200, 'prompt_cache_hit_tokens': 600, 'completion_tokens': 40}, 'cost': 0.001}
+        for _ in range(2))
+    api._record_payment_ai_usage()
+    data = api.payment_ai_settings()['data']
+    expected = ai.usage_cost({'prompt_tokens': 1200, 'prompt_cache_hit_tokens': 600, 'completion_tokens': 40}, pricing)
+    assert data['estimate_basis'] == 'recent' and data['estimate_count'] == 2
+    assert data['estimated_per_100'] == pytest.approx(100*expected)
+    # A changed requirement starts a new cache scope; the estimate keeps using recorded usage.
+    assert api.save_payment_ai_settings({'requirements': '需有付款时间'})['data']['estimated_per_100'] == pytest.approx(100*expected)
+    # Older records have no cached-token count: average the cost recorded at the time.
+    api.set_app_preference('tidoc.paymentAi.usage', json.dumps({scope: {'count': 4, 'input': 4000, 'output': 200, 'cost': 0.004}}))
+    api.save_payment_ai_settings({'requirements': ''})
+    assert api.payment_ai_settings()['data']['estimated_per_100'] == pytest.approx(0.1)
+
+
+def test_balance_is_only_for_official_deepseek_and_parses_amounts(api, monkeypatch):
+    assert not api.payment_ai_balance()['ok']  # no key yet
+    enable_payment_ai(api)
+    sent = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, size): return json.dumps({'is_available': True, 'balance_infos': [
+            {'currency': 'CNY', 'total_balance': '12.5', 'granted_balance': '2', 'topped_up_balance': '10.5'}]}).encode()
+
+    class Opener:
+        def open(self, request, timeout): sent.append(request); return Response()
+
+    monkeypatch.setattr(ai, 'build_opener', lambda *handlers: Opener())
+    data = api.payment_ai_balance()['data']
+    assert data == {'available': True, 'balances': [{'currency': 'CNY', 'total': '12.50', 'granted': '2.00', 'topped_up': '10.50'}]}
+    assert sent[0].full_url == 'https://api.deepseek.com/user/balance' and sent[0].data is None
+    assert api.payment_ai_settings()['data']['balance_supported']
+    api.save_payment_ai_settings({'provider': 'qwen', **ai.PRESETS['qwen']})
+    assert not api.payment_ai_balance()['ok'] and len(sent) == 1

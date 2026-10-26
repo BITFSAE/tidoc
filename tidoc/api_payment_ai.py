@@ -82,36 +82,49 @@ class PaymentAiApi:
 
     def _payment_ai_version(self):
         cfg = self._payment_ai_config()
-        facts = [cfg[k] for k in ('provider', 'base_url', 'model', 'requirements')]
+        facts = vision.config_facts(cfg)
         return vision.VERSION+":"+hashlib.sha256(vision.canonical(facts)).hexdigest()[:12]
 
     @_guard
     def payment_ai_settings(self):
         cfg = self._payment_ai_config()
         pricing = vision.price_info(cfg)
-        # Prior usage determines a per-image estimate. Before that use an explicit token budget.
+        # 每张的估算按本机实际用量：优先用当前设置的记录，没有时用全部记录，再没有才用预设用量。
+        # 提示词每次相同，服务商会按缓存价计费，所以缓存命中的部分单独按缓存价算。
         try:
             stats = json.loads(self._preference_value('tidoc.paymentAi.usage', '{}'))
         except ValueError:
             stats = {}
         sample = stats.get(self._payment_ai_client.scope(cfg, self._payment_ai_key(cfg)), {})
         count = sample.get('count', 0)
-        tokens = {'prompt_tokens': round(sample.get('input', 0)/count) if count else 3000,
-                  'completion_tokens': round(sample.get('output', 0)/count) if count else 150}
-        cost = vision.usage_cost(tokens, pricing)
+        if count and 'cached' not in sample and pricing['known']:
+            # 早期记录没有缓存 Token，直接用当时记下的实际费用平均。
+            cost, basis = sample.get('cost', 0)/count, 'recent'
+        else:
+            if not count:
+                sample = {k: sum(row.get(k, 0) for row in stats.values()) for k in ('count', 'input', 'cached', 'output')}
+                count = sample['count']
+            tokens = {'prompt_tokens': round(sample['input']/count) if count else vision.BUDGET_INPUT,
+                      'prompt_cache_hit_tokens': round(sample['cached']/count) if count else 0,
+                      'completion_tokens': round(sample['output']/count) if count else vision.BUDGET_OUTPUT}
+            cost, basis = vision.usage_cost(tokens, pricing), 'recent' if count else 'budget'
         key = self._payment_ai_key(cfg)
         return {**cfg, 'key_configured': bool(key), 'key_masked': mask_secret(key),
+                'default_prompt': vision.DEFAULT_PROMPT, 'balance_supported': vision.supports_balance(cfg),
                 'available': self._payment_ai_available(), 'pricing': pricing,
                 'estimated_per_100': None if cost is None else cost*100,
-                'estimate_basis': 'recent' if count else 'budget',
+                'estimate_basis': basis, 'estimate_count': count,
+                'budget_tokens': [vision.BUDGET_INPUT, vision.BUDGET_OUTPUT],
                 'total_estimated_cost': sum(x.get('cost', 0) for x in stats.values()),
                 'total_calls': sum(x.get('count', 0) for x in stats.values())}
 
     @_guard
     def save_payment_ai_settings(self, values=None, key=None, clear_key=False):
         old = self._payment_ai_config()
-        # 清除 Key 时自动识别一并关闭，否则会因「开着却没有 Key」被拒绝。
-        cfg = vision.validate_config({**old, **(values or {}), **({'enabled': False} if clear_key else {})})
+        values = values or {}
+        cfg = vision.validate_config({**old, **values})
+        if cfg['provider'] == 'custom':
+            cfg['custom_base_url'], cfg['custom_model'] = cfg['base_url'], cfg['model']
         # 只切换自动识别开关不影响正在进行的识别；换服务商、Key 等要等识别结束。
         changed = {k for k in cfg if cfg[k] != old[k]} - {'enabled'}
         with self._payment_ai_lock:
@@ -121,9 +134,16 @@ class PaymentAiApi:
         slot = self._payment_ai_key_slot(cfg)
         if key is not None and (not isinstance(key, str) or len(key) > 1000 or any(c.isspace() for c in key.strip())):
             raise ValueError('Key 格式有误')
+        if key and not cfg['base_url']:
+            raise ValueError('请先填写接口地址')
         stored = '' if clear_key else (key.strip() if key else self._preference_value(slot))
-        if cfg['enabled'] and not stored:
-            raise ValueError('请填写 Key')
+        # Key 按服务商和接口地址分开保存。换到还没有 Key 的服务商、或清除 Key 时，自动识别随之关闭，
+        # 不会在之后补填 Key 时自己重新开始上传；只有用户这次明确要开启时才报缺什么。
+        missing = '请填写 Key' if not stored else '请填写接口地址和模型' if not (cfg['base_url'] and cfg['model']) else ''
+        if cfg['enabled'] and missing:
+            if values.get('enabled') is True and not clear_key:
+                raise ValueError(missing)
+            cfg['enabled'] = False
         # Key and settings change together; _set_preference_value would commit them separately.
         with self.db.transaction():
             self.db.conn.execute('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)', (slot, stored))
@@ -131,6 +151,20 @@ class PaymentAiApi:
         # 清除 Key、开关自动识别后，其他条目上的付款截图提醒也跟着变。
         self._sync_payment_checks()
         return self.payment_ai_settings()['data']
+
+    def payment_ai_balance(self):
+        """DeepSeek 账户余额。只在用户点击时联网；请求在 API 锁外进行，不卡住其他操作。"""
+        with self._api_lock:
+            cfg = self._payment_ai_config()
+            key = self._payment_ai_key(cfg)
+        if not vision.supports_balance(cfg):
+            return {'ok': False, 'error': '只有 DeepSeek 官方接口可以查询余额'}
+        if not key:
+            return {'ok': False, 'error': '请先保存 Key'}
+        try:
+            return {'ok': True, 'data': vision.fetch_balance(key)}
+        except ValueError as exc:
+            return {'ok': False, 'error': str(exc)}
 
     def _record_payment_ai_usage(self):
         with self._payment_ai_client._lock:
@@ -140,9 +174,11 @@ class PaymentAiApi:
             return
         stats = json.loads(self._preference_value('tidoc.paymentAi.usage', '{}'))
         for event in events:
-            row = stats.setdefault(event['scope'], {'count': 0, 'input': 0, 'output': 0, 'cost': 0})
+            row = stats.setdefault(event['scope'], {'count': 0, 'input': 0, 'cached': 0, 'output': 0, 'cost': 0})
             row['count'] += 1
             row['input'] += event['usage'].get('prompt_tokens', 0)
+            if 'cached' in row:
+                row['cached'] += vision.cached_tokens(event['usage'])
             row['output'] += event['usage'].get('completion_tokens', 0)
             row['cost'] += event['cost'] or 0
         self._set_preference_value('tidoc.paymentAi.usage', json.dumps(stats))

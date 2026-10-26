@@ -2337,17 +2337,36 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .settings-row[hidden], .settings-row-actions > button[hidden] { display: none; }
 
 .payment-ai-settings [hidden] { display: none !important; }
-.payment-ai-settings small { color: var(--ink-soft); font-weight: normal; }
-.payment-ai-settings .settings-block-title small { margin-left: 4px; font-size: 11px; }
-.payment-ai-settings .link-btn { margin-left: 4px; }
-.payment-ai-key { flex-wrap: wrap; }
-.payment-ai-key input { width: 180px; min-width: 120px; max-width: 100%; }
-.payment-ai-options { padding: 12px 0 4px; }
-.payment-ai-options > .form-row { margin-bottom: 10px; }
-.payment-ai-options input[type="number"] { max-width: 130px; }
-.payment-ai-options details > summary { cursor: pointer; margin-bottom: 10px; }
-.payment-ai-cost, .payment-ai-options .hint { background: none; border: 0; padding: 6px 0 0; }
-.payment-ai-cost { margin-top: 8px; font-variant-numeric: tabular-nums; }
+.payment-ai-settings.is-saving { cursor: progress; }
+.payment-ai-settings .link-btn { margin-left: 6px; }
+.payment-ai-settings .settings-row-control .link-btn { margin-left: 0; white-space: nowrap; }
+.payment-ai-settings .settings-input, .payment-ai-settings textarea {
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; font-family: inherit;
+  background: var(--panel-raised); color: var(--ink);
+}
+.payment-ai-settings .settings-input:focus, .payment-ai-settings textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-ring); }
+.payment-ai-settings .settings-input { width: 280px; }
+.payment-ai-settings .settings-input.narrow { width: 96px; }
+.payment-ai-settings .settings-row-control .select-field, .payment-ai-settings .settings-row-control .settings-select { width: 280px; }
+.payment-ai-key input { width: 180px; }
+.payment-ai-key { gap: 8px; }
+.payment-ai-settings .is-missing { color: var(--warn); }
+.payment-ai-cost { font-variant-numeric: tabular-nums; }
+.payment-ai-prices label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); }
+.payment-ai-advanced { margin-top: 0; padding-bottom: 4px; }
+.payment-ai-advanced > summary + .settings-row { padding-top: 10px; }
+.payment-ai-prompt-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.payment-ai-prompt-head small { color: var(--ink-soft); font-size: 11px; font-weight: normal; }
+.payment-ai-settings textarea.payment-ai-prompt { min-height: 150px; font-size: 11.5px; line-height: 1.6; resize: vertical; }
+.payment-ai-requirements { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--ink-soft); }
+.payment-ai-requirements textarea { resize: vertical; min-height: 52px; line-height: 1.55; }
+.payment-ai-note { margin: 0; padding: 10px 0 2px; color: var(--ink-faint); font-size: 11.5px; line-height: 1.7; }
+.payment-ai-settings > .hint.warn { margin: 4px 0 8px; }
+@media (max-width: 720px) {
+  .payment-ai-settings .settings-row:not(.is-stacked) { flex-wrap: wrap; }
+  .payment-ai-settings .settings-row-control { flex: 1 1 100%; flex-wrap: wrap; }
+  .payment-ai-settings .settings-input, .payment-ai-settings .settings-row-control .select-field { width: 100%; }
+}
 .task-meter { width: 100%; height: 3px; accent-color: var(--primary); }
 .toast.working.has-meter { flex-wrap: wrap; max-width: min(720px, calc(100vw - 32px)); }
 .attachment-ai-hint { display: block; margin-top: 4px; font-size: 12px; color: var(--ink-soft); }

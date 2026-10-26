@@ -8,103 +8,165 @@ const PaymentAiUI = (() => {
   // Estimates are small; show cents, and say "under ¥0.01" instead of a row of zeros.
   const money = value => value == null ? '未设置单价' : !value ? '¥0'
     : value < 0.01 ? '不到 ¥0.01' : `¥${Number(value).toFixed(2)}`;
+  // 每一项都用同一种行：左边说明，右边控件。改动即保存，只有 Key 需要点「保存」。
   function markup(cfg) {
     return `<section class="dev-subsection payment-ai-settings" aria-label="付款截图 AI 识别">
       <div class="dev-subsection-title">付款截图 AI 识别 <small>实验性</small></div>
-      <div class="settings-row"><label class="settings-row-copy" for="paymentAiKey"><b>API Key</b><span><span data-ai-key-status></span> <button class="link-btn" type="button" data-ai-key-link>获取 Key</button></span></label>
-        <div class="settings-row-controls payment-ai-key"><input id="paymentAiKey" type="password" placeholder="API Key" autocomplete="new-password" spellcheck="false"/>
-          <button class="btn small" data-ai-save>保存</button><button class="btn small ghost" data-ai-clear ${cfg.key_configured ? '' : 'hidden'}>清除</button></div></div>
+      <div class="settings-row"><label class="settings-row-copy" for="paymentAiProvider"><b>服务商</b>
+        <span>每个服务商的 Key 分开保存，切换后自动换用</span></label>
+        <div class="settings-row-control"><select id="paymentAiProvider" class="settings-select" data-ai-provider>${Object.entries(presets)
+          .map(([value, preset]) => `<option value="${value}">${esc(preset.label || '其他兼容服务')}</option>`).join('')}</select></div></div>
+      <div class="settings-row"><label class="settings-row-copy" for="paymentAiKey"><b>API Key</b>
+        <span><span data-ai-key-status></span><button class="link-btn" type="button" data-ai-key-link>获取 Key</button><button class="link-btn" type="button" data-ai-balance>查询余额</button></span></label>
+        <div class="settings-row-control payment-ai-key"><input id="paymentAiKey" type="password" autocomplete="new-password" spellcheck="false"/>
+          <button class="btn small" data-ai-save>保存</button><button class="btn small ghost" data-ai-clear>清除</button></div></div>
       <div class="settings-row"><div class="settings-row-copy"><b>添加截图时自动识别</b>
-        <span>关闭后不会自动上传；仍可选中条目后在「云识别」里手动识别。按量计费。</span></div>
+        <span>关闭后不会自动上传，仍可选中条目在「云识别」里手动识别</span></div>
         <label class="switch-line"><input type="checkbox" aria-label="添加付款截图时自动识别" data-ai-enabled ${cfg.enabled ? 'checked' : ''}/><span>${cfg.enabled ? '已开启' : '已关闭'}</span></label></div>
-      <div class="hint payment-ai-cost" data-ai-cost></div>
-      <details class="settings-advanced"><summary>高级选项</summary><div class="payment-ai-options">
-        <label class="form-row">服务商<select data-ai-provider><option value="deepseek">DeepSeek Flash（推荐）</option><option value="qwen">Qwen Flash</option><option value="custom">其他兼容服务</option></select></label>
-        <label class="form-row">接口地址<input data-ai-base type="url" spellcheck="false" value="${esc(cfg.base_url)}"/></label>
-        <label class="form-row">模型<input data-ai-model spellcheck="false" value="${esc(cfg.model)}"/></label>
-        <label class="form-row">并发数量<input data-ai-concurrency type="number" min="1" max="64" step="1" value="${cfg.concurrency}"/><small>推荐 32；限流时调低。</small></label>
-        <label class="form-row">截图要求<textarea data-ai-requirements rows="2" maxlength="2000" placeholder="可选，如：需有付款时间">${esc(cfg.requirements)}</textarea></label>
-        <details><summary>费用估算</summary><p class="hint">DeepSeek 高峰：北京时间周一至周五 9–12 时、14–18 时，节假日除外。低谷半价。</p>
-          <div class="hint" data-ai-pricing></div>
-          <div data-ai-custom-prices>
-            <label class="form-row">输入单价<input data-ai-input-price type="number" min="0" step="0.01" value="${cfg.input_price}"/><small>元 / 百万 Token</small></label>
-            <label class="form-row">输出单价<input data-ai-output-price type="number" min="0" step="0.01" value="${cfg.output_price}"/><small>元 / 百万 Token</small></label>
-          </div>
-          <p class="hint">按近期用量估算，首次按每张 3000 输入、150 输出 Token；以服务商账单为准。</p>
-        </details>
-        <p class="hint">Key 保存在本机，不随绑定包、报账方案导出。</p>
-      </div></details><div class="hint warn" data-ai-error role="alert" hidden></div>
+      <div class="settings-row"><div class="settings-row-copy"><b>费用估算</b><span class="payment-ai-cost" data-ai-cost></span></div>
+        <button class="link-btn" type="button" data-ai-price-link>官方价格</button></div>
+      <details class="settings-advanced payment-ai-advanced"><summary>高级选项</summary>
+        <div class="settings-row"><label class="settings-row-copy" for="paymentAiBase"><b>接口地址</b><span>兼容 OpenAI 格式的 HTTPS 地址</span></label>
+          <div class="settings-row-control"><input id="paymentAiBase" class="settings-input" data-ai-base type="url" spellcheck="false" placeholder="https://"/></div></div>
+        <div class="settings-row"><label class="settings-row-copy" for="paymentAiModel"><b>模型</b><span>需支持图片输入</span></label>
+          <div class="settings-row-control"><input id="paymentAiModel" class="settings-input" data-ai-model spellcheck="false"/></div></div>
+        <div class="settings-row"><label class="settings-row-copy" for="paymentAiConcurrency"><b>并发数量</b><span>推荐 32；遇到限流时调低</span></label>
+          <div class="settings-row-control"><input id="paymentAiConcurrency" class="settings-input narrow" data-ai-concurrency type="number" min="1" max="64" step="1"/></div></div>
+        <div class="settings-row" data-ai-custom-prices><div class="settings-row-copy"><b>单价</b><span>元 / 百万 Token，用于估算费用</span></div>
+          <div class="settings-row-control payment-ai-prices">
+            <label>输入<input class="settings-input narrow" data-ai-input-price type="number" min="0" step="0.01"/></label>
+            <label>输出<input class="settings-input narrow" data-ai-output-price type="number" min="0" step="0.01"/></label></div></div>
+        <div class="settings-row is-stacked"><div class="payment-ai-prompt-head"><label class="settings-row-copy" for="paymentAiPrompt"><b>识别提示词 <small data-ai-prompt-state></small></b>
+          <span>规定返回的字段和判断规则。修改时保留开头的 JSON 字段，否则识别会失败；改动后已识别的截图需要重新识别</span></label>
+          <button class="btn small ghost" type="button" data-ai-prompt-reset>恢复默认</button></div>
+          <textarea id="paymentAiPrompt" class="payment-ai-prompt" data-ai-prompt rows="9" maxlength="8000" spellcheck="false"></textarea>
+          <label class="payment-ai-requirements" for="paymentAiRequirements"><span>附加要求 · 接在提示词末尾，恢复默认时保留</span>
+            <textarea id="paymentAiRequirements" data-ai-requirements rows="2" maxlength="2000" placeholder="可选，如：需有付款时间"></textarea></label></div>
+        <p class="payment-ai-note" data-ai-pricing></p>
+      </details>
+      <div class="hint warn" data-ai-error role="alert" hidden></div>
     </section>`;
   }
   function bind(body, initial) {
     const root = body.querySelector('.payment-ai-settings');
     if (!root) return;
     let cfg = initial;
+    let balanceFor = null;  // 余额属于哪把 Key；换了 Key 或服务商就不再显示旧余额
     const $ = selector => root.querySelector(selector);
     const field = name => $(`[data-ai-${name}]`);
     const openLink = url => Api.openExternalUrl(url).catch(error => toast(error.message, 'err'));
-    function showProvider(provider) {
-      field('custom-prices').hidden = provider !== 'custom';
-      field('key-link').hidden = !presets[provider].keyUrl;
-    }
+    const providerName = provider => presets[provider].label.replace(/（.*）$/, '') || '其他兼容服务';
     function render() {
+      const custom = cfg.provider === 'custom';
+      field('provider').value = cfg.provider;
+      field('base').value = cfg.base_url;
+      field('model').value = cfg.model;
+      field('concurrency').value = cfg.concurrency;
+      field('input-price').value = cfg.input_price;
+      field('output-price').value = cfg.output_price;
+      field('requirements').value = cfg.requirements;
+      field('prompt').value = cfg.prompt || cfg.default_prompt;
+      field('prompt-reset').hidden = !cfg.prompt;
+      field('prompt-state').textContent = cfg.prompt ? '已修改' : '默认';
+      field('custom-prices').hidden = !custom;
+      field('key-link').hidden = !presets[cfg.provider].keyUrl;
+      field('key-status').textContent = cfg.key_configured ? `已保存 ${cfg.key_masked || ''}`
+        : custom && !cfg.base_url ? '先在高级选项填写接口地址' : '未保存';
+      field('key-status').classList.toggle('is-missing', !cfg.key_configured);
+      $('#paymentAiKey').placeholder = cfg.key_configured ? '留空保留当前 Key' : `${providerName(cfg.provider)} API Key`;
+      field('clear').hidden = !cfg.key_configured;
+      field('balance').hidden = !(cfg.balance_supported && cfg.key_configured);
+      if (balanceFor !== cfg.key_masked) { field('balance').textContent = '查询余额'; balanceFor = null; }
       field('enabled').checked = cfg.enabled && cfg.key_configured;
       field('enabled').disabled = !cfg.key_configured;
       field('enabled').nextElementSibling.textContent = field('enabled').checked ? '已开启' : cfg.key_configured ? '已关闭' : '先保存 Key';
-      field('provider').value = cfg.provider;
-      field('key-status').textContent = (presets[cfg.provider].label || cfg.model || '兼容服务')
-        + (cfg.key_configured ? ` · 已保存 ${cfg.key_masked || ''}` : ' · 未填写');
-      $('#paymentAiKey').placeholder = cfg.key_configured ? '留空保留当前 Key' : 'API Key';
-      field('clear').hidden = !cfg.key_configured;
-      showProvider(cfg.provider);
       const p = cfg.pricing;
-      const parts = [`${p.period}${['高峰', '低谷'].includes(p.period) ? '（北京时间）' : ''}`, `100 张约 ${money(cfg.estimated_per_100)}`];
-      if (cfg.total_calls) parts.push(`累计调用 ${cfg.total_calls} 次 · 估算 ${money(cfg.total_estimated_cost)}`);
+      const parts = cfg.estimated_per_100 == null ? ['在高级选项填写单价后显示']
+        : [`${p.period}${['高峰', '低谷'].includes(p.period) ? '（北京时间）' : ''}`, `100 张约 ${money(cfg.estimated_per_100)}`];
+      if (cfg.total_calls) parts.push(`累计调用 ${cfg.total_calls} 次，约 ${money(cfg.total_estimated_cost)}`);
       field('cost').textContent = parts.join(' · ');
-      const link = p.url ? ` · <a href="${esc(p.url)}" data-ai-price-link>官方价格</a>` : '';
-      field('pricing').innerHTML = `${esc(p.beijing_time)}（北京） · 输入 ¥${p.input} / 输出 ¥${p.output}，每百万 Token · ${esc(p.updated)}${link}${p.calendar_known ? '' : '<br>本年度节假日未更新，按工作日保守估算。'}`;
-      const priceLink = root.querySelector('[data-ai-price-link]');
-      if (priceLink) priceLink.onclick = event => { event.preventDefault(); openLink(priceLink.href); };
+      field('price-link').hidden = !p.url;
+      const notes = [];
+      if (p.known && !custom) notes.push(`当前单价：输入 ¥${p.input} / 输出 ¥${p.output}，每百万 Token，${esc(p.updated)} 核对。`);
+      if (p.period === '高峰' || p.period === '低谷') notes.push('DeepSeek 高峰为北京时间周一至周五 9–12 时、14–18 时，节假日除外；低谷半价。'
+        + (p.calendar_known ? '' : '本年度节假日未更新，按工作日估算。'));
+      notes.push(`${cfg.estimate_basis === 'recent' ? `估算按本机已识别 ${cfg.estimate_count} 张的平均用量` : `还没有识别记录，估算按每张约 ${cfg.budget_tokens[0]} 输入、${cfg.budget_tokens[1]} 输出 Token`}，命中服务商缓存的部分按缓存价计；以服务商账单为准。Key 只保存在本机，不随绑定包、报账方案导出。`);
+      field('pricing').innerHTML = notes.join('<br>');
+    }
+    function showError(message) {
+      field('error').textContent = message;
+      field('error').hidden = !message;
     }
     function values() {
       return { provider: field('provider').value, base_url: field('base').value.trim(), model: field('model').value.trim(),
         concurrency: Number(field('concurrency').value), requirements: field('requirements').value.trim(),
+        prompt: field('prompt').value.trim(),
         input_price: Number(field('input-price').value), output_price: Number(field('output-price').value) };
     }
-    // enabled 为 null 表示只保存 Key 和选项，不改自动识别开关。
-    async function save(enabled, clear = false) {
-      field('error').hidden = true;
-      field('save').disabled = true;
-      field('enabled').disabled = true;
+    // changes 覆盖当前表单值；只有开关传 enabled，其余保存不改自动识别。
+    async function save(changes = {}, { key = null, clear = false, done = '' } = {}) {
+      showError('');
+      root.classList.add('is-saving');
       try {
-        cfg = await Api.savePaymentAiSettings({ ...values(), enabled: clear ? false : enabled === null ? cfg.enabled : enabled }, $('#paymentAiKey').value || null, clear);
+        const wasEnabled = cfg.enabled;
+        cfg = await Api.savePaymentAiSettings({ ...values(), ...changes }, key, clear);
         $('#paymentAiKey').value = '';
         State.paymentAiEnabled = cfg.enabled && cfg.available;
         State.paymentAiAvailable = cfg.available;
         applyOcrUiVisibility();
-        render();
-        toast(clear ? 'Key 已清除' : enabled !== null ? (cfg.enabled ? '已开启自动识别' : '已关闭自动识别') : '已保存', 'ok');
+        const note = wasEnabled && !cfg.enabled && !('enabled' in changes) ? '，自动识别已关闭' : '';
+        if (done) toast(done + note, 'ok');
       } catch (error) {
-        field('error').textContent = error.message; field('error').hidden = false;
-        field('enabled').checked = cfg.enabled;
-      } finally { field('save').disabled = false; field('enabled').disabled = !cfg.key_configured; }
+        showError(error.message);
+      } finally {
+        root.classList.remove('is-saving');
+        render();
+      }
     }
     field('provider').onchange = () => {
       const selected = field('provider').value;
-      field('base').value = presets[selected].base_url;
-      field('model').value = presets[selected].model;
-      $('#paymentAiKey').value = '';
-      field('key-status').textContent = '填写当前服务商的 Key';
-      showProvider(selected);
+      const preset = selected === 'custom' ? { base_url: cfg.custom_base_url, model: cfg.custom_model } : presets[selected];
+      if (selected === 'custom') {
+        $('.payment-ai-advanced').open = true;
+        if (!preset.base_url) setTimeout(() => field('base').focus());
+      }
+      save({ base_url: preset.base_url, model: preset.model }, { done: `已切换到「${providerName(selected)}」` });
     };
-    field('key-link').onclick = event => {
-      event.preventDefault();
-      const url = presets[field('provider').value].keyUrl;
-      if (url) openLink(url);
+    field('prompt-reset').onclick = () => save({ prompt: '' }, { done: '已恢复默认提示词' });
+    for (const name of ['base', 'model', 'concurrency', 'requirements', 'prompt', 'input-price', 'output-price']) {
+      field(name).onchange = () => save({}, { done: '已保存' });
+    }
+    // 只在点击时向 DeepSeek 查询，打开设置不联网。
+    field('balance').onclick = async () => {
+      const button = field('balance');
+      button.disabled = true;
+      button.textContent = '查询中…';
+      try {
+        const data = await Api.paymentAiBalance();
+        const rows = data.balances.map(row => `${row.currency === 'CNY' ? '¥' : row.currency + ' '}${row.total}`);
+        button.textContent = `余额 ${rows.join(' / ') || '¥0.00'}${data.available ? '' : '（不足）'} · 刷新`;
+        button.title = data.balances.map(row => `充值 ${row.topped_up}，赠送 ${row.granted}`).join('；');
+        balanceFor = cfg.key_masked;
+        showError('');
+      } catch (error) {
+        button.textContent = '查询余额';
+        showError(error.message);
+      } finally { button.disabled = false; }
     };
-    field('save').onclick = () => save(null);
-    field('clear').onclick = () => save(false, true);
-    field('enabled').onchange = () => save(field('enabled').checked);
+    field('key-link').onclick = event => { event.preventDefault(); openLink(presets[cfg.provider].keyUrl); };
+    field('price-link').onclick = () => cfg.pricing.url && openLink(cfg.pricing.url);
+    const saveKey = () => {
+      const key = $('#paymentAiKey').value.trim();
+      if (!key) return showError('请填写 Key');
+      save({}, { key, done: 'Key 已保存' });
+    };
+    field('save').onclick = saveKey;
+    $('#paymentAiKey').onkeydown = event => { if (event.key === 'Enter') saveKey(); };
+    field('clear').onclick = () => save({}, { clear: true, done: 'Key 已清除' });
+    field('enabled').onchange = () => {
+      const on = field('enabled').checked;
+      save({ enabled: on }, { done: on ? '已开启自动识别' : '已关闭自动识别' });
+    };
     render();
   }
   async function run(options, progress = null) {

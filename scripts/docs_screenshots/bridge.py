@@ -43,6 +43,27 @@ SHIM = """<script>(function () {
       open();
     });
   }
+  // 付款截图 AI 设置：打开设置和开发者选项，把这一小节单独摆在深色底上，裁剪时只留下它。
+  if (query.get("dialog") === "payment-ai") {
+    window.addEventListener("load", function () {
+      function open() {
+        var section = document.querySelector(".payment-ai-settings");
+        if (!section) {
+          var button = document.getElementById("settingsBtn");
+          if (button && !document.getElementById("modalRoot").lastChild) button.click();
+          return setTimeout(open, 100);
+        }
+        var cover = document.createElement("div");
+        cover.style.cssText = "position:fixed;inset:0;z-index:9998;background:#202020";
+        var wrap = document.createElement("div");
+        wrap.style.cssText = "position:fixed;top:24px;left:24px;width:800px;z-index:9999;padding:0 20px 8px;border-radius:12px;background:var(--panel)";
+        section.style.borderTop = "none";
+        wrap.appendChild(section);
+        document.body.append(cover, wrap);
+      }
+      open();
+    });
+  }
   if (!query.get("sprite")) return;
   var style = document.createElement("style");
   style.textContent = "html,body{background:transparent!important}body::before,body::after{display:none!important}";

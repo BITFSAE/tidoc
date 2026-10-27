@@ -552,3 +552,23 @@ def test_unit_price_of_a_non_terminating_quotient_stays_within_the_context_schem
     assert _unit_price_text(Decimal('988.00'), Decimal('2')) == '494.00'
     assert _unit_price_text(Decimal('1.00'), Decimal('8')) == '0.125'
     assert len(_unit_price_text(Decimal('1.00'), Decimal('7'))) <= 64
+
+
+def test_missing_optional_payee_renders_blank_without_relaxing_unknown_fields(tmp_path):
+    req=request(tmp_path)
+    req['files'][0]['output']['payee_mode']='single'
+    make_template(Path(req['resources_root'])/'doc.docx','{{ payee.name }} / {{ payee.account_number }} / {{ payee.fields.note|default("") }}')
+    req['files'][0]['definition']={'fields':[{'scope':'payee','id':'note','type':'text'}]}
+    result=render_request(req)
+    document=Document(result['files'][0]['path'])
+    assert document.paragraphs[0].text==' /  / '
+
+
+def test_word_cannot_bypass_revision_isolation_with_null_scheme(tmp_path):
+    req=request(tmp_path)
+    entry=deepcopy(req['files'][0]['context']['entries'][0])
+    entry['id']='another';entry['revision_id']='another-revision'
+    req['files'][0]['context']['entries'].append(entry)
+    req['files'][0]['context']['scheme']=None
+    with pytest.raises(ProtocolError) as error:render_request(req)
+    assert error.value.code=='REVISION_ISOLATION'

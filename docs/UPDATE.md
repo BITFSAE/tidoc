@@ -19,9 +19,17 @@ CDN 缓存规则：
 
 新结果使用 `payment_ai` 来源和独立规则指纹，复用附件识别列。后台任务只在短暂写入时持有 API 锁，网络请求不持锁；添加或改类截图时后端只采用任务或本机缓存的结果，不再同步请求；设置关闭后停止排队请求，已发出的请求仍可能计费。缓存只存校验通过的结构化结果，不存图片或 Key。macOS 打包版的 OpenSSL 默认证书路径指向构建机，识别请求额外加载系统根证书（`security find-certificate`）后校验，证书校验始终开启；校验失败时提示检查网络或代理，不重试。费用单价来源与离线节假日表见 `tidoc/services/payment_ai.py`；需要随供应商调价更新，不自动联网查询。DeepSeek 余额只在用户点击「查询余额」时请求，只发送 Key。设置新增的 `custom_base_url`、`custom_model`、`prompt` 由默认值补齐，无需迁移；`prompt` 为空表示内置提示词，内置提示词下旧缓存和识别版本仍然有效。用量统计新增缓存命中 Token，旧记录按记下的实际费用估算。用户操作见[设置说明](/guide/settings)。
 
+## 部分材料导出与打印组件兼容
+
+按材料种类分别拼接使用现有 PDF 渲染协议，无需数据库迁移或新增依赖。核心在生成计划中剔除缺失和不可打印资源；整组无材料时不安排 PDF，其他输出继续执行。方案的材料及字段要求改为提醒，保留金额空值；资源路径、摘要、模板和结构检查仍阻断技术错误。
+
+跨方案或修订合并通用 PDF 时，核心核对组件的 `render_features: ["cross_scheme_pdf"]` 能力。方案 Word 仍按修订分组，通用 PDF 按真实抬头分组。
+
+缺收款对象时生成 Word 由组件通过 `render_features: ["incomplete_payee"]` 声明。未声明该能力的旧组件仍可生成收款信息已填的 Word，以及 Excel、附件包和材料 PDF；缺收款对象的 Word 会提示更新组件。用户操作见[打印与 Word](/guide/export#打印与-word)。
+
 ## 发布
 
-打印组件 `0.1.24` 增加查验单空白尾页筛选能力，通过 `--capabilities` 的 `pdf_features: ["skip_blank_inspection_tails"]` 声明。核心在预检和调用组件前核对能力，旧组件可以照常生成保留全部页面的材料 PDF，启用筛选时需更新组件。本次选择按各材料 PDF 输出分别保存在输出定义中，历史任务重新生成时沿用；无需数据库迁移或新增依赖。用户操作见[打印与 Word](/guide/export#打印与-word)。
+打印组件 `0.1.24` 增加查验单空白尾页筛选能力，通过 `--capabilities` 的 `pdf_features: ["skip_blank_inspection_tails"]` 声明。核心在预检和调用组件前核对能力，旧组件可以照常生成保留全部页面的材料 PDF，启用筛选时需更新组件。打印窗口在组件支持时默认勾选该功能，用户可取消。历史任务仍沿用当时的选择，不改写原记录。本次选择按各材料 PDF 输出分别保存在输出定义中，历史任务重新生成时沿用；无需数据库迁移或新增依赖。用户操作见[打印与 Word](/guide/export#打印与-word)。
 
 查验单可包含用 ICCBased 色彩空间和填充矩形绘制的空备注栏残页，不能只凭存在非白绘制指令判断有内容。筛选按前页备注标签、尾页文字、裁剪后边框位置与粗细共同确认；未知色彩空间、绘制指令或实际正文均保留。回归使用虚构模板，真实附件仅在本机只读验证，不收入仓库或文档截图。
 
@@ -112,7 +120,7 @@ tidoc/ocr/macos/tidoc-ocr-macos-v<ocr_version>.zip
 - macOS 核心包构建后只剥离实际存在的依赖库 Mach-O 符号（`*.so` / `*.dylib` / 名为 `Python` 的解释器），保留主可执行文件末尾的 PyInstaller 内嵌归档，再以 ad-hoc 签名重签；没有匹配文件时跳过，不中断发布。DMG 使用 ULMO（LZMA）压缩。打印组件在 PyInstaller 收集阶段剥离符号，由 `--self-test` 兜底校验。
 - Release 说明和客户端 What’s changed 都从 `CHANGELOG.md` 最新一节生成；`scripts/set_version.py` 同时把该节嵌入核心程序，更新完成弹窗优先使用检查缓存、缓存缺失或过期时回退到安装包内说明，确保一键更新和手动安装都能显示，避免多处手工维护后内容不一致。
 - 文档站的更新日志页在构建时读取同一个 `CHANGELOG.md`，所以版本标题必须写成 `## 2026-10-08 · v0.1.39`、`## 2026-09-14`（没有版本号的日期记录）或 `## Unreleased`，小节标题用 `### Added`、`### Changed`、`### Fixed`，条目写成单行 `- ` 列表；标题写成其他形式会让文档站构建失败。`Unreleased` 一节在改成带版本号的标题之前不会出现在站点上。条目的第一句会在页面里作为要点单独突出，所以第一句要能独立说明改了什么。
-- 更新弹窗（发现新版本、更新完成）只列最新一节的前 6 条，下方的「查看完整更新日志」打开 `https://tidoc.bitfsae.com/update/changelog.html#v<版本号>`，页面会展开对应版本；带预发布后缀的测试版没有对应条目，链接不带锚点。
+- 更新弹窗（发现新版本、更新完成）只列最新一节的前 6 条，下方的「查看完整更新日志」打开 `https://tidoc.bitfsae.com/update/changelog.html#v<版本号>`，页面会展开对应版本；测试版链接不带锚点。
 - Windows 核心首次安装仍使用 Inno Setup 的按用户安装器；安装到用户目录，不要求管理员权限，并提供开始菜单、可选桌面快捷方式和卸载入口。发布任务同时把 `dist/tidoc` 打成带单一 `tidoc/` 根目录的一键更新 ZIP。macOS 同时用 `ditto` 生成保留应用包元数据的 `tidoc.app/` 更新 ZIP。
 - 平台图标集中在 `icon/`：`source/icon-master.png` 是完整方形母版；Windows 使用 `windows/icon-rounded.png` 和多尺寸 `windows/icon.ico`，透明圆角由素材提供；macOS 使用不手工裁圆角的 `macos/icon-1024.png` 和 `macos/icon.icns`，交给系统裁切。`scripts/generate_brand_assets.py` 可从方形源图重建这些文件及 Web 用 PNG。
 

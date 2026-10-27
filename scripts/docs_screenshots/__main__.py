@@ -71,6 +71,7 @@ SHOTS = [
     Shot("hero-cards", "light", sprite=True),
     Shot("hero-cards-dark", "dark", sprite=True),
     Shot("print-dialog", "light", dialog="print"),
+    Shot("print-options", "light", dialog="print-options"),
     Shot("payment-ai-settings", "light", dialog="payment-ai"),
 ]
 

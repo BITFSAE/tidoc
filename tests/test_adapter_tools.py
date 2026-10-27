@@ -81,7 +81,7 @@ def test_every_example_fixture_checks_expectations_and_renders(tmp_path):
         assert report["cases"][0]["files"]
 
 
-def test_lab_fixture_omitting_conditionally_required_approval_fails(tmp_path):
+def test_lab_fixture_omitting_conditionally_required_approval_warns_and_renders(tmp_path):
     fixture = json.loads((ROOT / "examples/adapters/fixtures/lab.json").read_text("utf-8"))
     fixture["entries"][0]["materials"].remove("custom:org.example.lab:approval")
     missing = tmp_path / "lab-without-approval.json"
@@ -89,9 +89,12 @@ def test_lab_fixture_omitting_conditionally_required_approval_fails(tmp_path):
 
     result = run_cli("render", ROOT / "examples/adapters/lab", "--fixture", missing,
                      "--out", tmp_path / "rendered", "--output", "cost_settlement")
-    assert result.returncode == 1
-    diagnostic = json.loads(result.stdout)["errors"][0]
-    assert diagnostic["code"] == "RULE_MATERIAL_REQUIRED"
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ok"] and report["files"]
+    diagnostic = next(item for item in report["diagnostics"]
+                      if item["code"] == "RULE_MATERIAL_REQUIRED")
+    assert diagnostic["severity"] == "warning"
     assert diagnostic["target"] == "custom:org.example.lab:approval"
 
 

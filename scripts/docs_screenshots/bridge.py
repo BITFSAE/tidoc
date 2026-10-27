@@ -33,12 +33,21 @@ SHIM = """<script>(function () {
     };
   });
   window.pywebview = {api: api};
-  if (query.get("dialog") === "print") {
+  if (query.get("dialog") === "print" || query.get("dialog") === "print-options") {
     window.addEventListener("load", function () {
       function open() {
         var cards = document.querySelectorAll(".entry-card");
         if (!cards.length) return setTimeout(open, 100);
         AdapterUI.print([cards[0].dataset.entryId]);
+        if (query.get("dialog") === "print-options") {
+          function expand() {
+            var options = Array.from(document.querySelectorAll(".export-dialog .export-more"))
+              .find(function (node) { return node.querySelector("summary").textContent.trim() === "扩展选项"; });
+            if (!options) return setTimeout(expand, 100);
+            options.open = true;
+          }
+          expand();
+        }
       }
       open();
     });

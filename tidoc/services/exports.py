@@ -35,6 +35,18 @@ GENERIC_ATTACHMENTS = {'id': 'generic_attachments', 'label': '附件整理包', 
 GENERIC_MATERIALS = {'id':'generic_materials','label':'通用材料 PDF','type':'pdf_bundle','rows':'invoice_summary','payee_mode':'none','amount_basis':'invoice','filename':'{title.short_name}_材料.pdf','pdf':{'include_roles':['invoice','payment_screenshot','physical_image','inspection_pdf','other'],'image_layout':'a4_landscape_2','content_order':'entry','numbering':True}}
 
 
+# Stable core output IDs also work when no source scheme is installed.
+MATERIAL_PDF_OUTPUTS = [
+    {**GENERIC_MATERIALS, 'id': 'generic_pdf_' + role, 'label': label + ' PDF',
+     'filename': '{title.short_name}_' + label + '.pdf',
+     'pdf': {**GENERIC_MATERIALS['pdf'], 'include_roles': [role]}}
+    for role, label in (
+        ('invoice', '发票'), ('payment_screenshot', '付款截图'),
+        ('inspection_pdf', '查验单'), ('physical_image', '实物图'), ('other', '其他材料'),
+    )
+]
+
+
 def _safe_name(value, fallback='未命名', max_len=64):
     return safe_name(value, fallback, max_len)
 

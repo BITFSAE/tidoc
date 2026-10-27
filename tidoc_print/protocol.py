@@ -53,7 +53,7 @@ def capabilities():
             legacy_available = False
     docx = schema_available and catalog_available and not any(name in missing for name in ('docx','docxtpl','jinja2'))
     pdf = schema_available and not any(name in missing for name in ('pypdf','PIL','reportlab'))
-    return {'component':'tidoc_print','version':__version__,'ipc_versions':(([1] if legacy_available else [])+[2]) if schema_available else [],'context_versions':[1] if schema_available else [], 'renderers':(['docx'] if docx else []) + (['pdf_bundle'] if pdf else []), 'pdf_features':(['skip_blank_inspection_tails'] if pdf else []), 'adapter_capabilities':(['output.docx.v1'] if docx else []) + (['output.pdf.v1'] if pdf else []), 'missing':missing, 'limits':{'timeout_seconds':120,'context_bytes':16*1024*1024,'loop_depth':3},'cancel':True}
+    return {'component':'tidoc_print','version':__version__,'ipc_versions':(([1] if legacy_available else [])+[2]) if schema_available else [],'context_versions':[1] if schema_available else [], 'render_features':(['incomplete_payee'] if docx else []) + (['cross_scheme_pdf'] if pdf else []), 'renderers':(['docx'] if docx else []) + (['pdf_bundle'] if pdf else []), 'pdf_features':(['skip_blank_inspection_tails'] if pdf else []), 'adapter_capabilities':(['output.docx.v1'] if docx else []) + (['output.pdf.v1'] if pdf else []), 'missing':missing, 'limits':{'timeout_seconds':120,'context_bytes':16*1024*1024,'loop_depth':3},'cancel':True}
 
 
 def _safe_relative(value):
@@ -149,11 +149,13 @@ def validate_request(request):
             title = entry.get('title') or {}
             subjects.add(title_key(title,entry.get('id','')))
         schemes={(entry.get('scheme_id'),entry.get('revision_id')) for entry in context['entries']}
-        if len(schemes)>1:raise ProtocolError('团队输出不能混合方案修订','REVISION_ISOLATION')
+        generic_pdf = (output.get('type')=='pdf_bundle' and context.get('scheme') is None
+                       and output.get('payee_mode','none')=='none' and output.get('id') in {
+                           'generic_materials','generic_pdf_invoice','generic_pdf_payment_screenshot',
+                           'generic_pdf_inspection_pdf','generic_pdf_physical_image','generic_pdf_other'})
+        if len(schemes)>1 and not generic_pdf:raise ProtocolError('团队输出不能混合方案修订','REVISION_ISOLATION')
         if len(subjects)>1:
             raise ProtocolError('Word 和材料 PDF 必须按抬头隔离', 'TITLE_ISOLATION')
-        if output.get('payee_mode') != 'none' and output.get('payee_mode') and context.get('payee') is None:
-            raise ProtocolError('需要明确选择完整收款对象', 'MISSING_PAYEE')
         if output.get('type') == 'docx':
             path = _resource_path(root,item.get('template') or output.get('template'))
             if item.get('template_sha256') and _digest(path) != item['template_sha256']:

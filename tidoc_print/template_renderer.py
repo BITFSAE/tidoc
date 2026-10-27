@@ -138,6 +138,11 @@ class DataSandbox(SandboxedEnvironment):
     def getattr(self, obj, attribute):
         if attribute.startswith("_"):
             return self.unsafe_undefined(obj, attribute)
+        # Declared optional objects (for example an unselected payee) may be
+        # null. Their leaves render empty; undeclared/misspelled paths are still
+        # rejected by template validation and missing dict keys stay strict.
+        if obj is None:
+            return None
         if isinstance(obj, dict):
             return obj[attribute] if attribute in obj else self.undefined(obj=obj, name=attribute)
         from jinja2.runtime import LoopContext
@@ -146,6 +151,8 @@ class DataSandbox(SandboxedEnvironment):
         return self.unsafe_undefined(obj, attribute)
 
     def getitem(self, obj, argument):
+        if obj is None:
+            return None
         if isinstance(obj, dict) and isinstance(argument, str) and not argument.startswith("_"):
             return obj[argument] if argument in obj else self.undefined(obj=obj, name=argument)
         return self.undefined(obj=obj, name=argument)

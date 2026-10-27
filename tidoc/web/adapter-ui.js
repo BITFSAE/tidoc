@@ -868,6 +868,48 @@ const AdapterUI = (() => {
     { id: 'generic_attachments', label: '附件整理包', type: 'attachment_zip', payee_mode: 'none' },
     { id: 'generic_materials', label: '材料 PDF', type: 'pdf_bundle', payee_mode: 'none' },
   ];
+  const MATERIAL_OUTPUTS = [
+    ['invoice', '发票'], ['payment_screenshot', '付款截图'], ['inspection_pdf', '查验单'],
+    ['physical_image', '实物图'], ['other', '其他材料'],
+  ].map(([role, label]) => ({ id: 'generic_pdf_' + role, label: label + ' PDF', type: 'pdf_bundle', payee_mode: 'none', pdf: { include_roles: [role] } }));
+  // Keep distinct custom templates, but offer the core equivalent as a mode of
+  // the same row instead of another checkbox elsewhere in the dialog.
+  function exportOutputRows(items) {
+    const rows = items.map(item => ({ ...item, alternatives: [] }));
+    for (const generic of GENERIC_OUTPUTS) {
+      const matches = rows.filter(item => item.output.type === generic.type);
+      const fallback = { output: generic, binding: '', definition: null };
+      if (matches.length) {
+        const primary = matches[0];
+        const output = primary.output, settings = primary.definition?.effective_settings || {};
+        const policies = primary.definition?.scheme?.settings || {};
+        const effective = (key, fallback, declared) => key in policies || (settings[key] ?? fallback) !== fallback ? (settings[key] ?? fallback) : (declared ?? fallback);
+        const sameOverview = matches.length === 1 && output.type === 'xlsx' && !output.columns?.length
+          && !output.group_by?.length && !output.when && !output.required_fields?.length
+          && (output.rows || 'invoice_summary') === 'invoice_summary'
+          && outputPayeeMode(primary.definition, output) === 'none'
+          && effective('print.amount_basis', 'invoice', output.amount_basis) === 'invoice'
+          && effective('print.sort_by', 'selection', output.sort_by) === 'selection'
+          && ['freeze_header', 'filter', 'totals'].every(key => (output.xlsx?.[key] ?? (key === 'totals' ? output.totals : undefined) ?? true) === true);
+        if (!sameOverview) primary.alternatives = [{ output: primary.output, binding: primary.binding, definition: primary.definition }, fallback];
+        if (matches.length === 1) primary.label = generic.label;
+      } else rows.push({ ...fallback, alternatives: [] });
+    }
+    return rows;
+  }
+  function outputDescription(output, definition) {
+    if (output.type === 'pdf_bundle') {
+      const roles = output.pdf?.roles || output.pdf?.include_roles;
+      const names = new Map([['invoice', '发票'], ['payment_screenshot', '付款截图'], ['inspection_pdf', '查验单'], ['physical_image', '实物图'], ['other', '其他材料'], ...(definition?.materials || []).map(role => [role.id, role.label])]);
+      return roles ? '拼接' + roles.map(role => names.get(role) || '自定义材料').join('、') : definition ? '按方案指定的材料范围拼接' : '拼接全部可打印材料';
+    }
+    if (output.type === 'attachment_zip') {
+      const grouping = output.attachments?.group_by || ['title', 'entry'];
+      return grouping.includes('claimant') ? '按抬头、报账人整理原文件' : '按抬头、每条发票整理原文件';
+    }
+    if (output.type === 'xlsx') return output.columns?.length ? '按方案指定的列汇总' : '汇总发票、金额、材料状态和备注';
+    return '';
+  }
   // 本次可临时覆盖的方案设置，按「哪些输出会用到它」分组；没有对应输出被勾选时整组隐藏。
   // 收款方式（统一／分别）不在这里改，它是方案设置。
   const ADJUST_GROUPS = [
@@ -898,15 +940,15 @@ const AdapterUI = (() => {
     if (key === 'entry.default_title_id') return (definition?.scheme?.titles || []).length > 0;
     return true;
   }
-  function adjustRow(definition, catalog, key) {
+  function adjustRow(definition, catalog, key, defaultLabel = '方案') {
     const spec = catalog[key]; const policy = definition.scheme.settings[key] || {};
     if (!spec || !settingApplies(key, definition) || 'fixed' in policy || policy.editable === false) return null; // 方案固定的项不允许改，也不占位置
     const isBoolean = spec.type === 'boolean';
     const name = value => value === true || value === 'true' ? '开启' : value === false || value === 'false' ? '关闭' : choiceLabels[value] || value;
-    const row = el('div', 'settings-row'); const copy = el('div', 'settings-row-copy');
+    const row = el('div', 'settings-row'); row.dataset.adjustKey = key; const copy = el('div', 'settings-row-copy');
     copy.innerHTML = `<b>${esc(labels[key])}</b>`; row.title = settingHelp[key] || '';
     const select = el('select'); select.setAttribute('aria-label', labels[key]);
-    select.innerHTML = `<option value="">沿用方案设置：${esc(name(definition.effective_settings?.[key]))}</option>` +
+    select.innerHTML = `<option value="">${esc(name(definition.effective_settings?.[key]))}（${esc(defaultLabel)}）</option>` +
       (isBoolean ? ['true', 'false'] : spec.enum || []).map(value => `<option value="${esc(value)}">${esc(name(value))}</option>`).join('');
     const control = el('div', 'settings-row-control'); control.append(select); row.append(copy, control);
     return { key, row, value: () => select.value === '' ? null : isBoolean ? select.value === 'true' : select.value };
@@ -950,10 +992,10 @@ const AdapterUI = (() => {
       ]);
       let people = initialPeople;
       const canRender = type => !['docx', 'pdf_bundle'].includes(type) || !!(component.available && component.ipc_versions?.includes(2) && component.renderers?.includes(type));
-      const bindings = new Map(); let missingDefinition = false;
+      const bindings = new Map();
       for (const entry of entries) {
         const definition = entry.adapter?.definition;
-        if (!definition) { missingDefinition = true; continue; }
+        if (!definition) continue;
         const binding = entry.scheme_id + ':' + entry.scheme_revision_id;
         if (!bindings.has(binding)) bindings.set(binding, { binding, schemeId: entry.scheme_id, revision: entry.scheme_revision_id, definition, name: entry.adapter?.scheme_name || definition.manifest.name });
       }
@@ -968,50 +1010,90 @@ const AdapterUI = (() => {
       const remember = () => {
         for (const scope of new Set([...meta.values()].map(item => scopeOf(item.binding)))) {
           const ids = chosen().filter(input => scopeOf(meta.get(input).binding) === scope).map(input => input.dataset.outputId);
-          if (ids.length) try { localStorage.setItem(OUTPUT_MEMORY_PREFIX + scope, JSON.stringify({ ids, base: JSON.stringify(configuredByScope.get(scope) ?? null) })); } catch (_) {}
+          try { localStorage.setItem(OUTPUT_MEMORY_PREFIX + scope, JSON.stringify({ ids, base: JSON.stringify(configuredByScope.get(scope) ?? null) })); } catch (_) {}
         }
       };
       const supportsSkipTails = component.pdf_features?.includes('skip_blank_inspection_tails');
-      const outputRow = (output, binding, checked, definition = null) => {
+      const outputRow = (output, binding, checked, definition = null, spec = {}) => {
         const supported = canRender(output.type);
+        const label = spec.label || output.label;
         const row = el('label', 'settings-row export-output' + (supported ? '' : ' is-disabled'));
         const note = supported ? (outputPayeeMode(definition, output) !== 'none' ? '含收款信息' : '') : '需要安装或更新打印导出组件';
-        row.innerHTML = `<input type="checkbox" data-output-id="${esc(output.id)}"${binding ? ` data-output-binding="${esc(binding)}"` : ''}${checked && supported ? ' checked' : ''}${supported ? '' : ' disabled'}/><span class="settings-row-copy"><b>${esc(output.label)}</b></span>${note ? `<span class="export-kind${supported ? '' : ' export-warn'}">${esc(note)}</span>` : ''}`;
+        row.title = outputDescription(output, definition);
+        row.innerHTML = `<input type="checkbox" data-output-id="${esc(output.id)}"${binding ? ` data-output-binding="${esc(binding)}"` : ''}${checked && supported ? ' checked' : ''}${supported ? '' : ' disabled'}/><span class="settings-row-copy"><b>${esc(label)}</b>${note ? `<span class="export-kind${supported ? '' : ' export-warn'}">${esc(note)}</span>` : ''}</span>`;
         const input = $('input', row);
         const info = { output, binding, definition };
         meta.set(input, info);
         const item = el('div', 'export-item');
         item.append(row, el('div', 'export-names'));
         item.lastChild.hidden = true;
-        if (output.type === 'pdf_bundle') {
+        const extra = el('div', 'export-output-settings export-adjust-grid');
+        extra.append(el('div', 'settings-block-title', esc(label)));
+        if (spec.alternatives?.length) {
+          const modeRow = el('label', 'settings-row export-output-mode');
+          const modeLabel = output.type === 'pdf_bundle' ? '材料范围' : output.type === 'attachment_zip' ? '整理方式' : '表格内容';
+          modeRow.append(el('span', 'settings-row-copy', `<b>${esc(modeLabel)}</b>`));
+          const mode = el('select'); mode.setAttribute('aria-label', label + '的生成方式');
+          modeRow.title = outputDescription(output, definition);
+          mode.innerHTML = spec.alternatives.map((choice, index) => {
+            const label = choice.output.type === 'pdf_bundle'
+              ? choice.binding ? outputDescription(choice.output, choice.definition).replace(/^拼接/, '') + '（方案）' : '全部材料'
+              : choice.output.type === 'attachment_zip'
+                ? (choice.output.attachments?.group_by || ['title', 'entry']).includes('claimant') ? '按报账人（方案）' : '按每条发票' + (choice.binding ? '（方案）' : '')
+                : choice.binding ? '方案列' : '通用列';
+            return `<option value="${index}">${esc(label)}</option>`;
+          }).join('');
+          mode.value = String(spec.alternatives.findIndex(choice => choice.output.id === output.id && choice.binding === binding));
+          mode.addEventListener('change', () => {
+            const next = spec.alternatives[Number(mode.value)];
+            Object.assign(info, next);
+            input.dataset.outputId = next.output.id;
+            if (next.binding) input.dataset.outputBinding = next.binding; else delete input.dataset.outputBinding;
+            row.title = outputDescription(next.output, next.definition);
+            modeRow.title = row.title;
+          });
+          const control = el('div', 'settings-row-control'); control.append(mode); modeRow.append(control);
+          extra.append(modeRow);
+        }
+        const includesInspection = (output.pdf?.roles || output.pdf?.include_roles || ['inspection_pdf']).includes('inspection_pdf');
+        if (output.type === 'pdf_bundle' && (includesInspection || spec.alternatives?.length)) {
           const suffix = meta.size;
           const holder = el('div', 'export-pdf-options');
           const option = el('label', 'settings-row export-output' + (supportsSkipTails ? '' : ' is-disabled'));
-          option.innerHTML = `<input type="checkbox" data-skip-blank-inspection-tails aria-labelledby="skip-tails-label-${suffix}" aria-describedby="skip-tails-help-${suffix}"${supportsSkipTails ? '' : ' disabled'}/><span class="settings-row-copy"><b id="skip-tails-label-${suffix}">剔除查验单空白尾页</b><span id="skip-tails-help-${suffix}">${supportsSkipTails ? '原始材料保留；打印前请核对生成的 PDF。' : '需要更新打印导出组件后使用。'}</span></span>`;
-          option.title = '可剔除仅剩页眉页脚、空备注栏边框或标签的尾页，仅对这项输出生效。';
-          holder.append(option); item.append(holder);
-          holder.hidden = true;
+          option.innerHTML = `<input type="checkbox" data-skip-blank-inspection-tails aria-labelledby="skip-tails-label-${suffix}" aria-describedby="skip-tails-help-${suffix}"${supportsSkipTails ? ' checked' : ' disabled'}/><span class="settings-row-copy"><b id="skip-tails-label-${suffix}">剔除查验单空白尾页</b><span id="skip-tails-help-${suffix}"${supportsSkipTails ? ' class="sr-only"' : ''}>${supportsSkipTails ? '原始材料保留；打印前请核对生成的 PDF。' : '需要更新打印导出组件后使用。'}</span></span>`;
+          option.title = '只剔除查验单的空白尾页，至少保留第一页；原始材料保留。可取消勾选以保留全部页面。';
+          holder.append(option); extra.append(holder);
           info.skipTailsInput = $('input', option); info.skipTailsHolder = holder;
         }
+        if (extra.children.length > 1) info.extraHolder = extra;
         return item;
       };
-      // 生成内容：方案声明的输出。
+      const items = [];
       for (const { binding, schemeId, definition, name } of bindings.values()) {
-        const block = el('section', 'settings-block');
-        block.append(el('div', 'settings-block-title', esc(bindings.size > 1 ? name + ' · 生成内容' : '生成内容')));
         const remembered = recall(scopeOf(binding));
         const currentDefinition = liveSchemes.get(schemeId).definition;
-        if (!configuredByScope.has(scopeOf(binding))) configuredByScope.set(scopeOf(binding), configuredOutputs(currentDefinition));
-        for (const output of definition.outputs || []) block.append(outputRow(output, binding, defaultSelected(definition, output, remembered, currentDefinition), definition));
-        body.append(block);
+        configuredByScope.set(scopeOf(binding), configuredOutputs(currentDefinition));
+        for (const output of definition.outputs || []) items.push({ output, binding, definition,
+          checked: defaultSelected(definition, output, remembered, currentDefinition), name });
       }
-      // 通用输出：不依赖方案，跨方案或没有安装来源方案时才是主要入口，平时折叠。
-      const generic = el('details', 'settings-block export-more');
       const lastGeneric = recall('generic')?.ids || [];
-      generic.open = missingDefinition || bindings.size !== 1 || lastGeneric.length > 0;
-      generic.innerHTML = '<summary>通用输出<span>不依赖报账方案</span></summary>';
-      for (const output of GENERIC_OUTPUTS) generic.append(outputRow(output, '', lastGeneric.includes(output.id)));
-      body.append(generic);
+      const block = el('section', 'settings-block');
+      block.append(el('div', 'settings-block-title', '生成内容'));
+      for (const spec of exportOutputRows(items)) {
+        let { output, binding, definition, checked = false } = spec;
+        if (!checked && spec.alternatives.some(choice => lastGeneric.includes(choice.output.id))) {
+          ({ output, binding, definition } = spec.alternatives.find(choice => lastGeneric.includes(choice.output.id)));
+          checked = true;
+        } else if (!binding) checked = lastGeneric.includes(output.id);
+        const label = spec.label || (bindings.size > 1 && binding ? spec.name + ' · ' + output.label : output.label);
+        block.append(outputRow(output, binding, checked, definition, { ...spec, label }));
+      }
+      body.append(block);
+      const separate = el('details', 'settings-block export-more');
+      separate.open = MATERIAL_OUTPUTS.some(output => lastGeneric.includes(output.id));
+      separate.innerHTML = '<summary>按材料分别拼接</summary>';
+      for (const output of MATERIAL_OUTPUTS) separate.append(outputRow(output, '', lastGeneric.includes(output.id)));
+      body.append(separate);
       // 本次选项：日期与收款对象，用不到的不出现。
       const options = el('section', 'settings-block');
       const dateRow = el('div', 'settings-row');
@@ -1024,7 +1106,7 @@ const AdapterUI = (() => {
       const payeeHolder = el('div'); payeeHolder.append(payeeSelect);
       let byClaimantOnly = false;
       const payeeNote = () => {
-        const text = byClaimantOnly ? '按报账人分别收款' : people.length ? '' : '还没有收款信息，请先填写';
+        const text = byClaimantOnly ? '按报账人分别收款' : people.length ? '' : '未填写收款信息，生成时留空';
         payeeCopy.innerHTML = `<b>收款对象</b>${text ? `<span${people.length || byClaimantOnly ? '' : ' class="export-warn"'}>${text}</span>` : ''}`;
       };
       payeeNote();
@@ -1050,21 +1132,34 @@ const AdapterUI = (() => {
         }
       }
       if (fieldsBlock.children.length > 1) body.append(fieldsBlock);
-      // 本次调整：把原来「每个输出一组」合并成一组，默认折叠；方案固定的项直接不出现。
+      // 扩展选项默认折叠；材料范围、整理方式和排版只显示已勾选输出会用到的项。
       const adjustForms = []; const adjust = el('details', 'settings-block export-more');
-      adjust.innerHTML = '<summary>本次调整<span>仅本次有效</span></summary>';
+      adjust.innerHTML = '<summary title="材料范围、整理方式与排版">扩展选项</summary>';
+      for (const info of meta.values()) if (info.extraHolder) adjust.append(info.extraHolder);
       for (const { binding, schemeId, definition, name } of bindings.values()) {
         const scheme = liveSchemes.get(schemeId); const catalog = scheme.settings_catalog || scheme.settings_descriptions || {};
         const groups = [];
         for (const group of ADJUST_GROUPS) {
           const rows = group.keys.map(key => adjustRow(definition, catalog, key)).filter(Boolean);
           if (!rows.length) continue;
-          const holder = el('div'); if (bindings.size > 1) holder.append(el('div', 'settings-block-title', esc(name)));
+          const holder = el('div', 'export-adjust-grid'); if (bindings.size > 1 && groups.length === 0) holder.append(el('div', 'settings-block-title', esc(name)));
           rows.forEach(r => holder.append(r.row)); adjust.append(holder); groups.push({ group, rows, holder, binding });
         }
         adjustForms.push({ binding, definition, groups });
       }
-      if (adjustForms.some(f => f.groups.length)) body.append(adjust);
+      const genericCatalog = [...liveSchemes.values()][0]?.settings_catalog || {};
+      const genericDefinition = { scheme: { settings: {} }, outputs: [...GENERIC_OUTPUTS, ...MATERIAL_OUTPUTS],
+        effective_settings: Object.fromEntries(Object.entries(genericCatalog).map(([key, spec]) => [key, spec.default])) };
+      const genericGroups = [];
+      for (const group of ADJUST_GROUPS) {
+        const rows = group.keys.map(key => adjustRow(genericDefinition, genericCatalog, key, '默认')).filter(Boolean);
+        if (!rows.length) continue;
+        const holder = el('div', 'export-adjust-grid'); if (bindings.size > 1 && genericGroups.length === 0) holder.append(el('div', 'settings-block-title', '通用输出'));
+        rows.forEach(row => holder.append(row.row)); adjust.append(holder);
+        genericGroups.push({ group, rows, holder, binding: '' });
+      }
+      adjustForms.push({ binding: '', definition: genericDefinition, groups: genericGroups });
+      if (adjust.children.length > 1) body.append(adjust);
       const status = el('div', 'export-status'); status.dataset.exportStatus = ''; status.setAttribute('role', 'status'); status.tabIndex = -1; body.append(status);
 
       const note = el('span', 'modal-foot-note');
@@ -1079,9 +1174,20 @@ const AdapterUI = (() => {
         if (byClaimantOnly !== rows.byClaimantOnly) { byClaimantOnly = rows.byClaimantOnly; payeeNote(); }
         payeeHolder.hidden = byClaimantOnly;
         options.hidden = dateRow.hidden && payeeRow.hidden;
-        for (const { groups } of adjustForms) for (const { group, holder, binding } of groups) holder.hidden = !on.some(item => item.binding === binding && group.applies(item.output));
-        for (const [input, info] of meta) if (info.skipTailsHolder) info.skipTailsHolder.hidden = !input.checked;
-        adjust.hidden = !adjustForms.some(f => f.groups.some(g => !g.holder.hidden));
+        for (const { groups } of adjustForms) for (const { group, rows: settings, holder, binding } of groups) {
+          const matching = on.filter(item => item.binding === binding && group.applies(item.output));
+          for (const { key, row } of settings) {
+            row.hidden = key === 'print.amount_basis' && !matching.some(item => ['docx', 'xlsx'].includes(item.output.type));
+            if (key === 'print.image_layout') row.hidden = !matching.some(({ output }) =>
+              (output.pdf?.roles || output.pdf?.include_roles || ['payment_screenshot']).some(role => !['invoice', 'inspection_pdf'].includes(role)));
+          }
+          holder.hidden = !matching.length || settings.every(({ row }) => row.hidden);
+        }
+        for (const [input, info] of meta) {
+          if (info.extraHolder) info.extraHolder.hidden = !input.checked;
+          if (info.skipTailsHolder) info.skipTailsHolder.hidden = !input.checked || !(info.output.pdf?.roles || info.output.pdf?.include_roles || ['inspection_pdf']).includes('inspection_pdf');
+        }
+        adjust.hidden = !adjustForms.some(f => f.groups.some(g => !g.holder.hidden)) && ![...meta].some(([input, info]) => input.checked && info.extraHolder);
         run.disabled = !on.length || checking || generating;
         note.textContent = on.length ? '' : '请先勾选要生成的内容';
       };
@@ -1094,12 +1200,13 @@ const AdapterUI = (() => {
             for (const { group, rows } of groups) {
               if (!group.applies(output)) continue;
               for (const row of rows) {
+                if (row.row.hidden) continue;
                 const value = row.value(); if (value === null) continue;
                 const name = row.key.slice('print.'.length);
                 if (group.id === 'pdf') (configured.pdf ||= {})[name] = value; else configured[name] = value;
               }
             }
-            (outputOptions[binding] ||= {})[output.id] = configured;
+            (binding ? (outputOptions[binding] ||= {}) : genericOutputOptions)[output.id] = configured;
           }
         }
         for (const [input, { output, binding, skipTailsInput }] of meta) {
@@ -1133,6 +1240,7 @@ const AdapterUI = (() => {
           const binding = input.dataset.outputBinding || '';
           const mine = input.checked ? groups.filter(group => group.output_id === input.dataset.outputId && (group.scheme_id ? group.scheme_id + ':' + group.revision_id : '') === binding) : [];
           const holder = $('.export-names', input.closest('.export-item'));
+          input.closest('.export-item').classList.toggle('has-many-names', mine.length > 1);
           holder.hidden = !mine.length;
           holder.innerHTML = exportNameMarkup(mine, outputNames, invalid);
         }
@@ -1323,5 +1431,5 @@ const AdapterUI = (() => {
     m = modal({ title: '导出记录', key: 'export-jobs', replace: pending.mask, wide: true, body, footer: [mkBtn('完成', 'primary', () => m.close())] });
     $('.is-focus', body)?.scrollIntoView({ block: 'nearest' });
   }
-  return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,usesPayee,payeeModes,settingApplies,defaultSelected,exportRowState,runStep,afterCheck,splitDiagnostics,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs};
+  return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,usesPayee,payeeModes,settingApplies,defaultSelected,exportOutputRows,outputDescription,exportRowState,runStep,afterCheck,splitDiagnostics,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs};
 })();

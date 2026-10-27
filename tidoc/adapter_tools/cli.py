@@ -297,6 +297,7 @@ def _render(package_path, fixture_path, out_dir, output_ids=None):
         rendered_files = [{**item, "bytes": Path(item["path"]).stat().st_size} for item in result.get("files", [])]
         return {"ok": True, "fixture": str(fixture_path), "job_id": result["job_id"],
                 "groups": groups, "files": rendered_files, "output_dir": result.get("output_dir"),
+                "diagnostics": result.get("diagnostics", []),
                 "outputs": sorted(output_stats), "output_stats": output_stats,
                 "entry_count": len(entry_ids), "title_groups": len(distinct_titles), "material_roles": material_roles}
     finally:
@@ -326,7 +327,7 @@ def _test(package_path, cases_dir):
         expected_ok = expectations.get("ok", True)
         if actual_ok != expected_ok:
             failures.append(f"ok 期望 {expected_ok}，实际 {actual_ok}")
-        diagnostics = rendered.get("errors", [])
+        diagnostics = rendered.get("errors", rendered.get("diagnostics", []))
         wanted = set(expectations.get("diagnostic_codes", []))
         actual_codes = {item["code"] for item in diagnostics}
         if not wanted <= actual_codes:

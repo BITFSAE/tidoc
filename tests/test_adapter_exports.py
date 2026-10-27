@@ -446,7 +446,7 @@ def test_planner_package_can_define_three_arbitrary_word_outputs(planner_setup,t
         assert Path(file['path']).name==declaration['label']+'_2026-10-06.docx'
 
 
-def test_export_preflight_blocks_material_maximum_on_pinned_revision(planner_setup,tmp_path):
+def test_export_preflight_warns_material_maximum_on_pinned_revision(planner_setup,tmp_path):
     from tidoc.adapters.registry import required_capabilities
     planner,entries,attachments,adapters,eid,root=planner_setup
     # Existing materials may exceed a newly selected revision even though the
@@ -460,11 +460,12 @@ def test_export_preflight_blocks_material_maximum_on_pinned_revision(planner_set
     adapters.packages.link_revision(base['scheme_id'],revision)
     planner.db.conn.execute('UPDATE entries SET scheme_revision_id=? WHERE id=?',(revision,eid));planner.db.conn.commit()
     plan=planner.preview([eid],['overview'])
-    assert not plan['ok']
+    assert plan['ok']
     diagnostics=[d for d in plan['diagnostics'] if d['code']=='MATERIAL_MAXIMUM']
+    assert all(d['severity']=='warning' for d in diagnostics)
     assert any(d['stage']=='export' and d['entry_id']==eid and d['target']=='invoice' and d['output_id']=='overview' for d in diagnostics)
-    with pytest.raises(ValueError):planner.run(plan['plan_id'])
-    assert not list(root.exports_dir.iterdir())
+    assert planner.run(plan['plan_id'])['status']=='completed'
+    assert list(root.exports_dir.iterdir())
 
 
 def test_local_copies_sharing_revision_have_separate_output_and_field_choices(planner_setup,tmp_path):
@@ -617,7 +618,8 @@ def test_unbatched_export_fields_are_temporary_and_isolated(planner_setup):
     adapters.packages.set_current_revision(scheme_id,revision)
     planner.db.conn.execute('UPDATE entries SET scheme_revision_id=? WHERE id=?',(revision,eid));planner.db.conn.commit()
     plan=planner.preview([eid],['overview'])
-    assert not plan['ok']
+    assert plan['ok']
+    assert any(d['code']=='FIELD_REQUIRED' and d['severity']=='warning' for d in plan['diagnostics'])
     binding=scheme_id+':'+revision
     plan=planner.preview([eid],['overview'],{'batch_fields_by_binding':{binding:{'project':'本次经费'}}})
     assert plan['ok'],plan['diagnostics']
@@ -658,9 +660,12 @@ def test_generic_material_pdf_supports_external_roles_and_title_isolation(planne
     assert sorted(len(PdfReader(file['path']).pages) for file in job['files'])==[1,2]
     non_pdf=tmp_path/'contract.txt';non_pdf.write_text('original contract','utf-8')
     attachments.add(eid,non_pdf,'other')
-    blocked=planner.preview([eid],['generic_materials'])
-    assert not blocked['ok']
-    assert any(d['code']=='UNCONVERTIBLE_MATERIAL' for d in blocked['diagnostics'])
+    partial=planner.preview([eid],['generic_materials'])
+    assert partial['ok']
+    assert any(d['code']=='UNCONVERTIBLE_MATERIAL' and d['severity']=='warning' for d in partial['diagnostics'])
+    result=planner.run(partial['plan_id'])
+    assert result['status']=='completed',result['diagnostics']
+    assert len(PdfReader(result['files'][0]['path']).pages)==2
 
 
 def test_xml_only_folder_import_and_pinned_suggested_tags(tmp_path):
@@ -774,3 +779,149 @@ def test_pdf_tail_option_rejects_non_boolean_input(planner_setup):
     options = {'output_options': {'generic_materials': {'pdf': {'skip_blank_inspection_tails': 'false'}}}}
     with pytest.raises(ValueError, match='开关'):
         planner.preview([eid], ['generic_materials'], options)
+
+
+def test_missing_required_materials_and_fields_allow_partial_word_and_pdf(planner_setup):
+    from pypdf import PdfReader
+    planner,entries,attachments,adapters,eid,root=planner_setup
+    original=entries.get(eid)
+    definition=deepcopy(adapters.get_revision(original['scheme_revision_id']))
+    next(role for role in definition['materials'] if role['id']=='payment_screenshot')['min_count']=1
+    definition['effective_settings']['profile.reviewer_required']=True
+    next(output for output in definition['outputs'] if output['id']=='reimbursement')['payee_mode']='single'
+    revision=adapters.packages.store_revision(definition,adapters.packages.revision_record(original['scheme_revision_id'])['content_hash'])
+    adapters.packages.link_revision(original['scheme_id'],revision)
+    planner.db.conn.execute('UPDATE entries SET scheme_revision_id=?,check_status=? WHERE id=?',(revision,'blocked',eid))
+    planner.db.conn.commit()
+    plan=planner.preview([eid],['reimbursement','materials'])
+    assert plan['ok'],plan['diagnostics']
+    assert {'MATERIAL_REQUIRED','REVIEWER_REQUIRED','MISSING_PAYEE','ENTRY_BLOCKED'} <= {item['code'] for item in plan['diagnostics']}
+    assert not any(item['severity'] in ('blocked','required') for item in plan['diagnostics'])
+    result=planner.run(plan['plan_id'])
+    assert result['status']=='completed',result['diagnostics']
+    pdf=next(file for file in result['files'] if file['type']=='pdf_bundle')
+    assert len(PdfReader(pdf['path']).pages)==1  # No payment placeholder page.
+
+
+def test_material_kinds_generate_separate_pdfs_and_skip_empty_outputs(planner_setup,tmp_path):
+    from PIL import Image
+    from pypdf import PdfReader
+    from reportlab.pdfgen import canvas
+    from tidoc.services.exports import MATERIAL_PDF_OUTPUTS
+    planner,entries,attachments,adapters,eid,root=planner_setup
+    image=tmp_path/'payment.png';Image.new('RGB',(80,120),'blue').save(image)
+    attachments.add(eid,image,'payment_screenshot')
+    inspection=tmp_path/'inspection.pdf';c=canvas.Canvas(str(inspection));c.drawString(72,700,'INSPECTION');c.save()
+    attachments.add(eid,inspection,'inspection_pdf')
+    original=entries.get(eid)
+    empty_id=entries.create(original['profile_id'])
+    plan=planner.preview([empty_id,eid],[output['id'] for output in MATERIAL_PDF_OUTPUTS])
+    assert plan['ok'],plan['diagnostics']
+    assert {file['output_id'] for file in plan['files']}=={'generic_pdf_invoice','generic_pdf_payment_screenshot','generic_pdf_inspection_pdf'}
+    result=planner.run(plan['plan_id'])
+    assert result['status']=='completed',result['diagnostics']
+    assert all(len(PdfReader(file['path']).pages)==1 for file in result['files'])
+    invoice=next(file for file in result['files'] if file['output_id']=='generic_pdf_invoice')
+    assert 'INVOICE' in PdfReader(invoice['path']).pages[0].extract_text()
+    assert 'INSPECTION' not in PdfReader(invoice['path']).pages[0].extract_text()
+    assert any(item['code']=='EMPTY_PDF_SKIPPED' for item in result['diagnostics'])
+    repeated=planner.regenerate(result['id'])
+    assert repeated['status']=='completed',repeated['diagnostics']
+    assert len(repeated['files'])==3
+
+
+def test_empty_pdf_does_not_block_other_outputs_or_create_an_empty_file(planner_setup):
+    planner,entries,attachments,adapters,eid,root=planner_setup
+    empty=planner.preview([eid],['generic_pdf_payment_screenshot'])
+    assert not empty['ok'] and not empty['files']
+    assert any(item['code']=='NO_EXPORTABLE_CONTENT' for item in empty['diagnostics'])
+    partial=planner.preview([eid],['generic_overview','generic_pdf_payment_screenshot'])
+    assert partial['ok'],partial['diagnostics']
+    result=planner.run(partial['plan_id'])
+    assert result['status']=='completed',result['diagnostics']
+    assert [file['type'] for file in result['files']]==['xlsx']
+
+
+def test_missing_and_invalid_materials_skip_only_affected_files(planner_setup,tmp_path):
+    from pypdf import PdfReader
+    planner,entries,attachments,adapters,eid,root=planner_setup
+    invalid=tmp_path/'broken.pdf';invalid.write_bytes(b'not a PDF')
+    attachments.add(eid,invalid,'other')
+    from reportlab.pdfgen import canvas
+    valid=tmp_path/'good.pdf';c=canvas.Canvas(str(valid));c.drawString(72,700,'GOOD SIBLING');c.save()
+    attachments.add(eid,valid,'other')
+    missing=tmp_path/'missing.txt';missing.write_text('missing','utf-8')
+    attachment=attachments.add(eid,missing,'other')
+    (root.attachments_dir/attachment['stored_path']).unlink()
+    plan=planner.preview([eid],['generic_materials','generic_attachments'])
+    assert plan['ok'],plan['diagnostics']
+    assert {'INVALID_MATERIAL','MISSING_MATERIAL_FILE'} <= {item['code'] for item in plan['diagnostics']}
+    result=planner.run(plan['plan_id'])
+    assert result['status']=='completed',result['diagnostics']
+    pdf=next(file for file in result['files'] if file['type']=='pdf_bundle')
+    assert len(PdfReader(pdf['path']).pages)==2  # Both good PDFs, including same-role sibling.
+    archive=next(file for file in result['files'] if file['type']=='attachment_zip')
+    with zipfile.ZipFile(archive['path']) as zipped:
+        assert sum(name.endswith('.pdf') for name in zipped.namelist())==3  # Original broken file retained.
+
+
+def test_missing_amounts_are_blank_instead_of_zero_and_do_not_block_export(planner_setup):
+    planner,entries,attachments,adapters,eid,root=planner_setup
+    eid=entries.create(entries.get(eid)['profile_id'])
+    plan=planner.preview([eid],['generic_overview'],{'amount_basis':'paid'})
+    assert plan['ok'],plan['diagnostics']
+    result=planner.run(plan['plan_id'])
+    assert result['status']=='completed',result['diagnostics']
+    assert result['snapshot']['files'][0]['context']['totals']['selected'] is None
+    with zipfile.ZipFile(result['files'][0]['path']) as zipped:
+        sheet=ET.fromstring(zipped.read('xl/worksheets/sheet1.xml'))
+        ns={'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+        assert sheet.find('.//s:c[@r="K2"]/s:v',ns) is None
+        assert sheet.find('.//s:c[@r="L2"]/s:v',ns) is None
+
+
+def test_separate_invoice_pdf_merges_same_title_across_revisions(planner_setup,tmp_path):
+    from tidoc.engine import ParsedInvoice
+    from pypdf import PdfReader
+    from reportlab.pdfgen import canvas
+    planner,entries,attachments,adapters,eid,root=planner_setup
+    original=entries.get(eid)
+    adapters.update_scheme_settings(original['scheme_id'],original['scheme_revision_id'],{'print.numbering':False})
+    second=entries.create(original['profile_id'],parsed=ParsedInvoice(invoice_no='SAME-TITLE-002',buyer_name='测试大学',buyer_tax_id='TEST',total=Decimal('2')))
+    pdf=tmp_path/'second.pdf';c=canvas.Canvas(str(pdf));c.drawString(72,700,'SECOND REVISION');c.save()
+    attachments.add(second,pdf,'invoice_pdf')
+    plan=planner.preview([eid,second],['generic_pdf_invoice'])
+    assert plan['ok'],plan['diagnostics']
+    assert len(plan['files'])==1
+    result=planner.run(plan['plan_id'])
+    assert result['status']=='completed',result['diagnostics']
+    assert len(PdfReader(result['files'][0]['path']).pages)==2
+
+
+def test_old_print_component_reports_incomplete_payee_before_render(planner_setup,monkeypatch):
+    from tidoc.services import printing
+    planner,entries,attachments,adapters,eid,root=planner_setup
+    original=entries.get(eid)
+    definition=deepcopy(adapters.get_revision(original['scheme_revision_id']))
+    next(output for output in definition['outputs'] if output['id']=='reimbursement')['payee_mode']='single'
+    revision=adapters.packages.store_revision(definition,adapters.packages.revision_record(original['scheme_revision_id'])['content_hash'])
+    adapters.packages.link_revision(original['scheme_id'],revision)
+    planner.db.conn.execute('UPDATE entries SET scheme_revision_id=? WHERE id=?',(revision,eid));planner.db.conn.commit()
+    monkeypatch.setattr(printing,'component_status',lambda *_:{'available':True,'ipc_versions':[2],'renderers':['docx','pdf_bundle']})
+    plan=planner.preview([eid],['reimbursement'])
+    assert not plan['ok']
+    assert any(item['code']=='PRINT_COMPONENT_UPDATE_REQUIRED' for item in plan['diagnostics'])
+    assert planner.preview([eid],['generic_pdf_invoice'])['ok']
+
+
+def test_default_overviews_disambiguate_same_title_names_with_tax_ids(planner_setup):
+    from tidoc.engine import ParsedInvoice
+    planner,entries,attachments,adapters,eid,root=planner_setup
+    second=entries.create(entries.get(eid)['profile_id'],parsed=ParsedInvoice(
+        invoice_no='SECOND-TAX-ID',buyer_name='测试大学',buyer_tax_id='OTHER-TAX',total=Decimal('3')))
+    plan=planner.preview([eid,second],['overview','generic_overview'])
+    assert plan['ok'],plan['diagnostics']
+    saved=planner._plans[plan['plan_id']]
+    assert all(any(column.get('source')=='entry.title.tax_id' for column in item['output']['columns'])
+               for item in saved['files'])
+    assert planner.run(plan['plan_id'])['status']=='completed'

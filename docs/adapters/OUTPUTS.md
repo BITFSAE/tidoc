@@ -18,7 +18,7 @@ Word 输出引用包内 DOCX 模板。材料 PDF 选择材料角色、页面顺�
 
 核心四类输出的预检均使用唯一 [`context.schema.json`](../../schemas/team-adapter/1/context.schema.json) 检查完整上下文。打印 IPC 在渲染前再次执行同一校验，新旧协议、源码和外部进程一致。错误只报告 JSON Pointer 和约束，不回显账号或备注。
 
-预检按本地方案、修订、主体和输出需要的收款人或批次分组。输出有必需缺项时整体停止，用户取消有问题的输出后重新预览。所有文件写入独立暂存目录，成功后才发布；取消、超时或写出失败不会留下交付目录。
+预检按本地方案、修订、主体和输出需要的收款人或批次分组。材料、金额、审核人、收款信息和方案必填信息缺项产生 warning，允许继续导出；缺失金额保留 null，不转为零。路径、结构、模板、摘要和组件能力错误仍整体停止。所有文件写入独立暂存目录，成功后才发布；取消、超时或写出失败不会留下交付目录。
 
 界面修改选择或关闭对话框时使旧预览失效。预检响应返回后先核对当前表单版本，过期结果被丢弃，其输出计划也会取消，不能用它启用生成按钮。
 
@@ -34,7 +34,7 @@ Word 输出引用包内 DOCX 模板。材料 PDF 选择材料角色、页面顺�
 
 `get_export_progress(job_id)` 只返回内存中的阶段、状态及完成数，不读取数据库；它与 `cancel_export(plan_id)` 都不等待长导出持有的 API 锁。前端每 400 ms 查询一次。资源、核心文件及产物检查阶段可提供计数，Word／PDF 生成和保存阶段不保证细分百分比。核心写出器完成当前有界步骤后响应取消，组件进程沿用超时与取消机制。
 
-通用总览、附件包和材料 PDF 共用配置输出的写出器。保留输出 ID 分别为 `generic_overview`、`generic_attachments` 和 `generic_materials`。总览和附件包可以跨方案选择；通用材料 PDF 按真实抬头拆分，包含内置及自定义角色，不依赖来源团队模板。缺发票 PDF 或不可转换材料时先阻止相关输出。
+通用总览、附件包和材料 PDF 共用配置输出的写出器。保留输出 ID 分别为 `generic_overview`、`generic_attachments` 和 `generic_materials`。总览和附件包可以跨方案选择；通用材料 PDF 按真实抬头拆分，包含内置及自定义角色，不依赖来源团队模板。`generic_pdf_invoice`、`generic_pdf_payment_screenshot`、`generic_pdf_inspection_pdf`、`generic_pdf_physical_image` 和 `generic_pdf_other` 分别只拼接对应角色。缺票面、资源缺失或材料损坏、加密、不可转换时记录 warning，只跳过受影响文件。空 PDF 分组不进入计划，其余输出照常生成；没有勾选时报告 `NO_OUTPUT_SELECTED`，已勾选但没有可生成内容时报告 `NO_EXPORTABLE_CONTENT`。
 
 历史重新生成使用当次快照及资源摘要，资源已删除或变化时阻止重新生成，保留原结果供查看。
 
@@ -47,3 +47,7 @@ Word 输出引用包内 DOCX 模板。材料 PDF 选择材料角色、页面顺�
 文件名变量的权威目录为 [`context_fields.json`](../../tidoc_print/context_fields.json) 中的 `filename_fields`，由轻量 `filename_field_catalog()` 读取。可用变量包括方案名称、抬头、批次名称、导出日期／输出 ID，以及相应作用域内的条目 ID、票号、报账人和材料角色；模板完整字段目录不意味着这些字段都能用于文件名。旧 IPC 的固定字段映射仅供 v1 兼容。
 
 `render` 根据 fixture 在临时数据库中创建条目，经同一预检生成真实文件。Excel 使用核心输出器；Word 和材料 PDF 使用打印组件。fixture 可声明相对附件路径，也可用 `attachments[].generate` 生成虚构材料。桌面端和 CLI 都核验附件、收款对象和方案修订。
+
+打印窗口在组件支持时显式发送 `skip_blank_inspection_tails: true` 作为新任务默认值，用户可取消。协议中未声明该值时仍按 `false` 处理，历史快照按已保存值重新生成，避免改变旧任务的页数。
+
+适配 CLI 的 `render` 在成功结果中返回 `diagnostics`，保留缺材料等提醒；`test` 同时核对成功提醒和失败诊断。

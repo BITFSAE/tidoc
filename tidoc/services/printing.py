@@ -121,6 +121,22 @@ def execute_print_request(request,components_dir=None,cancel_check=None):
         raise RuntimeError('打印导出组件缺少所选输出能力，请检查更新。')
     if any(item['output'].get('pdf',{}).get('skip_blank_inspection_tails') for item in request['files']) and 'skip_blank_inspection_tails' not in status.get('pdf_features',[]):
         raise RuntimeError('剔除查验单空白尾页需要更新打印导出组件。')
+    missing_payee = any(
+        item['output']['type'] == 'docx'
+        and item['output'].get('payee_mode', 'none') != 'none'
+        and item['context'].get('payee') is None
+        for item in request['files']
+    )
+    if missing_payee and 'incomplete_payee' not in status.get('render_features', []):
+        raise RuntimeError('缺少收款信息时生成 Word，需要更新打印导出组件。')
+    cross_scheme_pdf = any(
+        item['output']['type'] == 'pdf_bundle'
+        and len({(entry['scheme_id'], entry['revision_id'])
+                 for entry in item['context']['entries']}) > 1
+        for item in request['files']
+    )
+    if cross_scheme_pdf and 'cross_scheme_pdf' not in status.get('render_features', []):
+        raise RuntimeError('跨方案合并 PDF，需要更新打印导出组件。')
     timeout=float(request.get('timeout_seconds',120))
     if not 0<timeout<=120: raise ValueError('导出超时应为 0–120 秒')
     with tempfile.TemporaryDirectory(prefix='tidoc-print-ipc-') as tmp:

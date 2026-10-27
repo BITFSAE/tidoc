@@ -298,10 +298,11 @@ def test_uninstalled_source_preserves_values_and_history_without_activating(tmp_
     assert values=={'public':'项目甲','phone':'001234'}
     assert target.entries.list()[0]['completeness']==entry['completeness']
     response=target.preview_export([entry_id],['reimbursement'])
-    assert response['ok']  # 调用成功；阻断项在计划里
-    preview=response['data']
-    assert not preview['ok']
-    assert any(d['code']=='EXTERNAL_SCHEME_PENDING' for d in preview['diagnostics'])
+    assert response['ok']
+    preview=response.get('data',response)
+    assert preview['ok']
+    assert any(d['code']=='EXTERNAL_SCHEME_PENDING' and d['severity']=='warning'
+               for d in preview['diagnostics'])
     for choice,expected in [([],{'public'}),(['org.tidoc.generic:entry:phone'],{'public','phone'})]:
         outgoing=bindle_service.export_bindle(target.entries,target.attachments,[entry_id],
             tmp_path/('roundtrip-'+str(len(choice))+'.tidoc'),{claimant['id']:claimant},include_ask_fields=choice)

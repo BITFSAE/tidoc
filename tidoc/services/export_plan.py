@@ -17,7 +17,7 @@ from ..db.export_jobs import ExportJobRepo
 from ..adapters.cache import PreviewCache
 from .export_context import (ROLE_TYPES, build_export_context, digest_data, filename_for,
                              get_path, json_data, project_entry, safe_name, title_key)
-from .exports import (GENERIC_ATTACHMENTS, GENERIC_OVERVIEW, GENERIC_MATERIALS, confined_path,
+from .exports import (GENERIC_ATTACHMENTS, GENERIC_OVERVIEW, GENERIC_MATERIALS, MATERIAL_PDF_OUTPUTS, confined_path,
                       resource_digest, write_attachment_zip, write_xlsx)
 
 
@@ -199,7 +199,7 @@ class ExportPlanner:
             raise ValueError('模板不在不可变方案资源目录内')
         return {'path':path.relative_to(self.root).as_posix(),'sha256':resource_digest(path),'kind':'template'}
 
-    def _resources(self,entries,output):
+    def _resources(self,entries,output,diagnostics=None):
         resources=[]
         settings=output.get('pdf') if output['type']=='pdf_bundle' else output.get('attachments') or {}
         settings=settings or {}
@@ -212,7 +212,22 @@ class ExportPlanner:
                 if roles and role not in roles:continue
                 if output['type'] in ('docx','xlsx'):continue
                 if output['type']=='pdf_bundle' and role=='invoice' and att.get('type')=='invoice_xml':continue
-                source=confined_path(self.root/'attachments',att['stored_path'])
+                try:
+                    source=confined_path(self.root/'attachments',att['stored_path'])
+                except ValueError:
+                    # Only absent files inside the attachment root may be skipped.
+                    # Keep unsafe paths as errors, including symlinks outside it.
+                    from pathlib import PurePosixPath
+                    relative=PurePosixPath(str(att['stored_path']))
+                    root=(self.root/'attachments').resolve()
+                    candidate=root.joinpath(*relative.parts).resolve()
+                    if (diagnostics is None or relative.is_absolute() or '..' in relative.parts
+                            or '\\' in str(relative) or ':' in str(relative)
+                            or not candidate.is_relative_to(root) or candidate.exists()):
+                        raise
+                    diagnostics.append(_diagnostic('MISSING_MATERIAL_FILE','材料文件已缺失，本次跳过。',
+                        severity='warning',entry_id=entry['id'],output_id=output['id'],target=role))
+                    continue
                 resources.append({'id':att.get('id') or f'{entry["id"]}-{index}','entry_id':entry['id'],'path':source.relative_to(self.root).as_posix(),'sha256':resource_digest(source),'role_id':role,'original_name':att.get('original_name') or source.name,'label':role_defs.get(role,{}).get('label') or att.get('role_label') or ''})
         return resources
 
@@ -247,7 +262,7 @@ class ExportPlanner:
                 if applies is not True:
                     add('OUTPUT_NOT_APPLICABLE' if applies is False else 'OUTPUT_CONDITION_MISSING','所选输出不适用于此条目。' if applies is False else '请补充输出适用条件信息。',entry_id=entry['id'])
             if not generic and raw.get('check_status')=='blocked':
-                add('ENTRY_BLOCKED','条目存在核心阻断项，请先核对。',entry_id=entry['id'])
+                add('ENTRY_BLOCKED','条目标有严重问题，导出前请核对。',entry_id=entry['id'])
             if not generic and raw.get('source_scheme_unbound'):
                 add('EXTERNAL_SCHEME_PENDING','来源方案尚未应用，请核对后选择本机报账方案。',entry_id=entry['id'],target='scheme')
             counts={}
@@ -279,25 +294,25 @@ class ExportPlanner:
                         diagnostics.append({**diagnostic,'entry_id':entry['id'],'output_id':output['id']})
             # Core nonoptional accounting invariants apply to every monetary writer.
             if output['type'] in ('docx','xlsx') and entry['total'] is None:
-                add('MISSING_INVOICE_AMOUNT','发票金额缺失或无效，不能将其当作零。',entry_id=entry['id'])
+                add('MISSING_INVOICE_AMOUNT','发票金额缺失或无效，输出留空，请核对。',entry_id=entry['id'])
             if output['amount_basis']=='paid' and entry['paid_amount'] is None:
-                add('MISSING_PAID_AMOUNT','按实付导出需要填写有效实付金额，零值有效。',entry_id=entry['id'])
+                add('MISSING_PAID_AMOUNT','实付金额缺失，输出留空；已填的零值保留。',entry_id=entry['id'])
             if output['type']=='pdf_bundle' and 'invoice' in (output.get('pdf',{}).get('roles') or output.get('pdf',{}).get('include_roles') or ['invoice']):
                 if not any(r['entry_id']==entry['id'] and r['role_id']=='invoice' and Path(r['path']).suffix.lower()=='.pdf' for r in resources):
-                    add('MISSING_INVOICE_PDF','打印票面需要发票 PDF；XML 不能替代票面。',entry_id=entry['id'],target='invoice')
+                    add('MISSING_INVOICE_PDF','缺少发票 PDF，本次跳过票面；XML 不能替代票面。',entry_id=entry['id'],target='invoice')
         if output['payee_mode']!='none' and context['payee'] is None:
-            add('MISSING_PAYEE','请为每位报账人指定完整的收款对象。' if output['payee_mode']=='by_claimant' else '请选择一个完整的收款对象（在「管理收款信息」里填写）。',target='payee')
+            add('MISSING_PAYEE','报账人未指定收款对象，收款信息留空，请核对。' if output['payee_mode']=='by_claimant' else '未选择收款对象，收款信息留空，请核对。',target='payee')
         payee=context.get('payee')
         if payee and output['payee_mode']!='none':
             required=['name'] if payee.get('account_type')=='none' else ['name','bank_name','account_number']
             for field in required:
                 if not payee.get(field):add('MISSING_PAYEE_FIELD','收款信息缺项，请核对选定对象。',target='payee.'+field)
         if output['type']=='pdf_bundle':
-            if not resources:add('NO_PRINT_MATERIALS','没有可生成 PDF 的材料。')
+            # An empty group is skipped by the planner, never rendered as a blank PDF.
             for resource in resources:
                 suffix=Path(resource['path']).suffix.lower()
                 if suffix not in ('.pdf','.png','.jpg','.jpeg'):
-                    add('UNCONVERTIBLE_MATERIAL','材料不能转换为 PDF，请使用附件整理包保留原文件。',entry_id=resource['entry_id'],target=resource['role_id'])
+                    add('UNCONVERTIBLE_MATERIAL','此材料不能转换为 PDF，本次跳过；可用附件整理包保留原文件。',entry_id=resource['entry_id'],target=resource['role_id'],resource_path=resource['path'])
                 else:
                     try:
                         if suffix=='.pdf':
@@ -308,12 +323,14 @@ class ExportPlanner:
                             from PIL import Image
                             with Image.open(self.root/resource['path']) as image:image.verify()
                     except ImportError:pass # external component completes structure validation
-                    except Exception:add('INVALID_MATERIAL','材料损坏、加密或为空，请替换后再导出。',entry_id=resource['entry_id'],target=resource['role_id'])
-        if output['type'] in ('docx','pdf_bundle'):
+                    except Exception:add('INVALID_MATERIAL','此材料损坏、加密或为空，本次跳过；请核对原文件。',entry_id=resource['entry_id'],target=resource['role_id'],resource_path=resource['path'])
+        if output['type']=='docx' or output['type']=='pdf_bundle' and self._printable_resources(resources,output,diagnostics):
             from .printing import component_status
             status=component_status(self.data_root.components_dir)
             if not status.get('available'):add('PRINT_COMPONENT_REQUIRED','需要安装打印导出组件。')
             elif 2 not in status.get('ipc_versions',[]) or output['type'] not in status.get('renderers',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','打印导出组件缺少所需能力，请检查更新。')
+            elif output['type']=='pdf_bundle' and len({(entry['scheme_id'],entry['revision_id']) for entry in context['entries']})>1 and 'cross_scheme_pdf' not in status.get('render_features',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','跨方案合并 PDF，需要更新打印导出组件。')
+            elif output['type']=='docx' and output['payee_mode']!='none' and context.get('payee') is None and 'incomplete_payee' not in status.get('render_features',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','缺少收款信息时生成 Word，需要更新打印导出组件。')
             elif output.get('pdf',{}).get('skip_blank_inspection_tails') and 'skip_blank_inspection_tails' not in status.get('pdf_features',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','剔除查验单空白尾页需要更新打印导出组件。')
         if template:
             try:
@@ -328,9 +345,31 @@ class ExportPlanner:
                 if not sources.intersection({'title','row.title','entry.title.name','title.name'}):add('TITLE_COLUMN_REQUIRED','跨抬头总览必须包含抬头列。')
                 if len({title['name'] for title in titles})<len({title_key(title,entry['id']) for title,entry in zip(titles,context['entries'])}) and not sources.intersection({'tax_id','row.tax_id','entry.title.tax_id','title.tax_id'}):
                     # Generic writer always includes an extra tax ID column when ambiguity exists.
-                    if generic:output['columns']=deepcopy(output['columns'])+[{'id':'tax_id','source':'entry.title.tax_id','label':'税号','width':24}]
+                    if generic or not output.get('columns'):
+                        output['columns'] = deepcopy(output.get('columns') or GENERIC_OVERVIEW['columns'])
+                        output['columns'].append({'id': 'tax_id', 'source': 'entry.title.tax_id',
+                                                  'label': '税号', 'width': 24})
                     else:add('TAX_ID_COLUMN_REQUIRED','同名不同税号的总览必须包含税号列。')
-        return diagnostics
+        # Completeness and scheme requirements advise the operator; they do not
+        # prevent exporting the available work. Structural errors remain blocking.
+        reminders={
+            'ENTRY_BLOCKED','EXTERNAL_SCHEME_PENDING','OUTPUT_FIELD_REQUIRED',
+            'OUTPUT_NOT_APPLICABLE','OUTPUT_CONDITION_MISSING','REVIEWER_REQUIRED',
+            'MATERIAL_REQUIRED','MATERIAL_MAXIMUM','FIELD_REQUIRED',
+            'RULE_CONDITION_PENDING','RULE_MATERIAL_REQUIRED','RULE_FIELD_REQUIRED','RULE_NOTICE',
+            'MISSING_INVOICE_AMOUNT','MISSING_PAID_AMOUNT','MISSING_INVOICE_PDF',
+            'MISSING_PAYEE','MISSING_PAYEE_FIELD',
+            'UNCONVERTIBLE_MATERIAL','INVALID_MATERIAL',
+        }
+        return [{**item,'severity':'warning'} if item['code'] in reminders and item.get('severity') in ('required','blocked') else item for item in diagnostics]
+
+    def _printable_resources(self, resources, output, diagnostics):
+        if output['type'] != 'pdf_bundle':
+            return resources
+        rejected = {item.get('resource_path') for item in diagnostics
+                    if item['code'] in ('INVALID_MATERIAL', 'UNCONVERTIBLE_MATERIAL')}
+        return [resource for resource in resources
+                if resource['path'] not in rejected]
 
     def preview(self,entry_ids,output_ids=None,options=None):
         options=json_data(options or {})
@@ -346,6 +385,7 @@ class ExportPlanner:
             by_revision.setdefault((entry['scheme_id'],entry['scheme_revision_id']),{'entries':[],'definition':definition})['entries'].append(entry)
         requested=set(output_ids) if output_ids is not None else None
         diagnostics=[];files=[];groups=[];used=set();recognized=set()
+        selected_any=bool(requested) or bool(binding_outputs and any(binding_outputs.values()))
         for sidrev,data in by_revision.items():
             sid,revision=sidrev;definition=data['definition'];scheme=self.adapters.get_scheme(sid)
             binding_key=sid+':'+revision
@@ -358,6 +398,7 @@ class ExportPlanner:
                 configured_defaults=definition.get('effective_settings',{}).get('print.default_outputs',definition.get('scheme',{}).get('default_outputs'))
                 enabled=declared['id'] in configured_defaults if configured_defaults is not None else declared.get('default_selected',False)
                 if selected_for_binding is not None and declared['id'] not in selected_for_binding or selected_for_binding is None and not enabled:continue
+                selected_any=True
                 output=self._effective_output(declared,definition,binding_options)
                 subgroup={}
                 group_by=output.get('group_by') or []
@@ -414,7 +455,7 @@ class ExportPlanner:
                     item={'group_id':group_id,'output':deepcopy(output),'context':context,'filename':filename,'definition':definition,'resources':[]}
                     template=None
                     try:
-                        item['resources']=self._resources(raw,output)
+                        item['resources']=self._resources(raw,output,diagnostics)
                         if output['type']=='docx':
                             template=self._template_resource(revision,output)
                             item['template']=template['path'];item['template_sha256']=template['sha256']
@@ -422,6 +463,10 @@ class ExportPlanner:
                         diagnostics.append(_diagnostic('MISSING_RESOURCE','所选输出的模板或材料缺失，请补齐后重新预览。',output_id=output['id'],group_id=group_id))
                     group_diags=self._preflight(context,definition,item['output'],raw,item['resources'],template)
                     diagnostics.extend({**diag,'group_id':group_id} for diag in group_diags)
+                    item['resources']=self._printable_resources(item['resources'],output,group_diags)
+                    if output['type']=='pdf_bundle' and not item['resources']:
+                        diagnostics.append(_diagnostic('EMPTY_PDF_SKIPPED',f'「{output.get("label",output["id"])}」没有可拼接的材料，已跳过，不生成空 PDF。',severity='warning',output_id=output['id']))
+                        continue
                     files.append(item)
                     groups.append({'group_id':group_id,'scheme_id':sid,'revision_id':revision,'scheme_name':scheme['name'],'title':context['title'],'batch':context['batch'],'payee':{'id':payee['id'],'name':payee['name'],'account_tail':payee.get('account_number','')[-4:]} if payee else None,'entry_ids':[e['id'] for e in raw],'output_id':output['id'],'filename':filename,'totals':context['totals']})
             if selection is not None and selected_for_binding is not None:
@@ -436,7 +481,7 @@ class ExportPlanner:
             context=build_export_context(raw,output=output,profiles=profiles,options=generic_options)
             group_id=digest_data([output['id'],entry_ids])[:16]
             resources=[]
-            try:resources=self._resources(raw,output)
+            try:resources=self._resources(raw,output,diagnostics)
             except Exception:diagnostics.append(_diagnostic('MISSING_RESOURCE','附件已缺失，请补齐后重新预览。',output_id=output['id']))
             diagnostics.extend(self._preflight(context,{},output,raw,resources,generic=True))
             generic_filename=filename_for(output,context)
@@ -445,23 +490,29 @@ class ExportPlanner:
             used.add(generic_filename.casefold())
             files.append({'group_id':group_id,'output':output,'context':context,'filename':generic_filename,'resources':resources})
             groups.append({'group_id':group_id,'scheme_id':None,'title':None,'batch':None,'payee':None,'entry_ids':entry_ids,'output_id':output['id'],'filename':files[-1]['filename'],'totals':context['totals']})
-        recognized.add(GENERIC_MATERIALS['id'])
-        if requested and GENERIC_MATERIALS['id'] in requested:
+        for generic_output in (GENERIC_MATERIALS,*MATERIAL_PDF_OUTPUTS):
+            recognized.add(generic_output['id'])
+            if not requested or generic_output['id'] not in requested:continue
             subjects={}
             for entry,definition in loaded:
                 projected=project_entry(entry,profiles.get(entry.get('profile_id')),definition)
                 subjects.setdefault(title_key(projected['title'],entry['id']),[]).append(entry)
             for subject,raw in subjects.items():
                 raw=[{**entry,'extension_values':{},'batch':({**entry['batch'],'fields':{}} if entry.get('batch') else None)} for entry in raw]
-                output=self._effective_output(GENERIC_MATERIALS,{},options)
+                output=self._effective_output(generic_output,{},options)
                 roles=list(dict.fromkeys(['invoice']+[(att.get('role_id') or ROLE_TYPES.get(att.get('type'),'other')) for entry in raw for att in entry.get('attachments',[])]))
-                output['pdf']['include_roles']=roles
+                if generic_output['id']==GENERIC_MATERIALS['id']:output['pdf']['include_roles']=roles
                 context=build_export_context(raw,output=output,profiles=profiles,options={key:value for key,value in options.items() if key in ('date','sort_by','numbering','image_layout','content_order')})
                 group_id=digest_data([output['id'],subject,[entry['id'] for entry in raw]])[:16]
                 resources=[]
-                try:resources=self._resources(raw,output)
+                try:resources=self._resources(raw,output,diagnostics)
                 except Exception:diagnostics.append(_diagnostic('MISSING_RESOURCE','附件已缺失，请补齐后重新预览。',output_id=output['id']))
-                diagnostics.extend(self._preflight(context,{},output,raw,resources,generic=True))
+                group_diags=self._preflight(context,{},output,raw,resources,generic=True)
+                diagnostics.extend(group_diags)
+                resources=self._printable_resources(resources,output,group_diags)
+                if not resources:
+                    diagnostics.append(_diagnostic('EMPTY_PDF_SKIPPED',f'「{output.get("label",output["id"])}」没有可拼接的材料，已跳过，不生成空 PDF。',severity='warning',output_id=output['id']))
+                    continue
                 filename=filename_for(output,context)
                 if filename.casefold() in used:
                     path=Path(filename);filename=safe_name(path.stem,max_len=95)+'_'+group_id[:8]+path.suffix
@@ -470,7 +521,9 @@ class ExportPlanner:
                 groups.append({'group_id':group_id,'scheme_id':None,'title':context['title'],'batch':None,'payee':None,'entry_ids':[entry['id'] for entry in raw],'output_id':output['id'],'filename':filename,'totals':context['totals']})
         if requested and requested-recognized:
             diagnostics.append(_diagnostic('UNKNOWN_OUTPUT','未知输出：'+', '.join(sorted(requested-recognized))))
-        if not files:diagnostics.append(_diagnostic('NO_OUTPUT_SELECTED','请选择至少一种输出。'))
+        if not files:
+            diagnostics.append(_diagnostic('NO_EXPORTABLE_CONTENT','所选输出没有可生成的内容，请添加材料或选择其他输出。')
+                               if selected_any else _diagnostic('NO_OUTPUT_SELECTED','请选择至少一种输出。'))
         # Names are part of the saved plan so rendering, history and regeneration agree.
         from .export_names import export_filename
         custom_names = options.get('output_names_by_group') or {}

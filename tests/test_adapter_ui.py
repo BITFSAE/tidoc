@@ -309,3 +309,24 @@ def test_card_title_dot_has_distinct_colours_in_both_themes():
     assert 'class="entry-title-wrap">${titleDot}<span class="entry-item-title"' in app
     # 按抬头分组或已筛选到某个抬头时整页同一个抬头，不画圆点。
     assert "State.groupBy !== 'title' && !$('#filterTitle')?.value" in app
+
+
+def test_print_outputs_merge_generic_equivalents_and_keep_custom_outputs():
+    out=_run_adapter_ui(r"""
+const item=(id,type)=>({output:{id,type,label:id},binding:'s:r',definition:{}});
+const rows=A.exportOutputRows([item('note','docx'),item('accept','docx'),item('materials','pdf_bundle'),item('overview','xlsx'),item('attachments','attachment_zip')]);
+const custom=A.exportOutputRows([item('one','xlsx'),item('two','xlsx')]);
+console.log(JSON.stringify({rows,custom,unbound:A.exportOutputRows([]),
+ pdf:A.outputDescription({type:'pdf_bundle',pdf:{include_roles:['invoice','payment_screenshot','inspection_pdf']}},{}),
+ claimant:A.outputDescription({type:'attachment_zip',attachments:{group_by:['title','claimant']}},{}),
+ entry:A.outputDescription({type:'attachment_zip'},null)}));
+""",{})
+    assert len(out['rows'])==5
+    assert [row['label'] for row in out['rows'] if row.get('label')]==['材料 PDF','总览 Excel','附件整理包']
+    assert all(len(row['alternatives'])==2 for row in out['rows'] if row['output']['type'] in ('pdf_bundle','attachment_zip'))
+    assert next(row for row in out['rows'] if row['output']['type']=='xlsx')['alternatives']==[]
+    assert len([row for row in out['custom'] if row['output']['type']=='xlsx'])==2
+    assert len(out['unbound'])==3
+    assert out['pdf']=='拼接发票、付款截图、查验单'
+    assert out['claimant']=='按抬头、报账人整理原文件'
+    assert out['entry']=='按抬头、每条发票整理原文件'

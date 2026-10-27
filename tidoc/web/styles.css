@@ -2290,13 +2290,32 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .export-dialog .settings-row[hidden], .export-dialog .settings-block[hidden], .export-dialog .export-more > div[hidden] { display: none; }
 .export-dialog .settings-row-control { min-width: 0; }
 .export-dialog .settings-row select, .export-dialog .settings-row input[type="date"] { min-width: 190px; max-width: 280px; }
-.export-item { border-bottom: 1px solid var(--line-soft); }
+.export-item { display: grid; grid-template-columns: minmax(145px, .8fr) minmax(0, 1.6fr); align-items: center; column-gap: 16px; border-bottom: 1px solid var(--line-soft); }
+.export-item > .export-output { min-width: 0; }
+.export-item.has-many-names > .export-names { grid-column: 1 / -1; padding-left: 28px; }
+.export-output-settings { border-bottom: 1px solid var(--line-soft); }
+.export-output-settings[hidden] { display: none; }
+.export-output-settings .field-help { margin: 0 0 8px; }
+.export-output-settings > .settings-block-title { padding-top: 12px; }
 .export-item:last-child { border-bottom: 0; }
 .export-item > .export-output { border-bottom: 0; }
 .export-more > summary + .export-item > .export-output { padding-top: 14px; }
-.export-names { display: grid; gap: 6px; margin-top: -2px; padding: 0 0 10px 28px; }
+.export-names { display: grid; min-width: 0; gap: 6px; padding: 8px 0; }
 .export-names[hidden] { display: none; }
-.export-pdf-options { padding: 0 0 10px 28px; }
+.export-adjust-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; padding: 8px 0; }
+.export-adjust-grid[hidden] { display: none; }
+.export-adjust-grid > .settings-block-title { grid-column: 1 / -1; padding: 4px 0; }
+.export-dialog .export-adjust-grid .settings-row { gap: 10px; min-width: 0; min-height: 40px; padding: 4px 0; border: 0; flex-wrap: nowrap; }
+.export-adjust-grid .settings-row-copy { flex: 0 0 5.5em; }
+.export-adjust-grid .settings-row-copy b { font-size: 13px; font-weight: 500; }
+.export-dialog .export-adjust-grid .settings-row-control { flex: 1 1 0; min-width: 0; }
+.export-adjust-grid .settings-row-control .select-field { width: 100%; min-width: 0; }
+.export-adjust-grid .settings-row select { width: 100%; min-width: 0; max-width: none; }
+.export-adjust-grid .select-trigger { min-height: 32px; padding: 6px 10px; font-size: 12.5px; }
+.export-adjust-grid .export-pdf-options { align-self: center; padding: 0; }
+.export-adjust-grid .export-pdf-options .settings-row-copy { flex: 1; }
+.export-output-mode select { max-width: 100%; }
+.export-pdf-options { padding: 4px 0 0; }
 .export-pdf-options[hidden] { display: none; }
 .export-pdf-options .export-output { padding: 4px 0; }
 .export-pdf-options .settings-row-copy b { font-size: 13px; font-weight: 500; }
@@ -2304,7 +2323,7 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .export-name-label { flex: 0 0 10em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .export-filename-row input[aria-invalid="true"] { border-color: var(--blocked); box-shadow: 0 0 0 3px var(--blocked-soft); }
 .export-output { justify-content: flex-start; gap: 12px; padding: 10px 0; cursor: pointer; }
-.export-output .export-kind { margin-left: auto; padding-left: 12px; color: var(--ink-faint); font-size: 12px; white-space: nowrap; }
+.export-output .export-kind { color: var(--ink-faint); font-size: 12px; font-weight: 400; }
 .export-output input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
 .export-output .settings-row-copy { flex: 1 1 auto; }
 .export-output:hover .settings-row-copy b { color: var(--primary); }
@@ -2324,6 +2343,10 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .export-status { display:grid; gap:10px; }
 .export-status .diagnostic-section + .diagnostic-section { margin-top:0; }
 @media (max-width: 640px) {
+  .export-item { grid-template-columns: minmax(0, 1fr); }
+  .export-adjust-grid { grid-template-columns: minmax(0, 1fr); column-gap: 0; }
+  .export-adjust-grid .settings-row-control { flex-wrap: nowrap; flex: 1 1 0; }
+  .export-item > .export-names { padding: 0 0 10px 28px; }
   .export-dialog .settings-row, .payees-dialog .settings-row, .job-card .settings-row { flex-wrap: wrap; }
   .export-dialog .settings-row-control { flex-wrap:wrap; flex:1 1 100%; }
   .export-dialog .settings-row-control > div { flex:1; min-width:0; }

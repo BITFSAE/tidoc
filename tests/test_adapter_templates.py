@@ -572,3 +572,35 @@ def test_word_cannot_bypass_revision_isolation_with_null_scheme(tmp_path):
     req['files'][0]['context']['scheme']=None
     with pytest.raises(ProtocolError) as error:render_request(req)
     assert error.value.code=='REVISION_ISOLATION'
+
+
+def _full_validator_errors(ctx):
+    from tidoc_print.context_validation import context_validator
+    return sorted((error.validator, tuple(error.absolute_path)) for error in context_validator().iter_errors(ctx))
+
+
+def test_split_context_validation_reports_the_same_errors_as_the_full_schema():
+    from tidoc_print.context_validation import _context_errors, validate_context
+    ctx=build_export_context([{'id':'one','title':'学校','total':'1'},{'id':'two','title':'学校','total':'2'}])
+    assert validate_context(ctx)==[] and _full_validator_errors(ctx)==[]
+    bad=json.loads(json.dumps(ctx))
+    bad['entries'][1]['seller']=7
+    bad['rows'][0]['unexpected']='x'
+    bad['diagnostics'].append({'code':'X'})
+    bad['totals']['count']='many'
+    assert sorted(_context_errors(bad))==_full_validator_errors(bad)
+    pointers={item['location'] for item in validate_context(bad)}
+    assert {'/context/entries/1/seller','/context/rows/0'} <= pointers
+    # A cached item result is reused for equal content and never for changed content.
+    assert sorted(_context_errors(bad))==_full_validator_errors(bad)
+    bad['entries'][1]['seller']='销售方'
+    assert sorted(_context_errors(bad))==_full_validator_errors(bad)
+    bad['entries']='not a list'
+    assert sorted(_context_errors(bad))==_full_validator_errors(bad)
+
+
+def test_context_rows_do_not_share_objects_with_entries():
+    ctx=build_export_context([{'id':'one','title':'学校','total':'1'}])
+    row=ctx['rows'][0]
+    assert row['entry']==ctx['entries'][0] and row['entry'] is not ctx['entries'][0]
+    assert row['invoice']==ctx['entries'][0]['invoice'] and row['invoice'] is not row['entry']['invoice']

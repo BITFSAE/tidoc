@@ -17,6 +17,19 @@ CONTEXT_VERSION = 1
 
 def component_resource_path(relative, *, package='tidoc_print'):
     """Locate bundled resources without importing any core or rendering module."""
+    if not isinstance(relative, str) or not isinstance(package, str):
+        raise ValueError('组件资源路径不安全')
+    # Resolving the path walks every directory on each call; reuse it while the file exists.
+    bundle = sys._MEIPASS if getattr(sys, 'frozen', False) and getattr(sys, '_MEIPASS', None) else None
+    located = _locate_resource(relative, package, bundle)
+    if located.is_file():
+        return located
+    _locate_resource.cache_clear()
+    return _locate_resource(relative, package, bundle)
+
+
+@lru_cache(maxsize=64)
+def _locate_resource(relative, package, bundle):
     from pathlib import Path, PurePosixPath
 
     if package not in ('tidoc_print', 'tidoc', 'schemas') or not isinstance(relative, str):
@@ -25,8 +38,8 @@ def component_resource_path(relative, *, package='tidoc_print'):
     if (not relative.parts or relative.is_absolute() or '..' in relative.parts or
             '\\' in str(relative) or ':' in str(relative) or '\x00' in str(relative)):
         raise ValueError('组件资源路径不安全')
-    if getattr(sys, 'frozen', False) and getattr(sys, '_MEIPASS', None):
-        root = Path(sys._MEIPASS) / package
+    if bundle:
+        root = Path(bundle) / package
     else:
         root = Path(__file__).resolve().parent.parent / package
     candidate = root.joinpath(*relative.parts).resolve()
@@ -239,8 +252,10 @@ def rows_for_entries(entries, output):
             amount = decimal_value(item.get("total"))
             if quantity is not None and quantity != 0 and amount is not None:
                 item["unit_price"] = _unit_price_text(amount, quantity)
-            row = deepcopy(item)
-            row.update({"id": entry["id"] + "-" + str(item_index), "invoice_date": entry["invoice_date"], "is_first": item_index == 0, "reviewer": entry["claimant"]["reviewer"], "tax_id": entry["title"]["tax_id"], "index": len(rows) + 1, "entry_id": entry["id"], "entry": deepcopy(entry), "claimant": entry["claimant"]["name"], "title": entry["title"]["name"], "invoice": deepcopy(entry["invoice"]), "seller": entry["seller"], "invoice_no": entry["invoice_no"], "paid_amount": entry["paid_amount"] if item_index == 0 else None, "invoice_total": entry["total"] if item_index == 0 else None, "amount": entry["paid_amount"] if output.get("amount_basis") == "paid" and item_index == 0 else (None if output.get("amount_basis") == "paid" else item.get("total")), "storage_location": defaults.get("storage_location", ""), "first_for_invoice": item_index == 0})
+            # item is already a private copy, and build_export_context passes the finished
+            # rows through json_data, which gives every row its own entry and invoice objects.
+            row = dict(item)
+            row.update({"id": entry["id"] + "-" + str(item_index), "invoice_date": entry["invoice_date"], "is_first": item_index == 0, "reviewer": entry["claimant"]["reviewer"], "tax_id": entry["title"]["tax_id"], "index": len(rows) + 1, "entry_id": entry["id"], "entry": entry, "claimant": entry["claimant"]["name"], "title": entry["title"]["name"], "invoice": entry["invoice"], "seller": entry["seller"], "invoice_no": entry["invoice_no"], "paid_amount": entry["paid_amount"] if item_index == 0 else None, "invoice_total": entry["total"] if item_index == 0 else None, "amount": entry["paid_amount"] if output.get("amount_basis") == "paid" and item_index == 0 else (None if output.get("amount_basis") == "paid" else item.get("total")), "storage_location": defaults.get("storage_location", ""), "first_for_invoice": item_index == 0})
             rows.append(row)
     return rows
 

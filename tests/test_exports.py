@@ -66,3 +66,25 @@ def test_attachment_archive_uses_normalized_names(repos, tmp_path):
         names = zf.namelist()
         assert "清单.txt" in names
         assert any(name.endswith("/发票_01.pdf") for name in names)
+
+
+def test_material_check_is_remembered_until_the_file_changes(api, tmp_path, monkeypatch):
+    import os
+    import pypdf
+    planner = api._export_planner()
+    path = tmp_path / 'material.pdf'
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    with path.open('wb') as handle:
+        writer.write(handle)
+    opened = []
+    real = pypdf.PdfReader
+    monkeypatch.setattr(pypdf, 'PdfReader', lambda *args, **kwargs: opened.append(1) or real(*args, **kwargs))
+    assert planner._material_readable(path, '.pdf') is True
+    assert planner._material_readable(path, '.pdf') is True
+    assert len(opened) == 1
+    path.write_bytes(b'not a pdf any more')
+    os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 1_000_000))
+    assert planner._material_readable(path, '.pdf') is False
+    path.unlink()
+    assert planner._material_readable(path, '.pdf') is False

@@ -39,6 +39,7 @@ class ExportPlanner:
         self.jobs=getattr(adapters,'jobs',None) or ExportJobRepo(db)
         # Plans hold full render contexts: keep few, drop idle ones. An expired plan must be previewed again.
         self._plans=PreviewCache();self._cancellations=OrderedDict();self._progress={};self._lock=threading.RLock()
+        self._readable={}
 
     def _cancellation(self,job_id):
         # One event per job; the oldest are dropped so cancelled previews cannot accumulate.
@@ -115,11 +116,12 @@ class ExportPlanner:
         return loaded
 
     def _source_fingerprint(self,loaded,options):
-        state=[]
+        state=[];schemes={}
         for entry,definition in loaded:
             sid=entry['scheme_id'];revision=entry['scheme_revision_id']
             profile=self.profiles.get(entry.get('profile_id')) if entry.get('profile_id') else {}
-            scheme=self.adapters.get_scheme(sid)
+            if sid not in schemes:schemes[sid]=self.adapters.get_scheme(sid)
+            scheme=schemes[sid]
             explicit=(options.get('payee_ids_by_binding') or {}).get(sid+':'+revision,(options.get('payee_ids_by_revision') or {}).get(revision,options.get('payee_id')))
             payees={mode:self.adapters.payees.resolve(sid,profile_id=entry.get('profile_id'),payee_id=explicit,batch_id=entry.get('batch_id'),mode=mode) for mode in ('single','by_claimant')}
             extensions={scope+':'+owner:self._fields(scope,owner,sid,definition,revision) for scope,owner in [('scheme',sid)]+[('payee',payee['id']) for payee in payees.values() if payee]}
@@ -254,6 +256,23 @@ class ExportPlanner:
             from datetime import date
             date.fromisoformat(context['export']['date'])
         except (ValueError,TypeError):add('INVALID_EXPORT_DATE','导出日期必须为 YYYY-MM-DD。',target='export.date')
+        relevant=None
+        if not generic:
+            # The scope of this output is the same for every entry; evaluate_policy only reads it.
+            relevant=deepcopy(definition)
+            # Only scopes used by selected output block this output; no payee paragraph means no payee fields.
+            references=set(output.get('required_fields') or [])
+            if output['type']=='xlsx':
+                references.update(col.get('source') or col.get('field') or col.get('id') or '' for col in output.get('columns',[]))
+            if template:
+                with zipfile.ZipFile(self.root/template['path']) as archive:
+                    text='\n'.join(archive.read(name).decode('utf-8','ignore') for name in archive.namelist() if name.endswith('.xml'))
+                references.update(f'{f["scope"]}.fields.{f["id"]}' for f in definition.get('fields',[]) if f'.fields.{f["id"]}' in text)
+            if references:
+                selected={**output,'required_fields':sorted(references)}
+                relevant['outputs']=[selected]
+            if output['payee_mode']=='none':
+                relevant['fields']=[field for field in relevant.get('fields',[]) if field['scope']!='payee']
         for entry in context['entries']:
             raw=raw_by_id[entry['id']]
             policy_context={**context,'entry':entry,'invoice':entry['invoice'],'definition':definition}
@@ -274,21 +293,6 @@ class ExportPlanner:
                 for required in output.get('required_fields',[]):
                     if '.fields.' not in required and get_path(policy_context,required) in (None,''):
                         add('OUTPUT_FIELD_REQUIRED','请补充此输出需要的信息。',entry_id=entry['id'],target=required)
-                relevant=deepcopy(definition)
-                # Only scopes used by selected output block this output; no payee paragraph means no payee fields.
-                references=set(output.get('required_fields') or [])
-                if output['type']=='xlsx':
-                    references.update(col.get('source') or col.get('field') or col.get('id') or '' for col in output.get('columns',[]))
-                if template:
-                    from .export_context import extension_defaults
-                    with zipfile.ZipFile(self.root/template['path']) as archive:
-                        text='\n'.join(archive.read(name).decode('utf-8','ignore') for name in archive.namelist() if name.endswith('.xml'))
-                    references.update(f'{f["scope"]}.fields.{f["id"]}' for f in definition.get('fields',[]) if f'.fields.{f["id"]}' in text)
-                if references:
-                    selected={**output,'required_fields':sorted(references)}
-                    relevant['outputs']=[selected]
-                if output['payee_mode']=='none':
-                    relevant['fields']=[field for field in relevant.get('fields',[]) if field['scope']!='payee']
                 for stage in ('complete','export'):
                     for diagnostic in evaluate_policy(relevant,policy_context,counts,stage=stage):
                         diagnostics.append({**diagnostic,'entry_id':entry['id'],'output_id':output['id']})
@@ -313,17 +317,8 @@ class ExportPlanner:
                 suffix=Path(resource['path']).suffix.lower()
                 if suffix not in ('.pdf','.png','.jpg','.jpeg'):
                     add('UNCONVERTIBLE_MATERIAL','此材料不能转换为 PDF，本次跳过；可用附件整理包保留原文件。',entry_id=resource['entry_id'],target=resource['role_id'],resource_path=resource['path'])
-                else:
-                    try:
-                        if suffix=='.pdf':
-                            from pypdf import PdfReader
-                            reader=PdfReader(self.root/resource['path'])
-                            if reader.is_encrypted or not reader.pages:raise ValueError('加密或空 PDF')
-                        else:
-                            from PIL import Image
-                            with Image.open(self.root/resource['path']) as image:image.verify()
-                    except ImportError:pass # external component completes structure validation
-                    except Exception:add('INVALID_MATERIAL','此材料损坏、加密或为空，本次跳过；请核对原文件。',entry_id=resource['entry_id'],target=resource['role_id'],resource_path=resource['path'])
+                elif not self._material_readable(self.root/resource['path'],suffix):
+                    add('INVALID_MATERIAL','此材料损坏、加密或为空，本次跳过；请核对原文件。',entry_id=resource['entry_id'],target=resource['role_id'],resource_path=resource['path'])
         if output['type']=='docx' or output['type']=='pdf_bundle' and self._printable_resources(resources,output,diagnostics):
             from .printing import component_status
             status=component_status(self.data_root.components_dir)
@@ -362,6 +357,38 @@ class ExportPlanner:
             'UNCONVERTIBLE_MATERIAL','INVALID_MATERIAL',
         }
         return [{**item,'severity':'warning'} if item['code'] in reminders and item.get('severity') in ('required','blocked') else item for item in diagnostics]
+
+    def _material_readable(self,path,suffix):
+        """Whether a PDF or image opens; remembered while the file keeps its size and mtime.
+
+        Each change in the export dialog runs a new preview over the same materials, and
+        parsing every PDF again took a large share of that time.
+        """
+        try:
+            stat=path.stat()
+        except OSError:
+            return False
+        key=(str(path),stat.st_size,stat.st_mtime_ns)
+        cached=self._readable.get(key)
+        if cached is not None:
+            return cached
+        try:
+            if suffix=='.pdf':
+                from pypdf import PdfReader
+                reader=PdfReader(path)
+                if reader.is_encrypted or not reader.pages:raise ValueError('加密或空 PDF')
+            else:
+                from PIL import Image
+                with Image.open(path) as image:image.verify()
+            readable=True
+        except ImportError:
+            return True # external component completes structure validation
+        except Exception:
+            readable=False
+        with self._lock:
+            if len(self._readable)>=20000:self._readable.clear()
+            self._readable[key]=readable
+        return readable
 
     def _printable_resources(self, resources, output, diagnostics):
         if output['type'] != 'pdf_bundle':

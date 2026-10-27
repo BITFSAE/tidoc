@@ -152,17 +152,15 @@ def _eval(expr, context, allowed, depth=1, counter=None, catalog=None):
 def evaluate_condition(condition: dict, context: dict, stage='complete', definition: dict | None = None) -> bool | None:
     """Evaluate a public rule condition as True, False, or None (undetermined)."""
     allowed = RULE_COMPLETE_FIELDS if stage == 'complete' else RULE_EXPORT_FIELDS
+    catalog = field_catalog(definition or context.get('definition', {}))
     if stage == 'export':
         allowed = allowed | frozenset(
-            key for key in field_catalog(definition or context.get('definition', {}))
+            key for key in catalog
             if key.startswith(('entry.fields.', 'batch.fields.', 'payee.fields.', 'export.fields.', 'scheme.fields.'))
         )
     else:
-        allowed = allowed | frozenset(
-            key for key in field_catalog(definition or context.get('definition', {}))
-            if key.startswith('entry.fields.')
-        )
-    return _eval(condition, context, allowed, catalog=field_catalog(definition or context.get('definition', {})))
+        allowed = allowed | frozenset(key for key in catalog if key.startswith('entry.fields.'))
+    return _eval(condition, context, allowed, catalog=catalog)
 
 
 def evaluate_policy(definition: dict, context: dict, material_counts: dict, stage='complete') -> list[dict]:
@@ -224,11 +222,12 @@ def evaluate_policy(definition: dict, context: dict, material_counts: dict, stag
     extra_prefixes = ('entry.fields.',) if stage == 'complete' else (
         'entry.fields.', 'batch.fields.', 'payee.fields.', 'export.fields.', 'scheme.fields.'
     )
-    allowed = allowed | frozenset(k for k in field_catalog(definition) if k.startswith(extra_prefixes))
+    catalog = field_catalog(definition)
+    allowed = allowed | frozenset(k for k in catalog if k.startswith(extra_prefixes))
     for rule in definition.get('rules', []):
         if rule.get('stage') != stage:
             continue
-        verdict = _eval(rule.get('when', {}), context, allowed, catalog=field_catalog(definition))
+        verdict = _eval(rule.get('when', {}), context, allowed, catalog=catalog)
         if verdict is False:
             continue
         rule_id = rule['id']

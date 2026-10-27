@@ -1,6 +1,6 @@
 """Compatibility summary built from the same decimal-safe output projection."""
 from __future__ import annotations
-from .export_context import project_entry, exact_sum, decimal_value, title_key
+from .export_context import project_entry, exact_sum, decimal_value
 
 SUMMARY_VERSION = 1
 

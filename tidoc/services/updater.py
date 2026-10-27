@@ -1058,11 +1058,6 @@ def install_component(
     )
 
 
-def print_component_executable(components_dir: str | Path, plat: str | None = None) -> Path | None:
-    info = installed_component_info(components_dir, COMPONENT_PRINT, plat)
-    return Path(info["executable"]) if info["valid"] else None
-
-
 def _component_root(components_dir: str | Path, component: str, plat: str | None = None) -> Path:
     return Path(components_dir) / component / (plat or current_platform())
 

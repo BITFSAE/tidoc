@@ -6,7 +6,6 @@ import json
 import shutil
 import sys
 import tempfile
-import hashlib
 import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path

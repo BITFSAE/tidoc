@@ -8,7 +8,7 @@
 - icon/windows/icon.ico           Windows 应用与 .tidoc 文件图标（16-256）
 - icon/macos/icon-1024.png         1024×1024，完整方形 macOS 图标
 - icon/macos/icon.icns             macOS 应用与 .tidoc 文件图标（16-1024）
-- tidoc/web/assets/                Web 界面用 512、128、32 像素 PNG
+- tidoc/web/assets/                Web 界面用 128、32 像素 PNG
 
 源图要求：正方形、含背景（不透明）。Windows 由素材自己带透明圆角，
 macOS 保留完整方形交给系统裁切；缩放统一用 LANCZOS。
@@ -68,7 +68,6 @@ def main() -> None:
 
     master = resize(img, MASTER_SIZE)
     master.save(source_dir / "icon-master.png")
-    master.save(WEB_ASSETS_DIR / "tidoc-logo.png")
     resize(master, 128).save(WEB_ASSETS_DIR / "tidoc-logo-128.png")
     resize(master, 32).save(WEB_ASSETS_DIR / "favicon.png")
 

@@ -1,7 +1,6 @@
 """Restricted docxtpl rendering; templates never receive live Python objects."""
 from __future__ import annotations
 
-import json
 from datetime import date as Date
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from pathlib import Path

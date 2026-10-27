@@ -79,12 +79,6 @@ def _row_to_dict(row) -> dict:
     return {k: row[k] for k in row.keys()} if row else {}
 
 
-def paid_amount_differs(total, paid_amount) -> bool:
-    """“已修改”只表示实付金额存在且与发票总金额不一致。"""
-    paid_text = str(paid_amount or "").strip()
-    return bool(paid_text) and money(d(paid_text)) != money(d(total))
-
-
 class EntryRepo:
     def __init__(self, db: Database):
         self.db = db

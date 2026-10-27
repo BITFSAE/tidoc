@@ -65,9 +65,7 @@ const Api = (() => {
     copyScheme: (id,name) => call('copy_scheme',id,name),
     disableScheme: (id) => call('disable_scheme',id),
     enableScheme: (id) => call('enable_scheme',id),
-    updateSchemeSettings: (id,revision,values,clear=null) => call('update_scheme_settings',id,revision,values,clear),
     updateScheme: (id,revision,changes) => call('update_scheme',id,revision,changes||{}),
-    restoreSchemeDefaults: (id,revision,keys=null) => call('restore_scheme_defaults',id,revision,keys),
     rollbackScheme: (id,revision,expected) => call('rollback_scheme',id,revision,expected),
     exportAdapter: (id,options) => call('export_adapter',id,options||{}),
     getFormDescription: (scope,id,scheme=null,revision=null) => call('get_form_description',scope,id,scheme,revision),
@@ -90,7 +88,6 @@ const Api = (() => {
     getExportJob: (id) => call('get_export_job',id),
     getExportProgress: (id) => call('get_export_progress',id),
     regenerateExport: (id) => call('regenerate_export',id),
-    deleteExportJob: (id,files=false) => call('delete_export_job',id,files),
     reclassifyAttachment: (id,role,paymentAiJobId=null) => call('reclassify_attachment',id,role,'',paymentAiJobId),
 
     paymentAiSettings: () => call('payment_ai_settings'),

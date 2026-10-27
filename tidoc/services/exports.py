@@ -6,7 +6,6 @@ import json
 import os
 import tempfile
 import zipfile
-from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from xml.sax.saxutils import escape
 

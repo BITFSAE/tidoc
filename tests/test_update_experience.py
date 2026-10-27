@@ -2,11 +2,10 @@ import json
 
 from tidoc import __version__
 from tidoc.api import (
-    APP_LAST_SEEN_VERSION_KEY,
-    AUTO_UPDATE_INTERVAL_SECONDS,
     AUTO_UPDATE_PREF_KEY,
     Api,
 )
+from tidoc.api_shared import APP_LAST_SEEN_VERSION_KEY, AUTO_UPDATE_INTERVAL_SECONDS
 from tidoc.services.updater import current_platform, sha256_file
 
 

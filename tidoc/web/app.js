@@ -2460,7 +2460,7 @@ async function changeSelectionProfile(idsArg, selectedProfileId = '') {
           }
           await refreshEntries();
           await loadBatches();
-          toast(result.changed ? `已修改 ${result.changed} 位报账人` : '所选条目已经属于该报账人', 'ok');
+          toast(result.changed ? `已修改 ${result.changed} 个条目的报账人` : '所选条目已经属于该报账人', 'ok');
         } catch (e) { toast(e.message, 'err'); }
       }),
     ],

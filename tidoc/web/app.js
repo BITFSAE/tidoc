@@ -2131,11 +2131,11 @@ async function deleteBatchFlow(batchSummary) {
   body.innerHTML = `
     <div class="batch-delete-copy">
       <b>${esc(batch.name)}</b>
-      <p>${count ? `${count} 个条目会移到「未进批次」，条目及其附件会保留。` : '这个批次中没有条目。'}</p>
+      <p>${count ? `${count} 个条目会移到「未进批次」，条目及其材料会保留。` : '这个批次中没有条目。'}</p>
     </div>
     ${count ? `<label class="batch-delete-option">
       <input type="checkbox" name="batchDeleteEntries"/>
-      <span><b>同时永久删除条目</b><small>将删除 ${count} 个条目及其全部附件，此操作不可恢复。</small></span>
+      <span><b>同时永久删除条目</b><small>将删除 ${count} 个条目及其全部材料，此操作不可恢复。</small></span>
     </label>` : ''}`;
   const deleteBtn = mkBtn('删除批次', 'danger', async () => {
     const deleteEntries = !!body.querySelector('[name="batchDeleteEntries"]:checked');
@@ -4351,9 +4351,9 @@ function openUsageGuide(firstRun) {
 // 新建条目弹窗里的材料卡：付款截图、实物图、查验单，按方案定义取舍和排序。
 const ENTRY_ROLE_KEYS = { payment_screenshot: 'payment', physical_image: 'physical', inspection_pdf: 'inspection' };
 const ENTRY_ROLE_HINTS = {
-  payment_screenshot: (role) => `可多张 · ${role.min_count > 0 ? '必需' : '浅色背景'}`,
-  physical_image: (role) => `可多张 · ${role.min_count > 0 ? '必需' : '可选'}`,
-  inspection_pdf: (role) => role.min_count > 0 ? '必需' : '可选',
+  payment_screenshot: (role) => `可多张 · ${(role.min_count || 0) > 0 ? '必需' : '浅色背景'}`,
+  physical_image: (role) => `可多张 · ${(role.min_count || 0) > 0 ? '必需' : '可选'}`,
+  inspection_pdf: (role) => (role.min_count || 0) > 0 ? '必需' : '可选',
 };
 const ENTRY_ROLE_DEFAULTS = [
   { id: 'payment_screenshot', label: '付款截图', order: 1 },
@@ -4363,8 +4363,9 @@ const ENTRY_ROLE_DEFAULTS = [
 
 function entryMaterialRoles(definition) {
   if (!definition) return ENTRY_ROLE_DEFAULTS;
+  const declared = Array.isArray(definition.declared_materials) ? new Set(definition.declared_materials) : null;
   return (definition.materials || [])
-    .filter((role) => ENTRY_ROLE_KEYS[role.id] && role.presentation !== 'hidden')
+    .filter((role) => ENTRY_ROLE_KEYS[role.id] && role.presentation !== 'hidden' && (!declared || declared.has(role.id) || (role.min_count || 0) > 0))
     .sort((a, b) => (a.order || 0) - (b.order || 0));
 }
 
@@ -4866,7 +4867,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   // 旧数据没有方案时回退到内置四类。
   const atts = e.attachments || [];
   const roles = (e.material_roles || []).slice().sort((a, b) => (a.order || 0) - (b.order || 0));
-  const requiredRoleIds = new Set(roles.filter((role) => role.min_count > 0).map((role) => role.id));
+  const requiredRoleIds = new Set(roles.filter((role) => (role.min_count || 0) > 0).map((role) => role.id));
   (e.diagnostics || []).forEach((d) => {
     if (['MATERIAL_REQUIRED', 'RULE_MATERIAL_REQUIRED'].includes(d.code)) requiredRoleIds.add(d.target);
   });
@@ -4884,7 +4885,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
             : `<select class="attach-type-select" data-att-type="${a.id}">
                 ${ATTACHMENT_TYPE_OPTS.map(([v, l]) => `<option value="${v}"${v === a.type ? ' selected' : ''}>${l}</option>`).join('')}
               </select>`}
-          <input class="attach-note" data-att-note="${a.id}" value="${esc(a.note || '')}" placeholder="附件备注"/>
+          <input class="attach-note" data-att-note="${a.id}" value="${esc(a.note || '')}" placeholder="材料备注"/>
           <button class="btn small ghost" data-open-att="${a.id}">打开</button>
           <button class="btn small ghost" data-reveal-att="${a.id}">位置</button>
           <button class="btn small ghost" data-replace-att="${a.id}">替换</button>
@@ -5261,7 +5262,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
         if (!path) return;
         const jobId = type === 'payment_screenshot' ? await PaymentAiUI.prepare([path]) : null;
         const result = await Api.updateAttachment(att.id, { src_path: path, type, payment_ai_job_id: jobId });
-        toast(result.cleanup_warning || '附件已替换', result.cleanup_warning ? 'err' : 'ok');
+        toast(result.cleanup_warning || '材料已替换', result.cleanup_warning ? 'err' : 'ok');
         await reopenEntryDetail(mm, entryId, { affectsStatus: true });
       } catch (err) { toast(err.message, 'err'); }
     };
@@ -5274,7 +5275,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
         const result = await Api.updateAttachment(sel.dataset.attType, { type: sel.value, payment_ai_job_id: jobId });
         const reset = result.paid_amount_reset;
         toast(
-          reset?.reset ? `附件类型已更新，实付已恢复为 ${fmtMoney(reset.value)}` : '附件类型已更新',
+          reset?.reset ? `材料类型已更新，实付已恢复为 ${fmtMoney(reset.value)}` : '材料类型已更新',
           'ok',
         );
         await reopenEntryDetail(mm, entryId, { affectsStatus: true });
@@ -5283,7 +5284,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   });
   body.querySelectorAll('[data-att-note]').forEach((inp) => {
     inp.onchange = async () => {
-      try { await Api.updateAttachment(inp.dataset.attNote, { note: inp.value }); toast('附件备注已保存', 'ok'); }
+      try { await Api.updateAttachment(inp.dataset.attNote, { note: inp.value }); toast('材料备注已保存', 'ok'); }
       catch (err) { toast(err.message, 'err'); }
     };
   });
@@ -5332,7 +5333,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
     },
     footer: [
       mkBtn('删除条目', 'danger', async () => {
-        if (!confirm('确认删除该条目及其附件？此操作不可撤销。')) return;
+        if (!confirm('确认删除该条目及其材料？此操作不可撤销。')) return;
         try {
           const result = await Api.deleteEntry(entryId);
           mm.close();
@@ -6002,13 +6003,13 @@ function attachTypeLabel(t) {
 async function addAttachmentFlow(entryId, parentModal, presetType) {
   const body = el('div');
   body.innerHTML = `
-    <div class="form-row"><label>附件类型</label>
+    <div class="form-row"><label>材料类型</label>
       <select id="atType">
         ${ATTACHMENT_TYPE_OPTS.map(([v, l]) => `<option value="${v}"${v === presetType ? ' selected' : ''}>${l}</option>`).join('')}
       </select>
     </div>`;
   const m = modal({
-    title: '添加附件', body,
+    title: '添加材料', body,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
       mkBtn('选择文件并添加', 'primary', async () => {
@@ -6020,17 +6021,17 @@ async function addAttachmentFlow(entryId, parentModal, presetType) {
           if (!paths.length) return;
           progress = taskProgress(type === 'payment_screenshot'
             ? (State.paymentAiEnabled ? '正在识别付款截图金额…' : '正在添加付款截图…')
-            : '正在校验并添加附件…');
+            : '正在校验并添加材料…');
           if (type === 'payment_screenshot') {
             const infos = (await materialInfosForPaths(paths, progress)).map((info) => ({ ...info, type }));
             progress.update('正在添加截图并处理实付金额…');
             const result = await addMaterialInfosToEntry(entryId, infos);
             m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
-            toast(result.message || '附件已添加', 'ok');
+            toast(result.message || '材料已添加', 'ok');
           } else {
             for (const p of paths) await Api.addAttachment(entryId, p, type);
             m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
-            toast('附件已添加', 'ok');
+            toast('材料已添加', 'ok');
           }
         } catch (err) { toast(err.message, 'err'); }
         finally { progress?.close(); }
@@ -6075,9 +6076,9 @@ async function doExport(ids) {
   const body = el('div');
   const defaultName = exportDefaultName(ids);
   const formats = [
-    {id: 'bindle', label: '绑定包', suffix: '.tidoc', tail: '-绑定包', help: '包含条目、附件和报账人；备注与标签按设置导出。'},
+    {id: 'bindle', label: '绑定包', suffix: '.tidoc', tail: '-绑定包', help: '包含条目、材料和报账人；备注与标签按设置导出。'},
     {id: 'excel', label: '总览 Excel', suffix: '.xlsx', tail: '-总览', help: '核对条数、金额、材料状态和备注。'},
-    {id: 'archive', label: '规范命名附件包', suffix: '.zip', tail: '-附件', help: '按条目分文件夹整理附件并压缩。'},
+    {id: 'archive', label: '规范命名附件包', suffix: '.zip', tail: '-附件', help: '按条目分文件夹整理材料并压缩。'},
   ];
   body.innerHTML = `
     <div class="export-options">
@@ -6122,7 +6123,7 @@ async function doExport(ids) {
             outputs.push(await Api.exportOverviewExcel(ids, body.querySelector('[data-export-name="excel"]').value.trim()));
           }
           if (chosen.includes('archive')) {
-            progress.update('正在整理并压缩附件…');
+            progress.update('正在整理并压缩材料…');
             outputs.push(await Api.exportAttachmentArchive(ids, body.querySelector('[data-export-name="archive"]').value.trim()));
           }
           m.close();
@@ -6690,7 +6691,7 @@ async function batchReparse(entryIds, fromNotice = false) {
   });
   const m = modal({
     title: '重新识别发票',
-    subhead: fromNotice ? `当前列表中 ${ids.length} 张发票可更新` : `已选择 ${ids.length} 条`,
+    subhead: fromNotice ? `当前列表中 ${ids.length} 张发票可更新` : `已选择 ${ids.length} 张发票`,
     body,
     footer: [mkBtn('取消', 'ghost', () => m.close()), runBtn],
   });

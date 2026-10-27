@@ -52,6 +52,16 @@ SHIM = """<script>(function () {
       open();
     });
   }
+  if (query.get("dialog") === "detail") {
+    window.addEventListener("load", function () {
+      function open() {
+        var cards = document.querySelectorAll(".entry-card");
+        if (!cards.length) return setTimeout(open, 100);
+        openEntryDetail(cards[0].dataset.entryId);
+      }
+      open();
+    });
+  }
   // 付款截图 AI 设置：打开设置和开发者选项，把这一小节单独摆在深色底上，裁剪时只留下它。
   if (query.get("dialog") === "payment-ai") {
     window.addEventListener("load", function () {

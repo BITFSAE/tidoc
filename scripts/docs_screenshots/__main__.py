@@ -10,6 +10,7 @@ tidoc/web 前端接到真实的 Api 上，再用无界面的 Chrome 或 Edge 按
 产物（--out 目录下）：
 - main-overview.png / main-overview-dark.png   主界面，浅色与深色，1800×1293
 - hero-cards.png / hero-cards-dark.png         首页右上角三张卡片，849×627，四角透明
+- detail.png                                 条目详情，裁去周围的主界面
 - print-dialog.png                           打印窗口，裁去周围的主界面
 
 依赖：本机装有 Chrome 或 Edge，Python 里装有 Pillow（requirements-dev.txt）。浏览器路径也可以用
@@ -58,6 +59,8 @@ class Shot:
     def window(self) -> tuple[int, int]:
         if self.sprite:
             return SPRITE_WINDOW
+        if self.dialog == "detail":
+            return (1200, 1700)
         return (1200, 1400) if self.dialog else WINDOW
 
     @property
@@ -70,6 +73,7 @@ SHOTS = [
     Shot("main-overview-dark", "dark"),
     Shot("hero-cards", "light", sprite=True),
     Shot("hero-cards-dark", "dark", sprite=True),
+    Shot("detail", "light", dialog="detail"),
     Shot("print-dialog", "light", dialog="print"),
     Shot("print-options", "light", dialog="print-options"),
     Shot("payment-ai-settings", "light", dialog="payment-ai"),
@@ -89,7 +93,7 @@ def capture(chrome: str, url: str, shot: Shot, target: Path, env: dict[str, str]
     command = [
         chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
         "--use-mock-keychain", f"--force-device-scale-factor={SCALE}",
-        f"--window-size={width},{height}", "--virtual-time-budget=8000",
+        f"--window-size={width},{height}", f"--virtual-time-budget={15000 if shot.dialog == 'detail' else 8000}",
         f"--screenshot={target}", url + shot.query,
     ]
     if shot.sprite:

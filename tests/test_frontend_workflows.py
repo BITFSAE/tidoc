@@ -223,6 +223,17 @@ const scheme = {materials: [
 // 只保留新建条目能直接添加的三类材料，隐藏的角色不出现，顺序按方案。
 assert.deepEqual(entryMaterialRoles(scheme).map((role) => role.id),
   ['inspection_pdf', 'physical_image']);
+// 方案没有声明的内置角色（协议仍会注入）不显示；必需的角色即使没写声明也保留。
+const injected = {declared_materials: ['invoice'], materials: [
+  material('invoice', '发票', 0),
+  material('payment_screenshot', '付款截图', 1),
+  material('physical_image', '实物图', 2),
+  material('inspection_pdf', '查验单', 3),
+]};
+assert.deepEqual(entryMaterialRoles(injected).map((role) => role.id), []);
+const required = {...injected, materials: injected.materials.map((role) =>
+  role.id === 'inspection_pdf' ? {...role, min_count: 1} : role)};
+assert.deepEqual(entryMaterialRoles(required).map((role) => role.id), ['inspection_pdf']);
 assert.deepEqual(entryMaterialRoles({materials: []}).map((role) => role.id), []);
 // 没有方案定义时退回默认的三项（旧条目和未绑定方案仍能建条目）。
 assert.deepEqual(entryMaterialRoles(null).map((role) => role.id),

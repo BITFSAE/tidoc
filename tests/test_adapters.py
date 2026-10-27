@@ -364,3 +364,11 @@ def test_rebase_of_the_real_bitfsae_packages_only_follows_roles_the_user_left_al
     assert minimums(AdapterService._rebase_overrides(old, new, {'materials': _roles(old['materials'], physical_image=1)}))['inspection_pdf'] == 0
     # 局限：保存过材料要求、且查验单仍是旧默认「必需」的覆盖，和「没动过」无法区分，也跟随新默认。
     assert minimums(AdapterService._rebase_overrides(old, new, {'materials': _roles(old['materials'], inspection_pdf=1)}))['inspection_pdf'] == 0
+
+
+def test_declared_materials_only_cover_roles_the_package_configures():
+    # 协议会为所有方案注入内置材料；界面只应展示方案真正声明的角色。
+    minimal = load_package(ROOT / 'examples' / 'adapters' / 'minimal')
+    assert minimal.definition['declared_materials'] == ['invoice']
+    injected = {role['id'] for role in minimal.definition['materials']}
+    assert {'invoice', 'payment_screenshot', 'physical_image', 'inspection_pdf'} <= injected

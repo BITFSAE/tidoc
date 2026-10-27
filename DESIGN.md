@@ -128,6 +128,7 @@ tidoc App
 ### Attachment（附件）
 - `type`：`invoice_pdf` / `invoice_xml` / `payment_screenshot` / `physical_image` / `inspection_pdf` / `other`
 - `role_id`：方案材料角色。自定义角色继续使用 `type=other`，来源角色另保存定义修订。
+- 内置角色始终参与规则校验；`materials.json` 实际声明或设为必需的角色才生成新建条目入口和材料要求，未声明的注入角色只用于兼容旧附件。
 - `original_name`、`stored_path`、`sha256`、`added_at`
 - 付款截图可多张；附件可写附件备注
 

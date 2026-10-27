@@ -111,7 +111,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
       <div class="bindle-import-meta">
         <span><b>${entries.length}</b> 条目</span>
         <span><b>${packageProfiles.length}</b> 报账人</span>
-        <span><b>${attachmentCount}</b> 附件</span>
+        <span><b>${attachmentCount}</b> 份材料</span>
       </div>
     </div>
     ${insp.verified ? '' : `<div class="bindle-integrity-warning">
@@ -447,7 +447,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
       intoArchived && ['warn', `${intoArchived} 条将进入已归档批次，不在「在办」列表显示，到「已归档」里查看。`],
       withoutBatch && ['warn', `${withoutBatch} 条将留在「未进批次」。`],
       individual && ['', `${individual} 条按逐条设置的批次导入。`],
-      keepPlace && ['', `${keepPlace} 条已有且无变化，留在原批次。`],
+      keepPlace && ['', `${keepPlace} 个条目已有且无变化，留在原批次。`],
     ].filter(Boolean);
     reviewBox.innerHTML = `
       <div class="bindle-review-head"><b>导入前请核对</b><span>将导入 ${rows.length} 条${actionText ? `（${esc(actionText)}）` : ''}。框出的报账人和导入设置会作用到这些条目，导入后要逐条改回。</span></div>
@@ -476,7 +476,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
         if (!collected) return;
         if (!reviewing) { startReview(); return; }
         const { tampered, options } = collected;
-        const progress = taskProgress('正在导入条目和附件…');
+        const progress = taskProgress('正在导入条目和材料…');
         try {
           const r = await Api.importBindle(path, State.currentProfileId, !!tampered, options);
           progress.update('正在刷新条目列表…');

@@ -436,7 +436,8 @@ const AdapterUI = (() => {
   function requirementRows(scheme, onChange) {
     const current = scheme.requirements || {};
     const baseline = scheme.requirements_baseline || {};
-    const hidden = new Set((scheme.definition.materials || []).filter((role) => role.presentation === 'hidden').map((role) => role.id));
+    const declared = Array.isArray(scheme.definition.declared_materials) ? new Set(scheme.definition.declared_materials) : null;
+    const hidden = new Set((scheme.definition.materials || []).filter((role) => role.presentation === 'hidden' || (declared && !declared.has(role.id) && !((role.min_count || 0) > 0))).map((role) => role.id));
     return REQUIREMENT_ROWS.filter(([key]) => key in current && !hidden.has(key)).map(([key, label, help]) => buildRow({
       key: REQUIREMENT_PREFIX + key, locked: false, onChange, label, help,
       baseline: baseline[key] === true,
@@ -450,8 +451,8 @@ const AdapterUI = (() => {
     const rows = [['invoice', '发票', '发票 PDF 或 XML；始终必需。', '必需']];
     for (const role of scheme.definition.materials || []) {
       if (role.presentation === 'hidden') continue;
-      if (builtin.includes(role.id) || role.id === 'other' && !(role.min_count > 0)) continue;
-      const need = role.min_count > 0 ? `必需，至少 ${role.min_count} 份` : '可选';
+      if (builtin.includes(role.id) || role.id === 'other' && !((role.min_count || 0) > 0)) continue;
+      const need = (role.min_count || 0) > 0 ? `必需，至少 ${role.min_count} 份` : '可选';
       rows.push([role.id, role.label, '由方案规定，不能在这里修改。', need + (role.max_count != null ? `，最多 ${role.max_count} 份` : '')]);
     }
     return rows.map(([, label, help, state]) => {
@@ -794,7 +795,7 @@ const AdapterUI = (() => {
     m=modal({title:'历史版本',key:'scheme-history',body,footer:[mkBtn('完成','primary',()=>m.close())]});
   }
   async function rebind(ids) {
-    await refresh();const entries=await Promise.all(ids.map(id=>Api.getEntry(id)));const body=el('div');body.innerHTML='<p class="hint">预览规则变化。发票原始信息及附件保留。</p><label class="form-row">目标方案<select data-rebind-scheme>'+schemes.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')+'</select></label><details class="schema-advanced"><summary>字段和材料对应关系</summary><div data-rebind-mappings></div></details><div data-rebind-preview></div>';let plan=null,m,formVersion=0,mappingRequest=0,mappingLoading=false;
+    await refresh();const entries=await Promise.all(ids.map(id=>Api.getEntry(id)));const body=el('div');body.innerHTML='<p class="hint">预览规则变化。发票原始信息及材料保留。</p><label class="form-row">目标方案<select data-rebind-scheme>'+schemes.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')+'</select></label><details class="schema-advanced"><summary>字段和材料对应关系</summary><div data-rebind-mappings></div></details><div data-rebind-preview></div>';let plan=null,m,formVersion=0,mappingRequest=0,mappingLoading=false;
     const redrawMappings=async()=>{
       const request=++mappingRequest;const schemeId=$('[data-rebind-scheme]',body).value;
       formVersion++;plan=null;submit.disabled=true;mappingLoading=true;preview.disabled=true;

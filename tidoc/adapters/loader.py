@@ -384,7 +384,10 @@ def load_package(path, *, verify_templates=True) -> AdapterPackage:
         configured=next((role for role in material_overrides if role.get('id')==role_id),None)
         materials.append({**base_role,**(configured or {})})
     materials.extend(role for role in material_overrides if role.get('id') not in BUILTIN_ROLES)
-    definition={'manifest':parsed['manifest.json'],'scheme':parsed['scheme.json'],'fields':arr('fields.json','fields'),'materials':materials,'rules':arr('rules.json','rules'),'outputs':arr('outputs.json','outputs'),'effective_settings':{}}
+    # The UI only offers roles the package actually configured. Injected built-ins stay
+    # available to policies and for old attachments, but do not add empty entry fields.
+    declared_materials=sorted({role.get('id') for role in material_overrides if role.get('id')} | {'invoice'})
+    definition={'manifest':parsed['manifest.json'],'scheme':parsed['scheme.json'],'fields':arr('fields.json','fields'),'materials':materials,'declared_materials':declared_materials,'rules':arr('rules.json','rules'),'outputs':arr('outputs.json','outputs'),'effective_settings':{}}
     diagnostics.extend(_domain_validate(definition,files))
     if verify_templates:
         for output in definition['outputs']:

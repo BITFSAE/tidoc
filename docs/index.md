@@ -45,7 +45,7 @@ markdownStyles: false
 <a class="feature" href="/guide/organize.html">
 <span class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m10 13 2 2 4-4"/></svg></span>
 <h2 class="feature-title">批次管理与交接</h2>
-<p class="feature-text">按报账批次、报账人和标签多维度筛选。条目连同附件可导出为绑定包，方便在不同电脑间协作交接。</p>
+<p class="feature-text">按报账批次、报账人和标签多维度筛选。条目连同材料可导出为绑定包，方便在不同电脑间协作交接。</p>
 <span class="feature-more">批次与筛选 <span class="vpi-arrow-right"></span></span>
 </a>
 <a class="feature" href="/guide/export.html">
@@ -138,7 +138,7 @@ markdownStyles: false
 <span class="step-num">05</span>
 <span class="step-body">
 <span class="step-name">归入批次并导出</span>
-<span class="step-text">建立报账批次归纳条目，生成报销总表 Excel、附件包与 Word 打印件。</span>
+<span class="step-text">建立报账批次归纳条目，生成报销总表 Excel、附件整理包与 Word 打印件。</span>
 <span class="step-more">导出打印 <span class="vpi-arrow-right"></span></span>
 </span>
 </a>

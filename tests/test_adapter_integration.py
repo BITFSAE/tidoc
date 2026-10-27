@@ -283,3 +283,21 @@ def test_update_scheme_clears_default_title_when_that_title_is_removed(tmp_path)
     stale=api.update_scheme(second['id'],second['current_revision_id'],{'settings':{'print.numbering':False}})
     assert stale['ok'] is False
     api.db.close()
+
+
+def test_entry_material_roles_hide_injected_roles_the_package_does_not_declare(tmp_path):
+    api=setup_api(tmp_path/'data')
+    source=Path(__file__).resolve().parents[1]/'examples/adapters/minimal'
+    preview=api.inspect_adapter(str(source))
+    assert preview['ok'],preview
+    scheme=api.install_adapter((preview.get('data') or preview)['preview_id'])['data']
+    api.set_default_scheme(scheme['id'])
+    claimant=api.create_profile('虚构人员','')['data']
+    entry=api.create_entry(claimant['id'])['data']
+    roles={role['id'] for role in api.entries.get(entry['id'])['material_roles']}
+    listed={item['id']:item for item in api.entries.list()}[entry['id']]
+    assert roles=={'invoice'}
+    assert {role['id'] for role in listed['material_roles']}=={'invoice'}
+    details=api.scheme_details(scheme['id'])['data']
+    assert details['definition']['declared_materials']==['invoice']
+    api.db.close()

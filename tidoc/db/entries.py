@@ -250,11 +250,22 @@ class EntryRepo:
         from ..engine.models import RecognitionContext
         return RecognitionContext(self.policy_context(entry_id).titles)
 
+    @staticmethod
+    def _material_roles(definition):
+        declared = definition.get("declared_materials")
+        if not isinstance(declared, list):
+            return definition.get("materials", [])
+        declared = set(declared)
+        return [
+            role for role in definition.get("materials", [])
+            if role.get("id") == "invoice" or role.get("id") in declared or (role.get("min_count") or 0) > 0
+        ]
+
     def _decorate_policy(self, entry):
         definition = self._definition(entry.get("scheme_revision_id"))
         row = self.db.conn.execute("SELECT name FROM schemes WHERE id=?", (entry.get("scheme_id"),)).fetchone()
         entry["adapter"] = {"scheme_name": row[0] if row else "", "revision_id": entry["scheme_revision_id"], "definition": definition}
-        entry["material_roles"] = definition.get("materials", [])
+        entry["material_roles"] = self._material_roles(definition)
         entry["verification_visible"] = definition.get("effective_settings", {}).get("assist.verification_visible", True)
         entry["diagnostics"] = entry["completeness"].get("diagnostics", [])
         entry["extension_history"] = [dict(r) for r in self.db.conn.execute("SELECT * FROM extension_history WHERE scope='entry' AND owner_id=? ORDER BY id", (entry["id"],))]
@@ -552,7 +563,7 @@ class EntryRepo:
             entry["completeness"] = self._completeness(entry, ef)
             entry['diagnostics']=entry['completeness'].get('diagnostics',[])
             if definition:
-                entry["material_roles"] = definition.get("materials",[])
+                entry["material_roles"] = self._material_roles(definition)
                 entry["verification_visible"] = definition.get("effective_settings",{}).get("assist.verification_visible",True)
                 entry["diagnostics"] = entry["completeness"].get("diagnostics",[])
                 matches = [t for t in definition.get("scheme",{}).get("titles",[]) if t.get("id") == entry.get("title_profile_id")]

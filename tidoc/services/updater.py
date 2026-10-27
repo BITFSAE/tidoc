@@ -304,14 +304,18 @@ def load_update_manifest(channel: str = CHANNEL_STABLE, timeout: int = 12) -> di
     退回稳定版清单，不影响更新。"""
     if channel != CHANNEL_BETA:
         return load_manifest(MANIFEST_URL, timeout)
+    # 两份清单同时读取，网络慢时等待时间不叠加。
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="tidoc-manifest") as pool:
+        stable_job = pool.submit(load_manifest, MANIFEST_URL, timeout)
+        beta_job = pool.submit(load_manifest, BETA_MANIFEST_URL, timeout)
     stable: dict[str, Any] | None
     stable_error: RuntimeError | None = None
     try:
-        stable = load_manifest(MANIFEST_URL, timeout)
+        stable = stable_job.result()
     except RuntimeError as exc:
         stable, stable_error = None, exc
     try:
-        beta: dict[str, Any] | None = load_manifest(BETA_MANIFEST_URL, timeout)
+        beta: dict[str, Any] | None = beta_job.result()
     except RuntimeError:
         beta = None
     if beta is None and stable is None:
@@ -482,21 +486,14 @@ def check_updates(
             # 也在更新页显示一行，避免用户看不到入口。
             asset = {}
             manifest_missing = True
+        latest = asset.get("version") or ""
         if name == COMPONENT_CORE:
             current = CORE_VERSION
-            component_info: dict[str, Any] = {}
+            available = bool(latest and version_gt(latest, current))
+            component_state: dict[str, Any] = {"current_version": current}
         else:
-            component_info = installed_component_info(components_dir, name, plat)
-            current = component_info["version"] if component_info["valid"] else ""
-        latest = asset.get("version") or ""
-        available = bool(
-            latest
-            and (
-                not current
-                or version_gt(latest, current)
-                or component_info.get("needs_repair", False)
-            )
-        )
+            component_state = component_update_state(components_dir, name, latest, plat)
+            available = component_state["available"]
         downloaded: dict[str, Any] = {}
         if name == COMPONENT_CORE and updates_dir is not None:
             candidate = downloaded_core_update_info(updates_dir, plat)
@@ -508,12 +505,12 @@ def check_updates(
                 "OCR 识别组件" if name == COMPONENT_OCR
                 else "打印导出组件" if name == COMPONENT_PRINT else name
             ),
-            "current_version": component_info.get("version", current),
+            "installed_valid": True,
+            "needs_repair": False,
+            "install_issue": "",
+            **component_state,
             "latest_version": latest,
             "available": available,
-            "installed_valid": component_info.get("valid", True),
-            "needs_repair": component_info.get("needs_repair", False),
-            "install_issue": component_info.get("issue", ""),
             "manifest_missing": manifest_missing,
             "downloaded": bool(downloaded),
             "downloaded_path": downloaded.get("file_path", ""),
@@ -521,6 +518,30 @@ def check_updates(
             "asset": asset,
         })
     return result
+
+
+def component_update_state(
+    components_dir: str | Path,
+    component: str,
+    latest: str,
+    plat: str | None = None,
+) -> dict[str, Any]:
+    """本机安装状态与清单版本比较的结果；只读本地文件，不联网。
+
+    检查更新和显示上次检查结果共用它，组件装好或被删掉后，旧结果也能立即反映本机状态。
+    """
+    info = installed_component_info(components_dir, component, plat)
+    current = info["version"] if info["valid"] else ""
+    return {
+        "current_version": info.get("version", current),
+        "available": bool(
+            latest
+            and (not current or version_gt(latest, current) or info.get("needs_repair", False))
+        ),
+        "installed_valid": info.get("valid", True),
+        "needs_repair": info.get("needs_repair", False),
+        "install_issue": info.get("issue", ""),
+    }
 
 
 def download_asset(
@@ -979,10 +1000,15 @@ def install_component(
     updates_dir: str | Path,
     component: str,
     plat: str | None = None,
+    downloaded: Path | None = None,
 ) -> DownloadResult:
-    """下载、校验并安装一个可选组件（打印导出 / OCR 识别共用）。"""
+    """下载、校验并安装一个可选组件（打印导出 / OCR 识别共用）。
+
+    已用 download_asset 下载好的安装包可经 downloaded 传入，此时只做解压和登记。
+    """
     asset = get_platform_asset(manifest, component, plat)
-    downloaded = download_asset(asset, updates_dir)
+    if downloaded is None:
+        downloaded = download_asset(asset, updates_dir)
     install_dir = _component_version_dir(
         components_dir, component, asset.get("version") or "unknown", asset.get("platform") or current_platform()
     )

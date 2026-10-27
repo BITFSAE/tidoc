@@ -96,6 +96,8 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         self._verification_sessions: dict[str, dict] = {}
         self._qr_fetch_lock = threading.Lock()
         self._qr_fetch_jobs = {}
+        self._update_check_lock = threading.Lock()
+        self._update_check_jobs = {}
         self._bindle_inspection_cache: dict | None = None
         self._launch_files = [launch_file] if launch_file else []
         from .services.native_drop import NativeDropRegistry
@@ -1553,15 +1555,6 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
     def apply_ocr_items(self, entry_id):
         from .services.ocr import apply_ocr_items as _apply
         return _apply(self.entries, self.ocr, entry_id)
-
-    @_guard
-    def install_ocr_component(self):
-        from .services.updater import install_ocr_component
-        manifest = self._load_update_manifest()
-        result = install_ocr_component(
-            manifest, self.data_root.components_dir, self.data_root.updates_dir
-        )
-        return result.to_dict()
 
     # ------------------------------------------------------------ 临时文件维护
     def storage_maintenance_status(self):

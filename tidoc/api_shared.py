@@ -96,3 +96,18 @@ def _remove_empty_dropped_parent(root: Path, folder: Path) -> None:
         folder.rmdir()
     except OSError:
         pass
+
+
+def _bridge(func):
+    """与 _guard 相同的返回格式，但不持有全局调用锁。
+
+    用于要联网或长时间等待的调用：方法自己只在读写本地状态时短暂加锁，
+    等待期间界面上的其他调用（如打开设置）不必排队。
+    """
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return {"ok": True, "data": func(self, *args, **kwargs)}
+        except Exception as exc:  # noqa: BLE001 — 桥不能抛，统一转错误
+            return {"ok": False, "error": str(exc)}
+    return wrapper

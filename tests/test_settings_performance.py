@@ -108,3 +108,84 @@ def test_print_capabilities_persist_across_launches_but_timeouts_do_not(tmp_path
     printing._CAPABILITIES_CACHE.clear()
     assert printing._query_capabilities(exe, cache) == {}
     assert len(runs) == 3
+
+
+def test_update_check_reads_the_manifest_without_holding_api_lock(api, monkeypatch):
+    from tidoc.services import updater
+    started, release = Event(), Event()
+    calls = []
+    def check(*args, **kwargs):
+        calls.append(kwargs.get('channel'))
+        started.set()
+        assert release.wait(5)
+        return {'current_core_version': '0', 'updates': []}
+    monkeypatch.setattr(updater, 'check_updates', check)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        manual = pool.submit(api.check_updates)
+        try:
+            assert started.wait(2)
+            # The startup check joins the request already on the way instead of starting another.
+            automatic = pool.submit(api.auto_check_updates)
+            assert pool.submit(api.settings_data).result(timeout=2)['ok']
+        finally:
+            release.set()
+        assert manual.result(timeout=2)['ok'] and automatic.result(timeout=2)['data']['checked']
+    assert calls == ['stable']
+    assert api.auto_check_updates()['data']['reason'] == 'recent'
+
+
+def test_update_result_is_not_recorded_after_the_channel_changed(api, monkeypatch):
+    from tidoc.services import updater
+    def check(*args, **kwargs):
+        api.set_update_channel('beta')
+        return {'current_core_version': '0', 'updates': [], 'marker': 'stable'}
+    monkeypatch.setattr(updater, 'check_updates', check)
+    assert api.check_updates()['data']['marker'] == 'stable'
+    assert 'marker' not in api.cached_update_status()['data']
+
+
+def test_cached_update_status_reflects_components_installed_since_the_check(api, monkeypatch):
+    from tidoc.services import updater
+    api._record_update_check({'updates': [
+        {'component': 'print', 'current_version': '', 'latest_version': '0.2.0', 'available': True, 'state': 'available'},
+    ]})
+    monkeypatch.setattr(updater, 'installed_component_info', lambda *args, **kwargs: {
+        'valid': True, 'version': '0.2.0', 'needs_repair': False, 'issue': ''})
+    item = api.cached_update_status()['data']['updates'][0]
+    assert item['available'] is False and item['current_version'] == '0.2.0' and item['state'] == 'current'
+
+
+def test_component_download_does_not_hold_api_lock(api, monkeypatch, tmp_path):
+    from tidoc.services import updater
+    started, release = Event(), Event()
+    package = tmp_path / 'ocr.bin'
+    package.write_bytes(b'ocr')
+    def download(asset, updates_dir, timeout=60):
+        started.set()
+        assert release.wait(5)
+        return package
+    installed = []
+    monkeypatch.setattr(api, '_load_update_manifest', lambda: {'components': {}})
+    monkeypatch.setattr(updater, 'get_platform_asset', lambda manifest, component, plat=None: {'version': '1'})
+    monkeypatch.setattr(updater, 'download_asset', download)
+    monkeypatch.setattr(updater, 'install_component', lambda *args, downloaded=None, **kwargs: installed.append(downloaded) or updater.DownloadResult(
+        component='ocr', version='1', platform='macos', file_path=downloaded, sha256='', size=3))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        result = pool.submit(api.install_ocr_component)
+        try:
+            assert started.wait(2)
+            assert pool.submit(api.settings_data).result(timeout=2)['ok']
+        finally:
+            release.set()
+        assert result.result(timeout=2)['ok']
+    assert installed == [package]
+
+
+def test_beta_manifests_are_read_at_the_same_time(monkeypatch):
+    from tidoc.services import updater
+    both = __import__('threading').Barrier(2, timeout=2)
+    def load(url, timeout=12):
+        both.wait()  # Raises BrokenBarrierError if the second request only starts after the first.
+        return {'components': {}}
+    monkeypatch.setattr(updater, 'load_manifest', load)
+    assert updater.load_update_manifest('beta')['channel'] == 'beta'

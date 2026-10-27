@@ -4174,7 +4174,15 @@ async function openUpdateDialogImpl(pending) {
     if (op) op.innerHTML = `<div class="update-progress"><span></span></div><div class="hint">${esc(label)}</div>`;
   };
   const openReleases = () => Api.openExternalUrl(appInfo.releases).catch((e) => toast(e.message, 'err'));
+  // 上次检查的结果先显示出来，联网检查在后台进行；检查失败时保留这份结果并说明原因。
+  let shownStatus = null;
   const renderError = (message) => {
+    if (shownStatus) {
+      show(shownStatus);
+      body.querySelector('#updateOperation').innerHTML =
+        `<div class="hint warn">暂时无法检查更新：${esc(message)}。下面是上次检查的结果。</div>`;
+      return;
+    }
     const html = `
       <div class="update-summary is-error">
         <span class="update-summary-icon">!</span>
@@ -4184,12 +4192,20 @@ async function openUpdateDialogImpl(pending) {
       <div class="update-inline-actions"><button class="btn small" data-refresh-update>重新检查</button></div>`;
     morphModalHeight(m, () => { body.innerHTML = html; });
     body.querySelector('[data-open-release]').onclick = openReleases;
-    body.querySelector('[data-refresh-update]').onclick = () => render();
+    body.querySelector('[data-refresh-update]').onclick = () => {
+      setBusy('正在重新检查版本…');
+      render().catch((e) => renderError(e.message));
+    };
   };
   const render = async (message = '') => {
     const status = await Api.checkUpdates();
+    if (!m.mask.isConnected) return;
     setUpdateNotice(status);
     try { State.coreUpdateRuntime = await Api.coreUpdateStatus(); } catch (e) {}
+    show(status, message);
+  };
+  const show = (status, message = '', checking = false) => {
+    shownStatus = status;
     const availableItems = (status.updates || []).filter((item) => item.available);
     const coreUpdate = availableItems.find((item) => item.component === 'core');
     const checkedAt = fmtCheckTime(status.checked_at);
@@ -4308,11 +4324,20 @@ async function openUpdateDialogImpl(pending) {
       };
     });
     renderCoreUpdateAction(coreUpdate);
+    // 显示的是上次的结果时，操作要等这次检查完成，避免按旧版本信息下载或安装。
+    if (checking) setBusy('正在检查可用版本…');
   };
+  try {
+    const cached = await Api.cachedUpdateStatus();
+    if (m.mask.isConnected && cached.checked_at && cached.updates?.length) {
+      try { State.coreUpdateRuntime = await Api.coreUpdateStatus(); } catch (e) {}
+      show(cached, '', true);
+    }
+  } catch (e) { /* 没有可用的上次结果时直接等待检查 */ }
   try {
     await render();
   } catch (e) {
-    renderError(e.message);
+    if (m.mask.isConnected) renderError(e.message);
   }
 }
 

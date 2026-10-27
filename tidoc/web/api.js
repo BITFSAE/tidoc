@@ -190,6 +190,7 @@ const Api = (() => {
     updateChannel: () => call('update_channel'),
     setUpdateChannel: (channel) => call('set_update_channel', channel),
     checkUpdates: () => call('check_updates'),
+    cachedUpdateStatus: () => call('cached_update_status'),
     autoCheckUpdates: () => call('auto_check_updates'),
     coreUpdateStatus: () => call('core_update_status'),
     startCoreUpdateDownload: () => call('start_core_update_download'),

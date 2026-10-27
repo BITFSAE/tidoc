@@ -31,6 +31,22 @@ def _diagnostic(code,message,*,severity='blocked',**extra):
     return {'code':code,'severity':severity,'message':message,'stage':'export',**extra}
 
 
+def progress_message(phase,types):
+    """Progress text that names only the files this job actually produces."""
+    types=set(types or ())
+    if phase=='rendering_core':
+        if {'xlsx','attachment_zip'}<=types:return '正在生成总览和附件包'
+        if 'xlsx' in types:return '正在生成总览表'
+        if 'attachment_zip' in types:return '正在生成附件包'
+        return '正在生成文件'
+    if phase=='rendering_print':
+        if {'docx','pdf_bundle'}<=types:return '正在生成 Word 和材料 PDF'
+        if 'docx' in types:return '正在生成 Word 文档'
+        if 'pdf_bundle' in types:return '正在生成材料 PDF'
+        return '正在生成文件'
+    return None
+
+
 class ExportPlanner:
     def __init__(self,db,data_root,adapters):
         self.db=db;self.data_root=data_root;self.adapters=adapters
@@ -51,7 +67,7 @@ class ExportPlanner:
                     self._cancellations.popitem(last=False)
             return event
 
-    def _set_progress(self,job_id,phase,completed=0,total=0):
+    def _set_progress(self,job_id,phase,completed=0,total=0,message=None):
         messages={'verifying_resources':'正在核对原始材料',
                   'rendering_core':'正在生成总览和附件包',
                   'rendering_print':'正在生成 Word 和材料 PDF',
@@ -61,7 +77,7 @@ class ExportPlanner:
         status=phase if phase in ('completed','failed','cancelled') else 'running'
         with self._lock:
             self._progress[job_id]={'job_id':job_id,'status':status,'phase':phase,
-                'message':messages[phase],'completed':completed,'total':total}
+                'message':message or messages[phase],'completed':completed,'total':total}
             if len(self._progress)>256:
                 finished=next((key for key,value in self._progress.items()
                                if key!=job_id and value['status']!='running'),None)
@@ -298,7 +314,7 @@ class ExportPlanner:
                         diagnostics.append({**diagnostic,'entry_id':entry['id'],'output_id':output['id']})
             # Core nonoptional accounting invariants apply to every monetary writer.
             if output['type'] in ('docx','xlsx') and entry['total'] is None:
-                add('MISSING_INVOICE_AMOUNT','发票金额缺失或无效，输出留空，请核对。',entry_id=entry['id'])
+                add('MISSING_INVOICE_AMOUNT','金额缺失或无效，输出留空，请核对。',entry_id=entry['id'])
             if output['amount_basis']=='paid' and entry['paid_amount'] is None:
                 add('MISSING_PAID_AMOUNT','实付金额缺失，输出留空；已填的零值保留。',entry_id=entry['id'])
             if output['type']=='pdf_bundle' and 'invoice' in (output.get('pdf',{}).get('roles') or output.get('pdf',{}).get('include_roles') or ['invoice']):
@@ -325,7 +341,7 @@ class ExportPlanner:
             if not status.get('available'):add('PRINT_COMPONENT_REQUIRED','需要安装打印导出组件。')
             elif 2 not in status.get('ipc_versions',[]) or output['type'] not in status.get('renderers',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','打印导出组件缺少所需能力，请检查更新。')
             elif output['type']=='pdf_bundle' and len({(entry['scheme_id'],entry['revision_id']) for entry in context['entries']})>1 and 'cross_scheme_pdf' not in status.get('render_features',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','跨方案合并 PDF，需要更新打印导出组件。')
-            elif output['type']=='docx' and output['payee_mode']!='none' and context.get('payee') is None and 'incomplete_payee' not in status.get('render_features',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','缺少收款信息时生成 Word，需要更新打印导出组件。')
+            elif output['type']=='docx' and output['payee_mode']!='none' and context.get('payee') is None and 'incomplete_payee' not in status.get('render_features',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','缺少收款信息时生成文档，需要更新打印导出组件。')
             elif output.get('pdf',{}).get('skip_blank_inspection_tails') and 'skip_blank_inspection_tails' not in status.get('pdf_features',[]):add('PRINT_COMPONENT_UPDATE_REQUIRED','剔除查验单空白尾页需要更新打印导出组件。')
         if template:
             try:
@@ -638,9 +654,11 @@ class ExportPlanner:
                 if resource_digest(source)!=resource['sha256']:raise ValueError('原任务材料或模板已变化，不能按原数据重新生成。')
                 self._set_progress(job_id,'verifying_resources',index,len(job['resources']))
             print_files=[];outputs=[]
+            core_types={item['output']['type'] for item in job['snapshot']['files'] if item['output']['type'] in ('xlsx','attachment_zip')}
+            print_types={item['output']['type'] for item in job['snapshot']['files'] if item['output']['type'] in ('docx','pdf_bundle')}
             core_count=sum(item['output']['type'] in ('xlsx','attachment_zip') for item in job['snapshot']['files'])
             core_completed=0
-            self._set_progress(job_id,'rendering_core',0,core_count)
+            if core_count:self._set_progress(job_id,'rendering_core',0,core_count,message=progress_message('rendering_core',core_types))
             for item in job['snapshot']['files']:
                 check();kind=item['output']['type'];path=staging/item['filename']
                 if kind=='xlsx':write_xlsx(item['context'],item['output'],path)
@@ -648,9 +666,9 @@ class ExportPlanner:
                 else:print_files.append(item)
                 if kind in ('xlsx','attachment_zip'):
                     core_completed+=1
-                    self._set_progress(job_id,'rendering_core',core_completed,core_count)
+                    self._set_progress(job_id,'rendering_core',core_completed,core_count,message=progress_message('rendering_core',core_types))
             if print_files:
-                self._set_progress(job_id,'rendering_print')
+                self._set_progress(job_id,'rendering_print',message=progress_message('rendering_print',print_types))
                 from .printing import execute_print_request
                 request={'ipc_version':2,'job_id':job_id,'files':print_files,'resources_root':str(self.root),'output_dir':str(rendered),'timeout_seconds':job['options'].get('timeout_seconds',120)}
                 execute_print_request(request,self.data_root.components_dir,cancel_check=event.is_set)

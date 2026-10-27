@@ -210,6 +210,7 @@ def test_export_progress_and_cancel_remain_available_during_api_render(planner_s
         assert started.wait(3)
         progress=api.get_export_progress(plan['plan_id'])['data']
         assert progress['phase']=='rendering_core'
+        assert progress['message']=='正在生成总览表'   # 只生成 xlsx，不能顺带说附件包
         assert progress['completed']==0 and progress['total']==1
         progress['completed']=999
         assert api.get_export_progress(plan['plan_id'])['data']['completed']==0
@@ -221,6 +222,24 @@ def test_export_progress_and_cancel_remain_available_during_api_render(planner_s
     assert api.get_export_progress(plan['plan_id'])['data']['status']=='cancelled'
     assert not (root.exports_dir/plan['plan_id']).exists()
     api.db.close()
+
+
+def test_export_progress_text_names_only_the_files_the_job_produces():
+    from tidoc.services.export_plan import progress_message
+
+    assert progress_message('rendering_core',{'xlsx','attachment_zip'})=='正在生成总览和附件包'
+    assert progress_message('rendering_core',['xlsx'])=='正在生成总览表'
+    assert progress_message('rendering_core',['attachment_zip'])=='正在生成附件包'
+    assert progress_message('rendering_core',[])=='正在生成文件'
+    assert progress_message('rendering_core',None)=='正在生成文件'
+    assert progress_message('rendering_core',['xlsx','docx'])=='正在生成总览表'  # 打印类输出不改变核心阶段措辞
+    assert progress_message('rendering_print',{'docx','pdf_bundle'})=='正在生成 Word 和材料 PDF'
+    assert progress_message('rendering_print',['docx'])=='正在生成 Word 文档'
+    assert progress_message('rendering_print',['pdf_bundle'])=='正在生成材料 PDF'
+    assert progress_message('rendering_print',[])=='正在生成文件'
+    assert progress_message('rendering_print',['docx','pdf_bundle','xlsx'])=='正在生成 Word 和材料 PDF'
+    assert progress_message('verifying_resources',['xlsx']) is None
+    assert progress_message('publishing',[]) is None
 
 
 def test_cancellation_events_are_bounded_and_released_after_the_job(planner_setup):

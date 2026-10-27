@@ -208,3 +208,25 @@ assert.deepEqual(dateRangeOf('this_month', today), ['2026-01-01', '2026-01-31'])
 assert.deepEqual(dateRangeOf('last_month', today), ['2025-12-01', '2025-12-31']);
 assert.deepEqual(dateRangeOf('this_year', today), ['2026-01-01', '2026-12-31']);
 """)
+
+
+def test_entry_material_roles_follow_the_scheme_and_skip_hidden_roles():
+    run_selection(r"""
+const material = (id, label, order, presentation = 'visible') => ({id, label, order, presentation, quick_action: true});
+const scheme = {materials: [
+  material('invoice', '发票', 0),
+  material('inspection_pdf', '查验单', 1),
+  material('payment_screenshot', '付款截图', 2, 'hidden'),
+  material('physical_image', '实物图', 3),
+  material('custom:contract', '合同', 4),
+]};
+// 只保留新建条目能直接添加的三类材料，隐藏的角色不出现，顺序按方案。
+assert.deepEqual(entryMaterialRoles(scheme).map((role) => role.id),
+  ['inspection_pdf', 'physical_image']);
+assert.deepEqual(entryMaterialRoles({materials: []}).map((role) => role.id), []);
+// 没有方案定义时退回默认的三项（旧条目和未绑定方案仍能建条目）。
+assert.deepEqual(entryMaterialRoles(null).map((role) => role.id),
+  ['payment_screenshot', 'physical_image', 'inspection_pdf']);
+assert.deepEqual(entryMaterialRoles(undefined).map((role) => role.label),
+  ['付款截图', '实物图', '查验单 PDF']);
+""")

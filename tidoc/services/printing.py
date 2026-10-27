@@ -128,7 +128,7 @@ def execute_print_request(request,components_dir=None,cancel_check=None):
         for item in request['files']
     )
     if missing_payee and 'incomplete_payee' not in status.get('render_features', []):
-        raise RuntimeError('缺少收款信息时生成 Word，需要更新打印导出组件。')
+        raise RuntimeError('缺少收款信息时生成文档，需要更新打印导出组件。')
     cross_scheme_pdf = any(
         item['output']['type'] == 'pdf_bundle'
         and len({(entry['scheme_id'], entry['revision_id'])

@@ -251,14 +251,22 @@ const items=[
   {code:'PAID_DIFFERS',severity:'required',message:'金额不同',entry_id:'b'},
 ];
 const split=A.splitDiagnostics({diagnostics:items});
-console.log(JSON.stringify({split,html:A.diagnosticsMarkup([...split.blocking,...split.warnings],[{id:'a',invoice_no:'001'},{id:'b',invoice_no:'002'}])}));
+console.log(JSON.stringify({
+  split,
+  html:A.diagnosticsMarkup([...split.blocking,...split.warnings],[{id:'a',invoice_no:'001'},{id:'b',invoice_no:'002'}]),
+  noNumber:A.diagnosticsMarkup([{code:'X',severity:'info',message:'未填票号',entry_id:'c'}],[{id:'c'}]),
+  oneNumber:A.diagnosticsMarkup([{code:'X',severity:'info',message:'未填票号',entry_id:'a'}],[{id:'a',invoice_no:'001'}]),
+}));
 """,{})
     assert len(out['split']['blocking'])==1
     assert len(out['split']['warnings'])==1
     assert len(out['split']['warnings'][0]['sources'])==3
     assert out['html'].count('金额不同')==2  # 同名阻断项不会让先出现的提醒吞掉。
-    assert '涉及 2 条发票' in out['html'] and '001、002' in out['html']
+    assert '涉及 2 个条目' in out['html'] and '001、002' in out['html']
     assert 'class="hint' not in out['html']
+    # 单个条目有票号时仍按票号指认；没有票号时退回条目数量。
+    assert '发票 001' in out['oneNumber']
+    assert '1 个条目' in out['noNumber'] and '未填写发票号' not in out['noNumber']
 
 
 def test_export_names_are_inline_inputs_that_keep_typed_names_and_escape_private_text():
@@ -319,7 +327,8 @@ const custom=A.exportOutputRows([item('one','xlsx'),item('two','xlsx')]);
 console.log(JSON.stringify({rows,custom,unbound:A.exportOutputRows([]),
  pdf:A.outputDescription({type:'pdf_bundle',pdf:{include_roles:['invoice','payment_screenshot','inspection_pdf']}},{}),
  claimant:A.outputDescription({type:'attachment_zip',attachments:{group_by:['title','claimant']}},{}),
- entry:A.outputDescription({type:'attachment_zip'},null)}));
+ entry:A.outputDescription({type:'attachment_zip'},null),
+ overview:A.outputDescription({type:'xlsx'},null)}));
 """,{})
     assert len(out['rows'])==5
     assert [row['label'] for row in out['rows'] if row.get('label')]==['材料 PDF','总览 Excel','附件整理包']
@@ -329,4 +338,56 @@ console.log(JSON.stringify({rows,custom,unbound:A.exportOutputRows([]),
     assert len(out['unbound'])==3
     assert out['pdf']=='拼接发票、付款截图、查验单'
     assert out['claimant']=='按抬头、报账人整理原文件'
-    assert out['entry']=='按抬头、每条发票整理原文件'
+    assert out['entry']=='按抬头、每个条目整理原文件'
+    assert out['overview']=='汇总条目、金额、材料状态和备注'
+
+
+def test_material_split_outputs_only_list_printable_materials_that_really_exist():
+    out=_run_adapter_ui(r"""
+const roles=[
+  {id:'invoice',label:'发票',order:0,presentation:'visible'},
+  {id:'payment_screenshot',label:'付款截图',order:1,presentation:'visible'},
+  {id:'physical_image',label:'实物图',order:2,presentation:'visible'},
+  {id:'inspection_pdf',label:'查验单',order:3,presentation:'visible'},
+];
+const att=(type,name,extra={})=>({type,original_name:name,...extra});
+const entry=(id,attachments,extra={})=>({id,scheme_revision_id:'r2',material_roles:roles,attachments,...extra});
+const ids=(items)=>A.materialSplitOutputs(items).map(item=>item.id);
+console.log(JSON.stringify({
+  invoiceAndPayment:ids([entry('a',[att('invoice_pdf','invoice.pdf'),att('payment_screenshot','pay.png')])]),
+  withPhysical:ids([entry('a',[att('invoice_pdf','invoice.pdf'),att('payment_screenshot','pay.png'),att('physical_image','box.jpg')])]),
+  xmlOnly:ids([entry('a',[att('invoice_xml','invoice.xml')])]),
+  oldRevision:ids([entry('a',[att('invoice_pdf','old.pdf',{role_definition_revision_id:'r1'}),att('payment_screenshot','old.png',{role_definition_revision_id:'r1'})])]),
+  oldRevisionMixed:ids([entry('a',[att('invoice_pdf','new.pdf'),att('payment_screenshot','old.png',{role_definition_revision_id:'r1'})])]),
+  legacyAttachment:ids([entry('a',[att('invoice_pdf','legacy.pdf')])]),
+  union:ids([entry('a',[att('invoice_pdf','a.pdf'),att('payment_screenshot','a.png')]),entry('b',[att('payment_screenshot','b.png'),att('inspection_pdf','b.pdf')])]),
+  customRole:ids([entry('a',[att('other','contract.pdf',{role_id:'custom:org.tests:contract'})])]),
+  reordered:ids([entry('a',[att('invoice_pdf','a.pdf'),att('payment_screenshot','a.png'),att('physical_image','a.jpg')],
+    {material_roles:[{id:'invoice',label:'发票',order:9},{id:'payment_screenshot',label:'付款截图',order:1},{id:'physical_image',label:'实物图',order:5}]})]),
+}));
+""",{})
+    assert out['invoiceAndPayment']==['generic_pdf_invoice','generic_pdf_payment_screenshot']
+    assert out['withPhysical']==['generic_pdf_invoice','generic_pdf_payment_screenshot','generic_pdf_physical_image']
+    assert out['xmlOnly']==[]                                                   # 只有 XML，拼不成发票 PDF
+    assert out['oldRevision']==['generic_pdf_invoice','generic_pdf_payment_screenshot']  # 旧修订的附件仍属于条目，仍可拼接
+    assert out['oldRevisionMixed']==['generic_pdf_invoice','generic_pdf_payment_screenshot']
+    assert out['legacyAttachment']==['generic_pdf_invoice']                      # 没有修订标记的历史附件照常计算
+    assert out['union']==['generic_pdf_invoice','generic_pdf_payment_screenshot','generic_pdf_inspection_pdf']
+    assert out['customRole']==[]                                                 # 自定义材料由「材料 PDF」统一拼接
+    assert out['reordered']==['generic_pdf_payment_screenshot','generic_pdf_physical_image','generic_pdf_invoice']
+
+
+def test_material_output_memory_keeps_only_materials_that_are_currently_unavailable():
+    out=_run_adapter_ui(r"""
+const all=new Set(['generic_pdf_invoice','generic_pdf_payment_screenshot','generic_pdf_physical_image']);
+console.log(JSON.stringify({
+  uncheckedVisible:A.mergeMaterialMemory([],['generic_pdf_invoice'],new Set(['generic_pdf_invoice']),all),
+  hiddenRemembered:A.mergeMaterialMemory([],['generic_pdf_invoice','generic_pdf_physical_image'],new Set(['generic_pdf_invoice']),all),
+  noDuplicate:A.mergeMaterialMemory(['generic_pdf_invoice'],['generic_pdf_invoice'],new Set(),all),
+  disabledPreserved:A.mergeMaterialMemory([],['generic_pdf_payment_screenshot'],new Set(['generic_pdf_invoice']),all),
+}));
+""",{})
+    assert out['uncheckedVisible']==[]                                      # 看得见但取消的材料不写回
+    assert out['hiddenRemembered']==['generic_pdf_physical_image']          # 暂时没有的材料沿用上次勾选
+    assert out['noDuplicate']==['generic_pdf_invoice']                      # 已选中的材料不重复写入
+    assert out['disabledPreserved']==['generic_pdf_payment_screenshot']     # 组件不可用时不清掉记忆

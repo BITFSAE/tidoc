@@ -535,9 +535,12 @@ assert.equal(dragItemsAreImages({ items: [{ kind: 'file', type: '' }] }), false)
 assert.equal(dragItemsAreImages({ items: [] }), false);
 assert.equal(dragItemsAreImages(null), false);
 assert.equal(dragHintText(false, false), DRAG_HINT_IMPORT);
-assert.equal(dragHintText(false, true), DRAG_HINT_IMPORT_IMAGES);
-assert.ok(!DRAG_HINT_IMPORT_IMAGES.includes('PDF'));
-assert.equal(dragHintText(true, true), DRAG_HINT_BIND);                                // 悬停在卡片上永远是绑定材料
+// 没有方案时不能凭空说出材料名：图片只说取票二维码或材料。
+assert.equal(dragHintText(false, true), '松开导入：取票二维码图片，或添加为材料');
+assert.ok(!dragHintText(false, true).includes('PDF') && !dragHintText(false, true).includes('XML'));
+// 悬停在卡片上永远是绑定材料，不承诺任何具体文件类型。
+assert.equal(dragHintText(true, true), '松开添加材料到此条目');
+assert.ok(!dragHintText(true, true).includes('PDF') && !dragHintText(true, true).includes('XML'));
 """)
 
 

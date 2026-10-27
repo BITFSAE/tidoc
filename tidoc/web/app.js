@@ -120,11 +120,9 @@ function configuredTitleNames() {
 const BILIBILI_GUIDE_URL = 'https://www.bilibili.com/video/BV1XN3q69EPi/';
 const DOC_GUIDE_URL = 'https://www.bitfsae.com/news/tidoc-guide';
 const DOCS_SITE_URL = 'https://tidoc.bitfsae.com';
-const STATUS_LABEL = { draft: '草稿', partial: '部分材料', complete: '完整' };
 const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
 const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
 const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
-const DEFAULT_PAID_TO_INVOICE_KEY = 'tidoc.defaultPaidToInvoiceTotal';
 const DEFAULT_ENTRY_TITLE_KEY = 'tidoc.defaultEntryTitle';
 const THEME_KEY = 'tidoc.themeMode';
 const VERIFICATION_WATCH_DIR_KEY = 'tidoc.invoiceVerification.watchDirectory';
@@ -242,7 +240,6 @@ const OCR_FIELD_LABEL = {
   items: '物品明细',
 };
 const OCR_CONSOLE_URL = 'https://ocr.console.aliyun.com/overview';
-const OCR_QUOTA_NOTE = '每个阿里云账号每月有免费额度，超出后按量计费。免费额度与费用可在阿里云 OCR 控制台查看。';
 
 function fmtMoney(v) {
   if (v == null || v === '') return '—';
@@ -257,10 +254,6 @@ function fmtQuantity(v) {
   // 只对带小数点的数值去尾零，整数（10、100…）原样展示
   if (!text.includes('.')) return text;
   return text.replace(/0+$/, '').replace(/\.$/, '') || '0';
-}
-function initials(name) {
-  if (!name) return '—';
-  return Array.from(name).slice(0, 2).join('');
 }
 function baseName(p) { return String(p).split(/[/\\]/).pop(); }
 function dirName(p) {
@@ -312,7 +305,6 @@ function exportDefaultName(ids) {
 const I = {
   pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m4 20 4-1 11-11-3-3L5 16l-1 4z"/><path d="m14 5 3 3"/></svg>',
   note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v16H5z"/><path d="M8 9h8M8 13h6M8 17h4"/></svg>',
-  box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 7v10l9 4M21 7v10l-9 4M12 11v10"/></svg>',
   pdf: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><text x="9" y="16" font-size="6" fill="currentColor" stroke="none" font-family="JetBrains Mono, monospace">PDF</text></svg>',
   xml: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="m9 12-2 2 2 2M13 12l2 2-2 2" stroke-width="1.5"/></svg>',
   image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.4"/><path d="m4 17 5-4 4 3 3-2 4 4"/></svg>',
@@ -327,7 +319,6 @@ const I = {
 };
 function iconPencil(s) { return wrapSvg(I.pencil, s); }
 function iconNote(s) { return wrapSvg(I.note, s); }
-function iconBox(s) { return wrapSvg(I.box, s); }
 function iconPdf() { return I.pdf; }
 function iconXml() { return I.xml; }
 function iconImage() { return I.image; }
@@ -594,26 +585,6 @@ async function maybeAutoCheckUpdates(showCurrent = false) {
   }
 }
 
-async function maybeShowAvailableUpdate(core) {
-  const key = `tidoc.update.availableNotice.${core.latest_version}`;
-  try {
-    if (await Api.appPreference(key, '')) return;
-  } catch (e) {}
-  const showWhenFree = (attempt = 0) => {
-    if ($('#modalRoot').lastChild) {
-      if (attempt < 12) setTimeout(() => showWhenFree(attempt + 1), 800);
-      return;
-    }
-    openReleaseHighlights('available', {
-      current_version: core.current_version,
-      latest_version: core.latest_version,
-      notes: core.asset?.notes || [],
-      seen_key: key,
-    });
-  };
-  showWhenFree();
-}
-
 function showCompletedUpdateWhenFree(data) {
   const show = () => {
     if ($('#modalRoot').lastChild) {
@@ -863,17 +834,12 @@ async function loadWorkflowPreferences() {
   const local = localStorage.getItem(MULTI_CLAIMANT_KEY);
   const localTheme = normalizeThemeMode(localStorage.getItem(THEME_KEY));
   const legacyVerificationWatch = localStorage.getItem(VERIFICATION_WATCH_DIR_KEY) || '';
-  const localDefaultEntryTitle = localStorage.getItem(DEFAULT_ENTRY_TITLE_KEY) || '';
   State.multiClaimantMode = local === '1';
   try {
-    const [multiMode, defaultPaidToInvoice, defaultEntryTitle, themeMode, materialRequirements, verification, titleProfiles, showCreatedAt] = await Promise.all([
+    const [multiMode, themeMode, verification, showCreatedAt] = await Promise.all([
       Api.appPreference(MULTI_CLAIMANT_KEY, local || ''),
-      Api.appPreference(DEFAULT_PAID_TO_INVOICE_KEY, '1'),
-      Api.appPreference(DEFAULT_ENTRY_TITLE_KEY, localDefaultEntryTitle),
       Api.appPreference(THEME_KEY, localTheme),
-      Api.materialRequirements(),
       Api.invoiceVerificationPreferences(),
-      Api.titleProfiles(),
       Api.appPreference(SHOW_CREATED_AT_KEY, '0'),
     ]);
     State.multiClaimantMode = multiMode === '1';
@@ -977,21 +943,6 @@ async function loadProfiles() {
   }
   const def = State.profiles.find((p) => p.is_default) || State.profiles[0];
   State.currentProfileId = def.id;
-  renderProfilePill();
-}
-
-function renderProfilePill() {
-  if (!$('#profileName') || !$('#profileReviewer') || !$('#profileAvatar')) return;
-  const p = State.profileById[State.currentProfileId];
-  if (!p) {
-    $('#profileName').textContent = '未选择';
-    $('#profileReviewer').textContent = '';
-    $('#profileAvatar').textContent = '—';
-    return;
-  }
-  $('#profileName').textContent = p.name;
-  $('#profileReviewer').textContent = '审核 · ' + p.reviewer + (p.is_default ? ' · 默认' : '');
-  $('#profileAvatar').textContent = initials(p.name);
 }
 
 function renderProfileSelects() {
@@ -1551,7 +1502,11 @@ function entryCard(e) {
   const right = el('div', 'entry-right');
   const hasRoles = !!e.material_roles?.length;
   // 付款 / 查验由方案的快捷操作决定；实物图沿用"必需或已有才显示"。旧数据没有方案时按内置四类处理。
-  const quickRole = (roleId) => !hasRoles || !!entryMaterialRole(e, roleId)?.quick_action;
+  const quickRole = (roleId) => {
+    if (!hasRoles) return true;
+    const role = entryMaterialRole(e, roleId);
+    return !!role && role.presentation !== 'hidden' && !!role.quick_action;
+  };
   const physicalRole = entryMaterialRole(e, 'physical_image');
   const showPhysicalAction = hasRoles
     ? !!physicalRole && physicalRole.presentation !== 'hidden'
@@ -2236,7 +2191,7 @@ async function archiveBatchFlow(batch) {
         <b>${esc(batch.name)}</b>
         <span>${Number(stats.count || 0)} 条 · ${fmtMoney(stats.total || 0)}${stats.incomplete ? ` · 缺 ${stats.incomplete}` : ' · 材料齐备'}</span>
       </div>
-      ${stats.incomplete ? `<div class="archive-confirm-warning">仍有 ${stats.incomplete} 条材料未齐</div>` : ''}
+      ${stats.incomplete ? `<div class="archive-confirm-warning">仍有 ${stats.incomplete} 个条目材料未齐</div>` : ''}
       ${batch.note ? `<div class="archive-confirm-note"><b>批次备注</b><span>${esc(batch.note)}</span></div>` : ''}
     </div>`;
   const m = modal({
@@ -2505,7 +2460,7 @@ async function changeSelectionProfile(idsArg, selectedProfileId = '') {
           }
           await refreshEntries();
           await loadBatches();
-          toast(result.changed ? `已修改 ${result.changed} 条报账人` : '所选条目已经属于该报账人', 'ok');
+          toast(result.changed ? `已修改 ${result.changed} 位报账人` : '所选条目已经属于该报账人', 'ok');
         } catch (e) { toast(e.message, 'err'); }
       }),
     ],
@@ -2911,11 +2866,17 @@ function openEntryMenu(x, y, e, options) {
     b.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await fn(); };
     menu.appendChild(b);
   };
+  // 方案关掉快捷操作或隐藏起来的材料角色不进菜单；旧条目没有方案角色时保持原有菜单。
+  const hasRoles = !!e.material_roles?.length;
+  const roleQuick = (roleId) => {
+    const role = entryMaterialRole(e, roleId);
+    return hasRoles ? !!role && role.presentation !== 'hidden' && !!role.quick_action : true;
+  };
   item('打开详情', () => openEntryDetail(e.id));
   item('填写实付金额', () => quickPaidFlow(e));
-  item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'));
-  item('在线查验', () => onlineVerificationFlow(e.id));
-  item('上传已有查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
+  if (roleQuick('payment_screenshot')) item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'));
+  if (roleQuick('inspection_pdf') && verificationVisible(e)) item('在线查验', () => onlineVerificationFlow(e.id));
+  if (roleQuick('inspection_pdf')) item('上传已有查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
   item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'));
   if (cloudRecognitionVisible()) item('云识别', () => openOcrDialog([e.id]));
   item('编辑条目备注', () => quickNoteFlow(e));
@@ -3030,7 +2991,6 @@ async function quickDelete(e) {
 
 // ------------------------------------------------------------------ 事件
 function bindEvents() {
-  if ($('#profilePill')) $('#profilePill').onclick = () => openProfileManager(false);
   $$('.chip-select select, .sort-chip select').forEach((select) => {
     select.addEventListener('change', () => requestAnimationFrame(() => select.blur()));
   });
@@ -3771,9 +3731,9 @@ async function buildSettings(options = {}) {
 
       <!-- 关于 -->
       <div class="settings-block about">
-        <img src="assets/tidoc-logo-128.png" alt="" id="setRepoLogo" title="打开 GitHub 仓库" />
+        <img src="assets/tidoc-logo-128.png" alt="" />
         <div class="settings-about-copy">
-          <b>${document.getElementById('appWordmark')?.outerHTML || esc(appInfo.name)}<small>v${esc(appInfo.version)}</small></b>
+          <b>${esc(appInfo.name)}<small>v${esc(appInfo.version)}</small></b>
           <div class="settings-credit"><button class="link-btn" id="setBitfsae">BITFSAE</button><span>出品</span></div>
           <div class="settings-about-actions">
             <button class="link-btn with-icon" id="setRepo">${wrapSvg(I.github, 14)}<span>GitHub</span></button>
@@ -4021,7 +3981,6 @@ async function buildSettings(options = {}) {
   body.querySelector('#setDocsSite').onclick = () => Api.openExternalUrl(DOCS_SITE_URL).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setBilibili').onclick = () => Api.openExternalUrl(BILIBILI_GUIDE_URL).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setDocGuide').onclick = () => Api.openExternalUrl(DOC_GUIDE_URL).catch((e) => toast(e.message, 'err'));
-  body.querySelector('#setRepoLogo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenData').onclick = () => Api.openPath(paths.root).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setOpenExports').onclick = () => Api.openPath(paths.exports).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setMigrate').onclick = async () => {
@@ -4356,7 +4315,7 @@ async function maybeShowFirstUseGuide() {
 
 function usageGuideStepsMarkup() {
   return `<div><b>1 · 导入发票</b><span>拖入或粘贴发票 PDF/XML；多张用“导入发票”。</span></div>
-    <div><b>2 · 补齐材料</b><span>在卡片或详情添加付款截图、实物图和查验单；右键可打开已有文件。</span></div>
+    <div><b>2 · 补齐材料</b><span>在卡片或详情补齐方案要求的材料；右键可打开已有文件。</span></div>
     <div><b>3 · 核对条目</b><span>从“待补材料”或“识别提醒”进入详情，确认实付、明细和备注。</span></div>
     <div><b>4 · 组织批次</b><span>选中条目后移动到批次；点击批次右侧“⋯”可编辑批次、填写批次备注、归档，已归档批次可从“已归档”查看并恢复。</span></div>
     <div><b>5 · 导出打印</b><span>选中条目后导出绑定包、汇总或打印材料。</span></div>
@@ -4389,14 +4348,38 @@ function openUsageGuide(firstRun) {
 }
 
 // ------------------------------------------------------------------ 新建条目
+// 新建条目弹窗里的材料卡：付款截图、实物图、查验单，按方案定义取舍和排序。
+const ENTRY_ROLE_KEYS = { payment_screenshot: 'payment', physical_image: 'physical', inspection_pdf: 'inspection' };
+const ENTRY_ROLE_HINTS = {
+  payment_screenshot: (role) => `可多张 · ${role.min_count > 0 ? '必需' : '浅色背景'}`,
+  physical_image: (role) => `可多张 · ${role.min_count > 0 ? '必需' : '可选'}`,
+  inspection_pdf: (role) => role.min_count > 0 ? '必需' : '可选',
+};
+const ENTRY_ROLE_DEFAULTS = [
+  { id: 'payment_screenshot', label: '付款截图', order: 1 },
+  { id: 'physical_image', label: '实物图', order: 3 },
+  { id: 'inspection_pdf', label: '查验单 PDF', order: 4 },
+];
+
+function entryMaterialRoles(definition) {
+  if (!definition) return ENTRY_ROLE_DEFAULTS;
+  return (definition.materials || [])
+    .filter((role) => ENTRY_ROLE_KEYS[role.id] && role.presentation !== 'hidden')
+    .sort((a, b) => (a.order || 0) - (b.order || 0));
+}
+
 function openNewEntry() {
   if (!State.currentProfileId) { toast('请先创建报账人', 'err'); openProfileManager(true); return; }
 
   const picked = { xml: null, pdf: null, payments: [], physical: [], inspection: null };
   const body = el('div');
+  const schemeDefinition = () => {
+    const id = $('[data-import-scheme]', body)?.value;
+    return (State.schemes || []).find((scheme) => scheme.id === id)?.definition || State.scheme?.definition || null;
+  };
 
-  function uploadTile(key, label, hint, ph, ico) {
-    return `<div class="upload-tile" data-tile="${key}">
+  function uploadTile(key, label, hint, ph, ico, attrs = '') {
+    return `<div class="upload-tile" data-tile="${key}"${attrs}>
       <div class="ut-title">${ico} ${label}</div>
       <div class="ut-hint">${hint}</div>
       <button class="btn small" data-pick="${key}">${ph}</button>
@@ -4404,6 +4387,12 @@ function openNewEntry() {
     </div>`;
   }
   const utIco = (svg) => svg.replace('<svg ', '<svg width="18" height="18" ');
+  const materialTile = (role) => {
+    const key = ENTRY_ROLE_KEYS[role.id];
+    const single = key === 'inspection';
+    return uploadTile(key, esc(role.label), ENTRY_ROLE_HINTS[role.id](role), single ? '选择文件' : '选择图片',
+      utIco(single ? iconInspect() : iconImage()), ' data-material-tile');
+  };
 
   body.innerHTML = `
     <div class="hint">推荐同时上传发票 PDF 和 XML，识别更准。材料不齐可先存草稿，之后补齐。</div>
@@ -4417,13 +4406,26 @@ function openNewEntry() {
     <div class="upload-grid">
       ${uploadTile('pdf', '发票 PDF', '推荐上传', '选择文件', utIco(iconPdf()))}
       ${uploadTile('xml', '发票 XML', '让识别更准', '选择文件', utIco(iconXml()))}
-      ${uploadTile('payment', '付款截图', '可多张 · 浅色背景', '选择图片', utIco(iconImage()))}
-      ${uploadTile('physical', '实物图', '可多张 · 可选', '选择图片', utIco(iconImage()))}
-      ${uploadTile('inspection', '查验单 PDF', '可选', '选择文件', utIco(iconInspect()))}
     </div>
     <div id="nePreview"></div>`;
 
-  body.querySelectorAll('[data-pick]').forEach((btn) => {
+  const roleFor = (key) => entryMaterialRoles(schemeDefinition()).find((item) => ENTRY_ROLE_KEYS[item.id] === key);
+  const roleLabel = (key) => roleFor(key)?.label || { payment: '付款截图', physical: '实物图', inspection: '查验单' }[key];
+  const showPickName = (key, paths) => {
+    const tile = body.querySelector(`[data-tile="${key}"]`);
+    const nameEl = body.querySelector(`#ne-${key}-name`);
+    if (!tile || !nameEl) return;
+    nameEl.textContent = ['pdf', 'xml', 'inspection'].includes(key) ? baseName(paths[0]) : `${paths.length} 张${roleLabel(key)}`;
+    nameEl.hidden = false;
+    tile.classList.add('has-file');
+  };
+  const restorePicks = () => {
+    if (picked.payments.length) showPickName('payment', picked.payments);
+    if (picked.physical.length) showPickName('physical', picked.physical);
+    if (picked.inspection) showPickName('inspection', [picked.inspection]);
+  };
+
+  function bindPick(btn) {
     btn.onclick = async () => {
       const key = btn.dataset.pick;
       try {
@@ -4431,27 +4433,25 @@ function openNewEntry() {
         const res = await Api.pickFiles(multiple);
         const paths = res.paths || [];
         if (!paths.length) return;
-        const nameEl = body.querySelector(`#ne-${key}-name`);
-        const tile = body.querySelector(`[data-tile="${key}"]`);
-        if (key === 'payment') {
-          picked.payments = paths;
-          nameEl.textContent = `${paths.length} 张付款截图`;
-        } else if (key === 'physical') {
-          picked.physical = paths;
-          nameEl.textContent = `${paths.length} 张实物图`;
-        } else if (key === 'inspection') {
-          picked.inspection = paths[0];
-          nameEl.textContent = baseName(paths[0]);
-        } else {
-          picked[key] = paths[0];
-          nameEl.textContent = baseName(paths[0]);
-        }
-        nameEl.hidden = false;
-        tile.classList.add('has-file');
+        if (key === 'payment') picked.payments = paths;
+        else if (key === 'physical') picked.physical = paths;
+        else if (key === 'inspection') picked.inspection = paths[0];
+        else picked[key] = paths[0];
+        showPickName(key, paths);
         if (key === 'xml' || key === 'pdf') await preview();
       } catch (e) { toast(e.message, 'err'); }
     };
-  });
+  }
+
+  // 换方案时只重建材料卡；发票文件仍按已选内容识别。
+  const paintMaterialTiles = () => {
+    const grid = body.querySelector('.upload-grid');
+    grid.querySelectorAll('[data-material-tile]').forEach((tile) => tile.remove());
+    grid.insertAdjacentHTML('beforeend', entryMaterialRoles(schemeDefinition()).map(materialTile).join(''));
+    grid.querySelectorAll('[data-material-tile] [data-pick]').forEach(bindPick);
+  };
+
+  body.querySelectorAll('[data-pick]').forEach(bindPick);
 
   async function preview() {
     if (!picked.xml && !picked.pdf) return;
@@ -4507,7 +4507,17 @@ function openNewEntry() {
   };
 
   body.insertAdjacentHTML('afterbegin',AdapterUI.chooser());
-  const schemePicker = $('[data-import-scheme]',body); if (schemePicker) schemePicker.onchange = preview;
+  paintMaterialTiles();
+  const schemePicker = $('[data-import-scheme]',body);
+  if (schemePicker) schemePicker.onchange = () => {
+    const visible = new Set(entryMaterialRoles(schemeDefinition()).map((role) => ENTRY_ROLE_KEYS[role.id]));
+    if (!visible.has('payment')) picked.payments = [];
+    if (!visible.has('physical')) picked.physical = [];
+    if (!visible.has('inspection')) picked.inspection = null;
+    paintMaterialTiles();
+    restorePicks();
+    preview();
+  };
   const m = modal({
     title: '新建报账条目',
     subhead: '上传后自动识别，发票号、金额等无需手输；状态按材料齐全度自动判定',
@@ -5744,7 +5754,7 @@ function setupGlobalDrop() {
       }
       await cleanupDroppedPaths(paths);
       if (qr.report?.failed?.length) reportQrOutcome(qr);
-      else toast('请拖入发票 PDF、XML、付款截图、实物图或查验单', 'err');
+      else toast('请拖入发票 PDF、XML 或方案要求的材料', 'err');
     } catch (e) {
       if (!cleanupDeferred) await cleanupDroppedPaths(paths);
       toast(e.message || '处理拖入文件失败', 'err');
@@ -5850,8 +5860,6 @@ function setupClipboardUpload() {
 
 // 拖入文件时只留一条提示：空白区（虚线框）导入，悬停的条目卡片（高亮）绑定材料。
 const DRAG_HINT_IMPORT = '松开导入：发票 PDF / XML 或 .tidoc 绑定包';
-const DRAG_HINT_IMPORT_IMAGES = '松开导入：取票二维码图片，或付款截图、实物图';
-const DRAG_HINT_BIND = '松开添加到此条目：付款截图、实物图或查验单';
 
 function showDragOverlay() {
   // 弹窗里没有「空白区导入」，页面级提示会误导；弹窗内的材料拖放区自带高亮。
@@ -5868,15 +5876,18 @@ function dragItemsAreImages(dt) {
   return files.length > 0 && files.every((item) => String(item.type || '').startsWith('image/'));
 }
 
+// 拖入图片时浏览器只给类型，不给文件名；落点决定是导入还是加入当前条目。
 function dragHintText(onCard, images = false) {
-  if (onCard) return DRAG_HINT_BIND;
-  return images ? DRAG_HINT_IMPORT_IMAGES : DRAG_HINT_IMPORT;
+  if (onCard) return '松开添加材料到此条目';
+  if (!images) return DRAG_HINT_IMPORT;
+  return '松开导入：取票二维码图片，或添加为材料';
 }
 
 function updateDragHint(onCard, images = false) {
   document.body.classList.toggle('drag-over-card', onCard);
   const hint = $('.drag-hint');
-  if (hint) hint.textContent = dragHintText(onCard, images);
+  const text = dragHintText(onCard, images);
+  if (hint && hint.textContent !== text) hint.textContent = text;
 }
 
 function hideDragOverlay() {
@@ -5986,8 +5997,7 @@ function dropEntryLabel(e) {
 }
 
 function attachTypeLabel(t) {
-  return { invoice_pdf: '发票PDF', invoice_xml: '发票XML', payment_screenshot: '付款截图', physical_image: '实物图',
-    inspection_pdf: '查验单', other: '其他' }[t] || t;
+  return ATTACHMENT_TYPE_OPTS.find(([value]) => value === t)?.[1] || t;
 }
 async function addAttachmentFlow(entryId, parentModal, presetType) {
   const body = el('div');
@@ -6080,7 +6090,7 @@ async function doExport(ids) {
       </div>`).join('')}
     </div>
     ${(transferPreview.ask_fields||[]).map(field=>`<label class="chk"><input type="checkbox" data-transfer-field="${esc(field.key||field.field_key)}"/>包含 ${esc(field.label)}（${field.record_count||field.count||0} 条）</label>`).join('')}
-    <p class="hint export-note">当前选择 <b>${ids.length}</b> 条，导出的文件会放在设置里的“导出目录”。<br/>绑定包版本 5 需要接收方使用支持报账方案的新版本。</p>`;
+    <p class="hint export-note">当前选择 <b>${ids.length}</b> 个条目，导出的文件会放在设置里的“导出目录”。<br/>绑定包版本 5 需要接收方使用支持报账方案的新版本。</p>`;
   // 文件名只在勾选后出现，未勾选的格式保持一行高。
   const syncNameRow = id => {
     const input = body.querySelector(`[data-export-name="${id}"]`);
@@ -6100,7 +6110,7 @@ async function doExport(ids) {
           const input = body.querySelector(`[data-export-name="${id}"]`);
           if (!input.value.trim()) { toast('请填写文件名', 'err'); input.focus(); return; }
         }
-        const progress = taskProgress(`正在准备 ${ids.length} 条报账数据…`);
+        const progress = taskProgress(`正在准备 ${ids.length} 个条目的报账数据…`);
         const outputs = [];
         try {
           if (chosen.includes('bindle')) {
@@ -6199,7 +6209,7 @@ function updateOcrSuggestBar() {
   }
   bar.classList.remove('hidden');
   bar.innerHTML = `
-    <span class="ocr-suggest-text">当前视图有 ${applicable.length} 条发票可用阿里云识别</span>
+    <span class="ocr-suggest-text">当前视图有 ${applicable.length} 张发票可用阿里云识别</span>
     <button class="btn small" id="ocrSuggestRun">识别全部</button>`;
   bar.querySelector('#ocrSuggestRun').onclick = () => {
     const ids = applicable.map((entry) => entry.id);
@@ -6638,7 +6648,7 @@ async function batchReparse(entryIds, fromNotice = false) {
     <div class="recognition-choice-list">
       <label class="recognition-choice${invoice.total ? '' : ' disabled'}">
         <input type="checkbox" id="recognizeInvoice" ${invoice.pending ? 'checked' : ''} ${invoice.total ? '' : 'disabled'}/>
-        <span><b>发票</b><small>${invoice.total ? `${invoice.pending || 0} 条待识别${invoice.current ? `，${invoice.current} 条已处理` : ''}` : '所选条目没有发票文件'}</small></span>
+        <span><b>发票</b><small>${invoice.total ? `${invoice.pending || 0} 张待识别${invoice.current ? `，${invoice.current} 张已处理` : ''}` : '所选条目没有发票文件'}</small></span>
       </label>
     </div>
     <div class="cloud-settings-line">在本机重新读取发票文件，不联网、不计费。${payment.total && cloudRecognitionVisible() ? '付款截图请用「云识别」识别。' : ''}</div>`;
@@ -6666,9 +6676,9 @@ async function batchReparse(entryIds, fromNotice = false) {
       if (!explicitIds) State.selected.clear();
       await refreshEntries();
       const parts = [];
-      if (result.processed) parts.push(`发票 ${result.processed} 条`);
-      if (result.skipped_current) parts.push(`跳过 ${result.skipped_current} 条已是最新`);
-      if (result.failed.length) parts.push(`${result.failed.length} 条失败`);
+      if (result.processed) parts.push(`发票 ${result.processed} 张`);
+      if (result.skipped_current) parts.push(`跳过 ${result.skipped_current} 张已是最新`);
+      if (result.failed.length) parts.push(`${result.failed.length} 张失败`);
       toast(parts.join('，') || '当前规则已处理，无需重复识别', result.failed.length ? 'err' : 'ok');
     } catch (e) {
       toast(e.message, 'err');

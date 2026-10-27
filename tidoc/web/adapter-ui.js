@@ -149,11 +149,11 @@ const AdapterUI = (() => {
       if (!list.length) return '';
       const rows = list.map(item => {
         const ids = [...new Set(item.sources.map(source => source.entry_id || (known.has(source.target) ? source.target : null)).filter(Boolean))];
-        const names = ids.map(id => known.get(id)?.invoice_no || '未填写发票号');
-        const scope = names.length === 1 ? '发票 ' + names[0] : names.length > 1 ? `涉及 ${names.length} 条发票` : '';
+        const names = ids.map(id => known.get(id)?.invoice_no).filter(Boolean);
+        const scope = ids.length === 1 ? names[0] ? '发票 ' + names[0] : '1 个条目' : ids.length > 1 ? `涉及 ${ids.length} 个条目` : '';
         const payeeFields = { 'payee.name': '收款人姓名', 'payee.bank_name': '开户行', 'payee.account_number': '账号' };
         const missing = item.code === 'MISSING_PAYEE_FIELD' ? [...new Set(item.sources.map(source => payeeFields[source.target]).filter(Boolean))] : [];
-        return `<li><span>${esc(item.message || item.code)}</span>${scope ? `<small title="${esc(names.join('、'))}">${esc(scope)}</small>` : ''}${missing.length ? `<small>需补充：${esc(missing.join('、'))}</small>` : ''}</li>`;
+        return `<li><span>${esc(item.message || item.code)}</span>${scope ? `<small${names.length ? ` title="${esc(names.join('、'))}"` : ''}>${esc(scope)}</small>` : ''}${missing.length ? `<small>需补充：${esc(missing.join('、'))}</small>` : ''}</li>`;
       }).join('');
       return `<section class="diagnostic-section is-${level}" aria-label="${labels[level]}"><b class="diagnostic-title">${labels[level]} · ${list.length} 项</b><ul class="diagnostic-list">${rows}</ul></section>`;
     }).join('');
@@ -436,7 +436,8 @@ const AdapterUI = (() => {
   function requirementRows(scheme, onChange) {
     const current = scheme.requirements || {};
     const baseline = scheme.requirements_baseline || {};
-    return REQUIREMENT_ROWS.filter(([key]) => key in current).map(([key, label, help]) => buildRow({
+    const hidden = new Set((scheme.definition.materials || []).filter((role) => role.presentation === 'hidden').map((role) => role.id));
+    return REQUIREMENT_ROWS.filter(([key]) => key in current && !hidden.has(key)).map(([key, label, help]) => buildRow({
       key: REQUIREMENT_PREFIX + key, locked: false, onChange, label, help,
       baseline: baseline[key] === true,
       initial: current[key] === true,
@@ -448,6 +449,7 @@ const AdapterUI = (() => {
     const builtin = ['invoice', 'payment_screenshot', 'physical_image', 'inspection_pdf'];
     const rows = [['invoice', '发票', '发票 PDF 或 XML；始终必需。', '必需']];
     for (const role of scheme.definition.materials || []) {
+      if (role.presentation === 'hidden') continue;
       if (builtin.includes(role.id) || role.id === 'other' && !(role.min_count > 0)) continue;
       const need = role.min_count > 0 ? `必需，至少 ${role.min_count} 份` : '可选';
       rows.push([role.id, role.label, '由方案规定，不能在这里修改。', need + (role.max_count != null ? `，最多 ${role.max_count} 份` : '')]);
@@ -507,12 +509,11 @@ const AdapterUI = (() => {
 
       const summary = el('section', 'settings-block scheme-summary');
       const chips = [
-        [`版本 ${scheme.package_version}`, `包标识：${scheme.package_id}`],
+        [`版本 ${scheme.package_version}`],
         [`${scheme.definition.scheme.titles.length} 个抬头`],
         [`${scheme.definition.materials.length} 类材料`],
         [`${scheme.definition.outputs.length} 项输出`],
         ...(manifest.author ? [[`作者 ${manifest.author}`]] : []),
-        [`配置版本 ${String(scheme.revision_id || '').slice(0, 8)}`, '保存设置后生成的内部版本号；已有条目沿用创建时的版本。'],
       ];
       summary.innerHTML = `
         <div class="scheme-summary-top">
@@ -695,8 +696,8 @@ const AdapterUI = (() => {
     input.focus(); input.select();
   }
   async function exportScheme(scheme) {
-    const body=el('div');body.innerHTML=`<p class="hint">公共包包含 ${scheme.definition.scheme.titles.length} 个抬头、${scheme.definition.materials.length} 类材料和 ${scheme.definition.outputs.length} 项输出。收款对象、账号、个人填写值及历史记录不包含在公共包中。</p><label class="form-row">包标识<input data-package-id value="${esc(scheme.package_id)}"/></label><label class="form-row">名称<input data-package-name value="${esc(scheme.definition.manifest.name)}"/></label><label class="form-row">作者<input data-package-author value="${esc(scheme.definition.manifest.author||'')}"/></label><label class="form-row">说明<textarea data-package-description>${esc(scheme.definition.manifest.description||'')}</textarea></label>`;let m;
-    m=modal({title:'导出报账方案',key:'scheme-export',body,footer:[mkBtn('取消','ghost',()=>m.close()),mkBtn('导出','primary',async()=>{try{const r=await Api.exportAdapter(scheme.id,{package_id:$('[data-package-id]',body).value,name:$('[data-package-name]',body).value,author:$('[data-package-author]',body).value,description:$('[data-package-description]',body).value});if(!r.path){showErrors(body,new Error(r.message||'请填写修改后的包标识'));return;}m.close();await Api.openPath(r.path);toast('方案已导出','ok');}catch(e){showErrors(body,e);}})]});
+    const body=el('div');body.innerHTML=`<p class="hint">公共包包含 ${scheme.definition.scheme.titles.length} 个抬头、${scheme.definition.materials.length} 类材料和 ${scheme.definition.outputs.length} 项输出。收款对象、账号、个人填写值及历史记录不包含在公共包中。</p><label class="form-row">方案标识<input data-package-id value="${esc(scheme.package_id)}"/></label><label class="form-row">名称<input data-package-name value="${esc(scheme.definition.manifest.name)}"/></label><label class="form-row">作者<input data-package-author value="${esc(scheme.definition.manifest.author||'')}"/></label><label class="form-row">说明<textarea data-package-description>${esc(scheme.definition.manifest.description||'')}</textarea></label>`;let m;
+    m=modal({title:'导出报账方案',key:'scheme-export',body,footer:[mkBtn('取消','ghost',()=>m.close()),mkBtn('导出','primary',async()=>{try{const r=await Api.exportAdapter(scheme.id,{package_id:$('[data-package-id]',body).value,name:$('[data-package-name]',body).value,author:$('[data-package-author]',body).value,description:$('[data-package-description]',body).value});if(!r.path){showErrors(body,new Error(r.message||'请填写修改后的方案标识'));return;}m.close();await Api.openPath(r.path);toast('方案已导出','ok');}catch(e){showErrors(body,e);}})]});
   }
   async function editFields(scope,ownerId,schemeId=null,revisionId=null,onSaved=null) {
     try {
@@ -777,7 +778,7 @@ const AdapterUI = (() => {
       const row=el('div','settings-row'),copy=el('div','settings-row-copy'),title=el('b'),detail=el('span');
       title.append(document.createTextNode(`第 ${records.length-index} 版`));
       if(current)title.append(el('small','setting-flag is-changed','当前使用'));
-      detail.textContent=`${formatTime(record.created_at)} · 配置版本 ${record.revision_id.slice(0,8)}`;
+      detail.textContent=formatTime(record.created_at);
       copy.append(title,detail);row.append(copy);
       if(!current){
         row.append(mkBtn('回到此版本','small ghost',async()=>{
@@ -829,7 +830,7 @@ const AdapterUI = (() => {
     const history=entry.extension_history||[];
     // 放在详情页最末且默认折叠；有待处理的字段或提示时，标题上的「待处理」标记仍然可见。
     const section=el('details','detail-section minor-section adapter-entry');
-    section.innerHTML=`<summary>报账方案 · ${esc(entry.adapter?.scheme_name||'未选择')}${notices.length?' <span class="badge warning">待处理</span>':''}</summary><p class="scheme-desc">修订 ${esc(entry.scheme_revision_id?.slice(0,8)||'')}</p>`;
+    section.innerHTML=`<summary>报账方案 · ${esc(entry.adapter?.scheme_name||'未选择')}${notices.length?' <span class="badge warning">待处理</span>':''}</summary>`;
     const actions=el('div');
     if(hasFields)actions.append(mkBtn('填写报账信息','small ghost',()=>editFields('entry',entry.id,null,null,refreshDetail)));
     actions.append(mkBtn('更改方案','small ghost',()=>rebind([entry.id])));
@@ -848,7 +849,7 @@ const AdapterUI = (() => {
     const body=el('div');let m;const people=await Api.listPayees();const definitions=[];
     for(const {id,revision} of bindings.values()){
       const scheme=await Api.schemeDetails(id);const example=entries.find(e=>e.scheme_id===id&&e.scheme_revision_id===revision);const definition=example?.adapter?.definition||scheme.definition;definitions.push(definition);
-      const section=el('div','detail-section');section.innerHTML=`<h3>${esc(scheme.name)} · ${esc(revision.slice(0,8))}</h3>`;
+      const section=el('div','detail-section');section.innerHTML=`<h3>${esc(scheme.name)}${revision&&revision!==scheme.revision_id?' · 历史版本':''}</h3>`;
       if(definition.fields.some(f=>f.scope==='batch'))section.append(mkBtn('填写批次信息','ghost',()=>editFields('batch',batchId,id,revision)));
       if(payeeModes(definition).has('single')){const row=el('label','form-row');row.textContent='本批次收款对象';const select=el('select');select.innerHTML='<option value="">沿用方案选择</option>'+people.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${p.account_number?' · 尾号 '+esc(p.account_number.slice(-4)):''}</option>`).join('');select.value=batch.payee_mappings?.[id]?.id||'';select.onchange=async()=>{try{await Api.setBatchPayee(batchId,id,select.value||null);toast('已保存批次收款对象','ok');}catch(e){showErrors(body,e);}};row.append(select);section.append(row);}body.append(section);
     }
@@ -872,6 +873,35 @@ const AdapterUI = (() => {
     ['invoice', '发票'], ['payment_screenshot', '付款截图'], ['inspection_pdf', '查验单'],
     ['physical_image', '实物图'], ['other', '其他材料'],
   ].map(([role, label]) => ({ id: 'generic_pdf_' + role, label: label + ' PDF', type: 'pdf_bundle', payee_mode: 'none', pdf: { include_roles: [role] } }));
+  const MATERIAL_ROLE_OF_TYPE = { invoice_pdf: 'invoice', invoice_xml: 'invoice', payment_screenshot: 'payment_screenshot', physical_image: 'physical_image', inspection_pdf: 'inspection_pdf' };
+  const MATERIAL_ORDER = { invoice: 0, payment_screenshot: 1, physical_image: 2, inspection_pdf: 3, other: 4 };
+  // 只列出所选条目里实际存在的材料；发票要求有 PDF（只有 XML 时不能拼接），顺序沿用方案。
+  function materialSplitOutputs(entries) {
+    const builtin = new Map(MATERIAL_OUTPUTS.map((output, index) => [output.pdf.include_roles[0], { output, index }]));
+    const printable = /\.(pdf|png|jpe?g)$/i;
+    const found = new Map();
+    for (const entry of entries || []) {
+      const roles = new Map((entry.material_roles || []).map(role => [role.id, role]));
+      for (const attachment of entry.attachments || []) {
+        const role = attachment.role_id || MATERIAL_ROLE_OF_TYPE[attachment.type] || 'other';
+        if (!builtin.has(role)) continue; // 自定义材料由「材料 PDF」统一拼接；后端只认内置角色的单独输出。
+        const item = found.get(role) || { definition: null, printable: false, invoicePdf: false };
+        if (!item.definition && roles.has(role)) item.definition = roles.get(role);
+        if (printable.test(String(attachment.original_name || '')) || printable.test(String(attachment.stored_path || ''))) item.printable = true;
+        if (attachment.type === 'invoice_pdf') item.invoicePdf = true;
+        found.set(role, item);
+      }
+    }
+    return [...found.entries()]
+      .filter(([role, item]) => item.printable && (role !== 'invoice' || item.invoicePdf))
+      .sort(([a], [b]) => ((found.get(a).definition?.order ?? MATERIAL_ORDER[a]) - (found.get(b).definition?.order ?? MATERIAL_ORDER[b])) || (MATERIAL_ORDER[a] - MATERIAL_ORDER[b]))
+      .map(([role]) => ({ ...builtin.get(role).output }));
+  }
+  function mergeMaterialMemory(chosen, last, visible, materialIds) {
+    const ids = [...chosen];
+    for (const id of last) if (!visible.has(id) && materialIds.has(id) && !ids.includes(id)) ids.push(id);
+    return ids;
+  }
   // Keep distinct custom templates, but offer the core equivalent as a mode of
   // the same row instead of another checkbox elsewhere in the dialog.
   function exportOutputRows(items) {
@@ -905,9 +935,9 @@ const AdapterUI = (() => {
     }
     if (output.type === 'attachment_zip') {
       const grouping = output.attachments?.group_by || ['title', 'entry'];
-      return grouping.includes('claimant') ? '按抬头、报账人整理原文件' : '按抬头、每条发票整理原文件';
+      return grouping.includes('claimant') ? '按抬头、报账人整理原文件' : '按抬头、每个条目整理原文件';
     }
-    if (output.type === 'xlsx') return output.columns?.length ? '按方案指定的列汇总' : '汇总发票、金额、材料状态和备注';
+    if (output.type === 'xlsx') return output.columns?.length ? '按方案指定的列汇总' : '汇总条目、金额、材料状态和备注';
     return '';
   }
   // 本次可临时覆盖的方案设置，按「哪些输出会用到它」分组；没有对应输出被勾选时整组隐藏。
@@ -990,6 +1020,7 @@ const AdapterUI = (() => {
       const [entries, initialPeople, component] = await Promise.all([
         Promise.all(ids.map(id => Api.getEntry(id))), Api.listPayees(), Api.printComponentStatus(),
       ]);
+      const materialOutputs = materialSplitOutputs(entries);
       let people = initialPeople;
       const canRender = type => !['docx', 'pdf_bundle'].includes(type) || !!(component.available && component.ipc_versions?.includes(2) && component.renderers?.includes(type));
       const bindings = new Map();
@@ -1002,14 +1033,21 @@ const AdapterUI = (() => {
       const schemeIds = [...new Set([...bindings.values()].map(item => item.schemeId))];
       const liveSchemes = new Map(await Promise.all(schemeIds.map(async id => [id, await Api.schemeDetails(id)])));
       const body = el('div', 'settings-shell export-dialog');
-      const meta = new Map(); // 复选框 → { output, binding }
+      const meta = new Map(); // 复选框 → { output, binding, definition, supported }
       // 通用输出或未配置默认值的方案沿用上次选择；已配置的方案每次采用当前默认值。
       const scopeOf = binding => binding ? binding.split(':')[0] : 'generic';
       const configuredByScope = new Map();
       const recall = scope => { try { const value = JSON.parse(localStorage.getItem(OUTPUT_MEMORY_PREFIX + scope)); return value && Array.isArray(value.ids) ? value : null; } catch (_) { return null; } };
       const remember = () => {
+        const lastGeneric = recall('generic')?.ids || [];
+        const materialIds = new Set(MATERIAL_OUTPUTS.map(output => output.id));
         for (const scope of new Set([...meta.values()].map(item => scopeOf(item.binding)))) {
-          const ids = chosen().filter(input => scopeOf(meta.get(input).binding) === scope).map(input => input.dataset.outputId);
+          let ids = chosen().filter(input => scopeOf(meta.get(input).binding) === scope).map(input => input.dataset.outputId);
+          // 这次没出现的材料输出（如暂时没有实物图）沿用上次勾选；还看得见但被取消的按当前选择。
+          if (scope === 'generic') {
+            const visible = new Set([...meta].filter(([, item]) => scopeOf(item.binding) === 'generic' && item.supported).map(([, item]) => item.output.id));
+            ids = mergeMaterialMemory(ids, lastGeneric, visible, materialIds);
+          }
           try { localStorage.setItem(OUTPUT_MEMORY_PREFIX + scope, JSON.stringify({ ids, base: JSON.stringify(configuredByScope.get(scope) ?? null) })); } catch (_) {}
         }
       };
@@ -1022,7 +1060,7 @@ const AdapterUI = (() => {
         row.title = outputDescription(output, definition);
         row.innerHTML = `<input type="checkbox" data-output-id="${esc(output.id)}"${binding ? ` data-output-binding="${esc(binding)}"` : ''}${checked && supported ? ' checked' : ''}${supported ? '' : ' disabled'}/><span class="settings-row-copy"><b>${esc(label)}</b>${note ? `<span class="export-kind${supported ? '' : ' export-warn'}">${esc(note)}</span>` : ''}</span>`;
         const input = $('input', row);
-        const info = { output, binding, definition };
+        const info = { output, binding, definition, supported };
         meta.set(input, info);
         const item = el('div', 'export-item');
         item.append(row, el('div', 'export-names'));
@@ -1039,7 +1077,7 @@ const AdapterUI = (() => {
             const label = choice.output.type === 'pdf_bundle'
               ? choice.binding ? outputDescription(choice.output, choice.definition).replace(/^拼接/, '') + '（方案）' : '全部材料'
               : choice.output.type === 'attachment_zip'
-                ? (choice.output.attachments?.group_by || ['title', 'entry']).includes('claimant') ? '按报账人（方案）' : '按每条发票' + (choice.binding ? '（方案）' : '')
+                ? (choice.output.attachments?.group_by || ['title', 'entry']).includes('claimant') ? '按报账人（方案）' : '按每个条目' + (choice.binding ? '（方案）' : '')
                 : choice.binding ? '方案列' : '通用列';
             return `<option value="${index}">${esc(label)}</option>`;
           }).join('');
@@ -1089,11 +1127,13 @@ const AdapterUI = (() => {
         block.append(outputRow(output, binding, checked, definition, { ...spec, label }));
       }
       body.append(block);
-      const separate = el('details', 'settings-block export-more');
-      separate.open = MATERIAL_OUTPUTS.some(output => lastGeneric.includes(output.id));
-      separate.innerHTML = '<summary>按材料分别拼接</summary>';
-      for (const output of MATERIAL_OUTPUTS) separate.append(outputRow(output, '', lastGeneric.includes(output.id)));
-      body.append(separate);
+      if (materialOutputs.length) {
+        const separate = el('details', 'settings-block export-more');
+        separate.open = materialOutputs.some(output => lastGeneric.includes(output.id));
+        separate.innerHTML = '<summary>按材料分别拼接</summary>';
+        for (const output of materialOutputs) separate.append(outputRow(output, '', lastGeneric.includes(output.id)));
+        body.append(separate);
+      }
       // 本次选项：日期与收款对象，用不到的不出现。
       const options = el('section', 'settings-block');
       const dateRow = el('div', 'settings-row');
@@ -1148,7 +1188,7 @@ const AdapterUI = (() => {
         adjustForms.push({ binding, definition, groups });
       }
       const genericCatalog = [...liveSchemes.values()][0]?.settings_catalog || {};
-      const genericDefinition = { scheme: { settings: {} }, outputs: [...GENERIC_OUTPUTS, ...MATERIAL_OUTPUTS],
+      const genericDefinition = { scheme: { settings: {} }, outputs: [...GENERIC_OUTPUTS, ...materialOutputs],
         effective_settings: Object.fromEntries(Object.entries(genericCatalog).map(([key, spec]) => [key, spec.default])) };
       const genericGroups = [];
       for (const group of ADJUST_GROUPS) {
@@ -1319,7 +1359,7 @@ const AdapterUI = (() => {
       const manage = mkBtn('管理收款信息', 'small ghost', () => payees(entries[0]?.scheme_id, async () => { people = await Api.listPayees(); fillPayees(); payeeNote(); enhanceNativeSelects(payeeRow); invalidate(); }));
       payeeControl.append(payeeHolder, manage);
       if (!pending.mask.isConnected) return;
-      m = modal({ title: '打印导出', subhead: `已选 ${entries.length} 条发票`, key: 'print', replace: pending.mask, wide: true, body, footer: [note, cancel, run], onClose: () => { stopNamePreview(); if (plan) Api.cancelExport(plan.plan_id).catch(() => {}); } });
+      m = modal({ title: '打印导出', subhead: `已选 ${entries.length} 个条目`, key: 'print', replace: pending.mask, wide: true, body, footer: [note, cancel, run], onClose: () => { stopNamePreview(); if (plan) Api.cancelExport(plan.plan_id).catch(() => {}); } });
       enhanceNativeSelects(body); sync(); loadNames();
       if (!run.disabled) run.focus({ preventScroll: true }); // 回车即按默认选择生成
     } catch (e) { if (pending.mask.isConnected) toast(e.message, 'err'); }
@@ -1364,7 +1404,7 @@ const AdapterUI = (() => {
     let m;
     const statusBadge = { completed: ['已完成', 'pass'], failed: ['失败', 'blocked'], cancelled: ['已取消', 'warning'], running: ['生成中', 'warning'], planned: ['已预检', ''] };
     const intro = el('p', 'scheme-desc');
-    intro.textContent = '每次生成都会保留一份当时的数据快照。重新生成使用这份快照，不受之后修改条目的影响。';
+    intro.textContent = '每次生成都会保留当时的条目内容。重新生成使用这份记录，不受之后修改条目的影响。';
     body.append(intro);
     if (!records.length) body.append(el('div', 'settings-list-empty', '还没有导出记录。生成打印导出后，会在这里留下记录，可以重新打开文件或按原数据重新生成。'));
     for (const job of records) {
@@ -1379,7 +1419,7 @@ const AdapterUI = (() => {
       const copy = el('div', 'settings-row-copy'), title = el('b'), detail = el('span');
       title.append(document.createTextNode(formatTime(job.created_at)), el('small', 'badge ' + statusClass, esc(statusText)));
       detail.textContent = [
-        job.snapshot?.entry_ids ? `${job.snapshot.entry_ids.length} 条发票` : '',
+        job.snapshot?.entry_ids ? `${job.snapshot.entry_ids.length} 个条目` : '',
         schemeNames.join('、'),
         `${files.length} 个文件`,
       ].filter(Boolean).join(' · ');
@@ -1431,5 +1471,5 @@ const AdapterUI = (() => {
     m = modal({ title: '导出记录', key: 'export-jobs', replace: pending.mask, wide: true, body, footer: [mkBtn('完成', 'primary', () => m.close())] });
     $('.is-focus', body)?.scrollIntoView({ block: 'nearest' });
   }
-  return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,usesPayee,payeeModes,settingApplies,defaultSelected,exportOutputRows,outputDescription,exportRowState,runStep,afterCheck,splitDiagnostics,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs};
+  return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,usesPayee,payeeModes,settingApplies,defaultSelected,exportOutputRows,outputDescription,exportRowState,runStep,afterCheck,splitDiagnostics,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs,materialSplitOutputs,mergeMaterialMemory};
 })();

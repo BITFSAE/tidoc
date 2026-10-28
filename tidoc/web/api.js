@@ -147,6 +147,7 @@ const Api = (() => {
 
     listBatches: (includeArchived) => call('list_batches', !!includeArchived),
     getBatch: (id) => call('get_batch', id),
+    reorderBatches: (ids) => call('reorder_batches', ids || []),
     createBatch: (name, note, entryIds) => call('create_batch', name, note || '', entryIds || []),
     updateBatch: (id, fields) => call('update_batch', id, fields || {}),
     archiveBatch: (id, archived) => call('archive_batch', id, archived !== false),

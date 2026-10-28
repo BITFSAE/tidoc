@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import re
+from copy import copy
+from difflib import SequenceMatcher
+import unicodedata
 from decimal import Decimal
 from pathlib import Path
 
 from pypdf import PdfReader
+from pypdf.generic import ArrayObject, ByteStringObject, ContentStream, NameObject, NumberObject, TextStringObject
 
 from .models import ParsedItem
 from .money import money
@@ -15,7 +19,91 @@ def _compact(value: str) -> str:
     return re.sub(r'\s+', '', value)
 
 
+def name_has_column_spill(current: ParsedItem, candidate: ParsedItem) -> bool:
+    """Allow shortening only when every removed fragment belongs to a column."""
+    old, new, spec, unit = (
+        _compact(unicodedata.normalize('NFKC', value))
+        for value in (current.actual_name, candidate.actual_name, candidate.spec, candidate.unit)
+    )
+    if not new or not spec or old == new:
+        return False
+    for operation, start, end, _new_start, _new_end in SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if operation == 'equal':
+            continue
+        if operation != 'delete':
+            return False
+        fragment = old[start:end]
+        if fragment in spec:
+            continue
+        if unit and fragment.endswith(unit) and fragment[:-len(unit)] in spec:
+            continue
+        return False
+    return True
+
+
+def align_positioned_items(current: list[ParsedItem], candidates: list[ParsedItem]):
+    """Match row amounts, allowing only corroborated same-product discounts."""
+    aligned = []
+    offset = 0
+    for candidate in candidates:
+        if offset >= len(current):
+            return []
+        first = current[offset]
+        amount = first.total
+        offset += 1
+        while amount > candidate.total and offset < len(current):
+            discount = current[offset]
+            if (
+                discount.total >= 0 or discount.quantity is not None or discount.unit
+                or _compact(discount.actual_name) != _compact(candidate.actual_name)
+                or not (_compact(first.actual_name) == _compact(candidate.actual_name)
+                        or name_has_column_spill(first, candidate))
+            ):
+                break
+            amount += discount.total
+            offset += 1
+        if amount != candidate.total:
+            return []
+        aligned.append((first, candidate))
+    return aligned if offset == len(current) else []
+
+
 def _page_spans(page) -> list[tuple[float, float, str]]:
+    # pypdf can flush a text fragment with the preceding fragment's matrix.
+    # Identity transforms flush its buffer at each show-text boundary without
+    # moving anything. Work on an in-memory copy and preserve original font
+    # bytes: serializing decoded strings would change custom-font character codes.
+    def font_bytes(value):
+        if isinstance(value, TextStringObject):
+            return ByteStringObject(value.original_bytes)
+        if isinstance(value, ArrayObject):
+            return ArrayObject([font_bytes(part) for part in value])
+        return value
+
+    original_page = page
+    source = page.get_contents()
+    if source is not None:
+        stream = ContentStream(source, page.pdf)
+        identity = ([NumberObject(n) for n in (1, 0, 0, 1, 0, 0)], b'cm')
+        operations = []
+        for operands, operator in stream.operations:
+            operands = [font_bytes(value) for value in operands]
+            if operator in (b'Tj', b'TJ'):
+                operations.extend((identity, (operands, operator), identity))
+            else:
+                operations.append((operands, operator))
+        stream.operations = operations
+        page = copy(page)
+        page[NameObject('/Contents')] = stream
+    spans = _extract_spans(page)
+    # Character-by-character generators need pypdf's normal text joining. A
+    # fragmented header cannot anchor columns reliably; retain that reader.
+    if source is not None and not any('项目名称' in _compact(text) for _x, _y, text in spans):
+        return _extract_spans(original_page)
+    return spans
+
+
+def _extract_spans(page) -> list[tuple[float, float, str]]:
     spans = []
     last_end = None
 
@@ -78,6 +166,8 @@ def read_positioned_items(path: Path) -> list[ParsedItem]:
         for span in spans:
             x, y, text = span
             in_name_column = abs(x - left) < 3
+            if not in_name_column and _compact(text) in {'购', '买', '销', '售', '方', '信', '息'}:
+                continue  # Vertical party labels may carry displaced text matrices.
             in_table = bottom + 5 < y < top - 2
             # A wrapped name can report a baseline below the printed table.
             # Require contiguous name fragments in the source stream there;
@@ -114,12 +204,37 @@ def read_positioned_items(path: Path) -> list[ParsedItem]:
             _compact(text): x for x, y, text in spans
             if abs(y - top) < 3 and _compact(text) in {'规格型号', '单位', '数量'}
         }
+        # Some fonts expose 「单 位」 as two separate text fragments.
+        header = [(x, _compact(text)) for x, y, text in spans if abs(y - top) < 3]
+        if '单位' not in anchors:
+            for x, text in header:
+                if text == '单' and any(0 < other_x - x < 30 and other == '位'
+                                         for other_x, other in header):
+                    anchors['单位'] = x
         for _head, names, cells in groups:
             if any('¥' in text or '￥' in text for _x, _y, text in cells):
                 return []  # A subtotal has leaked into the row; keep the other reader.
             name = ''.join(names).replace('\n', '')
+            unit_cells = spec_cells = []
+            if '单位' in anchors:
+                unit_x = anchors['单位']
+                spec_x = anchors.get('规格型号', (left + unit_x) / 2)
+                start = (spec_x + unit_x) / 2
+                end = (anchors.get('数量', unit_x + 70) + unit_x) / 2
+                unit_cells = sorted(
+                    [cell for cell in cells if start <= cell[0] < end], key=lambda cell: -cell[1]
+                )
+                spec_cells = sorted(
+                    [cell for cell in cells if spec_x - 10 <= cell[0] < start],
+                    key=lambda cell: -cell[1],
+                )
+            # Parse the numeric tail without model fragments (which can contain
+            # numbers and hyphens resembling quantities or negative amounts).
+            numeric_cells = [cell for cell in cells if cell not in spec_cells and cell not in unit_cells]
             values = []
-            for _x, _y, text in sorted(cells, key=lambda cell: cell[0]):
+            if unit_cells:
+                values.append(''.join(_compact(cell[2]) for cell in unit_cells))
+            for _x, _y, text in sorted(numeric_cells, key=lambda cell: cell[0]):
                 values.append(_compact(text) if re.fullmatch(r'[\d\s.,+\-]+', text) else text.replace('\n', ''))
             parsed = _parse_pdf_items([name + '     ' + '     '.join(values)], layout=True)
             if len(parsed) != 1:
@@ -128,19 +243,8 @@ def read_positioned_items(path: Path) -> list[ParsedItem]:
             item.name = name
             item.actual_name = clean_item_name(name)
             if '单位' in anchors:
-                unit_x = anchors['单位']
-                start = (anchors.get('规格型号', unit_x - 60) + unit_x) / 2
-                end = (anchors.get('数量', unit_x + 70) + unit_x) / 2
-                unit_cells = sorted(
-                    [cell for cell in cells if start <= cell[0] < end], key=lambda cell: -cell[1]
-                )
                 item.unit = ''.join(_compact(cell[2]) for cell in unit_cells)
-                if '规格型号' in anchors:
-                    spec_cells = sorted(
-                        [cell for cell in cells if anchors['规格型号'] - 10 <= cell[0] < start],
-                        key=lambda cell: -cell[1],
-                    )
-                    item.spec = ''.join(cell[2] for cell in spec_cells)
+                item.spec = ''.join(cell[2] for cell in spec_cells)
             else:
                 units = [text for _x, _y, text in cells if text in _PDF_UNIT_SUFFIXES]
                 if len(units) == 1:

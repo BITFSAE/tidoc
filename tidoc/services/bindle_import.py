@@ -194,7 +194,7 @@ class _EntryRestorer:
         return new_id
 
 
-def _assign_batches(conn, now, affected_entry_indexes, entry_batch_overrides,
+def _assign_batches(conn, now, default_batch_entry_indexes, entry_batch_overrides,
                     destination_by_entry_index, target_batch_id, new_batch_name):
     batch_created = global_batch_created = False
     individually_assigned = globally_assigned = 0
@@ -218,7 +218,7 @@ def _assign_batches(conn, now, affected_entry_indexes, entry_batch_overrides,
 
     default_affected_indexes = [
         entry_index
-        for entry_index in affected_entry_indexes
+        for entry_index in default_batch_entry_indexes
         if entry_index not in entry_batch_overrides
     ]
     if default_affected_indexes and new_batch_name:
@@ -237,6 +237,8 @@ def _assign_batches(conn, now, affected_entry_indexes, entry_batch_overrides,
         if not destination_id:
             continue
         mode = override["mode"]
+        if mode == "keep":
+            continue
         if mode == "existing":
             override_target = override["batch_id"]
         elif mode == "new":
@@ -313,6 +315,11 @@ def import_bindle(
     target_batch_id = str(options.get("batch_id") or "").strip()
     requested_scheme_id = str(options.get("scheme_id") or "").strip()
     new_batch_name = str(options.get("batch_name") or "").strip()
+    move_existing_entries = options.get("move_existing_entries", False)
+    if not isinstance(move_existing_entries, bool):
+        raise ValueError("已有条目的批次设置无效，请重新选择。")
+    if move_existing_entries and not (target_batch_id or new_batch_name):
+        raise ValueError("移动已有条目前，请先选择目标批次。")
     if target_batch_id and new_batch_name:
         raise ValueError("已有批次和新建批次只能选择一个。")
     entry_selection_supplied = "selected_entry_indexes" in options
@@ -321,28 +328,28 @@ def import_bindle(
             int(value) for value in (options.get("selected_entry_indexes") or [])
         }
     except (TypeError, ValueError) as exc:
-        raise ValueError("逐条导入选择无效，请重新打开导入预览。") from exc
+        raise ValueError("导入条目的选择无效，请重新打开导入预览。") from exc
     entry_batch_overrides: dict[int, dict] = {}
     for raw_index, raw_override in (options.get("entry_batch_overrides") or {}).items():
         try:
             entry_index = int(raw_index)
         except (TypeError, ValueError) as exc:
-            raise ValueError("逐条批次设置无效，请重新选择。") from exc
+            raise ValueError("单条批次设置无效，请重新选择。") from exc
         override = dict(raw_override or {})
         mode = str(override.get("mode") or "default")
-        if mode not in {"default", "none", "existing", "new"}:
-            raise ValueError("逐条批次设置无效，请重新选择。")
+        if mode not in {"default", "keep", "none", "existing", "new"}:
+            raise ValueError("单条批次设置无效，请重新选择。")
         if mode == "default":
             continue
         normalized = {"mode": mode}
         if mode == "existing":
             normalized["batch_id"] = str(override.get("batch_id") or "").strip()
             if not normalized["batch_id"]:
-                raise ValueError("请为逐条设置选择报账批次。")
+                raise ValueError("请为单条设置选择报账批次。")
         elif mode == "new":
             normalized["batch_name"] = str(override.get("batch_name") or "").strip()
             if not normalized["batch_name"]:
-                raise ValueError("请填写逐条设置的新批次名称。")
+                raise ValueError("请填写单条设置的新批次名称。")
         entry_batch_overrides[entry_index] = normalized
 
     inspected = inspected if inspected is not None else storage.inspect_bindle(path)
@@ -355,7 +362,7 @@ def import_bindle(
             raise ValueError("预览后绑定包或本地条目已变化，请重新打开导入预览。")
         current = copy.deepcopy(inspected)
         for entry in current.get("entries", []):
-            for key in ("import_action", "existing_entry_id", "existing_batches", "merge_preview",
+            for key in ("import_action", "existing_entry_id", "existing_batches", "existing_profile", "merge_preview",
                         "adapter_compatibility", "extension_merge_preview", "role_mapping_preview"):
                 entry.pop(key, None)
         storage._annotate_import_actions(entries_repo, current, adapter_service=adapter_service,
@@ -409,7 +416,7 @@ def import_bindle(
         if not conn.execute(
             "SELECT 1 FROM batches WHERE id = ?", (override_batch_id,)
         ).fetchone():
-            raise ValueError("逐条设置中的批次已不存在，请重新选择。")
+            raise ValueError("单条设置中的批次已不存在，请重新选择。")
     profile_count_before = len(existing_profiles)
     profile_by_identity = {
         (str(profile.get("name") or "").strip(), str(profile.get("reviewer") or "").strip()): profile["id"]
@@ -423,7 +430,7 @@ def import_bindle(
     batch_created = False
     global_batch_created = False
     destination_by_entry_index: dict[int, str] = {}
-    affected_entry_indexes: set[int] = set()
+    default_batch_entry_indexes: set[int] = set()
     individually_assigned = 0
     globally_assigned = 0
 
@@ -513,6 +520,9 @@ def import_bindle(
                 )
                 if existing_id:
                     destination_by_entry_index[entry_index] = existing_id
+                    # 补材料和移动批次分别决定；无内容变化的条目也支持明确移动。
+                    if move_existing_entries or existing_id in imported_ids:
+                        default_batch_entry_indexes.add(entry_index)
                     changes = storage._merge_existing_entry(
                         conn, entries_repo, attachments_repo, zf, existing_id, e,
                         import_tags, now, created_files, bool(inspected["tampered"]),
@@ -521,7 +531,6 @@ def import_bindle(
                     if changes:
                         if existing_id not in updated_ids:
                             updated_ids.append(existing_id)
-                        affected_entry_indexes.add(entry_index)
                         merged.append({
                             "entry_id": existing_id,
                             "invoice_no": invoice_no,
@@ -555,7 +564,7 @@ def import_bindle(
                 new_id = restorer.restore(e, entry_index, destination_profile_id, invoice_no, zf)
                 imported_ids.append(new_id)
                 destination_by_entry_index[entry_index] = new_id
-                affected_entry_indexes.add(entry_index)
+                default_batch_entry_indexes.add(entry_index)
                 if invoice_no:
                     existing_by_invoice_no[invoice_no] = new_id
                 for digest in invoice_hashes:
@@ -564,7 +573,7 @@ def import_bindle(
             affected_ids = list(dict.fromkeys(imported_ids + updated_ids))
             (target_batch_id, batch_created, global_batch_created,
              individually_assigned, globally_assigned) = _assign_batches(
-                conn, now, affected_entry_indexes, entry_batch_overrides,
+                conn, now, default_batch_entry_indexes, entry_batch_overrides,
                 destination_by_entry_index, target_batch_id, new_batch_name,
             )
 
@@ -614,7 +623,7 @@ def import_bindle(
     if updated_ids:
         message_parts.append(f"补充 {len(updated_ids)} 条现有记录")
     if skipped:
-        message_parts.append(f"已跳过 {len(skipped)} 条重复发票")
+        message_parts.append(f"{len(skipped)} 条已有且无变化")
     if inspected["tampered"] and imported_ids:
         message_parts.append("完整性异常条目已标记为严重问题")
     if created_profile_ids:
@@ -625,7 +634,7 @@ def import_bindle(
     if globally_assigned:
         message_parts.append("已移到新建批次" if global_batch_created else "已移到所选批次")
     if individually_assigned:
-        message_parts.append(f"已按逐条设置调整 {individually_assigned} 条批次")
+        message_parts.append(f"已按单条设置调整 {individually_assigned} 条的批次")
     message = "；".join(message_parts) + "。"
 
     return {

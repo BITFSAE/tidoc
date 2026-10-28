@@ -1,4 +1,4 @@
-"""截图用的虚构数据：8 条条目、2 位报账人、2 个批次，全部写进隔离数据目录。
+"""截图用的虚构数据：8 条条目、2 位报账人、2 个批次，另有一个导入预览用的绑定包，全部写进隔离数据目录。
 
 这里没有真实发票、姓名、税号或账号。抬头沿用内置 BITFSAE 方案里的两个公开抬头。
 """
@@ -128,3 +128,31 @@ def seed(api, work_dir: Path) -> None:
             api.entries.set_check(entry_id, "warning", warning)
         api.entries.recompute_status(entry_id)
         time.sleep(1.1)  # 更新时间精确到秒，间隔一秒以上排序才稳定
+
+
+def seed_bindle_preview(api, work_dir: Path) -> Path:
+    """构造同时包含新增、待补充和无变化条目的虚构绑定包。"""
+    from tidoc.db import TYPE_INSPECTION
+    from tidoc.services.bindle import export_bindle
+
+    backend = Backend(api)
+    entries = {entry["invoice_no"]: entry for entry in api.entries.list()}
+    existing_ids = [entries[f"26999000000000000{n}"]["id"] for n in (101, 102)]
+    profiles = {profile["id"]: profile for profile in api.profiles.list()}
+    profile_ids = {profile["name"]: profile["id"] for profile in profiles.values()}
+    # 包里多一张查验单的条目显示为「已有·待补充」；临时新建、导出后删掉的条目显示为「新增」。
+    new_ids = []
+    for n, name, amount, person in ((201, "文件收纳盒", "48.00", "张三"), (202, "标签纸", "26.50", "李四")):
+        xml_path = work_dir / f"preview-{n}.xml"
+        _invoice_xml(xml_path, f"26999000000000000{n}", "2026-09-20", "示例办公用品商行", UNIVERSITY, name, amount)
+        new_ids.append(backend.create_entry(profile_ids[person], title=UNIVERSITY, xml_path=str(xml_path))["id"])
+    extra = work_dir / "补交查验单.pdf"
+    _blank_pdf(extra, 600)
+    attachment = api.attachments.add(existing_ids[0], str(extra), TYPE_INSPECTION)
+    package = export_bindle(api.entries, api.attachments, existing_ids + new_ids,
+                            work_dir / "9月补交材料.tidoc", profiles)
+    api.attachments.delete(attachment["id"])
+    api.entries.recompute_status(existing_ids[0])
+    for entry_id in new_ids:
+        backend.delete_entry(entry_id)
+    return package

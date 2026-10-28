@@ -272,11 +272,11 @@ body {
 
 .app { display: grid; grid-template-columns: 1fr; height: 100vh; }
 
-/* 批次栏与状态预设同在工具条第二行（见 .toolbar-view-row）：放得下时批次在左、预设靠右，
-   放不下时 wrap-reverse 让预设换到上一行、批次栏独占下一行。 */
+/* 批次栏与状态预设同在工具条第二行（见 .toolbar-view-row）：批次栏占满预设左侧的剩余宽度，
+   批次多了在栏内横向滚动；剩余宽度不足 min-width 时，wrap-reverse 让预设换到上一行、批次栏独占下一行。 */
 .batch-folders {
   display: flex; align-items: center; gap: 10px;
-  flex: 1 1 auto; min-width: 0; max-width: 100%;
+  flex: 1 1 0; min-width: min(340px, 100%); max-width: 100%;
 }
 .batch-folders.hidden { display: none; }
 .batch-scope {
@@ -294,8 +294,12 @@ body {
 .batch-folder-track {
   display: flex; align-items: center; gap: 7px; overflow-x: auto;
   flex: 1 1 auto; min-width: 0; padding: 2px 0;
-  scrollbar-width: thin;
+  scrollbar-width: thin; user-select: none; -webkit-user-select: none;
 }
+/* 浮动滚动条见 .stats.is-scrollable；这里垫出的位置落在工具条底部的留白里（工具条下内边距 10px）。 */
+html[data-scrollbars="overlay"] .batch-folder-track.is-scrollable { padding-bottom: 12px; margin-bottom: -10px; }
+.batch-folder.dragging { z-index: 1; border-color: var(--primary-line); box-shadow: var(--shadow-lg); transition: none; }
+html.batch-dragging, html.batch-dragging * { cursor: grabbing !important; }
 /* 批次 = 索引卡片标签：细描边 + 顶部彩条，比整块色块更利落 */
 .batch-folder {
   position: relative; height: 36px;
@@ -714,11 +718,14 @@ body {
 /* ---------------------------------------------------------------- content */
 .content { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 12px 24px 24px; overflow: hidden; }
 .content-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; margin-bottom: 10px; flex-wrap: wrap; }
-.content-summary { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
+/* 统计条占满「选择条目」左侧的剩余宽度、放不下就横向滚动，「选择条目」保持在右侧；
+   选中条目后操作按钮变多、统计条不足 min-width 时才换行，换到下一行也靠右。 */
+.content-summary { display: flex; align-items: center; gap: 10px; flex: 1 1 0; min-width: min(260px, 100%); }
 .stats { font-size: 12px; color: var(--ink-soft); display: flex; gap: 14px; align-items: center; min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: thin; white-space: nowrap; padding-bottom: 1px; }
 .stats::-webkit-scrollbar { height: 4px; }
-/* 浮动滚动条（macOS 默认）不占位置，会盖在这一行文字上；按它展开后的高度在下方留出位置。 */
-html[data-scrollbars="overlay"] .stats { padding-bottom: 15px; }
+/* 浮动滚动条（macOS 默认）不占位置，会盖在文字上：需要横向滚动时按它展开后的高度在下方垫出位置，
+   再用负外边距抵掉，滚动条落进下方的空白，这一行的高度和与「选择条目」的对齐都不变。 */
+html[data-scrollbars="overlay"] .stats.is-scrollable { padding-bottom: 15px; margin-bottom: -12px; }
 .stats b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; font-family: var(--font-display); font-variation-settings: "SOFT" 30; }
 .stats .sep { color: var(--line); }
 .stats .stats-sum { font-family: var(--font-display); font-size: 15px; font-variation-settings: "SOFT" 30, "opsz" 40; }
@@ -732,7 +739,7 @@ html[data-scrollbars="overlay"] .stats { padding-bottom: 15px; }
 .selection-bar {
   display: inline-flex; align-items: center; gap: 2px;
   background: var(--primary-soft); border: 1px solid var(--primary-line-soft); border-radius: 999px;
-  padding: 3px 5px 3px 9px; font-size: 12px; max-width: 100%; overflow-x: auto; scrollbar-width: none;
+  padding: 3px 5px 3px 9px; font-size: 12px; max-width: 100%; overflow-x: auto; scrollbar-width: none; margin-left: auto;
 }
 .selection-bar::-webkit-scrollbar { display: none; }
 .selection-bar.empty { background: var(--panel-raised); border-color: var(--line); }
@@ -1379,55 +1386,46 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .bindle-section-head h3 { margin: 0; color: var(--ink-soft); font-size: 12px; font-weight: 650; }
 .bindle-section-head label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: 11.5px; cursor: pointer; }
 .bindle-section-head input, .bindle-profile-row > input[type="checkbox"] { accent-color: var(--primary); }
-.bindle-profile-list { display: grid; border: 1px solid var(--line-soft); border-radius: 8px; overflow: hidden; }
+.bindle-profile-list { max-height: min(32vh, 280px); border: 1px solid var(--line-soft); border-radius: 7px; overflow: auto; background: var(--panel-raised); }
 .bindle-profile-labels, .bindle-profile-row {
-  display: grid; grid-template-columns: 22px minmax(0, 1fr) minmax(0, 1fr) 48px;
-  gap: 8px; align-items: center;
+  display: grid; grid-template-columns: 22px minmax(0, 1fr) minmax(0, 1fr) 58px;
+  gap: 8px; align-items: center; padding: 4px 10px;
 }
-.bindle-profile-labels { padding: 7px 10px 5px; background: var(--paper-2); color: var(--ink-faint); font-size: 11px; }
+.bindle-profile-labels { position: sticky; top: 0; z-index: 1; min-height: 28px; background: var(--paper-2); color: var(--ink-soft); font-size: 11px; }
 .bindle-profile-labels span:last-child { text-align: right; }
-.bindle-profile-row {
-  padding: 8px 10px; border-top: 1px solid var(--line-soft); background: var(--panel-raised);
-}
+.bindle-profile-labels > span:not(:last-child) { padding-left: 6px; }
+.bindle-profile-row { min-height: 36px; border-top: 1px solid var(--line-soft); }
 .bindle-profile-row.off, .bindle-entry-row.off { opacity: .45; background: var(--paper-2); }
-.bindle-profile-row input { min-width: 0; }
-.bindle-profile-row > input[type="checkbox"] { margin: 0; justify-self: center; }
-.bindle-profile-row > span { text-align: right; color: var(--ink-faint); font-size: 11.5px; white-space: nowrap; }
-/* 同名报账人需要手动选择时，选择框追加在行尾，要放到姓名列下面而不是挤进 22px 的勾选列。 */
+.bindle-profile-row.off { opacity: .65; }
+.bindle-profile-row > input:not([type="checkbox"]) {
+  width: 100%; min-width: 0; height: 27px; padding: 3px 6px; border: 1px solid transparent;
+  border-radius: 4px; background: transparent; color: var(--ink); font-size: 12px; box-shadow: none;
+}
+.bindle-profile-row > input:not([type="checkbox"]):enabled:hover { border-color: var(--line); }
+.bindle-profile-row > input:not([type="checkbox"]):focus { border-color: var(--primary); background: var(--panel); outline: 2px solid var(--primary-ring); }
+.bindle-profile-row > input:disabled { color: var(--ink-soft); opacity: 1; }
+.bindle-profile-labels > input, .bindle-profile-row > input[type="checkbox"] { width: 14px; height: 14px; margin: 0; justify-self: center; accent-color: var(--primary); }
+.bindle-profile-row > span { text-align: right; color: var(--ink-soft); font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .bindle-profile-row > select, .bindle-profile-row > .select-field { grid-column: 2 / -1; }
-/* 导入设置：第一行是报账批次（分段控件在左、批次选择或新名称在右），第二行是报账方案和统一标签，
-   两行共用同样的两栏，控件上下对齐；没有报账方案可选时，统一标签单独占左栏。 */
-.bindle-import-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; align-items: start; }
+/* 批次分段切换与目标控件同行，方案和标签在下一行。 */
+.bindle-import-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; align-items: start; }
 .bindle-import-options > * { min-width: 0; }
-.bindle-import-options .form-row { align-content: start; margin-bottom: 0; }
-.bindle-import-options label { min-height: 20px; }
-/* 输入框和下拉触发器、分段控件同高，同一行里的控件上下对齐。 */
-.bindle-import-options input:not([type="radio"]) { box-sizing: border-box; height: 36px; }
-.bindle-import-options .optional { margin-left: 4px; color: var(--ink-faint); font-size: 11px; font-weight: 400; }
-/* 报账方案选择由公共组件生成：标签文字直接写在 label 里，这里让它和其他字段的小标题一致。 */
-.bindle-import-options > div > .form-row {
-  gap: 6px; font-size: 11.5px; line-height: 20px; color: var(--ink-soft); font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
-}
-.bindle-batch-option {
-  grid-column: 1 / -1; grid-row: 1;
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; align-items: center;
-}
-.bindle-batch-option > label:first-child { grid-column: 1 / -1; }
-.bindle-batch-option > .bindle-segments { grid-column: 1; grid-row: 2; }
-.bindle-batch-option > select, .bindle-batch-option > input, .bindle-batch-option > .select-field { grid-column: 2; grid-row: 2; width: 100%; min-width: 0; }
-.bindle-segments {
-  display: grid; grid-template-columns: repeat(3, 1fr); height: 36px; padding: 3px;
-  border: 1px solid var(--line); border-radius: 7px; background: var(--paper-2);
-}
-.bindle-segments label { display: grid; min-width: 0; cursor: pointer; }
+.bindle-import-options .form-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; align-items: center; margin: 0; }
+.bindle-import-options label { min-width: 0; margin: 0; color: var(--ink-soft); font-size: 11.5px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+.bindle-import-options input:not([type="checkbox"]), .bindle-import-options .select-trigger { box-sizing: border-box; height: 32px; font-size: 12px; }
+.bindle-import-options .select-field { min-width: 0; width: 100%; }
+.bindle-batch-option { grid-column: 1 / -1; grid-row: 1; }
+.bindle-batch-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+.bindle-batch-fields > select, .bindle-batch-fields > input, .bindle-batch-fields > .select-field { grid-column: 2; grid-row: 1; min-width: 0; }
+.bindle-segments { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); height: 32px; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-2); }
+.bindle-segments label { display: grid; cursor: pointer; }
 .bindle-segments input { position: absolute; opacity: 0; pointer-events: none; }
-.bindle-segments span {
-  display: grid; place-items: center; min-width: 0; padding: 0 6px; border-radius: 5px; overflow: hidden;
-  color: var(--ink-soft); font-size: 12px; line-height: 1; text-overflow: ellipsis; white-space: nowrap;
-}
-.bindle-segments input:checked + span { background: var(--panel-raised); color: var(--ink); box-shadow: var(--shadow-sm); font-weight: 650; }
+.bindle-segments span { display: grid; place-items: center; padding: 0 4px; border-radius: 4px; color: var(--ink-soft); font-size: 12px; white-space: nowrap; }
+.bindle-segments input:checked + span { color: var(--ink); background: var(--panel-raised); box-shadow: var(--shadow-sm); font-weight: 600; }
 .bindle-segments input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 1px; }
-.bindle-segments label.disabled { cursor: default; opacity: .42; }
+.bindle-segments label.disabled { opacity: .42; cursor: default; }
+.bindle-tag-option { grid-column: 1 / -1; }
+.bindle-import-options.has-scheme .bindle-tag-option { grid-column: auto; }
 .bindle-integrity-warning {
   display: grid; gap: 4px; margin: -5px 0 0; padding: 10px 12px;
   border: 1px solid var(--blocked); border-radius: 8px; color: var(--blocked);
@@ -1452,70 +1450,74 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
   box-shadow: 0 0 0 2px var(--primary-line); animation: bindleReviewPulse 1.2s ease 2;
 }
 @keyframes bindleReviewPulse { 50% { box-shadow: 0 0 0 4px var(--primary-ring); } }
-.bindle-entry-tools { display: flex; align-items: center; gap: 12px; }
-.bindle-entry-tools > label { display: none; }
-.bindle-entry-section.customizing .bindle-entry-tools > label { display: inline-flex; }
-.bindle-entry-tools .link-btn { min-height: 24px; padding: 2px 4px; font-size: 11.5px; }
-.bindle-selection-count { color: var(--ink-faint); font-weight: 500; }
+.bindle-import [hidden] { display: none !important; }
+.bindle-profiles > summary { cursor: pointer; color: var(--ink-soft); font-size: 12px; font-weight: 600; }
+.bindle-profiles > summary span { margin-left: 8px; color: var(--ink); font-weight: 400; }
+.bindle-profiles[open] > summary { margin-bottom: 10px; }
+.bindle-profile-note { margin: 0 0 6px; color: var(--ink-soft); font-size: 11px; line-height: 18px; }
+.bindle-batch-option > .bindle-move-option {
+  grid-column: 2; display: flex; align-items: center; gap: 6px;
+  color: var(--ink-soft); font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none; cursor: pointer;
+}
+.bindle-import-options .bindle-move-option input { height: auto; margin: 0; accent-color: var(--primary); }
+.bindle-entry-section > .bindle-section-head { gap: 8px; }
+.bindle-filters { display: flex; flex-wrap: wrap; gap: 2px; }
+.bindle-filters button {
+  display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 5px; padding: 6px 8px;
+  background: transparent; color: var(--ink-soft); font: inherit; font-size: 12px; cursor: pointer;
+}
+.bindle-filters button b { font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.bindle-filters button:hover { background: var(--paper-2); }
+.bindle-filters button[aria-pressed="true"] { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+.bindle-entry-section input[type="search"] { width: 240px; min-width: 160px; height: 30px; font-size: 11.5px; }
+.bindle-selection-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 6px; font-size: 11.5px; }
+.bindle-selection-bar > label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-soft); cursor: pointer; }
+.bindle-selection-bar input { accent-color: var(--primary); margin: 0; }
+.bindle-entry-tools { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.bindle-entry-tools .link-btn, .bindle-row-tools .link-btn { min-height: 24px; padding: 2px 3px; font-size: 11px; }
+.bindle-entry-tools button:disabled { opacity: .4; cursor: default; }
+.bindle-selection-count { color: var(--ink-soft); font-weight: 400; }
 .bindle-entry-list {
-  --bindle-entry-columns: 152px minmax(0, 1.25fr) 78px minmax(0, 1fr) 232px;
+  --bindle-entry-columns: 18px minmax(150px, 1fr) 68px minmax(95px, .65fr) minmax(280px, 1.65fr);
   display: grid; max-height: min(48vh, 520px); border: 1px solid var(--line-soft); background: var(--panel-raised);
   border-radius: 8px; overflow-x: hidden; overflow-y: auto;
 }
-.bindle-entry-section.customizing .bindle-entry-list {
-  --bindle-entry-columns: 22px 152px minmax(0, 1.25fr) 78px minmax(0, 1fr) 232px;
-}
 .bindle-entry-head, .bindle-entry-row {
   display: grid; grid-template-columns: var(--bindle-entry-columns);
-  gap: 0 10px; align-items: center; padding: 6px 10px;
+  gap: 0 10px; align-items: center; padding: 7px 10px;
 }
-/* 表头固定在滚动区顶部：整数行高，加底边线和浅影，滚到它下面的行就会被明确截断，而不是和表头叠在一起。 */
 .bindle-entry-head {
   position: sticky; z-index: 3; top: 0; background: var(--paper-2);
   border-bottom: 1px solid var(--line); box-shadow: 0 2px 5px -3px rgba(20, 15, 5, .22);
   color: var(--ink-faint); font-size: 11px; line-height: 16px;
 }
 .bindle-entry-head > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bindle-entry-head > :first-child, .bindle-entry-row > input[type="checkbox"] { display: none; }
-.bindle-entry-section.customizing .bindle-entry-head > :first-child,
-.bindle-entry-section.customizing .bindle-entry-row > input[type="checkbox"] { display: block; }
-.bindle-entry-row { min-height: 48px; border-top: 1px solid var(--line-soft); font-size: 12px; line-height: 16px; row-gap: 4px; }
+.bindle-entry-row { min-height: 48px; border-top: 1px solid var(--line-soft); font-size: 12px; line-height: 17px; row-gap: 4px; }
 .bindle-entry-head + .bindle-entry-row { border-top: 0; }
-.bindle-entry-row:last-child { border-bottom: 0; }
 .bindle-entry-row > * { min-width: 0; }
-.bindle-entry-row > input[type="checkbox"] { width: 14px; height: 14px; margin: 0; justify-self: center; align-self: center; accent-color: var(--primary); }
-.bindle-entry-row > .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bindle-entry-seller { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-soft); }
-.bindle-entry-owner { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bindle-entry-row > input[type="checkbox"] { width: 14px; height: 14px; margin: 0; justify-self: center; accent-color: var(--primary); }
+.bindle-entry-invoice { display: grid; gap: 2px; }
+.bindle-entry-invoice > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bindle-entry-invoice small { font-size: 10.5px; color: var(--ink-faint); }
+.bindle-entry-owner { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-soft); }
 .bindle-entry-amount { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* 本机情况：每行固定 16px 行高、行间不留缝，第一行是状态和说明，第二行是本机位置，需要时第三行显示单独设置的目标。 */
-.bindle-entry-result { display: grid; gap: 0; justify-self: stretch; text-align: left; }
+.bindle-entry-result { display: grid; gap: 2px; }
 .bindle-entry-result > * { min-width: 0; }
-.bindle-entry-line { display: flex; align-items: center; gap: 6px; min-height: 16px; }
+.bindle-entry-line { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 20px; }
 .bindle-entry-result small {
-  min-width: 0; overflow: hidden; color: var(--ink-faint); font-size: 10.5px;
-  line-height: 16px; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; overflow: hidden; color: var(--ink-soft); font-size: 11px;
+  line-height: 18px; text-overflow: ellipsis; white-space: nowrap;
 }
-.bindle-entry-line > small:not(.bindle-entry-location) { flex: 0 1 auto; }
-.bindle-entry-action { flex: none; color: var(--primary); font-size: 10.5px; font-weight: 700; line-height: 16px; white-space: nowrap; }
-.bindle-entry-action.unchanged { color: var(--ink-faint); font-weight: 600; }
-.bindle-entry-action.merge { color: var(--pass); }
-.bindle-entry-location { flex: 0 1 auto; color: var(--ink-soft) !important; }
-.bindle-entry-target-summary { display: none; color: var(--primary) !important; font-weight: 650; }
-.bindle-entry-row.has-bindle-override .bindle-entry-target-summary { display: block; }
-.bindle-entry-adjust {
-  display: none; flex: none; min-height: 0; margin: -3px -4px -3px auto; border: 0; padding: 3px 4px;
-  background: none; color: var(--primary); font: inherit; font-size: 10.5px; line-height: 16px; white-space: nowrap; cursor: pointer;
-}
-.bindle-entry-section.customizing .bindle-entry-adjust { display: inline-block; }
+.bindle-entry-action { flex: none; padding: 0 5px; border-radius: 4px; background: var(--primary-soft); color: var(--primary); font-size: 10.5px; font-weight: 600; line-height: 19px; white-space: nowrap; }
+.bindle-entry-action.unchanged { background: var(--paper-2); color: var(--ink-soft); }
+.bindle-entry-action.merge { background: var(--pass-soft); color: var(--pass); }
+.bindle-entry-location { flex: 1; }
+.bindle-entry-row.has-bindle-override .bindle-entry-location { color: var(--primary); }
+.bindle-row-tools { flex: none; display: flex; gap: 5px; margin-left: auto; }
 .bindle-entry-row.editing-bindle-override { background: var(--primary-hover); }
-/* 行里追加的内容（单独设置、材料角色对应、提示）都从发票号那一列起横跨整行，不落进窄列。 */
-.bindle-entry-override, .bindle-entry-row > .bindle-entry-material-map, .bindle-entry-row > .bindle-entry-note { grid-column: 1 / -1; }
-.bindle-entry-section.customizing .bindle-entry-override,
-.bindle-entry-section.customizing .bindle-entry-row > .bindle-entry-material-map,
-.bindle-entry-section.customizing .bindle-entry-row > .bindle-entry-note { grid-column: 2 / -1; }
+.bindle-entry-override, .bindle-entry-row > .bindle-entry-material-map, .bindle-entry-row > .bindle-entry-note { grid-column: 2 / -1; }
 .bindle-entry-override {
-  display: grid; grid-template-columns: auto minmax(160px, 280px) minmax(140px, 1fr) auto;
+  display: grid; grid-template-columns: auto minmax(160px, 260px) minmax(120px, 1fr) auto;
   gap: 8px; align-items: center; padding: 5px 0 2px; color: var(--ink-soft); font-size: 11px;
 }
 .bindle-entry-override > span { white-space: nowrap; }
@@ -1523,16 +1525,11 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .bindle-entry-override input { min-width: 0; height: 32px; }
 .bindle-entry-override .link-btn { min-height: 24px; justify-self: end; padding: 2px 4px; font-size: 11px; white-space: nowrap; }
 .bindle-entry-material-map { font-size: 12px; }
-.bindle-entry-material-map > summary {
-  width: fit-content; max-width: 100%; cursor: pointer; color: var(--ink-soft); font-size: 11.5px; line-height: 16px;
-}
+.bindle-entry-material-map > summary { width: fit-content; max-width: 100%; cursor: pointer; color: var(--ink-soft); font-size: 11.5px; line-height: 16px; }
 .bindle-entry-material-map > summary:hover { color: var(--ink); }
 .bindle-entry-material-map[open] > summary { margin-bottom: 6px; }
 .bindle-entry-material-map > .hint { margin: 0 0 8px; padding: 6px 10px; font-size: 11.5px; line-height: 1.5; }
-.bindle-entry-material-map > .form-row {
-  display: grid; grid-template-columns: minmax(96px, 200px) minmax(0, 320px); gap: 8px; align-items: center;
-  margin: 0 0 6px; color: var(--ink-soft); font-size: 12px;
-}
+.bindle-entry-material-map > .form-row { display: grid; grid-template-columns: minmax(96px, 200px) minmax(0, 320px); gap: 8px; align-items: center; margin: 0 0 6px; color: var(--ink-soft); font-size: 12px; }
 .bindle-entry-material-map > .form-row > span { min-width: 0; overflow-wrap: anywhere; }
 .bindle-entry-material-map > .form-row .select-field { width: 100%; }
 .bindle-entry-note { margin: 0; padding: 6px 10px; font-size: 11.5px; line-height: 1.5; }
@@ -1856,22 +1853,18 @@ body.drag-over-card .drag-hint { border-color: var(--found-line); color: var(--f
   .ocr-compare { grid-template-columns: 1fr; }
   .ocr-key-controls { justify-content: flex-start; }
   .bindle-import-bar { align-items: flex-start; flex-direction: column; gap: 6px; }
-  .bindle-import-options, .bindle-batch-option { grid-template-columns: 1fr; }
-  .bindle-batch-option > select, .bindle-batch-option > input, .bindle-batch-option > .select-field { grid-column: 1; grid-row: 3; }
-  .bindle-entry-tools { width: 100%; justify-content: space-between; }
+  .bindle-import-options { grid-template-columns: 1fr; }
+  .bindle-import-options.has-scheme .bindle-tag-option { grid-column: 1; }
+  .bindle-batch-fields { grid-template-columns: minmax(0, 1fr); }
+  .bindle-batch-fields > select, .bindle-batch-fields > input, .bindle-batch-fields > .select-field { grid-column: 1; grid-row: 2; }
+  .bindle-entry-section input[type="search"] { width: 100%; }
   .bindle-entry-list { max-height: 54vh; }
   .bindle-entry-head { display: none; }
-  .bindle-entry-row { grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; padding: 9px 10px; }
-  .bindle-entry-section.customizing .bindle-entry-row { grid-template-columns: 22px minmax(0, 1fr) auto; }
+  .bindle-entry-row { grid-template-columns: 18px minmax(0, 1fr) auto; gap: 3px 10px; padding: 8px 10px; }
   .bindle-entry-row > input[type="checkbox"] { grid-column: 1; grid-row: 1; }
-  .bindle-entry-row > .mono { grid-column: 1; grid-row: 1; }
-  .bindle-entry-row > .bindle-entry-amount { grid-column: 2; grid-row: 1; }
-  .bindle-entry-section.customizing .bindle-entry-row > .mono { grid-column: 2; }
-  .bindle-entry-section.customizing .bindle-entry-row > .bindle-entry-amount { grid-column: 3; }
-  .bindle-entry-seller, .bindle-entry-owner, .bindle-entry-result { grid-column: 1 / -1; }
-  .bindle-entry-section.customizing .bindle-entry-seller,
-  .bindle-entry-section.customizing .bindle-entry-owner,
-  .bindle-entry-section.customizing .bindle-entry-result { grid-column: 2 / -1; }
+  .bindle-entry-invoice { grid-column: 2; grid-row: 1; }
+  .bindle-entry-row > .bindle-entry-amount { grid-column: 3; grid-row: 1; }
+  .bindle-entry-owner, .bindle-entry-result { grid-column: 2 / -1; }
   .bindle-entry-override { grid-template-columns: 1fr; padding-top: 7px; }
   .bindle-entry-override .link-btn { justify-self: start; }
   .verification-fields { grid-template-columns: 1fr; }

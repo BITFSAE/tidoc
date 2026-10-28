@@ -1,6 +1,6 @@
 """Compatibility summary built from the same decimal-safe output projection."""
 from __future__ import annotations
-from .export_context import project_entry, exact_sum, decimal_value
+from .export_context import project_entry, exact_sum
 
 SUMMARY_VERSION = 1
 
@@ -14,8 +14,7 @@ def _item_count(entry):
 
 def build_entry_summary(entry):
     data = project_entry(entry)
-    differs = data['paid_amount'] is not None and data['total'] is not None and decimal_value(data['paid_amount']) != decimal_value(data['total'])
-    return {'invoice_no':data['invoice_no'],'invoice_date':data['invoice_date'],'seller':data['seller'],'total':data['total'],'item_count':_item_count(entry),'title':data['title']['name'],'buyer_tax_id':data['title']['tax_id'],'title_profile_id':data['title']['id'],'status':data['status'],'check_status':data['check_status'],'paid_amount':data['paid_amount'],'actual_item_name':data['actual_item_name'],'notes':data['notes'],'modified_fields':['paid_amount'] if differs else []}
+    return {'invoice_no':data['invoice_no'],'invoice_date':data['invoice_date'],'seller':data['seller'],'total':data['total'],'item_count':_item_count(entry),'title':data['title']['name'],'buyer_tax_id':data['title']['tax_id'],'title_profile_id':data['title']['id'],'status':data['status'],'check_status':data['check_status'],'paid_amount':data['paid_amount'],'actual_item_name':data['actual_item_name'],'notes':data['notes'],'modified_fields':entry.get('modified_fields',[])}
 
 
 def build_summary(entries_repo, entry_ids):

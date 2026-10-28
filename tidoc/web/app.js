@@ -222,17 +222,31 @@ else if (systemThemeMedia.addListener) systemThemeMedia.addListener(handleSystem
 const FIELD_LABEL = {
   paid_amount: '实付金额', actual_item_name: '实际物资名称', notes: '备注',
   invoice_no: '发票号码', total: '价税合计', buyer_name: '购买方抬头',
-  buyer_tax_id: '税号', title: '抬头',
+  buyer_tax_id: '购买方税号', title: '抬头', seller_tax_id: '销售方税号',
 };
 // 修改记录里自动写入的字段带来源前缀，例如「[阿里云OCR]total」，显示成「价税合计 · 采用阿里云 OCR」。
 const HISTORY_SOURCE_LABEL = {
-  '阿里云OCR': '采用阿里云 OCR', '本地重新识别': '本机重新识别', '人工修正': '人工修正', '付款截图识别': '付款截图识别填写',
+  '阿里云OCR': '采用阿里云 OCR', '本地重新识别': '本机重新识别', '人工修正': '人工修正', '付款截图识别': '付款截图识别填写', '识别结果': '采用识别结果',
 };
 function historyFieldLabel(field) {
   const match = /^\[(.+?)\](.+)$/.exec(String(field || ''));
   const name = match ? match[2] : field;
   const label = FIELD_LABEL[name] || OCR_FIELD_LABEL[name] || name;
   return match ? `${label} · ${HISTORY_SOURCE_LABEL[match[1]] || match[1]}` : label;
+}
+function historyValue(field, value) {
+  if (String(field).endsWith('items')) {
+    try {
+      const items = JSON.parse(value);
+      if (Array.isArray(items)) {
+        const labels = {name: '名称', actual_name: '实际物资名称', unit: '单位', quantity: '数量', unit_price: '单价', total: '金额', spec: '规格'};
+        return items.map((item, index) => `第 ${index + 1} 行：` + Object.entries(labels)
+          .filter(([key]) => item[key] != null && item[key] !== '')
+          .map(([key, label]) => `${label} ${item[key]}`).join('，')).join('；') || '无明细';
+      }
+    } catch (e) { /* 旧记录里的明细可能是普通说明文字。 */ }
+  }
+  return value || '空';
 }
 const OCR_FIELD_LABEL = {
   invoice_no: '发票号码', invoice_date: '发票日期', seller: '销售方',
@@ -330,13 +344,27 @@ function wrapSvg(svg, s) {
 
 // ------------------------------------------------------------------ 初始化
 // 浮动滚动条（macOS 默认的「根据鼠标或触控板」）不占布局位置；接了鼠标或设为「始终」时是占位的经典滚动条。
-// 启动时探测一次，横向滚动的窄条只在浮动滚动条下额外留位置。
+// 启动时探测一次。浮动滚动条下，报账人统计条和批次栏放不下、需要横向滚动时才在下方给滚动条留位置（样式 .is-scrollable）。
 function detectOverlayScrollbars() {
   const probe = document.createElement('div');
   probe.style.cssText = 'position:absolute;top:-200px;width:100px;height:100px;overflow:scroll;scrollbar-width:thin;visibility:hidden';
   document.body.appendChild(probe);
   document.documentElement.dataset.scrollbars = probe.offsetHeight === probe.clientHeight ? 'overlay' : 'classic';
   probe.remove();
+  if (document.documentElement.dataset.scrollbars !== 'overlay' || typeof ResizeObserver !== 'function') return;
+  // 下一帧再改样式：在回调里直接改尺寸会触发 ResizeObserver 循环提示，被全局错误处理当成 JS 错误。
+  const observer = new ResizeObserver(() => requestAnimationFrame(syncHorizontalScrollers));
+  observer.observe($('#stats'));
+  observer.observe($('#batchFolders'));
+}
+
+function syncHorizontalScrollers() {
+  if (document.documentElement.dataset.scrollbars !== 'overlay') return;
+  [$('#stats'), $('#batchFolders .batch-folder-track')].forEach((node) => {
+    if (!node) return;
+    const scrollable = node.scrollWidth > node.clientWidth;
+    if (node.classList.contains('is-scrollable') !== scrollable) node.classList.toggle('is-scrollable', scrollable);
+  });
 }
 
 async function init() {
@@ -1267,7 +1295,7 @@ function updateListSummary() {
     sum += Number(entry.total) || 0;
     const paid = Number(entry.fields?.paid_amount?.current);
     paidSum += isNaN(paid) ? 0 : paid;
-    if (entryHasPaidDifference(entry)) modifiedCount++;
+    if (entryHasManualChanges(entry)) modifiedCount++;
   });
   const batch = actualBatchId() ? (State.currentBatch || State.batches.find((item) => item.id === actualBatchId()) || null) : null;
   const parts = [];
@@ -1288,6 +1316,7 @@ function updateListSummary() {
     });
   }
   $('#stats').innerHTML = parts.join('');
+  syncHorizontalScrollers();
 }
 
 // 附件归属的方案材料角色；内置类型的角色标识与附件类型一致。
@@ -1320,7 +1349,7 @@ function listEntryFromDetail(entry) {
     ...entry,
     role_counts: roleCounts,
     fields,
-    modified_fields: entryHasPaidDifference(entry) ? ['paid_amount'] : [],
+    modified_fields: entry.modified_fields || [],
     attachment_count: Object.values(attachmentTypes).reduce((sum, count) => sum + count, 0),
     attachment_types: attachmentTypes,
     has_invoice: !!(attachmentTypes.invoice_pdf || attachmentTypes.invoice_xml),
@@ -1343,7 +1372,7 @@ async function refreshEntryCard(entryId, currentDetail = null) {
     renderEntries();
     return;
   }
-  if (State.quickView === 'modified' && !entryHasPaidDifference(entry)) {
+  if (State.quickView === 'modified' && !entryHasManualChanges(entry)) {
     State.entries.splice(index, 1);
     renderEntries();
     return;
@@ -1452,7 +1481,7 @@ function entryCard(e) {
   const actualCur = fields.actual_item_name ? fields.actual_item_name.current : '';
   const paidCur = fields.paid_amount ? fields.paid_amount.current : '';
   const paidDiff = entryHasPaidDifference(e);
-  const modified = paidDiff
+  const modified = entryHasManualChanges(e)
     ? `<span class="badge modified" data-tooltip="${esc(entryModifiedTooltip(e))}">${iconPencil(11)}已修改</span>` : '';
   const ocrBadge = e.ocr_pending
     ? `<button class="badge ocr badge-action" data-card-ocr="1" data-tooltip="阿里云 OCR 结果与当前值有差异待确认，点击查看">OCR</button>` : '';
@@ -1749,6 +1778,10 @@ function entryHasPaidDifference(entry) {
   return !!String(paid ?? '').trim() && !sameMoney(paid, entry?.total);
 }
 
+function entryHasManualChanges(entry) {
+  return !!entry?.modified_fields?.length;
+}
+
 // 识别提醒在库里用「；」连成一串，付款截图的几条带「[付款截图识别]」前缀（句子本身已写明是付款截图）；显示时逐条分行、去掉前缀。
 function checkMessageLines(message) {
   return String(message || '').split('；').map((part) => part.trim()).filter(Boolean)
@@ -1758,21 +1791,19 @@ function checkMessageLines(message) {
 function entryModifiedTooltip(entry) {
   const fields = entry?.fields || {};
   const changes = [];
-  const paid = fields.paid_amount;
-  if (entryHasPaidDifference(entry)) {
-    const by = ['payment_ai', 'payment_ocr'].includes(paid?.value_source) ? '（由付款截图识别填写）' : '';
-    changes.push(`实付金额：${fmtMoney(paid?.origin || entry?.total)} → ${fmtMoney(paid?.current)}${by}`);
-  }
-  const describeText = (key, label) => {
+  for (const key of entry?.modified_fields || []) {
     const row = fields[key];
-    if (!row?.modified) return;
-    const before = String(row.origin || '空');
-    const after = String(row.current || '空');
-    changes.push(before === after ? `${label}曾修改，当前为“${after}”` : `${label}：“${before}”→“${after}”`);
-  };
-  describeText('actual_item_name', '实际物资名称');
-  describeText('notes', '条目备注');
-  return changes.length ? `已修改：${changes.join('\n')}` : '实付金额与发票金额不一致';
+    const label = historyFieldLabel(key);
+    if (row) {
+      const before = key === 'paid_amount' ? fmtMoney(row.origin) : String(row.origin || '空');
+      const after = key === 'paid_amount' ? fmtMoney(row.current) : String(row.current || '空');
+      changes.push(`${label}：“${before}”→“${after}”`);
+    } else {
+      const current = entry[key];
+      changes.push(current && typeof current !== 'object' ? `${label}人工修改，当前为“${current}”` : `${label}人工修改`);
+    }
+  }
+  return changes.length ? `已修改：${changes.join('\n')}` : '当前保留人工修改结果，详情中可查看修改记录';
 }
 
 // 按报账人 / 抬头分组渲染，每组头显示条数、合计、齐备率，可整组选中
@@ -2021,6 +2052,9 @@ async function loadBatches() {
   renderBatchFolders();
 }
 
+let renderedBatchShelf = null;
+let renderedBatchFilter = null;
+
 function renderBatchFolders() {
   const wrap = $('#batchFolders');
   if (!wrap) return;
@@ -2062,6 +2096,12 @@ function renderBatchFolders() {
       ${folders.map(folderChip).join('')}
       <button type="button" class="batch-folder new" id="folderNewBatch">新建批次</button>`;
   }
+  // 重绘会换掉整条批次栏：同一范围内保留横向滚动位置，切换到别的批次时再把它滚进视野。
+  const previousTrack = wrap.querySelector('.batch-folder-track');
+  const keepScroll = previousTrack && renderedBatchShelf === shelf ? previousTrack.scrollLeft : 0;
+  const revealActive = renderedBatchFilter !== State.batchFilter;
+  renderedBatchShelf = shelf;
+  renderedBatchFilter = State.batchFilter;
   wrap.innerHTML = `
     <div class="batch-scope" role="tablist" aria-label="报账批次视图">
       ${scopeChip('', '在办', !shelf)}
@@ -2090,6 +2130,110 @@ function renderBatchFolders() {
   });
   const newBtn = $('#folderNewBatch');
   if (newBtn) newBtn.onclick = () => newBatchFlow();
+
+  const trackNode = wrap.querySelector('.batch-folder-track');
+  trackNode.scrollLeft = keepScroll;
+  const active = revealActive && trackNode.querySelector('.batch-folder.active');
+  if (active) {
+    const t = trackNode.getBoundingClientRect(), c = active.getBoundingClientRect();
+    if (c.left < t.left) trackNode.scrollLeft -= t.left - c.left + 8;
+    else if (c.right > t.right) trackNode.scrollLeft += c.right - t.right + 8;
+  }
+  trackNode.querySelectorAll('.batch-folder[data-folder]:not(.unbatched)').forEach((chip) => {
+    chip.addEventListener('pointerdown', (ev) => startBatchDrag(ev, trackNode, chip));
+  });
+  syncHorizontalScrollers();
+}
+
+// 按住批次左右拖动调整顺序（只在当前的「在办」或「已归档」范围内）；移动不到 5 像素仍算单击。
+// 用指针事件而非 HTML 拖放，免得和拖入文件的处理互相干扰。
+function startBatchDrag(downEvent, track, chip) {
+  if (downEvent.button !== 0 || downEvent.pointerType === 'touch') return;
+  if (downEvent.target instanceof Element && downEvent.target.closest('[data-folder-menu]')) return;
+  const chips = () => [...track.querySelectorAll('.batch-folder[data-folder]:not(.unbatched)')];
+  const before = chips().map((node) => node.dataset.folder);
+  const grabOffset = downEvent.clientX - chip.getBoundingClientRect().left;
+  let dragging = false;
+  let lastX = downEvent.clientX;
+  let frame = 0;
+
+  const place = () => {
+    chip.style.transform = '';
+    const width = chip.getBoundingClientRect().width;
+    const center = lastX - grabOffset + width / 2;
+    const others = chips().filter((node) => node !== chip);
+    const next = others.find((node) => {
+      const r = node.getBoundingClientRect();
+      return center < r.left + r.width / 2;
+    });
+    if (next) {
+      if (chip.nextElementSibling !== next) track.insertBefore(chip, next);
+    } else if (others.length && others[others.length - 1].nextElementSibling !== chip) {
+      others[others.length - 1].after(chip);
+    }
+    chip.style.transform = `translateX(${lastX - grabOffset - chip.getBoundingClientRect().left}px)`;
+  };
+  // 指针停在批次栏两端附近时持续滚动，拖到看不见的位置也不必松手。
+  const autoScroll = () => {
+    const r = track.getBoundingClientRect();
+    const step = lastX < r.left + 36 ? -10 : lastX > r.right - 36 ? 10 : 0;
+    if (step) {
+      const from = track.scrollLeft;
+      track.scrollLeft += step;
+      if (track.scrollLeft !== from) place();
+    }
+    frame = requestAnimationFrame(autoScroll);
+  };
+  const onMove = (ev) => {
+    if (ev.pointerId !== downEvent.pointerId) return;
+    lastX = ev.clientX;
+    if (!dragging) {
+      if (Math.abs(lastX - downEvent.clientX) < 5) return;
+      dragging = true;
+      try { chip.setPointerCapture(ev.pointerId); } catch (e) {}
+      chip.classList.add('dragging');
+      document.documentElement.classList.add('batch-dragging');
+      frame = requestAnimationFrame(autoScroll);
+    }
+    place();
+  };
+  const finish = (ev) => {
+    if (ev.pointerId !== downEvent.pointerId) return;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', finish);
+    window.removeEventListener('pointercancel', finish);
+    if (!dragging) return;
+    cancelAnimationFrame(frame);
+    chip.style.transform = '';
+    chip.classList.remove('dragging');
+    document.documentElement.classList.remove('batch-dragging');
+    // 松手后浏览器还会补发一次单击，吞掉它，免得拖完顺手打开了这个批次。
+    const swallow = (click) => { click.stopPropagation(); click.preventDefault(); };
+    track.addEventListener('click', swallow, true);
+    setTimeout(() => track.removeEventListener('click', swallow, true), 0);
+    const after = chips().map((node) => node.dataset.folder);
+    if (after.join('\n') !== before.join('\n')) saveBatchOrder(after);
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', finish);
+  window.addEventListener('pointercancel', finish);
+}
+
+async function saveBatchOrder(visibleIds) {
+  const visible = new Set(visibleIds);
+  const byId = new Map(State.batches.map((batch) => [batch.id, batch]));
+  const order = [...visibleIds, ...State.batches.filter((batch) => !visible.has(batch.id)).map((batch) => batch.id)];
+  State.batches = order.map((id) => byId.get(id)).filter(Boolean);
+  try {
+    const result = await Api.reorderBatches(order);
+    State.batches = result.batches || State.batches;
+    State.unbatchedCount = Number(result.unbatched_count || 0);
+  } catch (e) {
+    toast(e.message, 'err');
+    await loadBatches();
+    return;
+  }
+  renderBatchFolders();
 }
 
 function focusBatch(batchId) {
@@ -4982,7 +5126,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
     <div class="hitem">
       <span class="h-time">${esc(h.changed_at)}</span>
       <span class="h-field">${esc(historyFieldLabel(h.field))}</span>
-      <span class="h-val">「${esc(h.old_value || '空')}」→「${esc(h.new_value || '空')}」</span>
+      <span class="h-val">「${esc(historyValue(h.field, h.old_value))}」→「${esc(historyValue(h.field, h.new_value))}」</span>
     </div>`).join('')
     || '<div class="attach-item" style="color:var(--ink-soft)">暂无修改记录</div>';
 

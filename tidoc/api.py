@@ -913,6 +913,14 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         }
 
     @_guard
+    def reorder_batches(self, batch_ids=None):
+        self.batches.set_order(batch_ids or [])
+        return {
+            "batches": self.batches.list(include_archived=True),
+            "unbatched_count": self.batches.unbatched_count(),
+        }
+
+    @_guard
     def get_batch(self, batch_id):
         return self.batches.get(batch_id)
 

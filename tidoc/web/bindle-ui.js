@@ -1,4 +1,36 @@
 /* bindle-ui.js — shared operator workflow; loaded before app.js. */
+const BindlePreview = {
+  profiles(insp, fallback) {
+    const declared = new Map((insp.profiles || []).map((profile) => [profile.id || '__fallback__', profile]));
+    const referenced = new Map();
+    for (const entry of insp.entries || []) {
+      const sourceId = entry.profile_id || '__fallback__';
+      if (!referenced.has(sourceId)) referenced.set(sourceId, {
+        id: sourceId,
+        name: entry.profile_name || fallback?.name || '',
+        reviewer: entry.reviewer || fallback?.reviewer || '',
+        ...declared.get(sourceId),
+        sourceId,
+      });
+    }
+    return [...new Set([...declared.keys(), ...referenced.keys()])]
+      .filter((sourceId) => referenced.has(sourceId)).map((sourceId) => referenced.get(sourceId));
+  },
+  isExisting: (entry) => entry.import_action === 'merge' || entry.import_action === 'unchanged',
+  batchNames: (entry) => (entry.existing_batches || [])
+    .map((batch) => `${batch.name}${batch.archived ? '（已归档）' : ''}`).join('、') || '未进批次',
+  target(entry, value, name, mode, batchId, batchName, moveExisting) {
+    if (value === 'keep' || (value === 'default' && this.isExisting(entry) && !moveExisting)) {
+      return { mode: 'keep', label: this.batchNames(entry) };
+    }
+    if (value.startsWith('batch:')) return { mode: 'existing', id: value.slice(6) };
+    if (value === 'new') return { mode: 'new', label: name.trim() || '待填写批次名' };
+    if (value === 'none' || mode === 'none') return { mode: 'none', label: '未进批次' };
+    return mode === 'existing' ? { mode: 'existing', id: batchId }
+      : { mode: 'new', label: batchName.trim() || '待填写批次名' };
+  },
+};
+
 async function openBindleImportPreview(path, insp, options = {}) {
   const [batchResult, tags] = await Promise.all([
     Api.listBatches(true),
@@ -7,43 +39,12 @@ async function openBindleImportPreview(path, insp, options = {}) {
   const batches = Array.isArray(batchResult) ? batchResult : (batchResult?.batches || []);
   const fallback = State.profileById[State.currentProfileId];
   const entries = insp.entries || [];
-  const legacyProfiles = new Map();
-  entries.forEach((entry) => {
-    const sourceId = entry.profile_id || '__fallback__';
-    if (!legacyProfiles.has(sourceId)) {
-      legacyProfiles.set(sourceId, {
-        id: sourceId,
-        sourceId,
-        name: entry.profile_name || fallback?.name || '',
-        reviewer: entry.reviewer || fallback?.reviewer || '',
-        is_default: false,
-      });
-    }
-  });
-  const packageProfiles = (insp.profiles || []).length
-    ? insp.profiles.map((p) => ({ ...p, sourceId: p.id || '__fallback__' }))
-    : [...legacyProfiles.values()];
-  if (!packageProfiles.length) {
-    packageProfiles.push({
-      id: '__fallback__', sourceId: '__fallback__',
-      name: fallback?.name || '', reviewer: fallback?.reviewer || '',
-      is_default: false,
-    });
-  }
+  const packageProfiles = BindlePreview.profiles(insp, fallback);
   const counts = new Map(packageProfiles.map((p) => [p.sourceId, 0]));
-  (insp.entries || []).forEach((entry) => {
+  entries.forEach((entry) => {
     const key = entry.profile_id || '__fallback__';
     counts.set(key, (counts.get(key) || 0) + 1);
   });
-  const currentIdentity = State.profileById[State.currentProfileId];
-  const matchingProfiles = packageProfiles.filter((profile) => (
-    currentIdentity
-    && profile.name === currentIdentity.name
-    && profile.reviewer === currentIdentity.reviewer
-  ));
-  const initiallySelected = new Set(
-    (matchingProfiles.length ? matchingProfiles : packageProfiles).map((profile) => profile.sourceId)
-  );
   const activeBatches = (batches || []).filter((batch) => !batch.archived);
   // 已归档批次也可以作为目标（例如补交材料），排在在办批次之后并标明，默认仍选在办批次。
   const archivedBatches = (batches || []).filter((batch) => batch.archived);
@@ -52,44 +53,40 @@ async function openBindleImportPreview(path, insp, options = {}) {
   const attachmentCount = entries.reduce((sum, entry) => sum + (entry.attachments || []).length, 0);
   const body = el('div', 'bindle-import');
   const profileRows = packageProfiles.map((profile) => `
-    <div class="bindle-profile-row${initiallySelected.has(profile.sourceId) ? '' : ' off'}" data-bind-profile="${esc(profile.sourceId)}">
-      <input type="checkbox" data-bind-profile-enabled aria-label="导入 ${esc(profile.name || '该报账人')}" ${initiallySelected.has(profile.sourceId) ? 'checked' : ''}/>
+    <div class="bindle-profile-row" data-bind-profile="${esc(profile.sourceId)}">
+      <input type="checkbox" data-bind-profile-enabled aria-label="导入 ${esc(profile.name || '该报账人')}" checked/>
       <input data-bind-profile-name aria-label="报账人" value="${esc(profile.name || '')}" placeholder="填写报账人"/>
       <input data-bind-profile-reviewer aria-label="审核人" value="${esc(profile.reviewer || '')}" placeholder="填写审核人"/>
-      <span>${counts.get(profile.sourceId) || 0} 条</span>
+      <span data-bind-profile-count>${counts.get(profile.sourceId) || 0} 条</span>
     </div>`).join('');
   const perEntryBatchOptions = targetBatches.map((batch) =>
     `<option value="batch:${esc(batch.id)}">${esc(batchOptionLabel(batch))}</option>`
   ).join('');
   const entryRows = entries.map((entry, entryIndex) => {
     const profile = packageProfiles.find((item) => item.sourceId === (entry.profile_id || '__fallback__'));
-    const isExisting = entry.import_action === 'merge' || entry.import_action === 'unchanged';
-    const action = entry.import_action === 'merge' ? '补充' : isExisting ? '已有' : '新增';
+    const isExisting = BindlePreview.isExisting(entry);
+    const action = entry.import_action === 'merge' ? '已有·待补充' : isExisting ? '已有·无变化' : '新增';
     const actionDetail = entry.import_action === 'merge'
       ? (entry.merge_preview?.labels || []).join('、')
       : entry.import_action === 'unchanged'
-        ? '包内材料和信息已齐全'
-        : `包内材料 ${(entry.attachments || []).length} 份`;
-    const existingBatchNames = (entry.existing_batches || []).map((batch) => batch.name).filter(Boolean);
-    const currentLocation = isExisting
-      ? `所在批次 · ${existingBatchNames.length ? existingBatchNames.join('、') : '未进批次'}`
-      : '本机无此条目';
-    const ownerText = `${profile?.name || entry.profile_name || '未填写'} · ${profile?.reviewer || entry.reviewer || '未填写'}`;
-    return `<div class="bindle-entry-row${initiallySelected.has(entry.profile_id || '__fallback__') ? '' : ' off'}" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}" data-bind-entry-index="${entryIndex}">
-      <input type="checkbox" data-bind-entry-enabled aria-label="导入发票 ${esc(entry.invoice_no || entryIndex + 1)}" ${initiallySelected.has(entry.profile_id || '__fallback__') ? 'checked' : ''}/>
-      <span class="mono">${esc(entry.invoice_no || '无发票号')}</span>
-      <span class="bindle-entry-seller" data-tooltip-overflow="${esc(entry.seller || '')}">${esc(entry.seller || '未识别销售方')}</span>
+        ? ''
+        : `材料 ${(entry.attachments || []).length} 份`;
+    const owner = isExisting && entry.existing_profile?.id ? entry.existing_profile : profile;
+    const ownerText = `${owner?.name || entry.profile_name || '未填写'} · ${owner?.reviewer || entry.reviewer || '未填写'}`;
+    return `<div class="bindle-entry-row" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}" data-bind-entry-index="${entryIndex}" data-bind-action="${esc(entry.import_action || 'new')}">
+      <input type="checkbox" data-bind-entry-enabled aria-label="导入发票 ${esc(entry.invoice_no || entryIndex + 1)}" checked/>
+      <div class="bindle-entry-invoice"><span class="bindle-entry-seller" data-tooltip-overflow="${esc(entry.seller || '')}">${esc(entry.seller || '未识别销售方')}</span><small class="mono" data-tooltip-overflow="${esc(entry.invoice_no || '')}">${esc(entry.invoice_no || '无发票号')}</small></div>
       <span class="bindle-entry-amount">${fmtMoney(entry.total)}</span>
-      <span class="bindle-entry-owner" data-tooltip-overflow="${esc(ownerText)}">${esc(ownerText)}</span>
+      <span class="bindle-entry-owner" title="${isExisting ? '保留本机报账人和审核人' : '新条目的报账人和审核人'}" data-tooltip-overflow="${esc(ownerText)}">${esc(ownerText)}</span>
       <div class="bindle-entry-result">
-        <div class="bindle-entry-line"><span class="bindle-entry-action ${esc(entry.import_action || 'new')}">${esc(action)}</span><small data-tooltip-overflow="${esc(actionDetail)}">${esc(actionDetail)}</small><button type="button" class="bindle-entry-adjust" data-bind-entry-adjust aria-expanded="false" aria-controls="bindleEntryOverride${entryIndex}">单独设置</button></div>
-        <small class="bindle-entry-location" data-tooltip-overflow="${esc(currentLocation)}">${esc(currentLocation)}</small>
-        <small class="bindle-entry-target-summary"></small>
+        <div class="bindle-entry-line"><span class="bindle-entry-action ${esc(entry.import_action || 'new')}">${esc(action)}</span><small data-tooltip-overflow="${esc(actionDetail)}">${esc(actionDetail)}</small></div>
+        <div class="bindle-entry-line"><small class="bindle-entry-location"></small><span class="bindle-row-tools">${isExisting ? '<button type="button" class="link-btn" data-bind-entry-view title="查看本机已有条目">查看</button>' : ''}<button type="button" class="link-btn" data-bind-entry-adjust aria-label="单独设置该条目的批次" aria-expanded="false" aria-controls="bindleEntryOverride${entryIndex}">设置</button></span></div>
       </div>
       <div class="bindle-entry-override hidden" id="bindleEntryOverride${entryIndex}" data-bind-entry-override>
         <span>本条导入到</span>
         <select data-bind-entry-batch aria-label="设置该条目的目标批次">
           <option value="default">按上方统一设置</option>
+          ${isExisting ? '<option value="keep">保留原批次</option>' : ''}
           <option value="none">不加入批次</option>
           ${perEntryBatchOptions}
           <option value="new">新建批次…</option>
@@ -103,6 +100,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
   const existingBatchOptions = targetBatches.map((batch) =>
     `<option value="${esc(batch.id)}">${esc(batchOptionLabel(batch))}</option>`
   ).join('');
+  const defaultBatchTarget = targetBatches[0]?.id || '';
   const defaultBatchMode = activeBatches.length ? 'existing' : 'new';
   const suggestedBatchName = baseName(path).replace(/\.tidoc$/i, '').trim();
   body.innerHTML = `
@@ -119,43 +117,50 @@ async function openBindleImportPreview(path, insp, options = {}) {
       <label><input type="checkbox" id="bindleAllowTampered"/> 我确认继续，导入后标记为严重问题</label>
     </div>`}
     <div class="bindle-review hidden" id="bindleReview" role="status" aria-live="polite"></div>
-    <section class="bindle-import-section" data-bindle-review-target>
-      <div class="bindle-section-head"><h3>选择报账人</h3><label><input type="checkbox" id="bindleSelectAll" ${initiallySelected.size === packageProfiles.length ? 'checked' : ''}/> 全选</label></div>
+    <details class="bindle-import-section bindle-profiles" data-bindle-review-target ${packageProfiles.length ? '' : 'hidden'}>
+      <summary>报账人 <span id="bindleProfileSummary"></span></summary>
+      ${entries.some((entry) => !BindlePreview.isExisting(entry)) ? '<p class="bindle-profile-note">仅新增条目可修改姓名</p>' : ''}
       <div class="bindle-profile-list">
-        <div class="bindle-profile-labels"><span></span><span>报账人</span><span>审核人</span><span>条目</span></div>
+        <div class="bindle-profile-labels"><input type="checkbox" id="bindleSelectAll" aria-label="全选报账人" title="全选报账人" checked/><span>报账人</span><span>审核人</span><span>条目</span></div>
         ${profileRows}
       </div>
-    </section>
+    </details>
     <section class="bindle-import-section" data-bindle-review-target>
-      <h3>导入设置</h3>
       <div class="bindle-import-options">
         <div class="form-row bindle-batch-option">
           <label>报账批次</label>
-          <div class="bindle-segments" role="radiogroup" aria-label="报账批次">
-            <label><input type="radio" name="bindleBatchMode" value="none"/><span>不加入</span></label>
-            <label class="${targetBatches.length ? '' : 'disabled'}"><input type="radio" name="bindleBatchMode" value="existing" ${defaultBatchMode === 'existing' ? 'checked' : ''} ${targetBatches.length ? '' : 'disabled'}/><span>已有批次</span></label>
-            <label><input type="radio" name="bindleBatchMode" value="new" ${defaultBatchMode === 'new' ? 'checked' : ''}/><span>新建批次</span></label>
+          <div class="bindle-batch-fields">
+            <div class="bindle-segments" role="radiogroup" aria-label="报账批次">
+              <label><input type="radio" name="bindleBatchMode" value="none"/><span>不加入</span></label>
+              <label class="${targetBatches.length ? '' : 'disabled'}"><input type="radio" name="bindleBatchMode" value="existing" ${defaultBatchMode === 'existing' ? 'checked' : ''} ${targetBatches.length ? '' : 'disabled'}/><span>已有批次</span></label>
+              <label><input type="radio" name="bindleBatchMode" value="new" ${defaultBatchMode === 'new' ? 'checked' : ''}/><span>新建批次</span></label>
+            </div>
+            <select id="bindleBatchSelect" class="${defaultBatchMode === 'existing' ? '' : 'hidden'}" aria-label="选择已有批次">${existingBatchOptions}</select>
+            <input id="bindleNewBatch" class="${defaultBatchMode === 'new' ? '' : 'hidden'}" aria-label="新批次名称" placeholder="输入新批次名称" value="${esc(suggestedBatchName)}"/>
           </div>
-          <select id="bindleBatchSelect" class="${defaultBatchMode === 'existing' ? '' : 'hidden'}" aria-label="选择已有批次">${existingBatchOptions}</select>
-          <input id="bindleNewBatch" class="${defaultBatchMode === 'new' ? '' : 'hidden'}" aria-label="新批次名称" placeholder="输入批次名称" value="${esc(suggestedBatchName)}"/>
+          ${entries.some(BindlePreview.isExisting) ? '<label class="bindle-move-option" title="只处理本次勾选的条目，包含无变化的条目；单条设置优先"><input type="checkbox" id="bindleMoveExisting"/> 已有条目也移入此批次</label>' : ''}
         </div>
-        <div class="form-row">
-          <label for="bindleTagInput">统一标签 <span class="optional">可选</span></label>
-          <input id="bindleTagInput" list="bindleTagOptions" placeholder="选择或输入标签"/>
+        <div class="form-row bindle-tag-option">
+          <label for="bindleTagInput">统一标签</label>
+          <input id="bindleTagInput" list="bindleTagOptions" placeholder="选择或输入标签（可选）"/>
           <datalist id="bindleTagOptions">${existingTagOptions}</datalist>
         </div>
       </div>
     </section>
     <section class="bindle-import-section bindle-entry-section">
       <div class="bindle-section-head">
-        <h3>条目 <span class="bindle-selection-count" id="bindleSelectionCount"></span></h3>
-        <div class="bindle-entry-tools">
-          <label><input type="checkbox" id="bindleEntrySelectAll"/> 全选条目</label>
-          <button type="button" class="link-btn" id="bindleCustomizeEntries" aria-pressed="false">逐条调整</button>
-        </div>
+        <div class="bindle-filters" role="group" aria-label="按本机情况筛选">${[
+          ['all', '全部', entries.length],
+          ['new', '新增', entries.filter((e) => !BindlePreview.isExisting(e)).length],
+          ['merge', '已有·待补充', entries.filter((e) => e.import_action === 'merge').length],
+          ['unchanged', '已有·无变化', entries.filter((e) => e.import_action === 'unchanged').length],
+        ].map(([key, label, count]) => `<button type="button" data-bind-filter="${key}" aria-pressed="${key === 'all'}">${label} <b>${count}</b></button>`).join('')}</div>
+        <input type="search" id="bindleSearch" aria-label="搜索包内条目" placeholder="搜索发票、销售方、报账人或批次"/>
       </div>
+      <div class="bindle-selection-bar"><label><input type="checkbox" id="bindleEntrySelectAll"/> 全选当前结果</label><span class="bindle-selection-count" id="bindleSelectionCount" role="status"></span><div class="bindle-entry-tools"><button type="button" class="link-btn" id="bindleSelectVisible">仅选当前结果</button><button type="button" class="link-btn" id="bindleClearSelection">清空选择</button></div></div>
       <div class="bindle-entry-list">
-        ${entryRows ? '<div class="bindle-entry-head"><span></span><span>发票号</span><span>销售方</span><span class="bindle-entry-amount">金额</span><span>报账人 · 审核人</span><span>本机情况</span></div>' + entryRows : '<div class="bindle-empty">包内没有条目</div>'}
+        <div class="bindle-entry-head"><span></span><span>销售方 / 发票号</span><span class="bindle-entry-amount">金额</span><span>报账人 · 审核人</span><span>本机情况 / 批次去向</span></div>${entryRows}
+        <div class="bindle-empty hidden" id="bindleEmpty">${entries.length ? '没有符合条件的条目' : '包内没有条目'}</div>
       </div>
     </section>`;
 
@@ -163,13 +168,15 @@ async function openBindleImportPreview(path, insp, options = {}) {
   for (const row of body.querySelectorAll('[data-bind-profile]')) {
     const identity = identities[row.dataset.bindProfile];
     if (!identity || identity.status !== 'ambiguous') continue;
+    body.querySelector('.bindle-profiles').open = true;
     const select = el('select'); select.dataset.bindProfileMapping = row.dataset.bindProfile;
     select.setAttribute('aria-label','选择同名报账人'); select.innerHTML = '<option value="">请选择本机同名报账人</option>' + identity.candidates.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.reviewer||'无审核人')}</option>`).join(''); row.append(select);
   }
   const sourceScheme = insp.target_scheme_id || null;
   let reopening=false;
-  const schemeSelector = el('div'); schemeSelector.innerHTML = AdapterUI.chooser(sourceScheme || State.scheme?.id);
+  const schemeSelector = el('div', 'bindle-scheme-option'); schemeSelector.innerHTML = AdapterUI.chooser(sourceScheme || State.scheme?.id);
   if (schemeSelector.firstChild) {
+    body.querySelector('.bindle-import-options').classList.add('has-scheme');
     body.querySelector('.bindle-import-options').prepend(schemeSelector);
     $('[data-import-scheme]',schemeSelector).onchange = async event => {
       try { const updated=await Api.inspectBindle(path,event.target.value); reopening=true; m.close(); await openBindleImportPreview(path,updated,options); } catch(e) { reopening=false; toast(e.message,'err'); }
@@ -195,28 +202,143 @@ async function openBindleImportPreview(path, insp, options = {}) {
   const tagInput = body.querySelector('#bindleTagInput');
   const batchSelect = body.querySelector('#bindleBatchSelect');
   const newBatch = body.querySelector('#bindleNewBatch');
-  const batchModes = [...body.querySelectorAll('[name="bindleBatchMode"]')];
-  batchModes.forEach((input) => {
-    input.onchange = () => {
-      batchSelect.classList.toggle('hidden', input.value !== 'existing');
-      newBatch.classList.toggle('hidden', input.value !== 'new');
-      if (input.checked && input.value === 'existing') enhanceNativeSelects(batchSelect);
-      if (input.checked && input.value === 'new') newBatch.focus();
-    };
-  });
+  const moveExisting = body.querySelector('#bindleMoveExisting');
   const profileRowElements = [...body.querySelectorAll('[data-bind-profile]')];
   const entryRowElements = [...body.querySelectorAll('[data-bind-entry-index]')];
+  const entryFor = (row) => entries[Number(row.dataset.bindEntryIndex)];
+  batchSelect.value = defaultBatchTarget;
+  const batchMode = () => body.querySelector('[name="bindleBatchMode"]:checked').value;
+  const targetFor = (row) => {
+    const target = BindlePreview.target(entryFor(row), row.querySelector('[data-bind-entry-batch]').value,
+      row.querySelector('[data-bind-entry-new-batch]').value, batchMode(), batchSelect.value,
+      newBatch.value, !!moveExisting?.checked && batchMode() !== 'none');
+    if (target.mode === 'existing') {
+      const batch = targetBatches.find((item) => item.id === target.id);
+      target.label = batch ? `${batch.name}${batch.archived ? '（已归档）' : ''}` : '待选择批次';
+      target.archived = !!batch?.archived;
+    } else if (target.mode === 'keep') {
+      target.archived = (entryFor(row).existing_batches || []).some((batch) => batch.archived);
+    } else if (target.mode === 'new') {
+      target.label += '（新建）';
+    }
+    const currentBatches = entryFor(row).existing_batches || [];
+    target.unchanged = BindlePreview.isExisting(entryFor(row)) && (
+      (target.mode === 'existing' && currentBatches.length === 1 && currentBatches[0].id === target.id)
+      || (target.mode === 'none' && !currentBatches.length)
+    );
+    return target;
+  };
+  const renderTargets = () => {
+    entryRowElements.forEach((row) => {
+      const entry = entryFor(row), target = targetFor(row);
+      const select = row.querySelector('[data-bind-entry-batch]');
+      row.querySelector('[data-bind-entry-new-batch]').classList.toggle('hidden', select.value !== 'new');
+      row.classList.toggle('has-bindle-override', select.value !== 'default');
+      const summary = row.querySelector('.bindle-entry-location');
+      summary.textContent = target.mode === 'keep' || target.unchanged ? `保留 · ${target.label}`
+        : BindlePreview.isExisting(entry) ? `${BindlePreview.batchNames(entry)} → ${target.label}`
+          : `导入到 · ${target.label}`;
+      summary.dataset.tooltipOverflow = summary.textContent;
+    });
+  };
+  const selectedEntryRows = () => entryRowElements.filter(
+    (row) => row.querySelector('[data-bind-entry-enabled]').checked
+  );
+  const visibleEntryRows = () => entryRowElements.filter((row) => !row.hidden);
+  let activeFilter = 'all';
+  let importButton;
+  let reviewing = false;
+  const syncBindleSelection = () => {
+    const selectedRows = selectedEntryRows();
+    entryRowElements.forEach((row) => {
+      row.classList.toggle('off', !row.querySelector('[data-bind-entry-enabled]').checked);
+    });
+    profileRowElements.forEach((row) => {
+      const matchingRows = entryRowElements.filter(
+        (entryRow) => entryRow.dataset.bindEntryProfile === row.dataset.bindProfile
+      );
+      const selected = matchingRows.filter((entryRow) => entryRow.querySelector('[data-bind-entry-enabled]').checked);
+      const enabledInput = row.querySelector('[data-bind-profile-enabled]');
+      enabledInput.checked = selected.length > 0 && selected.length === matchingRows.length;
+      enabledInput.indeterminate = selected.length > 0 && selected.length < matchingRows.length;
+      row.classList.toggle('off', !selected.length);
+      row.querySelector('[data-bind-profile-count]').textContent = selected.length && selected.length < matchingRows.length
+        ? `${selected.length} / ${matchingRows.length}` : `${matchingRows.length} 条`;
+      const hasNew = selected.some((entryRow) => !BindlePreview.isExisting(entryFor(entryRow)));
+      row.querySelector('[data-bind-profile-name]').disabled = !hasNew;
+      row.querySelector('[data-bind-profile-reviewer]').disabled = !hasNew;
+    });
+    const all = body.querySelector('#bindleSelectAll');
+    all.checked = selectedRows.length > 0 && selectedRows.length === entries.length;
+    all.indeterminate = selectedRows.length > 0 && selectedRows.length < entries.length;
+    const visible = visibleEntryRows();
+    const selectedVisible = visible.filter((row) => row.querySelector('[data-bind-entry-enabled]').checked).length;
+    const entryAll = body.querySelector('#bindleEntrySelectAll');
+    entryAll.disabled = !visible.length;
+    entryAll.checked = selectedVisible > 0 && selectedVisible === visible.length;
+    entryAll.indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
+    const hiddenSelected = selectedRows.length - selectedVisible;
+    body.querySelector('#bindleSelectionCount').textContent = `已选 ${selectedRows.length} / ${entries.length}${hiddenSelected ? `（筛选外 ${hiddenSelected} 条）` : ''}`;
+    body.querySelector('#bindleSelectVisible').disabled = !visible.length;
+    body.querySelector('#bindleClearSelection').disabled = !selectedRows.length;
+    const selectedProfiles = profileRowElements.filter((row) => !row.classList.contains('off')).length;
+    body.querySelector('#bindleProfileSummary').textContent = selectedRows.length === entries.length
+      ? `全部 ${packageProfiles.length} 位` : `已选 ${selectedProfiles} / ${packageProfiles.length} 位`;
+    all.disabled = !entries.length;
+    if (importButton) {
+      importButton.textContent = !selectedRows.length ? '请选择条目'
+        : reviewing ? `确认导入 ${selectedRows.length} 条` : `导入 ${selectedRows.length} 条`;
+      importButton.disabled = !selectedRows.length;
+    }
+    if (reviewing) renderReview();
+  };
+  const filterEntries = () => {
+    const query = body.querySelector('#bindleSearch').value.trim().toLocaleLowerCase();
+    entryRowElements.forEach((row) => {
+      const entry = entryFor(row);
+      const profile = packageProfiles.find((item) => item.sourceId === row.dataset.bindEntryProfile);
+      const haystack = [entry.invoice_no, entry.seller, entry.title, profile?.name, profile?.reviewer,
+        row.querySelector('.bindle-entry-owner').textContent, BindlePreview.batchNames(entry)].join(' ').toLocaleLowerCase();
+      row.hidden = (activeFilter !== 'all' && row.dataset.bindAction !== activeFilter) || !haystack.includes(query);
+    });
+    body.querySelectorAll('[data-bind-filter]').forEach((button) => {
+      button.setAttribute('aria-pressed', String(button.dataset.bindFilter === activeFilter));
+    });
+    body.querySelector('#bindleEmpty').classList.toggle('hidden', visibleEntryRows().length > 0);
+    syncBindleSelection();
+  };
+  body.querySelectorAll('[data-bind-filter]').forEach((button) => {
+    button.onclick = () => { activeFilter = button.dataset.bindFilter; filterEntries(); };
+  });
+  body.querySelector('#bindleSearch').oninput = filterEntries;
+  body.querySelector('#bindleSelectAll').onchange = (event) => {
+    entryRowElements.forEach((row) => { row.querySelector('[data-bind-entry-enabled]').checked = event.target.checked; });
+    syncBindleSelection();
+  };
+  body.querySelector('#bindleEntrySelectAll').onchange = (event) => {
+    visibleEntryRows().forEach((row) => { row.querySelector('[data-bind-entry-enabled]').checked = event.target.checked; });
+    syncBindleSelection();
+  };
+  body.querySelector('#bindleSelectVisible').onclick = () => {
+    entryRowElements.forEach((row) => { row.querySelector('[data-bind-entry-enabled]').checked = !row.hidden; });
+    syncBindleSelection();
+  };
+  body.querySelector('#bindleClearSelection').onclick = () => {
+    entryRowElements.forEach((row) => { row.querySelector('[data-bind-entry-enabled]').checked = false; });
+    syncBindleSelection();
+  };
   profileRowElements.forEach((row) => {
     const enabledInput = row.querySelector('[data-bind-profile-enabled]');
     const nameInput = row.querySelector('[data-bind-profile-name]');
     const reviewerInput = row.querySelector('[data-bind-profile-reviewer]');
     const syncOwner = () => {
-      body.querySelectorAll('[data-bind-entry-profile]').forEach((entryRow) => {
-        if (entryRow.dataset.bindEntryProfile !== row.dataset.bindProfile) return;
+      entryRowElements.forEach((entryRow) => {
+        if (entryRow.dataset.bindEntryProfile !== row.dataset.bindProfile || BindlePreview.isExisting(entryFor(entryRow))) return;
         const owner = entryRow.querySelector('.bindle-entry-owner');
         owner.textContent = `${nameInput.value.trim() || '未填写'} · ${reviewerInput.value.trim() || '未填写'}`;
         owner.dataset.tooltipOverflow = owner.textContent;
       });
+      filterEntries();
     };
     nameInput.oninput = syncOwner;
     reviewerInput.oninput = syncOwner;
@@ -229,140 +351,58 @@ async function openBindleImportPreview(path, insp, options = {}) {
       syncBindleSelection();
     };
   });
-
-  const selectedEntryRows = () => entryRowElements.filter(
-    (row) => row.querySelector('[data-bind-entry-enabled]').checked
-  );
-  const selectedEntryIndexes = () => new Set(
-    selectedEntryRows().map((row) => Number(row.dataset.bindEntryIndex))
-  );
-  const selectedSourceIds = () => new Set(
-    selectedEntryRows().map((row) => row.dataset.bindEntryProfile)
-  );
-  const selectedEntryCount = () => selectedEntryRows().length;
-  let importButton;
-  // 第一次点导入只进入核对：框出报账人和导入设置，列出将发生的变化，再点一次才真正导入。
-  let reviewing = false;
-  const syncBindleSelection = () => {
-    const selectedRows = selectedEntryRows();
-    const selectedIndexes = new Set(selectedRows.map((row) => row.dataset.bindEntryIndex));
-    entryRowElements.forEach((row) => {
-      row.classList.toggle('off', !selectedIndexes.has(row.dataset.bindEntryIndex));
-    });
-    profileRowElements.forEach((row) => {
-      const matchingRows = entryRowElements.filter(
-        (entryRow) => entryRow.dataset.bindEntryProfile === row.dataset.bindProfile
-      );
-      const selectedCount = matchingRows.filter(
-        (entryRow) => entryRow.querySelector('[data-bind-entry-enabled]').checked
-      ).length;
-      const enabledInput = row.querySelector('[data-bind-profile-enabled]');
-      enabledInput.checked = selectedCount > 0 && selectedCount === matchingRows.length;
-      enabledInput.indeterminate = selectedCount > 0 && selectedCount < matchingRows.length;
-      row.classList.toggle('off', selectedCount === 0);
-      row.querySelector('[data-bind-profile-name]').disabled = selectedCount === 0;
-      row.querySelector('[data-bind-profile-reviewer]').disabled = selectedCount === 0;
-    });
-    const all = body.querySelector('#bindleSelectAll');
-    const selectedProfiles = profileRowElements.filter(
-      (row) => row.querySelector('[data-bind-profile-enabled]').checked
-    ).length;
-    const partialProfiles = profileRowElements.some(
-      (row) => row.querySelector('[data-bind-profile-enabled]').indeterminate
-    );
-    all.checked = selectedProfiles === packageProfiles.length;
-    all.indeterminate = partialProfiles || (selectedProfiles > 0 && selectedProfiles < packageProfiles.length);
-    const entryAll = body.querySelector('#bindleEntrySelectAll');
-    entryAll.checked = selectedRows.length > 0 && selectedRows.length === entryRowElements.length;
-    entryAll.indeterminate = selectedRows.length > 0 && selectedRows.length < entryRowElements.length;
-    body.querySelector('#bindleSelectionCount').textContent = `· 已选 ${selectedRows.length} / ${entries.length}`;
-    if (importButton) {
-      importButton.textContent = !selectedRows.length ? '请选择条目'
-        : reviewing ? `确认导入 ${selectedRows.length} 条` : `导入 ${selectedRows.length} 条`;
-      importButton.disabled = !selectedRows.length;
-    }
-    if (reviewing) renderReview();
-  };
-  body.querySelector('#bindleSelectAll').onchange = (ev) => {
-    entryRowElements.forEach((row) => {
-      row.querySelector('[data-bind-entry-enabled]').checked = ev.target.checked;
-    });
-    syncBindleSelection();
-  };
-  body.querySelector('#bindleEntrySelectAll').onchange = (ev) => {
-    entryRowElements.forEach((row) => {
-      row.querySelector('[data-bind-entry-enabled]').checked = ev.target.checked;
-    });
-    syncBindleSelection();
-  };
+  body.querySelectorAll('[name="bindleBatchMode"]').forEach((input) => {
+    input.onchange = () => {
+      const mode = batchMode();
+      batchSelect.classList.toggle('hidden', mode !== 'existing');
+      newBatch.classList.toggle('hidden', mode !== 'new');
+      if (moveExisting) {
+        moveExisting.closest('label').hidden = mode === 'none';
+        if (mode === 'none') moveExisting.checked = false;
+      }
+      if (mode === 'existing') enhanceNativeSelects(batchSelect);
+      if (mode === 'new') newBatch.focus();
+      renderTargets();
+    };
+  });
   entryRowElements.forEach((row) => {
     row.querySelector('[data-bind-entry-enabled]').onchange = syncBindleSelection;
+    const view = row.querySelector('[data-bind-entry-view]');
+    if (view) view.onclick = () => openEntryDetail(entryFor(row).existing_entry_id).catch((error) => toast(error.message, 'err'));
     const adjustButton = row.querySelector('[data-bind-entry-adjust]');
     const editor = row.querySelector('[data-bind-entry-override]');
     const select = row.querySelector('[data-bind-entry-batch]');
     const newBatchInput = row.querySelector('[data-bind-entry-new-batch]');
-    const summary = row.querySelector('.bindle-entry-target-summary');
-    const syncOverride = () => {
-      const isNew = select.value === 'new';
-      newBatchInput.classList.toggle('hidden', !isNew);
-      let label = '';
-      if (select.value === 'none') label = '目标 · 未进批次';
-      else if (select.value.startsWith('batch:')) label = `目标 · ${select.selectedOptions[0]?.textContent || '已有批次'}`;
-      else if (isNew) label = `目标 · ${newBatchInput.value.trim() || '待填写新批次'}`;
-      summary.textContent = label;
-      row.classList.toggle('has-bindle-override', !!label);
-    };
     adjustButton.onclick = () => {
       const opening = editor.classList.contains('hidden');
       entryRowElements.forEach((otherRow) => {
-        if (otherRow === row) return;
-        otherRow.querySelector('[data-bind-entry-override]').classList.add('hidden');
-        otherRow.classList.remove('editing-bindle-override');
-        const otherButton = otherRow.querySelector('[data-bind-entry-adjust]');
-        otherButton.textContent = '单独设置';
-        otherButton.setAttribute('aria-expanded', 'false');
+        const expanded = otherRow === row && opening;
+        otherRow.querySelector('[data-bind-entry-override]').classList.toggle('hidden', !expanded);
+        otherRow.classList.toggle('editing-bindle-override', expanded);
+        const button = otherRow.querySelector('[data-bind-entry-adjust]');
+        button.textContent = expanded ? '收起' : '设置';
+        button.setAttribute('aria-expanded', String(expanded));
       });
-      editor.classList.toggle('hidden', !opening);
-      row.classList.toggle('editing-bindle-override', opening);
-      adjustButton.textContent = opening ? '收起' : '单独设置';
-      adjustButton.setAttribute('aria-expanded', String(opening));
       if (opening) enhanceNativeSelects(select);
     };
     select.onchange = () => {
-      syncOverride();
+      renderTargets();
       if (select.value === 'new') newBatchInput.focus();
     };
-    newBatchInput.oninput = syncOverride;
     row.querySelector('[data-bind-entry-reset]').onclick = () => {
       select.value = 'default';
       newBatchInput.value = '';
-      syncOverride();
+      renderTargets();
+      if (reviewing) renderReview();
     };
-    syncOverride();
   });
-  const entrySection = body.querySelector('.bindle-entry-section');
-  const customizeEntries = body.querySelector('#bindleCustomizeEntries');
-  customizeEntries.onclick = () => {
-    const customizing = !entrySection.classList.contains('customizing');
-    entrySection.classList.toggle('customizing', customizing);
-    customizeEntries.setAttribute('aria-pressed', String(customizing));
-    customizeEntries.textContent = customizing ? '完成调整' : '逐条调整';
-    if (!customizing) {
-      entryRowElements.forEach((row) => {
-        row.querySelector('[data-bind-entry-override]').classList.add('hidden');
-        row.classList.remove('editing-bindle-override');
-        const adjustButton = row.querySelector('[data-bind-entry-adjust]');
-        adjustButton.textContent = '单独设置';
-        adjustButton.setAttribute('aria-expanded', 'false');
-      });
-    }
-  };
 
   // 校验输入并整理导入参数；有问题时提示并返回 null。
   const collectImport = () => {
-    const selected = selectedSourceIds();
-    const selectedIndexes = selectedEntryIndexes();
-    const selectedCount = selectedEntryCount();
+    const rows = selectedEntryRows();
+    const selected = new Set(rows.map((row) => row.dataset.bindEntryProfile));
+    const selectedIndexes = new Set(rows.map((row) => Number(row.dataset.bindEntryIndex)));
+    const selectedCount = rows.length;
     if (!selectedCount) { toast('请选择要导入的条目', 'err'); return null; }
     const tampered = body.querySelector('#bindleAllowTampered');
     if (tampered && !tampered.checked) {
@@ -375,24 +415,36 @@ async function openBindleImportPreview(path, insp, options = {}) {
       if (!selected.has(row.dataset.bindProfile)) return;
       const name = row.querySelector('[data-bind-profile-name]').value.trim();
       const reviewer = row.querySelector('[data-bind-profile-reviewer]').value.trim();
-      if (!name) invalidProfile = true;
+      if (!name && rows.some((entryRow) => entryRow.dataset.bindEntryProfile === row.dataset.bindProfile && !BindlePreview.isExisting(entryFor(entryRow)))) invalidProfile = true;
       profileOverrides[row.dataset.bindProfile] = { name, reviewer };
     });
-    if (invalidProfile) { toast('请填写报账人姓名', 'err'); return null; }
+    if (invalidProfile) {
+      body.querySelector('.bindle-profiles').open = true;
+      toast('请填写报账人姓名', 'err'); return null;
+    }
+    const missingMapping = [...body.querySelectorAll('[data-bind-profile-mapping]')].find((input) =>
+      !input.value && rows.some((row) => row.dataset.bindEntryProfile === input.dataset.bindProfileMapping
+        && !BindlePreview.isExisting(entryFor(row)))
+    );
+    if (missingMapping) {
+      body.querySelector('.bindle-profiles').open = true;
+      toast('请选择对应的本机报账人', 'err'); return null;
+    }
     const tag = tagInput.value.trim();
-    const batchMode = body.querySelector('[name="bindleBatchMode"]:checked').value;
-    const batchId = batchMode === 'existing' ? batchSelect.value : '';
-    const batchName = batchMode === 'new' ? newBatch.value.trim() : '';
-    if (batchMode === 'existing' && !batchId) { toast('请选择报账批次', 'err'); return null; }
-    if (batchMode === 'new' && !batchName) { toast('请填写新批次名称', 'err'); return null; }
+    const selectedBatchMode = batchMode();
+    const batchId = selectedBatchMode === 'existing' ? batchSelect.value : '';
+    const batchName = selectedBatchMode === 'new' ? newBatch.value.trim() : '';
+    const usesGlobalBatch = rows.some((row) => row.querySelector('[data-bind-entry-batch]').value === 'default' && (!BindlePreview.isExisting(entryFor(row)) || moveExisting?.checked));
+    if (usesGlobalBatch && selectedBatchMode === 'existing' && !batchId) { toast('请选择报账批次', 'err'); return null; }
+    if (usesGlobalBatch && selectedBatchMode === 'new' && !batchName) { toast('请填写新批次名称', 'err'); return null; }
     const entryBatchOverrides = {};
     let invalidEntryBatch = false;
-    selectedEntryRows().forEach((row) => {
+    rows.forEach((row) => {
       const entryIndex = row.dataset.bindEntryIndex;
       const entryBatch = row.querySelector('[data-bind-entry-batch]');
       const mode = entryBatch.value;
-      if (mode === 'none') {
-        entryBatchOverrides[entryIndex] = { mode: 'none' };
+      if (mode === 'none' || mode === 'keep') {
+        entryBatchOverrides[entryIndex] = { mode };
       } else if (mode.startsWith('batch:')) {
         entryBatchOverrides[entryIndex] = {
           mode: 'existing', batch_id: mode.slice('batch:'.length),
@@ -403,55 +455,42 @@ async function openBindleImportPreview(path, insp, options = {}) {
         entryBatchOverrides[entryIndex] = { mode: 'new', batch_name: individualBatchName };
       }
     });
-    if (invalidEntryBatch) { toast('请填写逐条设置的新批次名称', 'err'); return null; }
+    if (invalidEntryBatch) { toast('请填写单条设置的新批次名称', 'err'); return null; }
     const options = {
       profile_overrides: profileOverrides,
       tags: tag ? [tag] : [],
-      batch_id: batchId,
-      batch_name: batchName,
+      batch_id: usesGlobalBatch ? batchId : '',
+      batch_name: usesGlobalBatch ? batchName : '',
+      move_existing_entries: usesGlobalBatch && !!moveExisting?.checked && selectedBatchMode !== 'none',
       selected_profile_ids: [...selected],
       selected_entry_indexes: [...selectedIndexes],
       entry_batch_overrides: entryBatchOverrides,
       scheme_id: sourceScheme || $('[data-import-scheme]',body)?.value || State.scheme?.id,
       profile_mappings: Object.fromEntries($$('[data-bind-profile-mapping]',body).filter(input=>input.value).map(input=>[input.dataset.bindProfileMapping,input.value])),
-      role_mappings: Object.fromEntries(selectedEntryRows().map(row=>[row.dataset.bindEntryIndex,Object.fromEntries($$('[data-bind-role-source]',row).filter(input=>input.value).map(input=>[input.dataset.bindRoleSource,input.value]))])),
+      role_mappings: Object.fromEntries(rows.map(row=>[row.dataset.bindEntryIndex,Object.fromEntries($$('[data-bind-role-source]',row).filter(input=>input.value).map(input=>[input.dataset.bindRoleSource,input.value]))])),
     };
     return { tampered, options };
   };
 
   const reviewBox = body.querySelector('#bindleReview');
-  // 只写框出的设置里看不出来的内容：条目构成，以及会进入已归档批次、留在未进批次等后果。
   const renderReview = () => {
     const rows = selectedEntryRows();
-    const actions = { new: 0, merge: 0, unchanged: 0 };
+    const counts = { new: 0, merge: 0, unchanged: 0 };
+    const destinations = new Map();
+    let keep = 0, intoArchived = 0;
     rows.forEach((row) => {
-      const action = entries[Number(row.dataset.bindEntryIndex)].import_action || 'new';
-      actions[action] = (actions[action] || 0) + 1;
+      counts[row.dataset.bindAction] += 1;
+      const target = targetFor(row);
+      if (target.mode === 'keep' || target.unchanged) keep += 1;
+      else destinations.set(target.label, (destinations.get(target.label) || 0) + 1);
+      if (target.archived) intoArchived += 1;
     });
-    const actionText = [['new', '新增'], ['merge', '补充'], ['unchanged', '已有']]
-      .filter(([key]) => actions[key]).map(([key, label]) => `${label} ${actions[key]}`).join(' · ');
-    const mode = body.querySelector('[name="bindleBatchMode"]:checked')?.value;
-    const archivedIds = new Set(archivedBatches.map((batch) => batch.id));
-    // 与导入逻辑一致：统一设置只作用于新增和补充的条目，「已有·无变化」的条目留在原批次，逐条设置才移动。
-    let individual = 0, withoutBatch = 0, intoArchived = 0, keepPlace = 0;
-    rows.forEach((row) => {
-      const value = row.querySelector('[data-bind-entry-batch]').value;
-      if (value !== 'default') individual += 1;
-      else if (entries[Number(row.dataset.bindEntryIndex)].import_action === 'unchanged') { keepPlace += 1; return; }
-      if (value === 'none' || (value === 'default' && mode === 'none')) withoutBatch += 1;
-      const target = value.startsWith('batch:') ? value.slice('batch:'.length)
-        : value === 'default' && mode === 'existing' ? batchSelect.value : '';
-      if (archivedIds.has(target)) intoArchived += 1;
-    });
-    const lines = [
-      intoArchived && ['warn', `${intoArchived} 条将进入已归档批次，不在「在办」列表显示，到「已归档」里查看。`],
-      withoutBatch && ['warn', `${withoutBatch} 条将留在「未进批次」。`],
-      individual && ['', `${individual} 条按逐条设置的批次导入。`],
-      keepPlace && ['', `${keepPlace} 个条目已有且无变化，留在原批次。`],
-    ].filter(Boolean);
-    reviewBox.innerHTML = `
-      <div class="bindle-review-head"><b>导入前请核对</b><span>将导入 ${rows.length} 条${actionText ? `（${esc(actionText)}）` : ''}。框出的报账人和导入设置会作用到这些条目，导入后要逐条改回。</span></div>
-      ${lines.map(([tone, text]) => `<p class="${tone ? 'bindle-review-warn' : 'bindle-review-note'}">${esc(text)}</p>`).join('')}`;
+    const actions = [['new', '新增'], ['merge', '已有待补充'], ['unchanged', '已有无变化']]
+      .filter(([key]) => counts[key]).map(([key, label]) => `${label} ${counts[key]} 条`).join('，');
+    const locations = [keep ? `保留原批次 ${keep} 条` : '', ...[...destinations].map(([label, count]) => `${label === '未进批次' ? '未进批次' : `进入「${label}」`} ${count} 条`)].filter(Boolean);
+    reviewBox.innerHTML = `<div class="bindle-review-head"><b>导入前请核对</b><span>${esc(actions)}。</span></div>
+      <p class="bindle-review-note">${esc(locations.join('；'))}。</p>
+      ${intoArchived ? `<p class="bindle-review-warn">${intoArchived} 条在已归档批次中，导入后到「已归档」查看。</p>` : ''}`;
   };
   const startReview = () => {
     reviewing = true;
@@ -460,8 +499,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
     syncBindleSelection();
     reviewBox.scrollIntoView({ block: 'start', behavior: 'smooth' });
   };
-  body.addEventListener('input', () => { if (reviewing) renderReview(); });
-  body.addEventListener('change', () => { if (reviewing) renderReview(); });
+  const syncPreview = () => { renderTargets(); if (reviewing) renderReview(); };
+  body.addEventListener('input', syncPreview);
+  body.addEventListener('change', syncPreview);
 
   let m;
   m = modal({
@@ -491,7 +531,8 @@ async function openBindleImportPreview(path, insp, options = {}) {
       })),
     ],
   });
-  syncBindleSelection();
+  renderTargets();
+  filterEntries();
 }
 
 async function importBindleFlow(path) {

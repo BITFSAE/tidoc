@@ -33,6 +33,15 @@ SHIM = """<script>(function () {
     };
   });
   window.pywebview = {api: api};
+  if (query.get("dialog") === "bindle") {
+    window.addEventListener("load", function () {
+      function open() {
+        if (!document.querySelector(".entry-card")) return setTimeout(open, 100);
+        importBindleFlow(%(bindle_path)s);
+      }
+      open();
+    });
+  }
   if (query.get("dialog") === "print" || query.get("dialog") === "print-options") {
     window.addEventListener("load", function () {
       function open() {
@@ -114,13 +123,14 @@ SHIM = """<script>(function () {
 })();</script>"""
 
 
-def make_server(api, sprite_titles, sprite_heights, sprite_width) -> ThreadingHTTPServer:
+def make_server(api, sprite_titles, sprite_heights, sprite_width, *, bindle_path="") -> ThreadingHTTPServer:
     names = sorted(name for name in dir(api) if not name.startswith("_"))
     shim = SHIM % {
         "names": json.dumps(names),
         "titles": json.dumps(sprite_titles, ensure_ascii=False),
         "heights": json.dumps(sprite_heights),
         "width": sprite_width,
+        "bindle_path": json.dumps(str(bindle_path)),
     }
 
     class Handler(BaseHTTPRequestHandler):

@@ -1,4 +1,4 @@
-"""重新生成文档站首页、概念页和打印窗口的界面截图。
+"""重新生成文档站首页、概念页及操作窗口的界面截图。
 
 用法（在仓库根目录）：
     python -m scripts.docs_screenshots [--out docs/public/images] [--chrome <浏览器路径>] [--only 名称 ...]
@@ -12,6 +12,7 @@ tidoc/web 前端接到真实的 Api 上，再用无界面的 Chrome 或 Edge 按
 - hero-cards.png / hero-cards-dark.png         首页右上角三张卡片，849×627，四角透明
 - detail.png                                 条目详情，裁去周围的主界面
 - print-dialog.png                           打印窗口，裁去周围的主界面
+- bindle-preview.png                         绑定包导入预览，含新增和已有条目
 
 依赖：本机装有 Chrome 或 Edge，Python 里装有 Pillow（requirements-dev.txt）。浏览器路径也可以用
 环境变量 TIDOC_CHROME 指定。界面改动后这些图要重新生成，并检查改动是否符合预期再提交。
@@ -77,6 +78,7 @@ SHOTS = [
     Shot("print-dialog", "light", dialog="print"),
     Shot("print-options", "light", dialog="print-options"),
     Shot("payment-ai-settings", "light", dialog="payment-ai"),
+    Shot("bindle-preview", "light", dialog="bindle"),
 ]
 
 
@@ -148,7 +150,8 @@ def main(argv: list[str] | None = None) -> None:
         api.set_app_preference("tidoc.update.autoCheck", "0")
         print("写入虚构数据…")
         data.seed(api, temp / "files")
-        server = make_server(api, SPRITE_TITLES, SPRITE_HEIGHTS, SPRITE_WIDTH)
+        bindle_path = data.seed_bindle_preview(api, temp / "files") if any(shot.dialog == "bindle" for shot in shots) else ""
+        server = make_server(api, SPRITE_TITLES, SPRITE_HEIGHTS, SPRITE_WIDTH, bindle_path=bindle_path)
         url = f"http://127.0.0.1:{server.server_address[1]}/"
         args.out.mkdir(parents=True, exist_ok=True)
         try:

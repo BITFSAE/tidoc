@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from ..engine.models import ParsedInvoice
 from ..engine.money import d, money
 from .database import Database
+from .manual_changes import current_manual_fields, item_snapshot
 
 # 可自由修改的字段（设计文档 8.5）
 EDITABLE_FIELDS = ("paid_amount", "actual_item_name", "notes")
@@ -26,7 +27,7 @@ VALUE_SOURCE_MANUAL = "manual"
 # These versions describe recognition rules, not the Tidoc release. Keep them
 # unchanged for ordinary app releases and bump only the affected value when its
 # local recognition logic or result contract changes.
-LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-10-23-2"
+LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-10-28-2"
 PAYMENT_AI_RECOGNITION_VERSION = "payment-ai-2026-10-24"
 PAYMENT_CHECK_PREFIX = "[付款截图识别]"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
@@ -64,10 +65,15 @@ SORT_COLUMNS = {
     "amount": ("CAST(NULLIF(REPLACE(e.total, ',', ''), '') AS REAL)", "desc"),
     "seller": ("e.seller", "asc"),
 }
-PAID_AMOUNT_DIFF_SQL = """
-TRIM(COALESCE(ef.current, '')) <> ''
-AND ROUND(CAST(REPLACE(ef.current, ',', '') AS REAL) * 100)
-    <> ROUND(CAST(COALESCE(NULLIF(REPLACE(e.total, ',', ''), ''), '0') AS REAL) * 100)
+# Historical flags only identify candidates. Current values and recognition
+# evidence decide which manual differences still exist.
+MANUAL_MODIFICATIONS_SQL = f"""
+SELECT entry_id, field FROM entry_fields
+ WHERE modified = 1 AND field IN ('paid_amount', 'actual_item_name')
+UNION ALL
+SELECT entry_id, SUBSTR(field, {len(MANUAL_HISTORY_PREFIX) + 1}) AS field
+  FROM field_history
+ WHERE field IN ({", ".join(repr(MANUAL_HISTORY_PREFIX + field) for field in (*LOCKED_FIELDS, "items"))})
 """
 
 
@@ -225,6 +231,7 @@ class EntryRepo:
         entry['diagnostics']=entry['completeness'].get('diagnostics',[])
         if entry.get("scheme_revision_id"):
             self._decorate_policy(entry)
+        entry["modified_fields"] = self._modified_fields_map([entry_id])[entry_id]
         return entry
 
     def _definition(self, revision_id):
@@ -334,6 +341,56 @@ class EntryRepo:
         return [_row_to_dict(r) for r in rows]
 
     # ------------------------------------------------------------------ 列表 / 筛选
+    def _modified_fields_map(self, entry_ids: list[str]) -> dict[str, list[str]]:
+        result = {entry_id: [] for entry_id in entry_ids}
+        for offset in range(0, len(entry_ids), QUERY_BATCH_SIZE):
+            ids = entry_ids[offset:offset + QUERY_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in ids)
+            candidates = {}
+            for row in self.db.conn.execute(
+                f"SELECT entry_id, field FROM ({MANUAL_MODIFICATIONS_SQL}) "
+                f"WHERE entry_id IN ({placeholders})", ids,
+            ):
+                candidates.setdefault(row["entry_id"], set()).add(row["field"])
+            if not candidates:
+                continue
+            ids = list(candidates)
+            placeholders = ",".join("?" for _ in ids)
+            entries = {row["id"]: {**dict(row), "fields": {}, "history": [], "items": [],
+                                   "software_results": [], "recognized_payments": []}
+                       for row in self.db.conn.execute(f"SELECT * FROM entries WHERE id IN ({placeholders})", ids)}
+            for row in self.db.conn.execute(f"SELECT * FROM entry_fields WHERE entry_id IN ({placeholders})", ids):
+                entries[row["entry_id"]]["fields"][row["field"]] = dict(row)
+            for row in self.db.conn.execute(f"SELECT * FROM field_history WHERE entry_id IN ({placeholders}) ORDER BY changed_at, id", ids):
+                entries[row["entry_id"]]["history"].append(dict(row))
+            for row in self.db.conn.execute(f"SELECT * FROM items WHERE entry_id IN ({placeholders}) ORDER BY ordinal, id", ids):
+                entries[row["entry_id"]]["items"].append(dict(row))
+            # Only use saved OCR evidence for invoice files still attached here.
+            seen_ocr = set()
+            for row in self.db.conn.execute(
+                f"SELECT r.entry_id, r.normalized FROM ocr_results r "
+                f"WHERE r.entry_id IN ({placeholders}) AND r.status = 'ok' "
+                "AND EXISTS (SELECT 1 FROM attachments a WHERE a.entry_id=r.entry_id "
+                "AND a.type IN ('invoice_pdf', 'invoice_xml') AND a.sha256=r.file_sha256) "
+                "ORDER BY r.created_at DESC, r.id DESC", ids,
+            ):
+                if row["entry_id"] not in seen_ocr:
+                    seen_ocr.add(row["entry_id"])
+                    entries[row["entry_id"]]["software_results"].append(row["normalized"])
+            payments = {}
+            for row in self.db.conn.execute(
+                f"SELECT entry_id, recognition_version, recognition_status, recognized_value "
+                f"FROM attachments WHERE type='payment_screenshot' AND entry_id IN ({placeholders})", ids,
+            ):
+                payments.setdefault(row["entry_id"], []).append(dict(row))
+            for entry_id, rows in payments.items():
+                if all(row["recognition_status"] == "recognized" and row["recognized_value"]
+                       and row["recognition_version"].startswith(PAYMENT_AI_RECOGNITION_VERSION) for row in rows):
+                    entries[entry_id]["recognized_payments"] = [row["recognized_value"] for row in rows]
+            for entry_id, entry in entries.items():
+                result[entry_id] = current_manual_fields(entry, candidates[entry_id])
+        return result
+
     def list(self, **filters) -> list[dict]:
         """按抬头、报账人、状态、材料数量、关键词、金额、日期和归档状态过滤（设计文档 8.7）。"""
         where, params = [], []
@@ -376,8 +433,8 @@ class EntryRepo:
             where.append("e.invoice_date <= ?"); params.append(filters["date_to"])
         if filters.get("modified_only"):
             where.append(
-                f"EXISTS (SELECT 1 FROM entry_fields ef WHERE ef.entry_id = e.id "
-                f"AND ef.field = 'paid_amount' AND {PAID_AMOUNT_DIFF_SQL})"
+                f"EXISTS (SELECT 1 FROM ({MANUAL_MODIFICATIONS_SQL}) changes "
+                f"WHERE changes.entry_id = e.id)"
             )
         # 备注维度：有备注 / 无备注（记账备注即 entry_fields.notes 有非空当前值）
         has_notes = filters.get("has_notes")
@@ -464,7 +521,7 @@ class EntryRepo:
 
         result = []
         entry_ids = [r["id"] for r in rows]
-        modified_by_entry = {entry_id: [] for entry_id in entry_ids}
+        modified_by_entry = self._modified_fields_map(entry_ids)
         attachments_by_entry = {entry_id: {} for entry_id in entry_ids}
         fields_by_entry = {entry_id: {} for entry_id in entry_ids}
         batches_by_entry = {entry_id: [] for entry_id in entry_ids}
@@ -480,16 +537,6 @@ class EntryRepo:
             placeholders = ",".join("?" for _ in batch_ids)
             for source in self.db.conn.execute(f'SELECT entry_id,payload_json FROM entry_adapter_sources WHERE entry_id IN ({placeholders})',batch_ids):
                 sources_by_entry[source['entry_id']].append(json.loads(source['payload_json']))
-            modified_rows = self.db.conn.execute(
-                f"SELECT ef.entry_id, ef.field FROM entry_fields ef "
-                f"JOIN entries e ON e.id = ef.entry_id "
-                f"WHERE ef.field = 'paid_amount' AND {PAID_AMOUNT_DIFF_SQL} "
-                f"AND ef.entry_id IN ({placeholders})",
-                batch_ids,
-            ).fetchall()
-            for row in modified_rows:
-                modified_by_entry[row["entry_id"]].append(row["field"])
-
             attachment_rows = self.db.conn.execute(
                 f"SELECT entry_id, type, role_id,role_definition_revision_id, COUNT(*) c FROM attachments "
                 f"WHERE entry_id IN ({placeholders}) GROUP BY entry_id,type,role_id,role_definition_revision_id",
@@ -533,8 +580,10 @@ class EntryRepo:
 
         for r in rows:
             entry = _row_to_dict(r)
+            if filters.get("modified_only") and not modified_by_entry[entry["id"]]:
+                continue
             entry["tags"] = json.loads(entry.get("tags") or "[]")
-            # “已修改”只表示实付金额与发票总金额不一致；字段留痕仍由 modified/history 独立保存。
+            # 历史继续保留，列表只标出当前仍存在的人工差异。
             entry["modified_fields"] = modified_by_entry[entry["id"]]
             # 按类型统计附件，供 UI 显示材料状态点
             by_type = attachments_by_entry[entry["id"]]
@@ -990,12 +1039,15 @@ class EntryRepo:
     ) -> None:
         """用重新识别结果原子替换明细，同时保留用户修改过的条目级字段。"""
         exists = self.db.conn.execute(
-            "SELECT check_message FROM entries WHERE id = ?", (entry_id,)
+            "SELECT check_message, EXISTS (SELECT 1 FROM field_history "
+            "WHERE entry_id=entries.id AND field=?) AS manual_items "
+            "FROM entries WHERE id = ?", (f"{MANUAL_HISTORY_PREFIX}items", entry_id)
         ).fetchone()
         if not exists:
             raise ValueError("条目不存在。")
 
         with self.db.conn:
+            before_items = self._items(entry_id) if exists["manual_items"] else None
             self.db.conn.execute("DELETE FROM items WHERE entry_id = ?", (entry_id,))
             for ordinal, item in enumerate(items):
                 self.db.conn.execute(
@@ -1013,6 +1065,10 @@ class EntryRepo:
                         ordinal,
                     ),
                 )
+
+            if before_items is not None:
+                self._log_history(entry_id, "[识别结果]items", item_snapshot(before_items),
+                                  item_snapshot(self._items(entry_id)), "")
 
             # “实际物资名称”一旦被用户修改就不覆盖；仍为识别默认值时，
             # 跟随新的第一条明细更新 origin/current。
@@ -1380,6 +1436,7 @@ class EntryRepo:
                  unit: str = "", quantity: str = "", unit_price: str = "",
                  total: str = "", spec: str = "") -> dict:
         """在条目末尾追加一条明细行，返回新行 dict。"""
+        before = item_snapshot(self._items(entry_id))
         max_ord = self.db.conn.execute(
             "SELECT COALESCE(MAX(ordinal), -1) FROM items WHERE entry_id = ?", (entry_id,)
         ).fetchone()[0]
@@ -1388,9 +1445,11 @@ class EntryRepo:
                unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
             (entry_id, name, actual_name, unit, quantity, unit_price, total, spec, max_ord + 1),
         )
+        items = self._items(entry_id)
+        self._log_history(entry_id, f"{MANUAL_HISTORY_PREFIX}items", before, item_snapshot(items), "")
         self._touch(entry_id)
         self.db.conn.commit()
-        return self._items(entry_id)[-1]
+        return items[-1]
 
     def update_item(self, item_id: int, fields: dict) -> dict:
         """更新一条明细行的指定字段，返回更新后的行 dict。"""
@@ -1406,11 +1465,15 @@ class EntryRepo:
         if not row:
             raise ValueError("明细行不存在。")
         entry_id = row["entry_id"]
+        before = item_snapshot(self._items(entry_id))
         vals.append(item_id)
         self.db.conn.execute(f"UPDATE items SET {', '.join(sets)} WHERE id = ?", vals)
+        updated = self.db.conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        after = item_snapshot(self._items(entry_id))
+        if before != after:
+            self._log_history(entry_id, f"{MANUAL_HISTORY_PREFIX}items", before, after, "")
         self._touch(entry_id)
         self.db.conn.commit()
-        updated = self.db.conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
         return _row_to_dict(updated)
 
     def delete_item(self, item_id: int) -> str:
@@ -1419,7 +1482,9 @@ class EntryRepo:
         if not row:
             raise ValueError("明细行不存在。")
         entry_id = row["entry_id"]
+        before = item_snapshot(self._items(entry_id))
         self.db.conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+        self._log_history(entry_id, f"{MANUAL_HISTORY_PREFIX}items", before, item_snapshot(self._items(entry_id)), "")
         self._touch(entry_id)
         self.db.conn.commit()
         return entry_id

@@ -27,6 +27,10 @@ def _row_to_dict(row) -> dict:
     return {k: row[k] for k in row.keys()} if row else {}
 
 
+# 用户在批次栏拖出来的顺序；不在其中的批次（从没拖过、或之后新建的）排在前面，按最近更新。
+BATCH_ORDER_KEY = "tidoc.batch_order"
+
+
 class BatchRepo:
     def __init__(self, db: Database):
         self.db = db
@@ -279,6 +283,8 @@ class BatchRepo:
             sql += " WHERE archived = 0"
         sql += " ORDER BY archived ASC, updated_at DESC"
         rows = self.db.conn.execute(sql).fetchall()
+        rank = {batch_id: index for index, batch_id in enumerate(self._order())}
+        rows.sort(key=lambda r: (r["archived"], rank.get(r["id"], -1)))
         result = []
         for r in rows:
             batch = _row_to_dict(r)
@@ -288,6 +294,28 @@ class BatchRepo:
             batch["count"] = batch["stats"]["count"]
             result.append(batch)
         return result
+
+    def _order(self) -> list[str]:
+        row = self.db.conn.execute("SELECT value FROM meta WHERE key=?", (BATCH_ORDER_KEY,)).fetchone()
+        if not row:
+            return []
+        try:
+            value = json.loads(row[0])
+        except (TypeError, ValueError):
+            return []
+        return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+    def set_order(self, batch_ids: list[str]) -> None:
+        """保存批次栏的排列顺序；只记仍存在的批次，重复的 id 取第一次出现的位置。"""
+        if not isinstance(batch_ids, list) or not all(isinstance(item, str) for item in batch_ids):
+            raise ValueError("批次顺序必须是批次 id 列表。")
+        existing = {r[0] for r in self.db.conn.execute("SELECT id FROM batches")}
+        order = [batch_id for batch_id in dict.fromkeys(batch_ids) if batch_id in existing]
+        self.db.conn.execute(
+            "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (BATCH_ORDER_KEY, json.dumps(order, separators=(',', ':'))),
+        )
+        self.db.conn.commit()
 
     @staticmethod
     def _output_settings_key(batch_id: str) -> str:

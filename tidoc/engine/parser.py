@@ -454,7 +454,9 @@ def _extract_parties(lines: list[str], context=None) -> tuple[str, str, str, str
             continue
         if pending > 0:
             # 抬头名候选：跳过空行、税号行（"统一社会信用..."）、竖排单字残留
-            if _looks_like_invoice_meta(line):
+            # 成品油票头的分类文字可能在两组名称标签之后才输出。
+            # 只排除无标签的分类行，不排除名称中包含「成品油」的公司。
+            if _looks_like_invoice_meta(line) or _normalize_label(line) == "成品油":
                 continue
             for name in _split_combined_party_names(line, context):
                 if pending <= 0:
@@ -803,7 +805,7 @@ _PDF_UNIT_SUFFIXES = (
     "公斤", "千克", "平方米", "立方米",
     "个", "件", "只", "台", "套", "张", "片", "盒", "包", "把", "次",
     "支", "瓶", "卷", "米", "组", "枚", "块", "本", "辆", "条", "根",
-    "批", "箱", "桶", "对", "份",
+    "批", "箱", "桶", "对", "份", "升", "毫升",
 )
 
 
@@ -1205,20 +1207,23 @@ def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
         except (ValueError, ArithmeticError):
             pass
     try:
-        from .pdf_items import read_positioned_items
+        from .pdf_items import align_positioned_items, name_has_column_spill, read_positioned_items
 
         positioned = read_positioned_items(path)
+        aligned = align_positioned_items(invoice.items, positioned)
         if (
-            positioned and len(positioned) == len(invoice.items)
-            and all(a.total == b.total for a, b in zip(positioned, invoice.items))
+            aligned
             and money(sum((item.total for item in positioned), Decimal('0')) - invoice.total) == 0
         ):
-            for current, candidate in zip(invoice.items, positioned):
+            for current, candidate in aligned:
                 old_name = re.sub(r'\s+', '', current.actual_name)
                 new_name = re.sub(r'\s+', '', candidate.actual_name)
                 # A PDF text fragment can omit part of an already readable name.
-                # Position evidence may separate columns, but must not truncate it.
-                if new_name and (new_name not in old_name or '项目名称' in old_name):
+                # Shortening requires corroboration from the specification column.
+                if new_name and (
+                    new_name not in old_name or '项目名称' in old_name
+                    or name_has_column_spill(current, candidate)
+                ):
                     current.name = candidate.name
                     current.actual_name = candidate.actual_name
                 unit = candidate.unit
@@ -1234,6 +1239,8 @@ def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
                     current.quantity = candidate.quantity
                 if not current.spec:
                     current.spec = candidate.spec
+                current.total = candidate.total
+            invoice.items = [current for current, _candidate in aligned]
     except (OSError, ValueError, ArithmeticError, PyPdfError, DependencyError, NotImplementedError, KeyError, RuntimeError):
         pass
     return invoice

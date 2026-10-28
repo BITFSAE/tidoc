@@ -594,6 +594,32 @@ def test_seller_conflict_is_recorded_and_the_layout_value_is_still_used(parse_te
     assert f"销售方名称识别到两个不同的结果：「{OTHER_SELLER}」与「{SELLER_NAME}」，已采用「{SELLER_NAME}」" in result.message
 
 
+@pytest.mark.parametrize('context', [CONTEXT, RecognitionContext(())])
+def test_oil_invoice_category_does_not_consume_a_pending_party_name(parse_texts, context):
+    # Labels precede all values; the oil category is a separate header, not a seller.
+    plain = (
+        f"电子发票（普通发票） 发票号码：{INVOICE_NO}\n"
+        "名称： 名称：\n项目名称 规格型号 单位 数量\n成品油\n"
+        f"{BUYER_NAME}\n{BUYER_ID}\n{SELLER_NAME}\n{SELLER_ID}\n"
+        "*电子元件*示例电阻 个 10 11.15 111.50 13% 14.50\n"
+        "价税合计（大写）壹佰贰拾陆圆整 （小写）¥126.00\n"
+    )
+    invoice = parse_texts(plain, layout_text(), context=context)
+    assert invoice.seller == SELLER_NAME
+    assert invoice.buyer_name == BUYER_NAME
+    assert invoice.seller_tax_id == SELLER_ID
+    assert invoice.buyer_tax_id == BUYER_ID
+    assert invoice.field_checks['seller'].candidates['text'] != '成品油'
+    assert 'seller_conflict' not in codes(check_invoice(invoice, context=context))
+
+
+def test_oil_words_in_explicit_seller_name_still_report_a_real_conflict(parse_texts):
+    seller = '示例成品油销售有限公司'
+    invoice = parse_texts(plain_text(seller=seller), layout_text())
+    assert invoice.field_checks['seller'].candidates['text'] == seller
+    assert 'seller_conflict' in codes(check_invoice(invoice, context=CONTEXT))
+
+
 def test_buyer_name_conflict_is_settled_by_a_configured_title(parse_texts):
     wrong = "示例学院"
     invoice = parse_texts(plain_text(buyer=wrong), layout_text())

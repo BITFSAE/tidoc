@@ -775,6 +775,8 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapte
     if target_scheme_id and adapter_service:
         target = adapter_service.get_scheme(target_scheme_id)
         target_revision_id = target.get("current_revision_id") or target.get("revision_id") or ""
+    profiles = [dict(row) for row in entries_repo.db.conn.execute("SELECT id,name,reviewer FROM profiles").fetchall()]
+    profile_by_id = {profile["id"]: profile for profile in profiles}
     for entry, existing_id in zip(entries, matches):
         source_adapter = entry.get("adapter") or {}
         entry["adapter_compatibility"] = {"available": bool(source_adapter.get("definition")),
@@ -804,12 +806,12 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapte
         preview = _merge_preview(entries_repo, existing_id, entry, existing)
         entry["existing_entry_id"] = existing_id
         entry["existing_batches"] = existing.get("batches") or []
+        entry["existing_profile"] = profile_by_id.get(existing.get("profile_id")) or {}
         entry["merge_preview"] = preview
         entry["import_action"] = "merge" if preview["has_changes"] else "unchanged"
         counts[entry["import_action"]] += 1
     inspected["import_plan"] = counts
 
-    profiles = [dict(row) for row in entries_repo.db.conn.execute("SELECT id,name,reviewer FROM profiles").fetchall()]
     by_name = defaultdict(list)
     for profile in profiles:
         by_name[str(profile.get("name") or "").strip()].append(profile)
@@ -1268,8 +1270,8 @@ def _merge_existing_entry(
     extension_fields = _merge_extension_data(entries_repo, entry_id, incoming.get("adapter") or {})
     if extension_fields:
         changes.append(f"附加信息 {len(extension_fields)}")
-    if _retain_adapter_source(entries_repo,entry_id,incoming.get('adapter')):
-        changes.append('来源方案信息')
+    # 保留交接来源属于内部记录，不把材料和信息无变化的条目计作补充。
+    _retain_adapter_source(entries_repo, entry_id, incoming.get('adapter'))
 
     item_count = conn.execute(
         "SELECT COUNT(*) FROM items WHERE entry_id = ?", (entry_id,)

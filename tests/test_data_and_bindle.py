@@ -829,7 +829,7 @@ def test_bindle_round_trip_and_tamper(repos, sample_xmls, tmp_path):
     )
     assert duplicate["imported"] == 0
     assert len(duplicate["skipped"]) == 2
-    assert "跳过 2 条重复发票" in duplicate["message"]
+    assert "2 条已有且无变化" in duplicate["message"]
 
     # 确认完整性异常时，无新增内容的重复条目仍应保持本机状态不变。
     unchanged_tampered = import_bindle(

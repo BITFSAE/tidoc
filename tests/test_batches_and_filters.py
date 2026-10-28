@@ -129,6 +129,43 @@ def test_batch_archive_excluded_from_list(repos, sample_xmls):
     assert len(repos["batches"].list(include_archived=True)) == 2
 
 
+def test_batch_order_follows_saved_arrangement(repos):
+    batches = repos["batches"]
+    ids = {name: batches.create(name)["id"] for name in ("甲", "乙", "丙", "丁")}
+    for minute, name in enumerate(("甲", "乙", "丙", "丁")):
+        batches.db.conn.execute("UPDATE batches SET updated_at=? WHERE id=?", (f"2026-10-01T10:0{minute}:00", ids[name]))
+    batches.db.conn.commit()
+    names = lambda **kw: [b["name"] for b in batches.list(**kw)]
+    assert names() == ["丁", "丙", "乙", "甲"]
+
+    batches.set_order([ids["乙"], "missing", ids["甲"], ids["乙"], ids["丁"], ids["丙"]])
+    assert names() == ["乙", "甲", "丁", "丙"]
+
+    # 排好之后改动批次不再让它跳到前面；新建的批次排在最前。
+    batches.update(ids["丙"], note="改过")
+    new_id = batches.create("戊")["id"]
+    assert names() == ["戊", "乙", "甲", "丁", "丙"]
+
+    batches.set_archived(ids["乙"], True)
+    batches.set_archived(ids["丁"], True)
+    assert names(include_archived=True) == ["戊", "甲", "丙", "乙", "丁"]
+    batches.delete(new_id)
+    assert names() == ["甲", "丙"]
+
+    with pytest.raises(ValueError):
+        batches.set_order("not a list")
+
+
+def test_api_reorder_batches_returns_listing(api):
+    first = api.create_batch("第一批")["data"]
+    second = api.create_batch("第二批")["data"]
+    result = api.reorder_batches([first["id"], second["id"]])
+    assert result["ok"]
+    assert [b["id"] for b in result["data"]["batches"]] == [first["id"], second["id"]]
+    assert [b["id"] for b in api.list_batches(True)["data"]["batches"]] == [first["id"], second["id"]]
+    assert not api.reorder_batches("bad")["ok"]
+
+
 def test_archived_batch_entries_leave_working_surface(repos, sample_xmls):
     _, ids = _make_entries(repos, sample_xmls, 3)
     archived = repos["batches"].create("已交批", entry_ids=ids[:2])
@@ -320,10 +357,11 @@ def test_entry_list_uses_bounded_query_count(api, tmp_path):
     # 条目数翻倍，查询数不变。
     assert len({selects for _, selects in repo_counts}) == 1
     assert len({selects for _, selects in api_counts}) == 1
-    # 仓库层固定 8 次：条目主查询 + 报账人资料 + 方案来源 + 实付修改 + 附件 + 扩展字段值 + 可编辑字段 + 批次归属。
-    assert repo_counts[0][1] <= 8
+    # 原列表预取加上当前人工差异所需的原值、历史、明细和识别依据，
+    # 仍按条目集合批量读取，最多 14 次，不随条目数增加。
+    assert repo_counts[0][1] <= 14
     # 接口层多一次 OCR 状态同步。
-    assert api_counts[0][1] <= 9
+    assert api_counts[0][1] <= 15
 
 
 def test_amount_filter_and_sort_are_numeric(repos):
@@ -367,7 +405,7 @@ def test_keyword_search_includes_invoice_and_paid_amount(repos):
     assert [e["id"] for e in repos["entries"].list(keyword="1188")] == [entry_id]
 
 
-def test_modified_view_only_tracks_paid_amount_difference(repos, sample_xmls):
+def test_modified_view_only_keeps_current_invoice_data_differences(repos, sample_xmls):
     profile = repos["profiles"].create("张三", "李老师")
     parsed = parse_xml(sample_xmls[0])
     entry_id = repos["entries"].create(profile["id"], title=parsed.buyer_name, parsed=parsed)
@@ -375,18 +413,17 @@ def test_modified_view_only_tracks_paid_amount_difference(repos, sample_xmls):
 
     repos["entries"].update_field(entry_id, "actual_item_name", "改过的物资名", profile["id"])
     repos["entries"].update_field(entry_id, "notes", "保留修改记录", profile["id"])
-    assert repos["entries"].list(modified_only=True) == []
-    assert repos["entries"].list()[0]["modified_fields"] == []
+    assert repos["entries"].list(modified_only=True)[0]["modified_fields"] == ["actual_item_name"]
 
     different = str(Decimal(total) + Decimal("1.00"))
     repos["entries"].update_field(entry_id, "paid_amount", different, profile["id"])
     modified = repos["entries"].list(modified_only=True)
     assert [entry["id"] for entry in modified] == [entry_id]
-    assert modified[0]["modified_fields"] == ["paid_amount"]
+    assert modified[0]["modified_fields"] == ["actual_item_name", "paid_amount"]
 
     repos["entries"].update_field(entry_id, "paid_amount", total, profile["id"])
     assert repos["entries"].get(entry_id)["fields"]["paid_amount"]["modified"] is True
-    assert repos["entries"].list(modified_only=True) == []
+    assert repos["entries"].list(modified_only=True)[0]["modified_fields"] == ["actual_item_name"]
 
 
 # ------------------------------------------------------------------ 迁移

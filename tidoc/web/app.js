@@ -329,7 +329,18 @@ function wrapSvg(svg, s) {
 }
 
 // ------------------------------------------------------------------ 初始化
+// 浮动滚动条（macOS 默认的「根据鼠标或触控板」）不占布局位置；接了鼠标或设为「始终」时是占位的经典滚动条。
+// 启动时探测一次，横向滚动的窄条只在浮动滚动条下额外留位置。
+function detectOverlayScrollbars() {
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:absolute;top:-200px;width:100px;height:100px;overflow:scroll;scrollbar-width:thin;visibility:hidden';
+  document.body.appendChild(probe);
+  document.documentElement.dataset.scrollbars = probe.offsetHeight === probe.clientHeight ? 'overlay' : 'classic';
+  probe.remove();
+}
+
 async function init() {
+  detectOverlayScrollbars();
   setupFastTooltips();
   applyPreferences();
   bindEvents();

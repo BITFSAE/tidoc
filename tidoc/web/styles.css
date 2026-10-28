@@ -717,6 +717,8 @@ body {
 .content-summary { display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; }
 .stats { font-size: 12px; color: var(--ink-soft); display: flex; gap: 14px; align-items: center; min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: thin; white-space: nowrap; padding-bottom: 1px; }
 .stats::-webkit-scrollbar { height: 4px; }
+/* 浮动滚动条（macOS 默认）不占位置，会盖在这一行文字上；按它展开后的高度在下方留出位置。 */
+html[data-scrollbars="overlay"] .stats { padding-bottom: 15px; }
 .stats b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; font-family: var(--font-display); font-variation-settings: "SOFT" 30; }
 .stats .sep { color: var(--line); }
 .stats .stats-sum { font-family: var(--font-display); font-size: 15px; font-variation-settings: "SOFT" 30, "opsz" 40; }

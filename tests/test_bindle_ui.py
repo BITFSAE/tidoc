@@ -31,5 +31,5 @@ const profiles = sandbox.preview.profiles(JSON.parse(process.argv[2]), {name:'æœ
 console.log(JSON.stringify(profiles.map(p=>[p.sourceId,p.name,p.reviewer])));
 """
     result = subprocess.run([node, '-e', script, str(source), json.dumps(payload)],
-                            check=True, capture_output=True, text=True)
+                            check=True, capture_output=True, text=True, encoding='utf-8')
     assert json.loads(result.stdout) == [list(profile) for profile in expected]

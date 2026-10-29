@@ -2706,6 +2706,53 @@ async function quickPaidFlow(e) {
   setTimeout(() => body.querySelector('#qpInput')?.focus(), 20);
 }
 
+function askInspectionReplacement(detail) {
+  return new Promise((resolve) => {
+    const attachments = detail.attachments || [];
+    let decided = false, dialog;
+    const body = el('div');
+    body.innerHTML = `<p class="confirm-message">当前条目已有 ${attachments.length} 份查验单。通常只需保留一份，请确认如何处理新文件。</p>
+      <div class="form-row"><label>要替换的查验单</label><select data-inspection-replace>
+        ${attachments.map((att, index) => `<option value="${esc(att.id)}"${index === attachments.length - 1 ? ' selected' : ''}>${esc(att.original_name || '查验单')} · ${esc(att.added_at || '')}</option>`).join('')}
+      </select></div><p class="hint">「替换」只更换所选文件。选择「仍添加一份」会保留已有材料，并加入多份查验单的识别提醒。</p>`;
+    const finish = (action) => {
+      if (decided) return;
+      decided = true;
+      const choice = action ? {
+        inspection_action: action,
+        inspection_existing_ids: detail.existing_ids,
+        inspection_replace_id: body.querySelector('[data-inspection-replace]').value,
+      } : null;
+      dialog.close();
+      resolve(choice);
+    };
+    const cancel = mkBtn('取消', 'ghost', () => finish(null));
+    dialog = modal({ title: '已有查验单', body, compact: true, transient: true,
+      onClose: () => finish(null), footer: [cancel,
+        mkBtn('仍添加一份', 'ghost', () => finish('keep')),
+        mkBtn('替换所选查验单', 'primary', () => finish('replace'))] });
+    cancel.focus();
+  });
+}
+
+async function confirmInspectionOperation(operation, isCancelled = () => false) {
+  let options = {};
+  while (!isCancelled()) {
+    try { return await operation(options); }
+    catch (error) {
+      if (error.code !== 'inspection_conflict' || !error.detail) throw error;
+      const choice = await askInspectionReplacement(error.detail);
+      if (!choice || isCancelled()) return null;
+      options = choice;
+    }
+  }
+  return null;
+}
+
+async function addAttachmentWithInspectionConfirmation(entryId, path, type, note = '', options = {}) {
+  return confirmInspectionOperation((choice) => Api.addAttachment(entryId, path, type, note, { ...options, ...choice }));
+}
+
 async function quickAddAttachment(entryId, type) {
   let progress = null;
   try {
@@ -2722,7 +2769,9 @@ async function quickAddAttachment(entryId, type) {
       await syncEntryAfterChange(entryId, { affectsStatus: true });
       toast(result.message || '材料已添加', 'ok');
     } else {
-      for (const p of paths) await Api.addAttachment(entryId, p, type);
+      let added = 0;
+      for (const p of paths) if (await addAttachmentWithInspectionConfirmation(entryId, p, type)) added++;
+      if (!added) return;
       await syncEntryAfterChange(entryId, { affectsStatus: true });
       toast('材料已添加', 'ok');
     }
@@ -2804,7 +2853,10 @@ async function onlineVerificationFlow(entryId) {
       const path = (res.paths || [])[0];
       if (!path) return;
       setStatus('working', '正在核对查验单', '确认是否属于当前发票…');
-      await Api.addAttachment(entryId, path, 'inspection_pdf', '手动选择的查验单');
+      if (!await addAttachmentWithInspectionConfirmation(entryId, path, 'inspection_pdf', '手动选择的查验单')) {
+        setStatus('waiting', '已取消添加', '已有查验单保持不变。');
+        return;
+      }
       if (sessionId) await Api.closeInvoiceVerification(sessionId);
       await finishAttachment();
     } catch (err) {
@@ -2816,7 +2868,18 @@ async function onlineVerificationFlow(entryId) {
   const poll = async () => {
     if (!sessionId || attached || closed) return;
     try {
-      const result = await Api.invoiceVerificationStatus(sessionId);
+      const result = await confirmInspectionOperation(
+        (options) => Api.invoiceVerificationStatus(sessionId, options), () => closed);
+      if (closed) return;
+      if (!result) {
+        await Api.closeInvoiceVerification(sessionId);
+        sessionId = '';
+        openBtn.style.display = '';
+        openBtn.disabled = false;
+        body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = false; });
+        setStatus('waiting', '已取消添加', '已有查验单保持不变。');
+        return;
+      }
       if (result.state === 'attached') {
         await finishAttachment(result);
         return;
@@ -5735,6 +5798,7 @@ async function addDroppedMaterialFiles(entryId, files, progress = null) {
 async function addMaterialInfosToEntry(entryId, infos) {
   await validateDroppedMaterialsForEntry(entryId, infos);
   const paymentInfos = [];
+  const addedPaths = [];
   for (const info of infos) {
     const options = info.type === 'payment_screenshot'
       ? {
@@ -5743,7 +5807,9 @@ async function addMaterialInfosToEntry(entryId, infos) {
         }
       : {};
     if(info.role_id)options.role_id=info.role_id;
-    const att = await Api.addAttachment(entryId, info.path, info.type, '', options);
+    const att = await addAttachmentWithInspectionConfirmation(entryId, info.path, info.type, '', options);
+    if (!att) continue;
+    addedPaths.push(info.path);
     if (info.type === 'payment_screenshot') {
       paymentInfos.push({
         ...info,
@@ -5752,7 +5818,7 @@ async function addMaterialInfosToEntry(entryId, infos) {
     }
   }
   const message = await settlePaymentAmountAfterAdd(entryId, paymentInfos);
-  return { message };
+  return { message: message || (addedPaths.length ? '' : '未添加材料，已有查验单保持不变。'), added_paths: addedPaths };
 }
 
 async function validateDroppedMaterialsForEntry(entryId, infos) {
@@ -5801,14 +5867,16 @@ async function autoBindMaterialInfos(infos, extraEntries = [], options = {}) {
     if (!grouped.has(item.entryId)) grouped.set(item.entryId, []);
     grouped.get(item.entryId).push(item.info);
   }
+  const added = [];
   for (const [entryId, group] of grouped) {
-    await addMaterialInfosToEntry(entryId, group);
+    const result = await addMaterialInfosToEntry(entryId, group);
+    added.push(...group.filter((info) => !result?.added_paths || result.added_paths.includes(info.path)));
   }
   if (manual.length) openAttachDroppedFiles(manual.map((info) => info.path), {
     infos: manual,
     cleanupPaths: options.cleanupPaths,
   });
-  return { auto: auto.map((item) => item.info), manual };
+  return { auto: added, manual, skipped: auto.length - added.length };
 }
 
 async function handleLooseMaterialInfos(infos, cleanupPaths) {
@@ -5821,6 +5889,8 @@ async function handleLooseMaterialInfos(infos, cleanupPaths) {
   if (bind.auto.length) {
     await refreshEntries();
     toast(`已自动绑定 ${bind.auto.length} 份材料`, 'ok');
+  } else if (bind.skipped) {
+    toast('未添加材料，已有查验单保持不变。', 'ok');
   }
   return true;
 }
@@ -6236,7 +6306,9 @@ async function addAttachmentFlow(entryId, parentModal, presetType) {
             m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
             toast(result.message || '材料已添加', 'ok');
           } else {
-            for (const p of paths) await Api.addAttachment(entryId, p, type);
+            let added = 0;
+            for (const p of paths) if (await addAttachmentWithInspectionConfirmation(entryId, p, type)) added++;
+            if (!added) return;
             m.close(); parentModal.close(); openEntryDetail(entryId); await refreshEntries();
             toast('材料已添加', 'ok');
           }

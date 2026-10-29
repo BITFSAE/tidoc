@@ -172,7 +172,7 @@ const Api = (() => {
     revealAttachment: (id) => call('reveal_attachment', id),
     invoiceVerificationInfo: (id) => call('invoice_verification_info', id),
     startInvoiceVerification: (id, fields) => call('start_invoice_verification', id, fields || {}),
-    invoiceVerificationStatus: (sessionId) => call('invoice_verification_status', sessionId),
+    invoiceVerificationStatus: (sessionId, options = null) => call('invoice_verification_status', sessionId, options),
     closeInvoiceVerification: (sessionId) => call('close_invoice_verification', sessionId),
 
     printComponentStatus: () => call('print_component_status'),

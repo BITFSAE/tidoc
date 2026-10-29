@@ -124,8 +124,12 @@ def test_real_pdf_material_lifecycle_and_invoice_rechecks(api, tmp_path):
     assert "当日第 2 次" in api.entries.get(entry_id)["check_message"]
     api.entries.replace_recognized_items(entry_id, [], "pdf", "pass")
     assert "当日第 2 次" in api.entries.get(entry_id)["check_message"]
-    newer = api.add_attachment(entry_id, str(next_day), "inspection_pdf")["data"]
-    assert api.entries.get(entry_id)["check_status"] == "pass"
+    newer = api.add_attachment(entry_id, str(next_day), "inspection_pdf", options={
+        "inspection_action": "keep", "inspection_existing_ids": [attachment["id"]],
+    })["data"]
+    assert api.entries.get(entry_id)["check_status"] == "warning"
+    assert "2 份查验单" in api.entries.get(entry_id)["check_message"]
+    assert "当日第 2 次" not in api.entries.get(entry_id)["check_message"]
     api.delete_attachment(newer["id"])
     assert "当日第 2 次" in api.entries.get(entry_id)["check_message"]
     api.delete_attachment(attachment["id"])

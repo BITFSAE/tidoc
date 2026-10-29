@@ -1078,7 +1078,11 @@ class EntryRepo:
             results.append({**info, "added_at": row["added_at"], "attachment_id": row["id"]})
         base = [part for part in str(entry["check_message"] or "").split("；")
                 if part and not part.startswith(INSPECTION_CHECK_PREFIX)]
-        message = "；".join(filter(None, [*base, latest_inspection_message(results)]))
+        duplicate_message = (
+            f"{INSPECTION_CHECK_PREFIX} 当前条目有 {len(rows)} 份查验单，请核对并删除不需要的材料。"
+            if len(rows) > 1 else ""
+        )
+        message = "；".join(filter(None, [*base, duplicate_message, latest_inspection_message(results)]))
         if message != (entry["check_message"] or ""):
             status = "blocked" if entry["check_status"] == "blocked" else ("warning" if message else "pass")
             self.db.conn.execute("UPDATE entries SET check_status=?, check_message=? WHERE id=?",

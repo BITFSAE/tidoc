@@ -998,11 +998,16 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
     # ------------------------------------------------------------ 附件
     @_guard
     def add_attachment(self, entry_id, src_path, att_type, note="", options=None,role_id=None):
-        from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
+        from .db import TYPE_INSPECTION, TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
 
         options = options or {}
         self._validate_attachment_for_entry(entry_id, src_path, att_type)
-        att = self.attachments.add(entry_id, src_path, att_type, note,role_id=role_id or options.get("role_id"))
+        if att_type == TYPE_INSPECTION:
+            att = self._add_inspection_attachment(
+                entry_id, src_path, note, options, role_id=role_id or options.get("role_id")
+            )
+        else:
+            att = self.attachments.add(entry_id, src_path, att_type, note,role_id=role_id or options.get("role_id"))
         if att_type in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML}:
             self.entries.clear_invoice_recognition(entry_id)
         if att_type == TYPE_PAYMENT and not options.get("skip_payment_ai", False):
@@ -1709,7 +1714,8 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
 
         rows = self.db.conn.execute(
             "SELECT id FROM entries WHERE status_engine_version<>? OR id IN "
-            "(SELECT entry_id FROM attachments WHERE type='inspection_pdf' AND recognition_version<>?)",
+            "(SELECT entry_id FROM attachments WHERE type='inspection_pdf' AND recognition_version<>?) OR id IN "
+            "(SELECT entry_id FROM attachments WHERE type='inspection_pdf' GROUP BY entry_id HAVING COUNT(*)>1)",
             ("adapter-policy-1", INSPECTION_RECOGNITION_VERSION),
         ).fetchall()
         for row in rows:

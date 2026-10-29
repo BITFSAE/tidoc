@@ -20,6 +20,7 @@ from tidoc.services.invoice_verification import (
     make_print_compatibility_script,
     snapshot_pdfs,
     verification_print_title,
+    VERIFICATION_PRINT_SCALE,
 )
 
 
@@ -76,7 +77,7 @@ def test_prefill_reaches_form_state_without_submitting_or_overwriting_user(layou
     result = subprocess.run(
         [node, str(Path(__file__).with_name("verification_prefill_harness.cjs"))],
         input=json.dumps({"script": script, "layout": layout}),
-        text=True, capture_output=True, timeout=10,
+        text=True, encoding="utf-8", capture_output=True, timeout=10,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -107,7 +108,7 @@ def test_print_compatibility_copies_only_prepared_content_and_uses_native_print(
             "script": make_print_compatibility_script("26957000000168907686"),
             "layout": layout,
         }),
-        text=True, capture_output=True, timeout=10,
+        text=True, encoding="utf-8", capture_output=True, timeout=10,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -119,7 +120,7 @@ def test_verification_print_title_sanitizes_invoice_number():
     )
 
 
-@pytest.mark.parametrize("layout", ["ready", "wrong", "incomplete", "hidden", "closed", "long-number"])
+@pytest.mark.parametrize("layout", ["ready", "late-image", "wrong", "incomplete", "hidden", "closed", "long-number"])
 def test_auto_save_requires_visible_matching_result_and_waits_for_render(layout):
     node = shutil.which("node")
     if not node:
@@ -127,7 +128,7 @@ def test_auto_save_requires_visible_matching_result_and_waits_for_render(layout)
     result = subprocess.run(
         [node, str(Path(__file__).with_name("verification_auto_save_harness.cjs"))],
         input=json.dumps({"script": make_auto_save_script("26000000000000000001"), "layout": layout}),
-        text=True, capture_output=True, timeout=10,
+        text=True, encoding="utf-8", capture_output=True, timeout=10,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -510,7 +511,7 @@ def test_api_opens_official_site_only_after_explicit_start(
         "trash_source_after_archive": True,
     })
     assert preferences["ok"] is True
-    if sys.platform == "darwin":
+    if sys.platform in ("darwin", "win32"):
         # 自动保存不应依赖此前选过、现在已移走的外部目录。
         tmp_path.rmdir()
 
@@ -526,8 +527,9 @@ def test_api_opens_official_site_only_after_explicit_start(
     assert "maximized" not in created
     assert created["width"] == 1360
     assert created["height"] == 860
-    if sys.platform != "darwin":
+    if sys.platform not in ("darwin", "win32"):
         assert str(tmp_path.resolve()) in result["data"]["watch_directories"]
+    assert result["data"]["auto_save"] == (sys.platform in ("darwin", "win32"))
     assert "查验单-26957000000168907686" in fake_window.script
     assert fake_window._tidoc_print_title == "查验单-26957000000168907686"
     # A redirect may replace the initial document after its loaded event.
@@ -541,6 +543,74 @@ def test_api_opens_official_site_only_after_explicit_start(
     assert session["trash_source_after_archive"] is True
     assert api.close_invoice_verification(result["data"]["session_id"])["ok"] is True
     assert fake_window.destroyed is True
+
+
+@pytest.mark.parametrize('blocked', ['locked', 'rewritten'])
+def test_external_pdf_can_be_retried_after_lock_or_same_name_rewrite(api, tmp_path, monkeypatch, blocked):
+    import os
+    from pypdf import PdfWriter
+    from tidoc.services import folder_import, inspection_pdf
+
+    number = '26000000000000000001'
+    profile = api.profiles.create('测试报账人', '测试审核人')
+    entry_id = api.entries.create(profile['id'], parsed=ParsedInvoice(invoice_no=number))
+    path = tmp_path / '查验单.pdf'
+    writer = PdfWriter()
+    writer.add_blank_page(842, 595)
+    writer.write(path)
+    session = {
+        'entry_id': entry_id, 'invoice_no': number, 'window': None, 'window_closed': False,
+        'attached': None, 'watch_directories': [tmp_path], 'before': {},
+        'started_ns': time.time_ns(), 'candidate_sizes': {}, 'seen_candidates': set(),
+        'last_message': '', 'trash_source_after_archive': False,
+    }
+    api._verification_sessions['retry'] = session
+    detected = {'invoice_no': ''}
+    monkeypatch.setattr(folder_import, 'classify_pdf_attachment_type', lambda _: 'inspection_pdf')
+    monkeypatch.setattr(folder_import, 'extract_pdf_invoice_no', lambda _: detected['invoice_no'])
+    monkeypatch.setattr(inspection_pdf, 'read_inspection_pdf', lambda _: detected.copy())
+    assert api.invoice_verification_status('retry')['data']['state'] == 'processing'
+    if blocked == 'locked':
+        if sys.platform == 'win32':
+            import ctypes
+            from ctypes import wintypes
+
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            create = kernel.CreateFileW
+            create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                               wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            create.restype = wintypes.HANDLE
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = create(str(path), 0x80000000, 0, None, 3, 0, None)
+            assert handle != wintypes.HANDLE(-1).value
+            try:
+                assert api.invoice_verification_status('retry')['data']['state'] == 'processing'
+            finally:
+                kernel.CloseHandle(handle)
+        else:
+            original_open = Path.open
+
+            def locked_open(target, *args, **kwargs):
+                if target == path:
+                    raise PermissionError('The PDF is still open in the printer')
+                return original_open(target, *args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(Path, 'open', locked_open)
+                assert api.invoice_verification_status('retry')['data']['state'] == 'processing'
+        assert not session['seen_candidates']
+    else:
+        assert api.invoice_verification_status('retry')['data']['state'] == 'waiting'
+        assert session['seen_candidates']
+        # 文件名和大小相同，只更新时间，也要重新检查。
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+        assert api.invoice_verification_status('retry')['data']['state'] == 'processing'
+    detected['invoice_no'] = number
+    result = api.invoice_verification_status('retry')['data']
+    assert result['state'] == 'attached'
+    assert Path(result['attachment']['abs_path']).exists()
+    assert api.invoice_verification_status('retry')['data']['attachment']['id'] == result['attachment']['id']
 
 
 def test_verification_preferences_validate_custom_directory(api, tmp_path):
@@ -585,6 +655,7 @@ def test_verification_print_info_uses_landscape(api):
 
     assert int(info.orientation()) == AppKit.NSPaperOrientationLandscape
     assert info.paperSize().width > info.paperSize().height
+    assert float(info.dictionary()[AppKit.NSPrintScalingFactor]) == VERIFICATION_PRINT_SCALE
 
 
 def test_macos_verification_print_sets_native_job_title(api):
@@ -671,6 +742,7 @@ def test_macos_auto_save_sets_destination_before_creating_async_operation(api, t
         def _printOperationWithPrintInfo_(self, info):
             assert info.dictionary()[AppKit.NSPrintJobDisposition] == AppKit.NSPrintSaveJob
             assert info.dictionary()[AppKit.NSPrintJobSavingURL].path() == str(output)
+            assert float(info.dictionary()[AppKit.NSPrintScalingFactor]) == VERIFICATION_PRINT_SCALE
             return operation
 
         def window(self):

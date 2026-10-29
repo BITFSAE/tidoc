@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 TAX_VERIFICATION_URL = "https://inv-veri.chinatax.gov.cn/index.html"
+VERIFICATION_PRINT_SCALE = 0.8
 
 
 def build_verification_info(entry: dict) -> dict:
@@ -147,6 +148,8 @@ def make_auto_save_script(invoice_no: str) -> str:
   const invoiceNo = __INVOICE_NO__;
   let pending = false;
   let saved = false;
+  let renderResult = null;
+  let renderDeadline = 0;
   const visible = (node) => node.getClientRects().length > 0;
   const findResult = () => Array.from(document.querySelectorAll('.t-dialog'))
     .find((dialog) => visible(dialog)
@@ -158,6 +161,10 @@ def make_auto_save_script(invoice_no: str) -> str:
     const button = result && Array.from(result.querySelectorAll('button'))
       .find((node) => visible(node) && node.textContent.trim() === '打印' && !node.disabled);
     if (!button) return;
+    if (renderResult !== result) {
+      renderResult = result;
+      renderDeadline = Date.now() + 10000;
+    }
     pending = true;
     // 等二维码、样式和字体完成；超时保留官网的手动打印入口。
     try {
@@ -166,13 +173,17 @@ def make_auto_save_script(invoice_no: str) -> str:
           document.fonts.ready,
           ...Array.from(result.querySelectorAll('img')).map((img) => img.decode()),
         ]),
-        new Promise((_, reject) => setTimeout(() => reject(Error('timeout')), 10000)),
+        new Promise((_, reject) => setTimeout(() => reject(Error('timeout')),
+          Math.max(0, renderDeadline - Date.now()))),
       ]);
       if (findResult() !== result || !visible(button)) return;
       window.__tidocScanPrintFrames?.();
       saved = true;
       button.click();
     } catch (_) {
+      // 官网二维码的 src 会在结果弹窗出现后更新，第一次 decode 可能被中断。
+      // 在同一次准备期限内重试，不把这个短暂状态当成永久失败。
+      if (Date.now() < renderDeadline) return;
       saved = true;
       const helper = document.getElementById('tidoc-verification-helper');
       if (helper) helper.textContent = '查验结果尚未加载完整，请稍后点击官网“打印”保存查验单。';
@@ -188,7 +199,7 @@ def make_auto_save_script(invoice_no: str) -> str:
     return script.replace('__INVOICE_NO__', json.dumps(str(invoice_no)))
 
 
-def make_print_compatibility_script(invoice_no: str = "") -> str:
+def make_print_compatibility_script(invoice_no: str = "", *, print_message: list[str] | None = None) -> str:
     """把官网 PrintArea 选定内容提升到顶层 WebView，供原生打印使用。
 
     兼容旧版 PrintArea 和新版 Print.js 的同源 iframe，把官网已准备的打印
@@ -239,6 +250,9 @@ def make_print_compatibility_script(invoice_no: str = "") -> str:
         #${hostId} { display: none; }
         @media print {
           @page { size: A4 landscape; margin: 8mm; }
+          html, body.${bodyClass}, body.${bodyClass} #${hostId} {
+            background: #fff !important;
+          }
           body.${bodyClass} > :not(#${hostId}) { display: none !important; }
           body.${bodyClass} #${hostId} {
             display: block !important;
@@ -252,7 +266,7 @@ def make_print_compatibility_script(invoice_no: str = "") -> str:
 
     topDocument.body.classList.add(bodyClass);
     if (printTitle !== '查验单-') topDocument.title = printTitle;
-    topWindow.print();
+    __TIDOC_NATIVE_PRINT__
   };
 
   const observedDocuments = new WeakSet();
@@ -309,7 +323,12 @@ def make_print_compatibility_script(invoice_no: str = "") -> str:
   topWindow.setInterval(scan, 800);
 })();
 """
-    return script.replace("__TIDOC_PRINT_TITLE__", print_title)
+    native_print = (
+        f"topWindow.chrome.webview.postMessage({json.dumps(print_message)});"
+        if print_message else "topWindow.print();"
+    )
+    return (script.replace("__TIDOC_PRINT_TITLE__", print_title)
+            .replace("__TIDOC_NATIVE_PRINT__", native_print))
 
 
 def default_watch_directories(home: Path | None = None) -> list[Path]:

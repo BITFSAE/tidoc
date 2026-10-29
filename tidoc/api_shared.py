@@ -41,6 +41,21 @@ def mask_secret(value: str) -> str:
     return f"{prefix}{rest[:2]}****{rest[-4:]}"
 
 
+class InspectionConflictError(ValueError):
+    """新增查验单前，要求调用方确认处理已有材料的方式。"""
+
+    code = "inspection_conflict"
+
+    def __init__(self, entry_id, attachments):
+        self.detail = {
+            "entry_id": entry_id,
+            "existing_ids": [att["id"] for att in attachments],
+            "attachments": [{key: att.get(key, "") for key in ("id", "original_name", "added_at")}
+                            for att in attachments],
+        }
+        super().__init__(f"当前条目已有 {len(attachments)} 份查验单，请确认是否替换。")
+
+
 class DuplicateInvoiceError(ValueError):
     """导入命中了已有发票，携带可供前端定位原条目的结构化信息。"""
 
@@ -77,6 +92,10 @@ def _guard(func):
             error = {"ok": False, "error": str(exc)}
             if getattr(exc, "diagnostics", None):
                 error["diagnostics"] = exc.diagnostics
+            if getattr(exc, "code", None):
+                error["code"] = exc.code
+            if getattr(exc, "detail", None):
+                error["detail"] = exc.detail
             return error
     return wrapper
 

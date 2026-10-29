@@ -726,6 +726,9 @@ html.batch-dragging, html.batch-dragging * { cursor: grabbing !important; }
 /* 浮动滚动条（macOS 默认）不占位置，会盖在文字上：需要横向滚动时按它展开后的高度在下方垫出位置，
    再用负外边距抵掉，滚动条落进下方的空白，这一行的高度和与「选择条目」的对齐都不变。 */
 html[data-scrollbars="overlay"] .stats.is-scrollable { padding-bottom: 15px; margin-bottom: -12px; }
+/* 经典滚动条（Windows、或 macOS 设为「始终」）占布局高度，会把文字往上顶：按 JS 量出的滚动条高度再加 3px 间距用负外边距抵掉，
+   行高与非滚动时一致，文字和「选择条目」居中对齐，滚动条落进下方留白。 */
+html[data-scrollbars="classic"] .stats.is-scrollable { padding-bottom: 4px; margin-bottom: calc(-3px - var(--hscroll-h, 0px)); }
 .stats b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; font-family: var(--font-display); font-variation-settings: "SOFT" 30; }
 .stats .sep { color: var(--line); }
 .stats .stats-sum { font-family: var(--font-display); font-size: 15px; font-variation-settings: "SOFT" 30, "opsz" 40; }
@@ -902,6 +905,8 @@ html[data-engine="blink"] .entry-list[data-density="compact"] .entry-card { cont
 .entry-context-menu button:hover, .entry-context-menu button:focus-visible { background: var(--paper-2); }
 .entry-context-menu button:focus-visible { outline: 2px solid var(--primary-ring-strong); outline-offset: -2px; }
 .entry-context-menu button.danger { color: var(--blocked); }
+.entry-context-menu button.with-keys { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.entry-context-menu kbd { font: 11px var(--font-mono); color: var(--ink-faint); }
 
 /* 层级：弹窗遮罩 50+ < 通知 100 < 右键菜单 120 < 下拉列表 400 < 悬浮提示 500。
    提示必须在最上面，否则下拉展开时它自己选项的提示会被列表盖住。 */
@@ -1716,6 +1721,13 @@ code { background: var(--paper-2); padding: 2px 6px; border-radius: 4px; font-si
 .guide-steps > div:last-child { border-bottom: none; }
 .guide-steps b { font-size: 13px; color: var(--ink); }
 .guide-steps span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
+.shortcut-list { display: grid; grid-template-columns: max-content 1fr; gap: 10px 18px; align-items: center; padding: 2px; font-size: 12.5px; }
+.shortcut-list > div { display: contents; }
+.shortcut-list kbd {
+  justify-self: start; padding: 1px 6px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--paper-2); color: var(--ink); font: 11.5px var(--font-mono); white-space: nowrap;
+}
+.shortcut-list span { color: var(--ink-soft); line-height: 1.45; }
 
 /* 身份管理列表 */
 .profile-list { display: flex; flex-direction: column; gap: 8px; }

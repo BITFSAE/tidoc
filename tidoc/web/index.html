@@ -95,7 +95,7 @@
             <button type="button" id="searchClear" class="search-clear hidden" aria-label="清除搜索" title="清除搜索">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             </button>
-            <kbd id="searchKbd">/</kbd>
+            <kbd id="searchKbd" title="按 / 搜索，按 ? 查看常用快捷键">/</kbd>
           </div>
 
           <div class="quick-chips" id="quickChips" aria-label="筛选">
@@ -237,14 +237,14 @@
             <button class="selection-select-all" id="selectAllBtn" title="选择当前列表" aria-label="选择当前列表">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m8 12 2.5 2.5L16 9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>全选</span>
             </button>
-            <button class="selection-clear hidden" id="clearSelBtn" title="取消选择" aria-label="取消选择">
+            <button class="selection-clear hidden" id="clearSelBtn" title="取消选择（Esc）" aria-label="取消选择">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             </button>
             <span class="selection-divider"></span>
             <button class="btn small ghost" id="addToBatchBtn" title="调整所选条目的批次归属">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M3 7h7l2 2h9v10H3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>批次</span>
             </button>
-            <button class="btn small ghost" id="tagBtn" title="添加或移除标签">
+            <button class="btn small ghost" id="tagBtn" title="添加或移除标签（T）；右键可批量填写报账信息">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 5h9l7 7-8 8-8-8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="9" cy="10" r="1.3" fill="currentColor"/></svg><span>标签</span>
             </button>
             <button class="btn small ghost" id="changeProfileBtn" title="批量修改所选条目的报账人">

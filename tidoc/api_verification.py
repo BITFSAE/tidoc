@@ -117,16 +117,22 @@ class InvoiceVerificationApi:
                         "官网已打开，但打印兼容处理失败；可关闭后重新打开查验窗口。"
                     )
 
-            # 官网查验成功后会导航到结果页；每次页面加载都重新安装打印兼容处理。
-            window.events.loaded += install_print_compatibility
+            def prepare_verification_page() -> None:
+                if session["window_closed"]:
+                    return
+                try:
+                    window.evaluate_js(script)
+                except Exception:  # noqa: BLE001 - 官网仍可供用户手动填写
+                    session["last_message"] = "官网已打开，但自动填写失败，请在官网手动填写。"
+                install_print_compatibility()
+
+            # 旧地址会重定向到新版单页应用；每次加载都准备，脚本按文档去重。
+            # 官网查验成功后的结果页也需要重新安装打印兼容处理。
+            window.events.loaded += prepare_verification_page
 
             def prefill_when_loaded() -> None:
                 if window.events.loaded.wait(30):
-                    try:
-                        window.evaluate_js(script)
-                        install_print_compatibility()
-                    except Exception:  # noqa: BLE001 - 官网仍可供用户手动填写
-                        session["last_message"] = "官网已打开，但自动填写失败，请在官网手动填写。"
+                    prepare_verification_page()
 
             threading.Thread(target=prefill_when_loaded, daemon=True).start()
         except Exception:

@@ -1,7 +1,14 @@
+import json
+import shutil
+import subprocess
 import sys
+import threading
 import time
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from tidoc.engine.models import ParsedInvoice
 from tidoc.services.invoice_verification import (
@@ -39,7 +46,7 @@ def test_prefill_script_only_fills_and_focuses_captcha():
         "verification_value": "76.32",
     })
 
-    assert "document.getElementById('yzm')" in script
+    assert "findInput('yzm')" in script
     assert "checkfp.click" not in script
     assert "fpdm" not in script
     assert "26957000000168907686" in script
@@ -52,6 +59,24 @@ def test_prefill_script_only_fills_and_focuses_captcha():
     assert "datepicker('hide'" in script
     assert "input.blur()" in script
     assert "FocusEvent('focusout'" in script
+
+
+@pytest.mark.parametrize("layout", ["legacy", "current", "delayed", "missing"])
+def test_prefill_reaches_form_state_without_submitting_or_overwriting_user(layout):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("需要 Node 执行查验填充脚本")
+    script = make_prefill_script({
+        "invoice_no": "26957000000168907686",
+        "invoice_date": "20260713",
+        "verification_value": "76.32",
+    })
+    result = subprocess.run(
+        [node, str(Path(__file__).with_name("verification_prefill_harness.cjs"))],
+        input=json.dumps({"script": script, "layout": layout}),
+        text=True, capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_print_compatibility_uses_top_level_native_print():
@@ -67,6 +92,22 @@ def test_print_compatibility_uses_top_level_native_print():
     assert "checkfp" not in script
     assert "查验单-26957000000168907686" in script
     assert "topDocument.title = printTitle" in script
+
+
+@pytest.mark.parametrize("layout", ["legacy", "printjs", "navigation"])
+def test_print_compatibility_copies_only_prepared_content_and_uses_native_print(layout):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("需要 Node 执行查验打印脚本")
+    result = subprocess.run(
+        [node, str(Path(__file__).with_name("verification_print_harness.cjs"))],
+        input=json.dumps({
+            "script": make_print_compatibility_script("26957000000168907686"),
+            "layout": layout,
+        }),
+        text=True, capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_verification_print_title_sanitizes_invoice_number():
@@ -342,9 +383,14 @@ def test_api_opens_official_site_only_after_explicit_start(
             self.events = SimpleNamespace(loaded=FakeEvent(), closed=FakeEvent())
             self.destroyed = False
             self.script = ""
+            self.scripts = []
+            self.prepared = threading.Event()
 
         def evaluate_js(self, script):
             self.script = script
+            self.scripts.append(script)
+            if "tidoc-native-print-host" in script:
+                self.prepared.set()
 
         def destroy(self):
             self.destroyed = True
@@ -381,6 +427,7 @@ def test_api_opens_official_site_only_after_explicit_start(
     })
 
     assert result["ok"] is True
+    assert fake_window.prepared.wait(2)
     assert created["url"] == "https://inv-veri.chinatax.gov.cn/index.html"
     assert "maximized" not in created
     assert created["width"] == 1360
@@ -388,6 +435,13 @@ def test_api_opens_official_site_only_after_explicit_start(
     assert str(tmp_path.resolve()) in result["data"]["watch_directories"]
     assert "查验单-26957000000168907686" in fake_window.script
     assert fake_window._tidoc_print_title == "查验单-26957000000168907686"
+    # A redirect may replace the initial document after its loaded event.
+    before = len(fake_window.scripts)
+    for handler in fake_window.events.loaded.handlers:
+        handler()
+    assert len(fake_window.scripts) == before + 2
+    assert "__tidocVerificationPrefillStarted" in fake_window.scripts[-2]
+    assert "tidoc-native-print-host" in fake_window.scripts[-1]
     session = api._verification_sessions[result["data"]["session_id"]]
     assert session["trash_source_after_archive"] is True
     assert api.close_invoice_verification(result["data"]["session_id"])["ok"] is True

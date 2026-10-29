@@ -120,6 +120,8 @@ function configuredTitleNames() {
 const BILIBILI_GUIDE_URL = 'https://www.bilibili.com/video/BV1XN3q69EPi/';
 const DOC_GUIDE_URL = 'https://www.bitfsae.com/news/tidoc-guide';
 const DOCS_SITE_URL = 'https://tidoc.bitfsae.com';
+// 快捷键提示里的修饰键按平台显示：macOS 用 ⌘，其余用 Ctrl。
+const MOD_KEY = /Mac/i.test(globalThis.navigator?.platform || globalThis.navigator?.userAgent || '') ? '⌘' : 'Ctrl+';
 const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
 const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
 const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
@@ -343,28 +345,34 @@ function wrapSvg(svg, s) {
 }
 
 // ------------------------------------------------------------------ 初始化
-// 浮动滚动条（macOS 默认的「根据鼠标或触控板」）不占布局位置；接了鼠标或设为「始终」时是占位的经典滚动条。
-// 启动时探测一次。浮动滚动条下，报账人统计条和批次栏放不下、需要横向滚动时才在下方给滚动条留位置（样式 .is-scrollable）。
+// 浮动滚动条（macOS 默认的「根据鼠标或触控板」）不占布局位置；接了鼠标或设为「始终」时、以及 Windows 上是占位的经典滚动条。
+// 启动时探测一次。报账人统计条和批次栏放不下、需要横向滚动时标上 .is-scrollable：浮动滚动条下在下方给滚动条留位置；
+// 经典滚动条下把统计条滚动条的实际高度写进 --hscroll-h，用负外边距抵掉，免得滚动条把文字顶高、和「选择条目」对不齐。
 function detectOverlayScrollbars() {
   const probe = document.createElement('div');
   probe.style.cssText = 'position:absolute;top:-200px;width:100px;height:100px;overflow:scroll;scrollbar-width:thin;visibility:hidden';
   document.body.appendChild(probe);
   document.documentElement.dataset.scrollbars = probe.offsetHeight === probe.clientHeight ? 'overlay' : 'classic';
   probe.remove();
-  if (document.documentElement.dataset.scrollbars !== 'overlay' || typeof ResizeObserver !== 'function') return;
+  if (typeof ResizeObserver !== 'function') return;
   // 下一帧再改样式：在回调里直接改尺寸会触发 ResizeObserver 循环提示，被全局错误处理当成 JS 错误。
+  // 观察 border-box：经典滚动条出现时只增高边框盒，内容盒尺寸不变。
   const observer = new ResizeObserver(() => requestAnimationFrame(syncHorizontalScrollers));
-  observer.observe($('#stats'));
+  observer.observe($('#stats'), { box: 'border-box' });
   observer.observe($('#batchFolders'));
 }
 
 function syncHorizontalScrollers() {
-  if (document.documentElement.dataset.scrollbars !== 'overlay') return;
   [$('#stats'), $('#batchFolders .batch-folder-track')].forEach((node) => {
     if (!node) return;
     const scrollable = node.scrollWidth > node.clientWidth;
     if (node.classList.contains('is-scrollable') !== scrollable) node.classList.toggle('is-scrollable', scrollable);
   });
+  const stats = $('#stats');
+  if (stats && document.documentElement.dataset.scrollbars === 'classic') {
+    const bar = stats.classList.contains('is-scrollable') ? stats.offsetHeight - stats.clientHeight : 0;
+    stats.style.setProperty('--hscroll-h', `${bar}px`);
+  }
 }
 
 async function init() {
@@ -1269,12 +1277,15 @@ function updateSelectionBar() {
   const count = $('#selCount');
   const countText = hasSelection ? `已选 ${State.selected.size}` : '选择条目';
   if (count.textContent !== countText) count.textContent = countText;
+  const countHint = hasSelection ? 'Shift + 点击卡片可连续选择，Esc 取消选择' : '点击卡片选择，Shift + 点击连续选择';
+  if (count.dataset.tooltip !== countHint) count.dataset.tooltip = countHint;
   const selectAllBtn = $('#selectAllBtn');
   if (selectAllBtn) {
     const disabled = !State.entries.length;
     if (selectAllBtn.disabled !== disabled) selectAllBtn.disabled = disabled;
     const hint = allSelected ? '取消选择当前列表' : '选择当前列表';
-    if (selectAllBtn.dataset.tooltip !== hint) selectAllBtn.dataset.tooltip = hint;
+    const tooltip = `${hint}（${allSelected ? 'Esc' : `${MOD_KEY}A`}）`;
+    if (selectAllBtn.dataset.tooltip !== tooltip) selectAllBtn.dataset.tooltip = tooltip;
     if (selectAllBtn.getAttribute('aria-label') !== hint) selectAllBtn.setAttribute('aria-label', hint);
     const label = selectAllBtn.querySelector('span');
     const labelText = allSelected ? '取消全选' : '全选';
@@ -3016,8 +3027,10 @@ function askUseRecognizedPaymentAmount(amounts, sum, currentPaid = '', invoiceTo
 
 function openEntryMenu(x, y, e, options) {
   const menu = el('div', 'entry-context-menu');
-  const item = (label, fn, danger) => {
-    const b = el('button', danger ? 'danger' : '', esc(label));
+  // keys：右侧淡色显示的对应按键，只给键盘上能直接做到的项。
+  const item = (label, fn, danger, keys) => {
+    const b = el('button', danger ? 'danger' : '', keys ? `<span>${esc(label)}</span><kbd>${esc(keys)}</kbd>` : esc(label));
+    if (keys) b.classList.add('with-keys');
     b.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await fn(); };
     menu.appendChild(b);
   };
@@ -3027,7 +3040,7 @@ function openEntryMenu(x, y, e, options) {
     const role = entryMaterialRole(e, roleId);
     return hasRoles ? !!role && role.presentation !== 'hidden' && !!role.quick_action : true;
   };
-  item('打开详情', () => openEntryDetail(e.id));
+  item('打开详情', () => openEntryDetail(e.id), false, 'Enter');
   item('填写实付金额', () => quickPaidFlow(e));
   if (roleQuick('payment_screenshot')) item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'));
   if (roleQuick('inspection_pdf') && verificationVisible(e)) item('在线查验', () => onlineVerificationFlow(e.id));
@@ -3249,7 +3262,7 @@ function bindEvents() {
         return;
       }
     }
-    // 弹窗打开时，列表快捷键（/、n、t、Cmd+A）不应作用到后面的页面。
+    // 弹窗打开时，列表快捷键（/、n、t、?、Cmd+A）不应作用到后面的页面。
     if ($('#modalRoot').lastChild) return;
     if (e.target.matches?.('input, textarea, select')) {   // 事件目标可能是 document（脚本派发的事件），没有 matches
       if (e.key === 'Escape') e.target.blur();
@@ -3258,6 +3271,7 @@ function bindEvents() {
     const plain = !e.metaKey && !e.ctrlKey && !e.altKey;   // Cmd/Ctrl+N 等组合键不当作单键快捷键
     if (e.key === '/' && plain) { e.preventDefault(); $('#filterKeyword').focus(); }
     else if (e.key.toLowerCase() === 'n' && plain) openNewEntry();
+    else if (e.key === '?' && plain) { e.preventDefault(); openShortcutHelp(); }
     else if (e.key.toLowerCase() === 't' && plain && State.selected.size) tagSelectionFlow();
     else if (e.key === 'Escape' && State.selected.size) {
       clearEntrySelection();
@@ -3896,6 +3910,7 @@ async function buildSettings(options = {}) {
             <button class="link-btn with-icon" id="setBilibili">${wrapSvg(I.bilibili, 14)}<span>视频说明</span></button>
             <button class="link-btn with-icon" id="setDocGuide">${wrapSvg(I.doc, 14)}<span>说明文档</span></button>
             <button class="link-btn" id="setGuide">使用提示</button>
+            <button class="link-btn" id="setShortcuts" title="也可以在主界面按 ? 打开">快捷键</button>
           </div>
         </div>
       </div>
@@ -4131,6 +4146,7 @@ async function buildSettings(options = {}) {
     }
   };
   body.querySelector('#setGuide').onclick = () => openUsageGuide(false);
+  body.querySelector('#setShortcuts').onclick = openShortcutHelp;
   body.querySelector('#setBitfsae').onclick = () => Api.openExternalUrl('https://www.bitfsae.com').catch((e) => toast(e.message, 'err'));
   body.querySelector('#setRepo').onclick = () => Api.openExternalUrl(appInfo.repository).catch((e) => toast(e.message, 'err'));
   body.querySelector('#setDocsSite').onclick = () => Api.openExternalUrl(DOCS_SITE_URL).catch((e) => toast(e.message, 'err'));
@@ -4499,6 +4515,37 @@ function openUsageGuide(firstRun) {
         Api.setAppPreference(USAGE_GUIDE_SEEN_KEY, '1').catch(() => {});
       }
     },
+  });
+}
+
+// 快捷键速查：主界面按 ?，或设置底部「快捷键」打开。只列常用的几项，完整说明在文档站。
+function openShortcutHelp() {
+  const rows = [
+    ['/', '搜索；输入后按 ↓ 跳到结果'],
+    ['N', '新建条目'],
+    ['↑ ↓ / Tab', '在卡片之间移动'],
+    ['空格', '选中当前卡片；加 Shift 连续选择'],
+    ['Shift + 点击', '连续选择卡片'],
+    [`${MOD_KEY}A`, '选择当前列表'],
+    ['Enter', '打开当前卡片的详情'],
+    ['T', '给已选条目添加或移除标签'],
+    ['右键 / Shift + F10', '打开条目菜单'],
+    ['Esc', '关闭弹窗或菜单；取消选择'],
+    [`${MOD_KEY}V`, '粘贴发票或材料；拖入文件也可以'],
+    [`${MOD_KEY}Enter`, '在备注框里保存'],
+  ];
+  const body = el('div', 'shortcut-list');
+  body.innerHTML = rows.map(([keys, label]) => `<div><kbd>${esc(keys)}</kbd><span>${esc(label)}</span></div>`).join('');
+  let m;
+  const docsBtn = mkBtn('完整说明', 'ghost', () => Api.openExternalUrl(`${DOCS_SITE_URL}/guide/keyboard.html`).catch((e) => toast(e.message, 'err')));
+  docsBtn.title = '在浏览器打开文档站的键盘快捷键说明';
+  m = modal({
+    title: '快捷键',
+    key: 'shortcut-help',
+    compact: true,
+    transient: true,
+    body,
+    footer: [docsBtn, mkBtn('知道了', 'primary', () => m.close())],
   });
 }
 

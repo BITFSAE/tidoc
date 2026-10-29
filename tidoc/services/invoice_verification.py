@@ -42,12 +42,16 @@ def make_prefill_script(info: dict) -> str:
     return f"""
 (() => {{
   const values = {payload};
+  // 新版官网用 TDesign 表单，输入框没有旧版的 id；金额字段改为 kpje。
+  const findInput = (id) => document.getElementById(id) || document.querySelector(
+    '.t-form-item__' + (id === 'kjje' ? 'kpje' : id) + ' input'
+  );
   const dispatch = (input, names) => names.forEach((name) => {{
     const EventType = name === 'keyup' ? KeyboardEvent : Event;
     input.dispatchEvent(new EventType(name, {{ bubbles: true }}));
   }});
   const commitValue = (id, value) => {{
-    const input = document.getElementById(id);
+    const input = findInput(id);
     if (!input || !value) return;
     input.focus();
     input.value = value;
@@ -56,7 +60,7 @@ def make_prefill_script(info: dict) -> str:
     input.dispatchEvent(new FocusEvent('focusout', {{ bubbles: true }}));
   }};
   const commitDate = (value) => {{
-    const input = document.getElementById('kprq');
+    const input = findInput('kprq');
     if (!input || !value) return;
     const jq = window.jQuery;
     const match = /^([0-9]{{4}})([0-9]{{2}})([0-9]{{2}})$/.exec(value);
@@ -72,37 +76,53 @@ def make_prefill_script(info: dict) -> str:
       return;
     }}
     commitValue('kprq', value);
+    // TDesign 日期框在 Enter 时确认输入，并把值写回表单。
+    input.dispatchEvent(new KeyboardEvent('keydown', {{
+      key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+    }}));
+    input.blur();
   }};
-  commitValue('fphm', values.fphm);
-  setTimeout(() => {{
-    commitDate(values.kprq);
-  }}, 180);
-  setTimeout(() => {{
-    commitValue('kjje', values.kjje);
-  }}, 420);
-  setTimeout(() => {{
-    const dateInput = document.getElementById('kprq');
-    if (window.jQuery?.fn?.datepicker && dateInput) {{
-      window.jQuery(dateInput).datepicker('hide');
+  if (window.__tidocVerificationPrefillStarted) return;
+  window.__tidocVerificationPrefillStarted = true;
+  const deadline = Date.now() + 30000;
+  const fillWhenReady = () => {{
+    // 页面加载完成时，新版官网的表单可能仍未挂载。
+    if (!['fphm', 'kprq', 'kjje', 'yzm'].every((id) => findInput(id))) {{
+      if (Date.now() < deadline) setTimeout(fillWhenReady, 100);
+      return;
     }}
-    document.activeElement?.blur?.();
-    const captcha = document.getElementById('yzm');
-    if (captcha) {{ captcha.value = ''; captcha.focus(); }}
-  }}, 700);
-  if (!document.getElementById('tidoc-verification-helper')) {{
-    const helper = document.createElement('div');
-    helper.id = 'tidoc-verification-helper';
-    helper.textContent = '验证码通常不区分大小写。查验成功后点击官网“打印”，另存为 PDF 后请等待约 1–2 秒，软件识别处理完成后会自动归入条目。';
-    helper.style.cssText = [
-      'position:fixed', 'left:18px', 'bottom:18px', 'z-index:2147483647',
-      'max-width:360px', 'padding:10px 14px', 'border-radius:9px',
-      'background:#173a70', 'color:#fff', 'font:13px/1.55 sans-serif',
-      'box-shadow:0 8px 24px rgba(0,0,0,.22)'
-    ].join(';');
-    helper.onclick = () => helper.remove();
-    helper.title = '点击关闭';
-    document.body.appendChild(helper);
-  }}
+    commitValue('fphm', values.fphm);
+    setTimeout(() => {{
+      commitDate(values.kprq);
+    }}, 180);
+    setTimeout(() => {{
+      commitValue('kjje', values.kjje);
+    }}, 420);
+    setTimeout(() => {{
+      const dateInput = findInput('kprq');
+      if (window.jQuery?.fn?.datepicker && dateInput) {{
+        window.jQuery(dateInput).datepicker('hide');
+      }}
+      document.activeElement?.blur?.();
+      const captcha = findInput('yzm');
+      if (captcha) captcha.focus();
+    }}, 700);
+    if (!document.getElementById('tidoc-verification-helper')) {{
+      const helper = document.createElement('div');
+      helper.id = 'tidoc-verification-helper';
+      helper.textContent = '验证码通常不区分大小写。查验成功后点击官网“打印”，另存为 PDF 后请等待约 1–2 秒，软件识别处理完成后会自动归入条目。';
+      helper.style.cssText = [
+        'position:fixed', 'left:18px', 'bottom:18px', 'z-index:2147483647',
+        'max-width:360px', 'padding:10px 14px', 'border-radius:9px',
+        'background:#173a70', 'color:#fff', 'font:13px/1.55 sans-serif',
+        'box-shadow:0 8px 24px rgba(0,0,0,.22)'
+      ].join(';');
+      helper.onclick = () => helper.remove();
+      helper.title = '点击关闭';
+      document.body.appendChild(helper);
+    }}
+  }};
+  fillWhenReady();
 }})();
 """
 
@@ -116,8 +136,8 @@ def verification_print_title(invoice_no: str = "") -> str:
 def make_print_compatibility_script(invoice_no: str = "") -> str:
     """把官网 PrintArea 选定内容提升到顶层 WebView，供原生打印使用。
 
-    查验结果自身也在 iframe 中，脚本会持续发现同源 frame、替换其中 PrintArea
-    的出口，并把官网选定内容复制到顶层文档；普通调用仍进入系统打印。
+    兼容旧版 PrintArea 和新版 Print.js 的同源 iframe，把官网已准备的打印
+    内容复制到顶层文档，再调用原生打印，保留官网自己的材料排版。
     """
     print_title = json.dumps(verification_print_title(invoice_no), ensure_ascii=False)
     script = """
@@ -142,8 +162,8 @@ def make_print_compatibility_script(invoice_no: str = "") -> str:
       topDocument.body.appendChild(host);
     }
     host.replaceChildren();
-    selection.each(function() {
-      host.appendChild(topDocument.importNode(this, true));
+    Array.from(selection).forEach((node) => {
+      host.appendChild(topDocument.importNode(node, true));
     });
 
     topDocument.querySelectorAll('[data-tidoc-print-source-style]')
@@ -180,7 +200,27 @@ def make_print_compatibility_script(invoice_no: str = "") -> str:
     topWindow.print();
   };
 
+  const observedDocuments = new WeakSet();
   const installInWindow = (targetWindow) => {
+    // Print.js 在隐藏 iframe 的 load 回调中组装内容并调用子窗口 print。
+    // 捕获阶段先装上转发，调用时才读取已组装好的内容，避免漏掉首次打印。
+    const targetDocument = targetWindow.document;
+    if (!observedDocuments.has(targetDocument)) {
+      observedDocuments.add(targetDocument);
+      targetDocument.addEventListener('load', (event) => {
+        const frame = event.target;
+        if (frame.tagName === 'IFRAME') {
+          try { if (frame.contentWindow) scan(frame.contentWindow); } catch (_) {}
+        }
+      }, true);
+    }
+    if (targetWindow !== topWindow && !targetWindow.print.__tidocNativePrint) {
+      const nativeFramePrint = () => {
+        prepareTopLevelPrint(targetWindow.document.body.children, targetWindow);
+      };
+      nativeFramePrint.__tidocNativePrint = true;
+      targetWindow.print = nativeFramePrint;
+    }
     const jq = targetWindow.jQuery;
     if (!jq || !jq.fn || typeof jq.fn.printArea !== 'function') return false;
     if (jq.fn.printArea.__tidocNativePrint) return true;

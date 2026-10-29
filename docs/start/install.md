@@ -5,7 +5,7 @@ description: 下载 Tidoc 最新版安装包，Windows 和 macOS 各有一个。
 
 # 下载与安装
 
-下载安装包，安装后即可使用。Windows 和 macOS 各有一个安装包。
+下载安装包，安装后即可使用。
 
 ## 下载
 
@@ -50,12 +50,7 @@ description: 下载 Tidoc 最新版安装包，Windows 和 macOS 各有一个。
 
 ## 首次启动
 
-首次打开会依次要求：
-
-1. BITFSAE 车队队员选「BITFSAE 车队报账」，之后不用再改方案。其他团队选「通用报账」；团队给了方案文件的，点「导入报账方案」。之后需要换方案时，在「设置 → 开发者选项」里切换，已有材料保留原来的规则。
-2. 创建报账人，填写姓名。
-
-完成后进入主界面。接下来看[快速入门](/start/quickstart)。
+首次打开会依次要求选择报账方案、创建报账人，完成后进入主界面。BITFSAE 车队队员选「BITFSAE 车队报账」，其他团队的选择见[快速入门](/start/quickstart)。
 
 ![首次启动选择方案](/images/first-run-scheme.png)
 

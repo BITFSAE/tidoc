@@ -53,7 +53,7 @@ Tidoc 默认在启动完成后检查一次是否有新版本，持续运行时�
 | 组件 | 用途 |
 | --- | --- |
 | 打印导出组件 | 材料 PDF 拼接、图片排版与编号，以及报账方案定义的 Word 文档 |
-| OCR 识别组件 | 调用阿里云发票识别，需要在「设置 → 阿里云 OCR」里填写密钥后使用，见[阿里云 OCR](/guide/aliyun-ocr) |
+| OCR 识别组件 | 调用阿里云发票识别，需要在「设置 → 开发者选项 → 发票阿里云 OCR」里填写密钥后使用，见[阿里云 OCR](/guide/aliyun-ocr) |
 
 ## 接收测试版更新
 
@@ -85,9 +85,4 @@ Tidoc 默认在启动完成后检查一次是否有新版本，持续运行时�
 
 ## 手动下载
 
-自动更新用不了时，可以从 [GitHub Releases](https://github.com/BITFSAE/tidoc/releases/latest) 下载安装包：
-
-- Windows：`tidoc-core-windows-v{version}.exe`
-- macOS：`tidoc-core-macos-v{version}.dmg`
-
-「软件更新」窗口底部也有「GitHub Releases」按钮。
+自动更新用不了时，按[下载与安装](/start/install)里的方式下载安装包再安装。「软件更新」窗口底部也有「GitHub Releases」按钮。

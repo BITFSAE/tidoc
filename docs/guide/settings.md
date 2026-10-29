@@ -125,4 +125,4 @@ Tidoc 的条目、材料和设置都保存在本机数据文件夹里，日常�
 
 更新的联网方式见[软件和组件更新](/update/)。团队方案文件从本地导入，Tidoc 不会在后台下载团队规则。
 
-阿里云 AccessKey 只保存在本机，导出的绑定包不会携带它；绑定包导入后，使用接收方电脑上的 OCR 配置。建议为 Tidoc 单独创建 RAM 用户和 AccessKey，更换电脑或不再使用时，在阿里云控制台禁用旧的 AccessKey，见[阿里云 OCR](/guide/aliyun-ocr)。
+阿里云 AccessKey 只保存在本机，不随绑定包导出，导入绑定包后使用接收方电脑上的 OCR 配置。AccessKey 的创建和停用方法见[阿里云 OCR](/guide/aliyun-ocr)。

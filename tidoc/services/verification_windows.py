@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .invoice_verification import VERIFICATION_PRINT_SCALE
-
 PRINT_MESSAGE = "_tidocVerificationPrint"
 
 
@@ -47,7 +45,8 @@ def run_pdf_print(browser, output: Path, completed) -> None:
     settings.Orientation = CoreWebView2PrintOrientation.Landscape
     settings.PageWidth = 210 / 25.4
     settings.PageHeight = 297 / 25.4
-    settings.ScaleFactor = VERIFICATION_PRINT_SCALE
+    # 缩放和居中由页面内容完成（见 make_print_compatibility_script），与 macOS 一致。
+    settings.ScaleFactor = 1.0
     settings.ShouldPrintBackgrounds = True
     settings.ShouldPrintHeaderAndFooter = False
     # 页边距由官网打印兼容样式里的 @page 统一提供。

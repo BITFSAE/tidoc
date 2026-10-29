@@ -20,7 +20,7 @@ from tidoc.services.invoice_verification import (
     make_print_compatibility_script,
     snapshot_pdfs,
     verification_print_title,
-    VERIFICATION_PRINT_SCALE,
+    VERIFICATION_PRINT_ZOOM,
 )
 
 
@@ -655,7 +655,16 @@ def test_verification_print_info_uses_landscape(api):
 
     assert int(info.orientation()) == AppKit.NSPaperOrientationLandscape
     assert info.paperSize().width > info.paperSize().height
-    assert float(info.dictionary()[AppKit.NSPrintScalingFactor]) == VERIFICATION_PRINT_SCALE
+    # 缩放由页面内容完成；原生缩放只缩小排好版的页面，会让内容缩在纸张左侧。
+    assert float(info.dictionary().get(AppKit.NSPrintScalingFactor, 1.0)) == 1.0
+
+
+def test_print_script_scales_and_centers_inside_the_page():
+    script = make_print_compatibility_script("26957000000168907686")
+    assert f"zoom: {VERIFICATION_PRINT_ZOOM:g} !important;" in script
+    assert "width: max-content !important;" in script
+    assert "margin: 0 auto !important;" in script
+    assert "__TIDOC_" not in script
 
 
 def test_macos_verification_print_sets_native_job_title(api):
@@ -742,7 +751,6 @@ def test_macos_auto_save_sets_destination_before_creating_async_operation(api, t
         def _printOperationWithPrintInfo_(self, info):
             assert info.dictionary()[AppKit.NSPrintJobDisposition] == AppKit.NSPrintSaveJob
             assert info.dictionary()[AppKit.NSPrintJobSavingURL].path() == str(output)
-            assert float(info.dictionary()[AppKit.NSPrintScalingFactor]) == VERIFICATION_PRINT_SCALE
             return operation
 
         def window(self):

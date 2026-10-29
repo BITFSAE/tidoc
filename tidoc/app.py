@@ -16,6 +16,7 @@ from pathlib import Path
 import webview
 
 from .api import Api
+from .api_shared import activate_main_window
 from .single_instance import SingleInstance
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -240,24 +241,6 @@ def _update_health_path_from_argv(argv: list[str] | None = None) -> Path | None:
     return path.resolve() if path.is_absolute() else None
 
 
-def _activate_main_window(window) -> None:
-    """Restore a minimized main window and bring it to the foreground."""
-    try:
-        if sys.platform == "darwin":
-            # Cocoa's deminiaturize is harmless when the window is not minimized.
-            window.restore()
-        elif sys.platform == "win32":
-            state = str(getattr(getattr(window, "native", None), "WindowState", ""))
-            if state.lower().endswith("minimized"):
-                window.restore()
-        window.show()
-    except Exception:  # noqa: BLE001 - activation is best-effort across native backends
-        try:
-            window.show()
-        except Exception:
-            pass
-
-
 def _serve_instance_requests(instance, api, window, stop_event) -> None:
     """Forward secondary launches to the first window until it closes."""
     while not stop_event.is_set():
@@ -266,7 +249,7 @@ def _serve_instance_requests(instance, api, window, stop_event) -> None:
             path = Path(launch_file) if launch_file else None
             if path and path.suffix.lower() == ".tidoc" and path.is_file():
                 api.queue_launch_file(str(path))
-            _activate_main_window(window)
+            activate_main_window(window)
             try:
                 window.evaluate_js(
                     "window.handleSecondaryLaunch && window.handleSecondaryLaunch();"

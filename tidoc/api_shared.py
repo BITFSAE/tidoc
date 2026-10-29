@@ -1,5 +1,6 @@
 """Bridge envelopes, preference keys and filesystem containment helpers."""
 import functools
+import sys
 from pathlib import Path
 
 AUTO_UPDATE_PREF_KEY = "tidoc.update.autoCheck"
@@ -25,6 +26,24 @@ APP_LAST_SEEN_VERSION_KEY = "tidoc.update.lastSeenVersion"
 AUTO_UPDATE_INTERVAL_SECONDS = 60 * 60
 MAX_DROPPED_FILE_BYTES = 100 * 1024 * 1024
 MAX_DROPPED_TOTAL_BYTES = 500 * 1024 * 1024
+
+
+def activate_main_window(window) -> None:
+    """Restore a minimized main window and bring it to the foreground."""
+    try:
+        if sys.platform == "darwin":
+            # Cocoa's deminiaturize is harmless when the window is not minimized.
+            window.restore()
+        elif sys.platform == "win32":
+            state = str(getattr(getattr(window, "native", None), "WindowState", ""))
+            if state.lower().endswith("minimized"):
+                window.restore()
+        window.show()
+    except Exception:  # noqa: BLE001 - activation is best-effort across native backends
+        try:
+            window.show()
+        except Exception:
+            pass
 
 
 def mask_secret(value: str) -> str:

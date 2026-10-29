@@ -13,7 +13,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 TAX_VERIFICATION_URL = "https://inv-veri.chinatax.gov.cn/index.html"
-VERIFICATION_PRINT_SCALE = 0.8
+# 两端都由页面内容自己缩放（CSS zoom），原生打印缩放保持 100%，版式才一致。
+# 官网的发票版心是固定宽度：macOS 原生缩放只缩小排好版的页面，内容会贴在纸张左侧；
+# 原来 macOS 的「原生 80%」叠加 WebKit 按纸宽收缩，实际约为原尺寸的 72%，
+# 直接用 80% 会让带两行明细的专用发票在 A4 横向上挤出第二页，因此取 70%。
+VERIFICATION_PRINT_ZOOM = 0.7
 
 
 def build_verification_info(entry: dict) -> dict:
@@ -199,11 +203,17 @@ def make_auto_save_script(invoice_no: str) -> str:
     return script.replace('__INVOICE_NO__', json.dumps(str(invoice_no)))
 
 
-def make_print_compatibility_script(invoice_no: str = "", *, print_message: list[str] | None = None) -> str:
+def make_print_compatibility_script(
+    invoice_no: str = "",
+    *,
+    print_message: list[str] | None = None,
+) -> str:
     """把官网 PrintArea 选定内容提升到顶层 WebView，供原生打印使用。
 
     兼容旧版 PrintArea 和新版 Print.js 的同源 iframe，把官网已准备的打印
     内容复制到顶层文档，再调用原生打印，保留官网自己的材料排版。
+
+    打印内容按 VERIFICATION_PRINT_ZOOM 缩放并水平居中；Windows 与 macOS 的原生缩放都保持 100%。
     """
     print_title = json.dumps(verification_print_title(invoice_no), ensure_ascii=False)
     script = """
@@ -256,8 +266,9 @@ def make_print_compatibility_script(invoice_no: str = "", *, print_message: list
           body.${bodyClass} > :not(#${hostId}) { display: none !important; }
           body.${bodyClass} #${hostId} {
             display: block !important;
-            width: 100% !important;
-            margin: 0 !important;
+            width: max-content !important;
+            margin: 0 auto !important;
+            zoom: __TIDOC_PRINT_ZOOM__ !important;
           }
         }
       `;
@@ -328,6 +339,7 @@ def make_print_compatibility_script(invoice_no: str = "", *, print_message: list
         if print_message else "topWindow.print();"
     )
     return (script.replace("__TIDOC_PRINT_TITLE__", print_title)
+            .replace("__TIDOC_PRINT_ZOOM__", f"{VERIFICATION_PRINT_ZOOM:g}")
             .replace("__TIDOC_NATIVE_PRINT__", native_print))
 
 

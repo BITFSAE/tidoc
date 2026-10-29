@@ -117,6 +117,29 @@ def test_automatic_save_waits_for_confirmation_before_archiving_or_cleanup(api, 
     assert not output.exists()
 
 
+def test_conflict_during_automatic_save_brings_main_window_forward(api, tmp_path, monkeypatch):
+    """确认框在主窗口里，查验窗口盖住它时必须把主窗口提到前面，否则用户看不到。"""
+    from tidoc import api_verification
+
+    entry_id, _ = existing_entry(api, tmp_path)
+    directory = tempfile.TemporaryDirectory(dir=tmp_path)
+    output = make_pdf(Path(directory.name) / 'automatic.pdf', 1, '2026-10-30 10:00:00')
+    session = {'id': 'front', 'entry_id': entry_id, 'invoice_no': NUMBER,
+               'auto_save_dir': directory, 'auto_save_path': output,
+               'window': None, 'window_closed': False, 'attached': None,
+               'watch_directories': [], 'before': {}, 'started_ns': time.time_ns(),
+               'candidate_sizes': {}, 'seen_candidates': set(), 'last_message': '',
+               'trash_source_after_archive': False}
+    api._verification_sessions['front'] = session
+    main_window = object()
+    api._window = main_window
+    activated = []
+    monkeypatch.setattr(api_verification, 'activate_main_window', activated.append)
+    api.invoice_verification_status('front')
+    assert api.invoice_verification_status('front')['code'] == 'inspection_conflict'
+    assert activated == [main_window]
+
+
 def test_startup_checks_existing_multiple_materials_without_reparsing_cached_pdfs(api, tmp_path, monkeypatch):
     from tidoc.api import Api
     from tidoc.services import inspection_pdf

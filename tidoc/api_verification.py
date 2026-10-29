@@ -6,7 +6,7 @@ import threading
 import uuid
 from pathlib import Path
 from send2trash import send2trash
-from .api_shared import InspectionConflictError, _guard, _is_inside
+from .api_shared import InspectionConflictError, _guard, _is_inside, activate_main_window
 
 
 # 轮询约每 1.2 秒一次，同一份文件连续读取失败这么多次后不再等待。
@@ -325,6 +325,10 @@ class InvoiceVerificationApi:
                 }
             except InspectionConflictError:
                 processed = False
+                # 确认框在主窗口里；查验窗口盖在上面（macOS 还可能并成标签页）时用户看不到，
+                # 查验会像卡住一样没有结果。
+                if self._window is not None:
+                    activate_main_window(self._window)
                 raise
             except Exception as exc:  # noqa: BLE001 - 继续等待用户保存正确文件
                 retries = session.setdefault("retry_counts", {})
@@ -379,17 +383,15 @@ class InvoiceVerificationApi:
 
     @staticmethod
     def _configure_verification_print_info(info) -> None:
-        """当前查验单以横向、适度缩小的版式分页。"""
+        """查验单以横向分页；缩放由页面内容完成，见 make_print_compatibility_script。"""
         if sys.platform != "darwin":
             return
         try:
             import AppKit
         except ImportError:
             return
-        from .services.invoice_verification import VERIFICATION_PRINT_SCALE
 
         info.setOrientation_(AppKit.NSPaperOrientationLandscape)
-        info.dictionary()[AppKit.NSPrintScalingFactor] = VERIFICATION_PRINT_SCALE
 
     def _install_verification_landscape_print(self) -> None:
         """只为查验窗口包装 pywebview 的原生打印入口。"""

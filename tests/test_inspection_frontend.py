@@ -84,3 +84,22 @@ def test_changed_materials_require_a_fresh_confirmation_and_closed_flow_never_re
   assert.equal(cancelled,null);assert.equal(attempts,1);
 })().catch(e => {console.error(e);process.exitCode=1;});
 """)
+
+
+def test_dropped_files_are_reported_as_added_only_when_something_was_attached():
+    run_selection(r"""
+(async () => {
+  let result;
+  droppedFilesToPaths = async () => ['/new.pdf'];
+  materialInfosForPaths = async () => [{path:'/new.pdf',type:'inspection_pdf'}];
+  openInboundBindle = async () => false;
+  cleanupDroppedPaths = async () => {};
+  addMaterialInfosToEntry = async () => result;
+  result = {message:'未添加材料，已有查验单保持不变。', added_paths:[]};
+  assert.equal(await addDroppedMaterialFiles('entry',[{name:'new.pdf'}]), false);
+  result = {message:'', added_paths:['/new.pdf']};
+  assert.equal(await addDroppedMaterialFiles('entry',[{name:'new.pdf'}]), true);
+  openInboundBindle = async () => true;
+  assert.equal(await addDroppedMaterialFiles('entry',[{name:'new.pdf'}]), false);
+})().catch(e => {console.error(e);process.exitCode=1;});
+""")

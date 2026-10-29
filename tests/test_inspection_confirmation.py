@@ -131,3 +131,60 @@ def test_startup_checks_existing_multiple_materials_without_reparsing_cached_pdf
     assert '2 份查验单' in fresh.entries.get(entry_id)['check_message']
     assert fresh.entries.get(entry_id)['check_status'] == 'warning'
     fresh.db.close()
+
+
+def automatic_session(api, tmp_path, entry_id):
+    directory = tempfile.TemporaryDirectory(dir=tmp_path)
+    output = make_pdf(Path(directory.name) / 'automatic.pdf', 1, '2026-10-30 10:00:00')
+    session = {'id': 'retry', 'entry_id': entry_id, 'invoice_no': NUMBER,
+               'auto_save_dir': directory, 'auto_save_path': output,
+               'window': None, 'window_closed': False, 'attached': None,
+               'watch_directories': [], 'before': {}, 'started_ns': time.time_ns(),
+               'candidate_sizes': {}, 'seen_candidates': set(), 'last_message': '',
+               'trash_source_after_archive': False}
+    api._verification_sessions['retry'] = session
+    return session, output
+
+
+def test_persistent_save_errors_stop_waiting_and_report_the_reason(api, tmp_path, monkeypatch):
+    from tidoc.api_verification import VERIFICATION_RETRY_LIMIT
+
+    entry_id = new_entry(api)
+    session, output = automatic_session(api, tmp_path, entry_id)
+    calls = []
+
+    def disk_full(*args, **kwargs):
+        calls.append(args)
+        raise OSError('No space left on device')
+
+    monkeypatch.setattr(api.attachments, 'add', disk_full)
+    # 第一轮只确认文件大小稳定，之后每轮重试一次。
+    for _ in range(VERIFICATION_RETRY_LIMIT + 1):
+        assert api.invoice_verification_status('retry')['data']['state'] == 'processing'
+    result = api.invoice_verification_status('retry')['data']
+    assert result['state'] == 'waiting'
+    assert '未能绑定' in result['message'] and 'No space left on device' in result['message']
+    assert len(calls) == VERIFICATION_RETRY_LIMIT + 1
+    assert api.invoice_verification_status('retry')['data']['state'] == 'waiting'
+    assert len(calls) == VERIFICATION_RETRY_LIMIT + 1
+    assert output.exists() and not api.attachments.list(entry_id)
+
+
+def test_transient_save_error_is_retried_until_the_file_can_be_archived(api, tmp_path, monkeypatch):
+    entry_id = new_entry(api)
+    session, output = automatic_session(api, tmp_path, entry_id)
+    original, attempts = api.attachments.add, []
+
+    def flaky(*args, **kwargs):
+        attempts.append(args)
+        if len(attempts) < 3:
+            raise PermissionError('The PDF is still open in the printer')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(api.attachments, 'add', flaky)
+    for _ in range(3):
+        assert api.invoice_verification_status('retry')['data']['state'] == 'processing'
+    result = api.invoice_verification_status('retry')['data']
+    assert result['state'] == 'attached'
+    assert len(api.attachments.list(entry_id)) == 1
+    assert not output.exists()

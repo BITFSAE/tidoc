@@ -9,6 +9,10 @@ from send2trash import send2trash
 from .api_shared import InspectionConflictError, _guard, _is_inside
 
 
+# 轮询约每 1.2 秒一次，同一份文件连续读取失败这么多次后不再等待。
+VERIFICATION_RETRY_LIMIT = 10
+
+
 class InvoiceVerificationApi:
     def _add_inspection_attachment(self, entry_id, path, note="", options=None, role_id=None):
         """所有新增查验单共用确认规则；替换复用附件仓库的原子更新。"""
@@ -322,12 +326,17 @@ class InvoiceVerificationApi:
             except InspectionConflictError:
                 processed = False
                 raise
-            except OSError as exc:
-                processed = False
-                waiting_for_write = True
-                session["last_message"] = f"查验单暂时无法读取，正在等待文件保存完成：{exc}"
             except Exception as exc:  # noqa: BLE001 - 继续等待用户保存正确文件
-                session["last_message"] = f"发现 PDF，但未能绑定：{exc}"
+                retries = session.setdefault("retry_counts", {})
+                # 文件被打印程序占用通常几秒内释放；磁盘已满、目录不可写等持续性错误
+                # 不能无限显示“处理中”，超过次数后当作绑定失败并给出原因。
+                if isinstance(exc, OSError) and retries.get(version, 0) < VERIFICATION_RETRY_LIMIT:
+                    retries[version] = retries.get(version, 0) + 1
+                    processed = False
+                    waiting_for_write = True
+                    session["last_message"] = f"查验单暂时无法读取，正在等待文件保存完成：{exc}"
+                else:
+                    session["last_message"] = f"发现 PDF，但未能绑定：{exc}"
             finally:
                 if processed:
                     session["seen_candidates"].add(version)

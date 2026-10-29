@@ -5779,7 +5779,7 @@ async function addDroppedMaterialFiles(entryId, files, progress = null) {
   if (!files.length) return false;
   progress?.update('正在读取拖入材料…');
   const paths = await droppedFilesToPaths(files, { dropped: true });
-  let cleanupDeferred = false;
+  let cleanupDeferred = false, added = false;
   try {
     progress?.update(State.paymentAiEnabled ? '正在识别文件类型和付款金额…' : '正在识别文件类型…');
     const infos = await materialInfosForPaths(paths, progress);
@@ -5788,11 +5788,13 @@ async function addDroppedMaterialFiles(entryId, files, progress = null) {
       return false;
     }
     progress?.update('正在校验并添加到当前条目…');
-    await addMaterialInfosToEntry(entryId, infos);
+    const result = await addMaterialInfosToEntry(entryId, infos);
+    // 全部在确认框里取消时没有新增材料，调用方不应再提示“已添加”。
+    added = result.added_paths ? result.added_paths.length > 0 : true;
   } finally {
     if (!cleanupDeferred) await cleanupDroppedPaths(paths);
   }
-  return true;
+  return added;
 }
 
 async function addMaterialInfosToEntry(entryId, infos) {
@@ -6105,7 +6107,7 @@ function setupClipboardUpload() {
         } else {
           await refreshEntries();
         }
-        toast(result.message || `已添加 ${infos.length} 份材料到当前条目`, 'ok');
+        toast(result.message || `已添加 ${result.added_paths?.length ?? infos.length} 份材料到当前条目`, 'ok');
         return;
       }
       const invoiceInfos = infos.filter(isInvoiceImportInfo);
@@ -6254,14 +6256,16 @@ async function openAttachDroppedFiles(paths, options = {}) {
             grouped.get(info.entryId).push(info);
           });
           const messages = [];
+          let addedCount = 0;
           for (const [entryId, group] of grouped) {
             const result = await addMaterialInfosToEntry(entryId, group);
             if (result.message) messages.push(result.message);
+            addedCount += result.added_paths?.length ?? group.length;
           }
           await cleanupDroppedPaths(cleanupPaths);
           m.close();
           await refreshEntries();
-          toast(messages.join('；') || `已绑定 ${selectedInfos.length} 份材料`, 'ok');
+          toast(messages.join('；') || `已绑定 ${addedCount} 份材料`, 'ok');
         } catch (e) { toast(e.message, 'err'); }
         finally { progress?.close(); }
       }),

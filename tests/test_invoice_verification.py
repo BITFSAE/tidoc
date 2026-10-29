@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,7 @@ from tidoc.services.invoice_verification import (
     build_verification_info,
     changed_pdf_candidates,
     make_prefill_script,
+    make_auto_save_script,
     make_print_compatibility_script,
     snapshot_pdfs,
     verification_print_title,
@@ -115,6 +117,95 @@ def test_verification_print_title_sanitizes_invoice_number():
         verification_print_title(" 26957/000000168907686 ")
         == "查验单-26957000000168907686"
     )
+
+
+@pytest.mark.parametrize("layout", ["ready", "wrong", "incomplete", "hidden", "closed", "long-number"])
+def test_auto_save_requires_visible_matching_result_and_waits_for_render(layout):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("需要 Node 执行查验自动保存脚本")
+    result = subprocess.run(
+        [node, str(Path(__file__).with_name("verification_auto_save_harness.cjs"))],
+        input=json.dumps({"script": make_auto_save_script("26000000000000000001"), "layout": layout}),
+        text=True, capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("detected", ["26000000000000000001", "26000000000000000002", ""])
+def test_automatic_pdf_is_checked_attached_once_and_temp_is_cleaned(api, tmp_path, monkeypatch, detected):
+    from tidoc.services import folder_import, inspection_pdf
+    profile = api.create_profile("测试报账人", "测试审核人")["data"]
+    entry_id = api.entries.create(profile["id"], parsed=ParsedInvoice(invoice_no="26000000000000000001"))
+    directory = tempfile.TemporaryDirectory(dir=tmp_path)
+    printed = Path(directory.name) / "查验单.pdf"
+    printed.write_bytes(b"%PDF-test-output")
+    session = {
+        "entry_id": entry_id, "invoice_no": "26000000000000000001",
+        "auto_save_dir": directory, "auto_save_path": printed,
+        "auto_save_printing": True, "watch_directories": [], "before": {},
+        "started_ns": time.time_ns(), "attached": None, "window": None,
+        "window_closed": False, "candidate_sizes": {}, "seen_candidates": set(),
+        "last_message": "", "trash_source_after_archive": True,
+    }
+    api._verification_sessions["automatic"] = session
+    monkeypatch.setattr(folder_import, "classify_pdf_attachment_type", lambda _: "inspection_pdf")
+    monkeypatch.setattr(inspection_pdf, "read_inspection_pdf", lambda _: {"invoice_no": detected})
+    assert api.invoice_verification_status("automatic")["data"]["state"] == "processing"
+    session["auto_save_printing"] = False
+    assert api.invoice_verification_status("automatic")["data"]["state"] == "processing"
+    result = api.invoice_verification_status("automatic")["data"]
+    if detected == session["invoice_no"]:
+        assert result["state"] == "attached"
+        assert result["attachment"]["note"] == "由全国增值税发票查验平台自动保存"
+        assert Path(result["attachment"]["abs_path"]).read_bytes() == b"%PDF-test-output"
+        assert not printed.exists()
+        assert result["source_trashed"] is False
+        assert api.invoice_verification_status("automatic")["data"]["attachment"]["id"] == result["attachment"]["id"]
+    else:
+        assert result["state"] == "waiting"
+        assert printed.exists()
+        assert session["auto_save_rejected"] is True
+    api.close_invoice_verification("automatic")
+    assert not Path(directory.name).exists()
+
+
+def test_automatic_pdf_title_cannot_replace_its_missing_body_number(api, tmp_path):
+    from pypdf import PdfWriter
+
+    profile = api.profiles.create("测试报账人", "测试审核人")
+    number = "26000000000000000001"
+    entry_id = api.entries.create(profile["id"], parsed=ParsedInvoice(invoice_no=number))
+    printed = tmp_path / f"查验单-{number}.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(842, 595)
+    writer.add_metadata({"/Title": f"查验单-{number}"})
+    writer.write(printed)
+    session = {
+        "entry_id": entry_id, "invoice_no": number, "auto_save_path": printed,
+        "watch_directories": [], "before": {}, "started_ns": time.time_ns(),
+        "attached": None, "window": None, "window_closed": False,
+        "candidate_sizes": {}, "seen_candidates": set(), "last_message": "",
+    }
+    api._verification_sessions["title-only"] = session
+    api.invoice_verification_status("title-only")
+    result = api.invoice_verification_status("title-only")["data"]
+    assert result["state"] == "waiting"
+    assert "正文未能确认发票号码" in result["message"]
+    assert session["auto_save_rejected"] is True
+    assert not api.entries.get(entry_id)["attachments"]
+
+
+def test_cancel_during_pdf_output_defers_temp_cleanup(tmp_path):
+    from tidoc.api_verification import InvoiceVerificationApi
+    directory = tempfile.TemporaryDirectory(dir=tmp_path)
+    session = {"auto_save_dir": directory, "auto_save_printing": True}
+    InvoiceVerificationApi._cleanup_verification_temp(session)
+    assert Path(directory.name).exists()
+    assert session["cleanup_pending"] is True
+    session["auto_save_printing"] = False
+    InvoiceVerificationApi._cleanup_verification_temp(session)
+    assert not Path(directory.name).exists()
 
 
 def test_changed_pdf_candidates_only_returns_session_changes(tmp_path):
@@ -419,6 +510,9 @@ def test_api_opens_official_site_only_after_explicit_start(
         "trash_source_after_archive": True,
     })
     assert preferences["ok"] is True
+    if sys.platform == "darwin":
+        # 自动保存不应依赖此前选过、现在已移走的外部目录。
+        tmp_path.rmdir()
 
     result = api.start_invoice_verification(entry_id, {
         "invoice_no": "26957000000168907686",
@@ -432,7 +526,8 @@ def test_api_opens_official_site_only_after_explicit_start(
     assert "maximized" not in created
     assert created["width"] == 1360
     assert created["height"] == 860
-    assert str(tmp_path.resolve()) in result["data"]["watch_directories"]
+    if sys.platform != "darwin":
+        assert str(tmp_path.resolve()) in result["data"]["watch_directories"]
     assert "查验单-26957000000168907686" in fake_window.script
     assert fake_window._tidoc_print_title == "查验单-26957000000168907686"
     # A redirect may replace the initial document after its loaded event.
@@ -533,3 +628,65 @@ def test_macos_verification_print_sets_native_job_title(api):
         int(native_webview.print_info.orientation())
         == AppKit.NSPaperOrientationLandscape
     )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS 原生打印")
+def test_rejected_automatic_output_keeps_manual_native_print_available(api, tmp_path, monkeypatch):
+    from tidoc.api_verification import InvoiceVerificationApi
+    from webview.platforms.cocoa import BrowserView
+
+    output = tmp_path / "rejected.pdf"
+    output.write_bytes(b"rejected generated output")
+    native = SimpleNamespace(pywebview_window=SimpleNamespace(
+        title="tidoc · 发票查验", _tidoc_print_title="查验单-test",
+        _tidoc_verification_session={"auto_save_path": output, "auto_save_rejected": True},
+    ))
+    calls = []
+    monkeypatch.setattr(InvoiceVerificationApi, "_run_macos_verification_print",
+                        staticmethod(lambda *args: calls.append(args)))
+    api._install_verification_landscape_print()
+    BrowserView.print_webview(native)
+    assert calls == [(native, "查验单-test")]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS 原生打印")
+def test_macos_auto_save_sets_destination_before_creating_async_operation(api, tmp_path, monkeypatch):
+    import AppKit
+    from tidoc.services import verification_macos
+
+    class Operation:
+        def setJobTitle_(self, title):
+            self.title = title
+
+        def setShowsPrintPanel_(self, value):
+            self.print_panel = value
+
+        def setShowsProgressPanel_(self, value):
+            self.progress_panel = value
+
+    operation = Operation()
+    output = tmp_path / "查验单.pdf"
+
+    class NativeView:
+        def _printOperationWithPrintInfo_(self, info):
+            assert info.dictionary()[AppKit.NSPrintJobDisposition] == AppKit.NSPrintSaveJob
+            assert info.dictionary()[AppKit.NSPrintJobSavingURL].path() == str(output)
+            return operation
+
+        def window(self):
+            return "native-window"
+
+    complete = []
+
+    def run(operation_arg, native_window, callback):
+        assert operation_arg is operation
+        assert native_window == "native-window"
+        callback(True)
+        return "delegate"
+
+    monkeypatch.setattr(verification_macos, "run_pdf_print", run)
+    delegate = api._run_macos_verification_print(NativeView(), "查验单-test", output, complete.append)
+    assert delegate == "delegate"
+    assert complete == [True]
+    assert operation.print_panel is False
+    assert operation.progress_panel is False

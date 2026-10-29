@@ -1,6 +1,7 @@
 """User-triggered tax website verification."""
 from __future__ import annotations
 import sys
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -17,7 +18,7 @@ class InvoiceVerificationApi:
         entry = self.entries.get(entry_id)
         if not entry:
             raise FileNotFoundError(f"条目不存在：{entry_id}")
-        return build_verification_info(entry)
+        return {**build_verification_info(entry), "auto_save": sys.platform == "darwin"}
 
     @_guard
     def start_invoice_verification(self, entry_id, fields=None):
@@ -28,6 +29,7 @@ class InvoiceVerificationApi:
             TAX_VERIFICATION_URL,
             build_verification_info,
             make_prefill_script,
+            make_auto_save_script,
             make_print_compatibility_script,
             new_session_snapshot,
             snapshot_pdfs,
@@ -47,17 +49,20 @@ class InvoiceVerificationApi:
             raise ValueError("缺少开票日期，请先在条目详情补正开票日期。")
 
         session_id = uuid.uuid4().hex
+        auto_save = sys.platform == "darwin"
         snapshot = new_session_snapshot()
         verification_preferences = self._invoice_verification_preferences()
         custom_watch = verification_preferences["watch_directory"]
         if custom_watch:
             custom_watch_path = Path(custom_watch).expanduser()
-            if not custom_watch_path.is_dir():
+            if not auto_save and not custom_watch_path.is_dir():
                 raise ValueError("设置中的查验单归档目录不存在，请重新选择。")
             custom_watch_path = custom_watch_path.resolve()
-            if _is_inside(self.data_root.root, custom_watch_path):
+            inside_data = _is_inside(self.data_root.root, custom_watch_path)
+            if not auto_save and inside_data:
                 raise ValueError("查验单归档目录不能位于 tidoc 数据目录内。")
-            if custom_watch_path not in snapshot["watch_directories"]:
+            if (custom_watch_path.is_dir() and not inside_data
+                    and custom_watch_path not in snapshot["watch_directories"]):
                 snapshot["watch_directories"].append(custom_watch_path)
                 snapshot["before"].update(snapshot_pdfs([custom_watch_path]))
         session = {
@@ -78,6 +83,12 @@ class InvoiceVerificationApi:
             ],
             **snapshot,
         }
+        if auto_save:
+            session["auto_save_dir"] = tempfile.TemporaryDirectory(prefix="tidoc-verification-")
+            session["auto_save_path"] = (
+                Path(session["auto_save_dir"].name)
+                / f"{verification_print_title(info['invoice_no'])}.pdf"
+            )
         self._verification_sessions[session_id] = session
         try:
             self._install_verification_landscape_print()
@@ -95,6 +106,7 @@ class InvoiceVerificationApi:
             window._tidoc_print_title = verification_print_title(  # type: ignore[attr-defined]
                 info["invoice_no"]
             )
+            window._tidoc_verification_session = session  # type: ignore[attr-defined]
             session["window"] = window
 
             def on_window_closed() -> None:
@@ -102,10 +114,12 @@ class InvoiceVerificationApi:
                     session["window_closed"] = True
 
             window.events.closed += on_window_closed
-            script = make_prefill_script(info)
+            script = make_prefill_script(info, auto_save=auto_save)
             print_compatibility_script = make_print_compatibility_script(
                 info["invoice_no"]
             )
+            if auto_save:
+                print_compatibility_script += make_auto_save_script(info["invoice_no"])
 
             def install_print_compatibility() -> None:
                 if session["window_closed"]:
@@ -137,12 +151,14 @@ class InvoiceVerificationApi:
             threading.Thread(target=prefill_when_loaded, daemon=True).start()
         except Exception:
             self._verification_sessions.pop(session_id, None)
+            self._cleanup_verification_temp(session)
             raise
 
         return {
             "session_id": session_id,
             "watch_directories": [str(path) for path in session["watch_directories"]],
             "info": info,
+            "auto_save": auto_save,
         }
 
     @_guard
@@ -154,6 +170,7 @@ class InvoiceVerificationApi:
             extract_pdf_invoice_no,
         )
         from .services.invoice_verification import changed_pdf_candidates
+        from .services.inspection_pdf import read_inspection_pdf
 
         session = self._verification_sessions.get(str(session_id))
         if not session:
@@ -175,6 +192,9 @@ class InvoiceVerificationApi:
             session["before"],
             session["started_ns"],
         )
+        auto_path = session.get("auto_save_path")
+        if auto_path and auto_path.is_file() and not session.get("auto_save_printing"):
+            candidates.insert(0, auto_path)
         waiting_for_write = False
         for path in candidates:
             key = str(path)
@@ -189,19 +209,33 @@ class InvoiceVerificationApi:
             if previous_size != size or size == 0:
                 waiting_for_write = True
                 continue
-            session["seen_candidates"].add(key)
             try:
+                automatic = path == auto_path
                 if classify_pdf_attachment_type(path) != TYPE_INSPECTION:
+                    if automatic:
+                        session["auto_save_rejected"] = True
+                        session["last_message"] = "自动生成的 PDF 无法确认为查验单，请点击官网“打印”另存 PDF，或上传已有查验单。"
                     continue
-                detected_invoice_no = extract_pdf_invoice_no(path)
+                # 自动输出的标题由程序设置，不能把标题里的号码当成正文确认。
+                detected_invoice_no = (
+                    read_inspection_pdf(path).get("invoice_no", "") if automatic
+                    else extract_pdf_invoice_no(path)
+                )
                 if (detected_invoice_no and session["invoice_no"]
                         and detected_invoice_no != session["invoice_no"]):
                     session["last_message"] = (
                         f"发现一份其他发票的查验单（{detected_invoice_no}），未绑定。"
                     )
+                    if automatic:
+                        session["auto_save_rejected"] = True
+                        session["last_message"] += "请点击官网“打印”另存 PDF，或上传已有查验单。"
                     continue
                 if session["invoice_no"] and not detected_invoice_no:
+                    if automatic:
+                        session["auto_save_rejected"] = True
                     session["last_message"] = (
+                        "自动生成的查验单正文未能确认发票号码，请点击官网“打印”另存 PDF，或上传已有查验单。"
+                        if automatic else
                         "发现一份查验单，但未能确认发票号码，未自动绑定。"
                         "原 PDF 已保留，请手动选择这份文件。"
                     )
@@ -211,14 +245,15 @@ class InvoiceVerificationApi:
                 )
                 attachment = self.attachments.add(
                     session["entry_id"], path, TYPE_INSPECTION,
-                    note="由全国增值税发票查验平台原生打印保存",
+                    note=("由全国增值税发票查验平台自动保存" if automatic
+                          else "由全国增值税发票查验平台原生打印保存"),
                 )
                 self.entries.recompute_status(session["entry_id"])
                 session["attached"] = attachment
                 result_message = "查验单已保存到当前条目。"
                 cleanup_warning = ""
                 source_trashed = False
-                if session.get("trash_source_after_archive"):
+                if session.get("trash_source_after_archive") and not automatic:
                     try:
                         send2trash(str(path))
                         source_trashed = True
@@ -237,6 +272,7 @@ class InvoiceVerificationApi:
                 session["cleanup_warning"] = cleanup_warning
                 session["source_trashed"] = source_trashed
                 self._close_verification_window(session)
+                self._cleanup_verification_temp(session)
                 return {
                     "state": "attached",
                     "attachment": attachment,
@@ -246,8 +282,10 @@ class InvoiceVerificationApi:
                 }
             except Exception as exc:  # noqa: BLE001 - 继续等待用户保存正确文件
                 session["last_message"] = f"发现 PDF，但未能绑定：{exc}"
+            finally:
+                session["seen_candidates"].add(key)
 
-        state = "processing" if waiting_for_write else (
+        state = "processing" if waiting_for_write or session.get("auto_save_printing") else (
             "window_closed" if session["window_closed"] else "waiting"
         )
         return {
@@ -261,7 +299,17 @@ class InvoiceVerificationApi:
         session = self._verification_sessions.pop(str(session_id), None)
         if session:
             self._close_verification_window(session)
+            self._cleanup_verification_temp(session)
         return {"closed": bool(session)}
+
+    @staticmethod
+    def _cleanup_verification_temp(session: dict) -> None:
+        if session.get("auto_save_printing"):
+            session["cleanup_pending"] = True
+            return
+        directory = session.pop("auto_save_dir", None)
+        if directory:
+            directory.cleanup()
 
     def _close_verification_window(self, session: dict) -> None:
         window = session.get("window")
@@ -303,13 +351,39 @@ class InvoiceVerificationApi:
             if getattr(window, "title", "") != "tidoc · 发票查验":
                 return original(native_webview)
             job_title = getattr(window, "_tidoc_print_title", "查验单")
+            session = getattr(window, "_tidoc_verification_session", {})
+            output = session.get("auto_save_path")
+            if output and not session.get("window_closed") and not session.get("auto_save_rejected"):
+                if session.get("auto_save_printing") or output.exists():
+                    return
+                session["auto_save_printing"] = True
+
+                def completed(success):
+                    session["auto_save_printing"] = False
+                    session.pop("auto_save_delegate", None)
+                    if not success:
+                        output.unlink(missing_ok=True)
+                        session["last_message"] = "自动保存查验单失败，请点击官网“打印”重试。"
+                    if session.pop("cleanup_pending", False):
+                        self._cleanup_verification_temp(session)
+
+                try:
+                    session["auto_save_delegate"] = self._run_macos_verification_print(
+                        native_webview, job_title, output, completed
+                    )
+                except Exception as exc:  # noqa: BLE001 - 保留官网手动重试入口
+                    completed(False)
+                    session["last_message"] = f"自动保存查验单失败，请点击官网“打印”重试：{exc}"
+                return
             return self._run_macos_verification_print(native_webview, job_title)
 
         print_webview_landscape._tidoc_landscape_print = True
         BrowserView.print_webview = staticmethod(print_webview_landscape)
 
     @staticmethod
-    def _run_macos_verification_print(native_webview, job_title: str) -> None:
+    def _run_macos_verification_print(
+        native_webview, job_title: str, output: Path | None = None, completed=None
+    ):
         """创建带横向设置和明确任务名的 macOS 原生打印任务。"""
         import AppKit
         import Foundation
@@ -342,8 +416,18 @@ class InvoiceVerificationApi:
             - Foundation.NSWidth(imageable_bounds)
         )
 
+        if output is not None:
+            settings = info.dictionary()
+            settings[AppKit.NSPrintJobDisposition] = AppKit.NSPrintSaveJob
+            settings[AppKit.NSPrintJobSavingURL] = Foundation.NSURL.fileURLWithPath_(str(output))
         print_operation = native_webview._printOperationWithPrintInfo_(info)
         print_operation.setJobTitle_(job_title)
+        if output is not None:
+            print_operation.setShowsPrintPanel_(False)
+            print_operation.setShowsProgressPanel_(False)
+            from .services.verification_macos import run_pdf_print
+
+            return run_pdf_print(print_operation, native_webview.window(), completed)
         print_operation.runOperationModalForWindow_delegate_didRunSelector_contextInfo_(
             native_webview.window(), None, None, None
         )

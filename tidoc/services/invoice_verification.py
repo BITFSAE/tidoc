@@ -29,8 +29,13 @@ def build_verification_info(entry: dict) -> dict:
     return info
 
 
-def make_prefill_script(info: dict) -> str:
+def make_prefill_script(info: dict, *, auto_save: bool = False) -> str:
     """生成只填写官网表单、不提交查验的脚本。"""
+    hint = (
+        '验证码通常不区分大小写。填写后点击“查验”，显示发票详情后会自动保存查验单到当前条目，请稍候。'
+        if auto_save else
+        '验证码通常不区分大小写。查验成功后点击官网“打印”，另存为 PDF 后请等待约 1–2 秒，软件识别处理完成后会自动归入条目。'
+    )
     payload = json.dumps(
         {
             "fphm": str(info.get("invoice_no") or ""),
@@ -110,7 +115,7 @@ def make_prefill_script(info: dict) -> str:
     if (!document.getElementById('tidoc-verification-helper')) {{
       const helper = document.createElement('div');
       helper.id = 'tidoc-verification-helper';
-      helper.textContent = '验证码通常不区分大小写。查验成功后点击官网“打印”，另存为 PDF 后请等待约 1–2 秒，软件识别处理完成后会自动归入条目。';
+      helper.textContent = {json.dumps(hint, ensure_ascii=False)};
       helper.style.cssText = [
         'position:fixed', 'left:18px', 'bottom:18px', 'z-index:2147483647',
         'max-width:360px', 'padding:10px 14px', 'border-radius:9px',
@@ -131,6 +136,56 @@ def verification_print_title(invoice_no: str = "") -> str:
     """生成系统打印任务使用的稳定文件名，不包含扩展名。"""
     cleaned = re.sub(r"[^0-9A-Za-z_-]", "", str(invoice_no or ""))
     return f"查验单-{cleaned}"
+
+
+def make_auto_save_script(invoice_no: str) -> str:
+    """仅在本次发票的结果弹窗出现后触发官网打印，不提交表单。"""
+    script = """
+(() => {
+  if (window.__tidocAutoSaveStarted) return;
+  window.__tidocAutoSaveStarted = true;
+  const invoiceNo = __INVOICE_NO__;
+  let pending = false;
+  let saved = false;
+  const visible = (node) => node.getClientRects().length > 0;
+  const findResult = () => Array.from(document.querySelectorAll('.t-dialog'))
+    .find((dialog) => visible(dialog)
+      && /查验时间/.test(dialog.textContent)
+      && /发票号码[：:]?\\s*([0-9]{20})(?![0-9])/.exec(dialog.textContent)?.[1] === invoiceNo);
+  const scan = async () => {
+    if (pending || saved) return;
+    const result = findResult();
+    const button = result && Array.from(result.querySelectorAll('button'))
+      .find((node) => visible(node) && node.textContent.trim() === '打印' && !node.disabled);
+    if (!button) return;
+    pending = true;
+    // 等二维码、样式和字体完成；超时保留官网的手动打印入口。
+    try {
+      await Promise.race([
+        Promise.all([
+          document.fonts.ready,
+          ...Array.from(result.querySelectorAll('img')).map((img) => img.decode()),
+        ]),
+        new Promise((_, reject) => setTimeout(() => reject(Error('timeout')), 10000)),
+      ]);
+      if (findResult() !== result || !visible(button)) return;
+      window.__tidocScanPrintFrames?.();
+      saved = true;
+      button.click();
+    } catch (_) {
+      saved = true;
+      const helper = document.getElementById('tidoc-verification-helper');
+      if (helper) helper.textContent = '查验结果尚未加载完整，请稍后点击官网“打印”保存查验单。';
+    } finally {
+      pending = false;
+    }
+  };
+  new MutationObserver(scan).observe(document.documentElement, {childList: true, subtree: true});
+  window.setInterval(scan, 800);
+  scan();
+})();
+"""
+    return script.replace('__INVOICE_NO__', json.dumps(str(invoice_no)))
 
 
 def make_print_compatibility_script(invoice_no: str = "") -> str:

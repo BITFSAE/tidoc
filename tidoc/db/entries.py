@@ -13,6 +13,7 @@ import json
 import uuid
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 from ..engine.models import ParsedInvoice
 from ..engine.money import d, money
@@ -1007,6 +1008,7 @@ class EntryRepo:
 
     def recompute_status(self, entry_id: str, *, commit: bool = True) -> str:
         """Only this entry's frozen revision participates in status updates."""
+        self._refresh_inspection_check(entry_id)
         entry = self.get(entry_id)
         if not entry:
             return ""
@@ -1017,10 +1019,15 @@ class EntryRepo:
         return status
 
     def set_check(self, entry_id: str, check_status: str, message: str = "") -> None:
-        payment_messages = self._payment_check_messages(entry_id)
-        combined_message = "；".join(filter(None, [message, *payment_messages]))
+        from ..services.inspection_pdf import INSPECTION_CHECK_PREFIX
+
+        material_messages = self._payment_check_messages(entry_id)
+        row = self.db.conn.execute("SELECT check_message FROM entries WHERE id=?", (entry_id,)).fetchone()
+        material_messages.extend(part for part in str(row[0] if row else "").split("；")
+                                 if part.startswith(INSPECTION_CHECK_PREFIX))
+        combined_message = "；".join(filter(None, [message, *material_messages]))
         combined_status = check_status
-        if payment_messages and check_status != "blocked":
+        if material_messages and check_status != "blocked":
             combined_status = "warning"
         self.db.conn.execute(
             "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
@@ -1028,6 +1035,54 @@ class EntryRepo:
         )
         self._touch(entry_id)
         self.db.conn.commit()
+
+    def _refresh_inspection_check(self, entry_id: str) -> None:
+        """缓存每份查验单的正文信息，随材料变化更新识别提醒。"""
+        from ..services.inspection_pdf import (
+            INSPECTION_CHECK_PREFIX, INSPECTION_RECOGNITION_VERSION,
+            latest_inspection_message, read_inspection_pdf,
+        )
+
+        entry = self.db.conn.execute(
+            "SELECT invoice_no, check_status, check_message FROM entries WHERE id=?", (entry_id,)
+        ).fetchone()
+        if not entry:
+            return
+        rows = self.db.conn.execute(
+            "SELECT * FROM attachments WHERE entry_id=? AND type='inspection_pdf'", (entry_id,)
+        ).fetchall()
+        results = []
+        for row in rows:
+            path = Path(self.db.db_path).parent / "attachments" / row["stored_path"]
+            if not path.is_file():
+                continue
+            info = None
+            if row["recognition_version"] == INSPECTION_RECOGNITION_VERSION:
+                try:
+                    cached = json.loads(row["recognized_value"])
+                    if isinstance(cached, dict) and cached.get("sha256") == row["sha256"]:
+                        info = cached
+                except (ValueError, TypeError):
+                    pass
+            if info is None:
+                info = {**read_inspection_pdf(path), "sha256": row["sha256"]}
+                self.db.conn.execute(
+                    "UPDATE attachments SET recognition_version=?, recognition_status=?, "
+                    "recognized_value=?, recognition_message='' WHERE id=?",
+                    (INSPECTION_RECOGNITION_VERSION,
+                     "recognized" if info.get("count") is not None else "unrecognized",
+                     json.dumps(info, ensure_ascii=False), row["id"]),
+                )
+            if info.get("invoice_no") and entry["invoice_no"] and info["invoice_no"] != entry["invoice_no"]:
+                continue
+            results.append({**info, "added_at": row["added_at"], "attachment_id": row["id"]})
+        base = [part for part in str(entry["check_message"] or "").split("；")
+                if part and not part.startswith(INSPECTION_CHECK_PREFIX)]
+        message = "；".join(filter(None, [*base, latest_inspection_message(results)]))
+        if message != (entry["check_message"] or ""):
+            status = "blocked" if entry["check_status"] == "blocked" else ("warning" if message else "pass")
+            self.db.conn.execute("UPDATE entries SET check_status=?, check_message=? WHERE id=?",
+                                 (status, message, entry_id))
 
     def replace_recognized_items(
         self,

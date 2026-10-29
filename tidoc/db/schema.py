@@ -139,9 +139,9 @@ CREATE TABLE IF NOT EXISTS attachments (
     stored_path   TEXT DEFAULT '',   -- 相对 attachments/ 的路径
     sha256        TEXT DEFAULT '',
     note          TEXT DEFAULT '',   -- 付款截图可关联实付金额备注
-    recognition_version TEXT DEFAULT '', -- 本地付款截图识别规则版本
+    recognition_version TEXT DEFAULT '', -- 本地材料识别规则版本
     recognition_status TEXT DEFAULT '',  -- recognized/unrecognized/error
-    recognized_value TEXT DEFAULT '',    -- 本地 OCR 识别出的单张付款金额
+    recognized_value TEXT DEFAULT '',    -- 付款截图金额，或查验单正文信息 JSON
     recognition_message TEXT DEFAULT '', -- 未识别或失败原因
     role_id TEXT NOT NULL DEFAULT '',
     role_definition_revision_id TEXT REFERENCES scheme_revisions(revision_id),

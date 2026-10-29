@@ -1705,7 +1705,13 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
 
     def _sync_entry_statuses(self) -> None:
         """Recompute only outdated engine caches, always using the bound revision."""
-        rows = self.db.conn.execute("SELECT id FROM entries WHERE status_engine_version<>?", ("adapter-policy-1",)).fetchall()
+        from .services.inspection_pdf import INSPECTION_RECOGNITION_VERSION
+
+        rows = self.db.conn.execute(
+            "SELECT id FROM entries WHERE status_engine_version<>? OR id IN "
+            "(SELECT entry_id FROM attachments WHERE type='inspection_pdf' AND recognition_version<>?)",
+            ("adapter-policy-1", INSPECTION_RECOGNITION_VERSION),
+        ).fetchall()
         for row in rows:
             self.entries.recompute_status(row["id"])
 

@@ -1793,10 +1793,10 @@ function entryHasManualChanges(entry) {
   return !!entry?.modified_fields?.length;
 }
 
-// 识别提醒在库里用「；」连成一串，付款截图的几条带「[付款截图识别]」前缀（句子本身已写明是付款截图）；显示时逐条分行、去掉前缀。
+// 识别提醒在库里用「；」分隔；显示时逐条分行，去掉材料提醒的内部前缀。
 function checkMessageLines(message) {
   return String(message || '').split('；').map((part) => part.trim()).filter(Boolean)
-    .map((part) => part.startsWith('[付款截图识别]') ? part.slice('[付款截图识别]'.length).trim() : part);
+    .map((part) => part.replace(/^\[(?:付款截图识别|查验单)\]\s*/, ''));
 }
 
 function entryModifiedTooltip(entry) {
@@ -2743,6 +2743,10 @@ async function onlineVerificationFlow(entryId) {
   const archiveLocationHint = watchDirectory
     ? '设置中的归档目录，或下载、桌面、文档'
     : '下载、桌面或文档';
+  const saveGuide = info.auto_save
+    ? '<li>点击官网「查验」后，发票详情出现时会自动保存查验单</li><li>请等待「查验单已保存」，材料会归入当前条目</li>'
+    : `<li>查验成功后点击官网「打印」，在系统窗口另存为 PDF</li>
+       <li>保存到${esc(archiveLocationHint)}后，请等待约 1–2 秒，软件会核对并归入当前条目</li>`;
   const body = el('div', 'verification-flow');
   body.innerHTML = `
     <div class="verification-fields">
@@ -2760,9 +2764,8 @@ async function onlineVerificationFlow(entryId) {
     <div class="verification-guide">
       <ul>
         <li>验证码在官网填写，通常不区分大小写</li>
-        <li>查验成功后点击官网“打印”，在系统窗口另存为 PDF</li>
-        <li>保存到${esc(archiveLocationHint)}后，请等待约 1–2 秒，软件识别处理完成后会自动归入当前条目</li>
-        ${State.verificationTrashSource
+        ${saveGuide}
+        ${!info.auto_save && State.verificationTrashSource
           ? '<li>归档完成后，原 PDF 会移到系统废纸篓或回收站</li>'
           : ''}
       </ul>
@@ -2819,7 +2822,7 @@ async function onlineVerificationFlow(entryId) {
         return;
       }
       if (result.state === 'processing') {
-        setStatus('working', '正在识别 PDF', '通常需要 1–2 秒，处理完成后会自动归入条目…');
+        setStatus('working', '正在保存并核对查验单', '处理完成后会自动归入当前条目…');
       } else if (result.message) {
         setStatus('error', '还未归档', result.message);
       } else if (result.window_closed) {
@@ -2845,7 +2848,9 @@ async function onlineVerificationFlow(entryId) {
       const result = await Api.startInvoiceVerification(entryId, values);
       sessionId = result.session_id;
       openBtn.style.display = 'none';
-      setStatus('waiting', '请在官网完成查验并打印', '另存为 PDF 后请等待约 1–2 秒，软件会识别并自动归入当前条目。');
+      setStatus('waiting', result.auto_save ? '请在官网填写验证码并查验' : '请在官网完成查验并打印',
+        result.auto_save ? '发票详情出现后会自动保存，请等待「查验单已保存」。'
+          : '另存为 PDF 后请等待约 1–2 秒，软件会核对并自动归入当前条目。');
       pollTimer = setTimeout(poll, 800);
     } catch (err) {
       openBtn.disabled = false;
@@ -2878,7 +2883,7 @@ async function onlineVerificationFlow(entryId) {
     onClose: () => {
       closed = true;
       stopPolling();
-      if (sessionId && !attached) Api.closeInvoiceVerification(sessionId).catch(() => {});
+      if (sessionId) Api.closeInvoiceVerification(sessionId).catch(() => {});
     },
   });
   m.foot.classList.add('verification-foot');
@@ -3786,7 +3791,7 @@ async function buildSettings(options = {}) {
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>额外归档目录</b>
-            <span>除下载、桌面和文档外，再监测一个常用保存位置</span>
+            <span>用于手动另存的查验单；除下载、桌面和文档外，再监测一个保存位置</span>
             <code class="settings-inline-path" id="setVerificationWatchPath"
               data-tooltip-overflow="${esc(verificationPrefs.watch_directory || '')}">${esc(verificationPrefs.watch_directory || '未设置')}</code>
           </div>
@@ -3799,7 +3804,7 @@ async function buildSettings(options = {}) {
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>归档后清理原 PDF</b>
-            <span>成功复制到条目后，将原文件移到系统废纸篓或回收站；需要时可以恢复</span>
+            <span>手动另存的 PDF 归档后，将外部原文件移到废纸篓或回收站；自动保存不受此项影响</span>
           </div>
           <label class="switch-line"><input type="checkbox" id="setVerificationTrash"
             ${verificationPrefs.trash_source_after_archive ? 'checked' : ''}/><span>${verificationPrefs.trash_source_after_archive ? '已开启' : '已关闭'}</span></label>

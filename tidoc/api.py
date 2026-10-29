@@ -90,6 +90,8 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         self._window = None
         self._update_health_path = Path(update_health_path) if update_health_path else None
         self._verification_sessions: dict[str, dict] = {}
+        self._verification_window_lock = threading.Lock()
+        self._verification_batch_jobs: dict[str, dict] = {}
         self._qr_fetch_lock = threading.Lock()
         self._qr_fetch_jobs = {}
         self._update_check_lock = threading.Lock()

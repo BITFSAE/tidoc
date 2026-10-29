@@ -770,3 +770,53 @@ def test_macos_auto_save_sets_destination_before_creating_async_operation(api, t
     assert complete == [True]
     assert operation.print_panel is False
     assert operation.progress_panel is False
+
+
+def test_auto_captcha_script_reads_submits_and_parses_results():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("需要 Node 执行自动查验脚本")
+    from tidoc.services.invoice_verification import make_auto_captcha_script
+
+    result = subprocess.run(
+        [node, str(Path(__file__).with_name("verification_auto_harness.cjs"))],
+        input=json.dumps({"script": make_auto_captcha_script()}),
+        text=True, encoding="utf-8", capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_auto_captcha_script_is_not_the_manual_prefill():
+    from tidoc.services.invoice_verification import make_auto_captcha_script
+
+    script = make_auto_captcha_script()
+    assert "queryFpcyxx" in script
+    assert "__tidocAutoCaptcha" in script
+    assert "XMLHttpRequest.prototype.send" in script
+    assert "button.click()" in script
+    assert "验证码错误" in script
+    assert "访问过于频繁" in script
+
+
+def test_batch_verification_requires_selection(api):
+    result = api.start_invoice_verification_batch([], 2)
+    assert result["ok"] is False
+    assert "请先选择" in result["error"]
+
+
+def test_batch_verification_skips_entries_without_required_fields(api):
+    import hashlib
+    import json
+    from tidoc.services import payment_ai
+
+    cfg = payment_ai.validate_config(payment_ai.DEFAULT_CONFIG)
+    slot = payment_ai.KEY_PREFIX + hashlib.sha256(
+        (cfg["provider"] + "\n" + cfg["base_url"]).encode()).hexdigest()
+    api._set_preference_value(payment_ai.CONFIG_KEY, json.dumps(cfg))
+    api._set_preference_value(slot, "sk-test")
+    profile = api.profiles.create("张三", "李老师")
+    entry_id = api.entries.create(
+        profile["id"], parsed=ParsedInvoice(invoice_no="26957000000168907686"))
+    result = api.start_invoice_verification_batch([entry_id], 2)
+    assert result["ok"] is False
+    assert "都缺少查验信息" in result["error"]

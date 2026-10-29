@@ -173,9 +173,12 @@ const Api = (() => {
     openAttachment: (id) => call('open_attachment', id),
     revealAttachment: (id) => call('reveal_attachment', id),
     invoiceVerificationInfo: (id) => call('invoice_verification_info', id),
-    startInvoiceVerification: (id, fields) => call('start_invoice_verification', id, fields || {}),
+    startInvoiceVerification: (id, fields, auto = false) => call('start_invoice_verification', id, fields || {}, auto),
     invoiceVerificationStatus: (sessionId, options = null) => call('invoice_verification_status', sessionId, options),
     closeInvoiceVerification: (sessionId) => call('close_invoice_verification', sessionId),
+    startInvoiceVerificationBatch: (ids, concurrency = 2) => call('start_invoice_verification_batch', ids, concurrency),
+    invoiceVerificationBatchStatus: (id) => call('invoice_verification_batch_status', id),
+    cancelInvoiceVerificationBatch: (id) => call('cancel_invoice_verification_batch', id),
 
     printComponentStatus: () => call('print_component_status'),
     buildPrints: (ids, options, name) => call('build_prints', ids, options || null, name || null),

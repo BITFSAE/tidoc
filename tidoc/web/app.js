@@ -1348,7 +1348,7 @@ function updateSelectionBar() {
   const clearBtn = $('#clearSelBtn');
   const hideClear = !hasSelection || allSelected;
   if (clearBtn.classList.contains('hidden') !== hideClear) clearBtn.classList.toggle('hidden', hideClear);
-  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReviewBtn', 'batchReparseBtn', 'batchOcrBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
+  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReviewBtn', 'batchReparseBtn', 'batchOcrBtn', 'batchVerificationBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
     const btn = $('#' + id);
     if (btn && btn.disabled === hasSelection) btn.disabled = !hasSelection;
   });
@@ -2957,9 +2957,17 @@ async function onlineVerificationFlow(entryId) {
           placeholder="按发票价税合计填写"/>
       </label>
     </div>
+    ${info.auto_available ? `
+    <label class="verification-auto">
+      <input type="checkbox" data-verification-auto checked/>
+      <span>用 AI 自动填写验证码</span>
+      <small>识别后自动提交；看不清或错误时换一张再试，最多 10 次</small>
+    </label>` : ''}
     <div class="verification-guide">
       <ul>
-        <li>验证码在官网填写，通常不区分大小写</li>
+        <li>${info.auto_available
+          ? '勾选上面的选项后由 AI 识别并填写验证码；取消勾选可在官网手动填写，通常不区分大小写'
+          : '验证码在官网填写，通常不区分大小写'}</li>
         ${saveGuide}
         ${!info.auto_save && State.verificationTrashSource
           ? '<li>归档完成后，原 PDF 会移到系统废纸篓或回收站</li>'
@@ -2976,6 +2984,7 @@ async function onlineVerificationFlow(entryId) {
   let attached = false;
   let closed = false;
   const status = body.querySelector('[data-verification-status]');
+  const autoToggle = body.querySelector('[data-verification-auto]');
   const fields = () => Object.fromEntries(
     [...body.querySelectorAll('[data-verification-field]')].map((input) => [
       input.dataset.verificationField, input.value.trim(),
@@ -3033,6 +3042,24 @@ async function onlineVerificationFlow(entryId) {
       }
       if (result.state === 'processing') {
         setStatus('working', '正在保存并核对查验单', '处理完成后会自动归入当前条目…');
+      } else if (result.auto_state === 'failed') {
+        setStatus('error', '自动查验未完成', result.auto_message
+          || '可以在官网手动填写验证码，或重新打开查验。');
+      } else if (result.auto_state === 'backoff') {
+        setStatus('working', '官网访问过于频繁', result.auto_message
+          || '正在等待后重试，请保持窗口打开。');
+      } else if (result.auto_state && result.auto_state !== 'success') {
+        const autoTitles = {
+          starting: '正在打开查验平台',
+          waiting: 'AI 正在等待验证码',
+          recognizing: 'AI 正在识别验证码',
+          submitting: '正在提交验证码',
+          retry: '验证码未通过，正在重试',
+        };
+        setStatus('working', autoTitles[result.auto_state] || 'AI 正在自动查验',
+          result.auto_message || '');
+      } else if (result.auto_state === 'success') {
+        setStatus('working', '验证码已通过', '正在等待查验单保存…');
       } else if (result.message) {
         setStatus('error', '还未归档', result.message);
       } else if (result.window_closed) {
@@ -3051,19 +3078,24 @@ async function onlineVerificationFlow(entryId) {
       setStatus('error', '信息还不完整', '请填写发票号码、开票日期和价税合计。');
       return;
     }
+    const auto = !!(autoToggle && autoToggle.checked);
     openBtn.disabled = true;
+    if (autoToggle) autoToggle.disabled = true;
     body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = true; });
-    setStatus('working', '正在打开官网', '加载完成后请填写验证码并点击“查验”…');
+    setStatus('working', '正在打开官网',
+      auto ? 'AI 会自动填写验证码并提交，请等待查验结果…' : '加载完成后请填写验证码并点击“查验”…');
     try {
-      const result = await Api.startInvoiceVerification(entryId, values);
+      const result = await Api.startInvoiceVerification(entryId, values, auto);
       sessionId = result.session_id;
       openBtn.style.display = 'none';
-      setStatus('waiting', result.auto_save ? '请在官网填写验证码并查验' : '请在官网完成查验并打印',
-        result.auto_save ? '发票详情出现后会自动保存，请等待「查验单已保存」。'
-          : '另存为 PDF 后请等待约 1–2 秒，软件会核对并自动归入当前条目。');
+      setStatus('waiting', auto ? 'AI 正在自动查验' : (result.auto_save ? '请在官网填写验证码并查验' : '请在官网完成查验并打印'),
+        auto ? '验证码看不清或错误时会自动换一张，最多尝试 10 次。'
+          : (result.auto_save ? '发票详情出现后会自动保存，请等待「查验单已保存」。'
+            : '另存为 PDF 后请等待约 1–2 秒，软件会核对并自动归入当前条目。'));
       pollTimer = setTimeout(poll, 800);
     } catch (err) {
       openBtn.disabled = false;
+      if (autoToggle) autoToggle.disabled = false;
       body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = false; });
       setStatus('error', '官网未打开', err.message);
     }
@@ -3097,6 +3129,149 @@ async function onlineVerificationFlow(entryId) {
     },
   });
   m.foot.classList.add('verification-foot');
+}
+
+async function openBatchVerification(ids) {
+  const wanted = new Set(ids);
+  const entries = State.entries.filter((entry) => wanted.has(entry.id) && verificationVisible(entry));
+  if (!entries.length) {
+    toast('所选条目的方案没有开放在线查验', 'err');
+    return;
+  }
+  const noteFor = (entry) => {
+    if (!entry.invoice_no || !entry.invoice_date || !entry.total) return '缺少发票号码、开票日期或价税合计';
+    if (entry.attachment_types?.inspection_pdf) return '已有查验单，跳过';
+    return '';
+  };
+  const runnable = entries.filter((entry) => !noteFor(entry)).length;
+  const stateLabels = {
+    queued: '排队中', opening: '正在打开', verifying: '自动查验中',
+    done: '已保存', failed: '未完成', skipped: '已跳过', cancelled: '已取消',
+  };
+  const autoLabels = {
+    waiting: '读取验证码', recognizing: '识别验证码', submitting: '提交验证码',
+    retry: '重试中', backoff: '等待官网限流', success: '保存查验单',
+    starting: '正在打开平台', failed: '未完成',
+  };
+  const body = el('div', 'verification-batch');
+  const aiReady = !!State.paymentAiAvailable;
+  body.innerHTML = `
+    <div class="hint">${aiReady
+      ? '用 AI 识别验证码后自动提交，每个条目最多尝试 10 次。查验单会自动保存到对应条目。'
+      : '还没有保存 AI 识别的 Key，请先在「设置 → 开发者选项 → 付款截图 AI 识别」里填写。'}</div>
+    <div class="verification-batch-head">
+      <label>同时查验
+        <select data-batch-concurrency>
+          <option value="1">1 个窗口</option>
+          <option value="2" selected>2 个窗口</option>
+          <option value="3">3 个窗口</option>
+          <option value="4">4 个窗口</option>
+        </select>
+      </label>
+      <span>共 ${entries.length} 条，可立即查验 ${runnable} 条</span>
+    </div>
+    <div class="verification-batch-list" data-batch-list>
+      ${entries.map((entry) => {
+        const note = noteFor(entry);
+        return `<div class="verification-batch-row ${note ? 'muted' : ''}" data-batch-row="${esc(entry.id)}">
+          <span class="verification-batch-name">${esc(entry.invoice_no || entry.seller || '未识别销售方')}</span>
+          <span class="verification-batch-amount">${entry.total ? fmtMoney(entry.total) : ''}</span>
+          <span class="verification-batch-state">${note || '等待开始'}</span>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="verification-batch-summary hidden" data-batch-summary></div>`;
+  const list = body.querySelector('[data-batch-list]');
+  const concurrent = body.querySelector('[data-batch-concurrency]');
+  const summary = body.querySelector('[data-batch-summary]');
+  let jobId = '';
+  let timer = null;
+  let done = false;
+
+  const render = (items) => {
+    items.forEach((item) => {
+      const row = list.querySelector(`[data-batch-row="${item.entry_id}"]`);
+      if (!row) return;
+      row.classList.toggle('done', item.state === 'done');
+      row.classList.toggle('failed', item.state === 'failed');
+      row.classList.toggle('muted', item.state === 'skipped');
+      const label = stateLabels[item.state] || item.state;
+      const detail = item.state === 'verifying'
+        ? `${autoLabels[item.auto_state] || '自动查验中'}${item.attempts ? ` · 第 ${item.attempts} 次` : ''}`
+        : (item.message || label);
+      row.querySelector('.verification-batch-state').textContent = detail;
+    });
+  };
+
+  const poll = async () => {
+    if (!jobId || done) return;
+    try {
+      const job = await Api.invoiceVerificationBatchStatus(jobId);
+      render(job.items || []);
+      if (job.done) {
+        done = true;
+        stopBtn.disabled = true;
+        stopBtn.textContent = '已完成';
+        startBtn.style.display = 'none';
+        summary.classList.remove('hidden');
+        const cancelled = (job.items || []).filter((item) => item.state === 'cancelled').length;
+        summary.textContent = `完成 ${job.succeeded} 条，未完成 ${job.failed} 条`
+          + `${job.skipped ? `，跳过 ${job.skipped} 条` : ''}`
+          + `${cancelled ? `，已取消 ${cancelled} 条` : ''}`
+          + `${job.cost ? ` · 识别费用 ¥${Number(job.cost).toFixed(4)}` : ''}`;
+        await refreshEntries();
+        return;
+      }
+      timer = setTimeout(poll, 1500);
+    } catch (err) {
+      timer = setTimeout(poll, 2500);
+      summary.classList.remove('hidden');
+      summary.textContent = `读取进度失败：${err.message}`;
+    }
+  };
+
+  const startBtn = mkBtn('开始查验', 'primary', async () => {
+    startBtn.disabled = true;
+    startBtn.textContent = '正在打开…';
+    concurrent.disabled = true;
+    try {
+      const job = await Api.startInvoiceVerificationBatch(
+        entries.filter((entry) => !noteFor(entry)).map((entry) => entry.id),
+        Number(concurrent.value) || 2,
+      );
+      jobId = job.id;
+      stopBtn.disabled = false;
+      startBtn.style.display = 'none';
+      timer = setTimeout(poll, 800);
+    } catch (err) {
+      startBtn.disabled = false;
+      startBtn.textContent = '开始查验';
+      concurrent.disabled = false;
+      summary.classList.remove('hidden');
+      summary.textContent = err.message;
+    }
+  });
+  const stopBtn = mkBtn('取消剩余', 'ghost', async () => {
+    if (!jobId) return;
+    stopBtn.disabled = true;
+    stopBtn.textContent = '正在取消…';
+    try { await Api.cancelInvoiceVerificationBatch(jobId); }
+    catch (err) { toast(err.message, 'err'); }
+  });
+  stopBtn.disabled = true;
+  if (!aiReady || !runnable) startBtn.disabled = true;
+  const closeBtn = mkBtn('关闭', 'ghost', () => m.close());
+  const m = modal({
+    title: '批量查验',
+    subhead: 'AI 自动填写验证码；已有查验单的条目会跳过',
+    body,
+    wide: true,
+    footer: [closeBtn, stopBtn, startBtn],
+    onClose: () => {
+      if (timer) clearTimeout(timer);
+      if (jobId && !done) Api.cancelInvoiceVerificationBatch(jobId).catch(() => {});
+    },
+  });
 }
 
 async function maybeSetPaidFromInvoice(entryId) {
@@ -3516,6 +3691,7 @@ function bindEvents() {
   $('#batchReviewBtn').onclick = batchReviewChecks;
   $('#batchReparseBtn').onclick = batchReparse;
   $('#batchOcrBtn').onclick = () => openOcrDialog([...State.selected]);
+  $('#batchVerificationBtn').onclick = () => openBatchVerification([...State.selected]);
   $('#batchSummaryBtn').onclick = () => exportSummary([...State.selected]);
   $('#batchExportBtn').onclick = () => doExport([...State.selected]);
   $('#batchPrintBtn').onclick = () => openPrintDialog([...State.selected]);

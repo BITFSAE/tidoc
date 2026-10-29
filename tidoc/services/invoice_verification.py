@@ -137,6 +137,128 @@ def make_prefill_script(info: dict, *, auto_save: bool = False) -> str:
 """
 
 
+def make_auto_captcha_script() -> str:
+    """自动查验用的页面助手：读验证码、提交、刷新、读取查验结果。
+
+    只在当前页面内操作，不代替官网生成签名或请求。查验响应通过拦截
+    XMLHttpRequest 的 load 事件读取，和官网自己看到的响应一致。
+    """
+    return r"""
+(() => {
+  if (window.__tidocAutoCaptcha) return;
+  if (!window.__tidocCheckCaptureInstalled) {
+    window.__tidocCheckCaptureInstalled = true;
+    window.__tidocChecks = [];
+    const send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function(body) {
+      this.addEventListener('load', () => {
+        try {
+          if (String(this.responseURL || '').includes('queryFpcyxx')) {
+            window.__tidocChecks.push({at: Date.now(), body: this.responseText});
+            if (window.__tidocChecks.length > 20) window.__tidocChecks.shift();
+          }
+        } catch (_) {}
+      });
+      return send.apply(this, arguments);
+    };
+  }
+  const findInput = (id) => document.getElementById(id) || document.querySelector(
+    '.t-form-item__' + (id === 'kjje' ? 'kpje' : id) + ' input'
+  );
+  const visible = (node) => !!node && node.getClientRects().length > 0;
+  const captchaImage = () => document.querySelector("img[width='120']");
+  const hintText = () => {
+    const match = document.body.innerText.match(/请输入验证码[^\n]*/);
+    return match ? match[0].trim() : '';
+  };
+  const commit = (input, value) => {
+    input.focus();
+    input.value = value;
+    ['input', 'keyup', 'change'].forEach((name) => {
+      const Type = name === 'keyup' ? KeyboardEvent : Event;
+      input.dispatchEvent(new Type(name, {bubbles: true}));
+    });
+    input.blur();
+    input.dispatchEvent(new FocusEvent('focusout', {bubbles: true}));
+  };
+  const parseCheck = () => {
+    const checks = window.__tidocChecks || [];
+    const last = checks[checks.length - 1];
+    if (!last) return null;
+    try {
+      const data = JSON.parse(last.body)?.Response?.Data || {};
+      return {
+        code: String(data.CyjgDm || data.reCode || ''),
+        message: String(data.CyjgMsg || ''),
+        invoice: String(data.DzfpFpxxVO?.Fphm || ''),
+      };
+    } catch (_) {
+      return {code: '', message: '', invoice: ''};
+    }
+  };
+  window.__tidocAutoCaptcha = {
+    read() {
+      const image = captchaImage();
+      const src = image ? image.src : '';
+      return {
+        ready: !!(findInput('yzm') && findInput('fphm')),
+        image: /^data:image\//.test(src) && src.length > 500 ? src : '',
+        hint: hintText(),
+        checks: (window.__tidocChecks || []).length,
+      };
+    },
+    refresh() {
+      const image = captchaImage();
+      if (!image) return false;
+      image.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+      return true;
+    },
+    submit(answer) {
+      const input = findInput('yzm');
+      if (!input) return {submitted: false, disabled: true};
+      commit(input, String(answer || ''));
+      const button = Array.from(document.querySelectorAll('button'))
+        .find((node) => visible(node) && node.textContent.replace(/\s/g, '') === '查验');
+      if (!button) return {submitted: false, disabled: true};
+      // 表单校验是异步的：填完后按钮要到下一帧才会启用。
+      const click = () => { if (!button.disabled) button.click(); };
+      const disabled = button.disabled;
+      if (disabled) setTimeout(click, 150);
+      else click();
+      return {submitted: true, disabled};
+    },
+    status() {
+      const text = document.body.innerText;
+      const dialogs = Array.from(document.querySelectorAll('.t-dialog')).filter(visible);
+      const last = parseCheck();
+      const success = dialogs.some((dialog) =>
+        /发票详情|查验时间/.test(dialog.innerText));
+      return {
+        success: success || (last && (last.code === '7' || last.code === '00')),
+        captcha_error: !!(last && last.code === '97') || /验证码错误/.test(text),
+        frequent: /访问过于频繁/.test(text),
+        message: last ? last.message : '',
+        invoice: last ? last.invoice : '',
+        checks: (window.__tidocChecks || []).length,
+        dialog: dialogs.length ? dialogs[dialogs.length - 1].innerText.slice(0, 160) : '',
+      };
+    },
+    closeResult() {
+      const dialogs = Array.from(document.querySelectorAll('.t-dialog')).filter(visible);
+      for (const dialog of dialogs) {
+        const button = Array.from(dialog.querySelectorAll('button'))
+          .find((node) => ['关闭', '确定'].includes(node.textContent.trim()));
+        if (button) button.click();
+      }
+      document.querySelectorAll('.t-dialog__mask, .t-dialog__position')
+        .forEach((node) => node.remove());
+      return true;
+    },
+  };
+})();
+"""
+
+
 def verification_print_title(invoice_no: str = "") -> str:
     """生成系统打印任务使用的稳定文件名，不包含扩展名。"""
     cleaned = re.sub(r"[^0-9A-Za-z_-]", "", str(invoice_no or ""))

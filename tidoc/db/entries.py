@@ -15,6 +15,9 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from ..engine.check_lines import (
+    INSPECTION_CHECK_PREFIX, PAYMENT_CHECK_PREFIX, check_lines, open_categories, reviewed_texts,
+)
 from ..engine.models import ParsedInvoice
 from ..engine.money import d, money
 from .database import Database
@@ -30,7 +33,6 @@ VALUE_SOURCE_MANUAL = "manual"
 # local recognition logic or result contract changes.
 LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-10-28-2"
 PAYMENT_AI_RECOGNITION_VERSION = "payment-ai-2026-10-24"
-PAYMENT_CHECK_PREFIX = "[付款截图识别]"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
 LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "seller_tax_id", "invoice_date")
 # 阿里云 OCR 采用值写入关键信息时的留痕前缀（区别于人工修正）
@@ -84,6 +86,13 @@ def _now() -> str:
 
 def _row_to_dict(row) -> dict:
     return {k: row[k] for k in row.keys()} if row else {}
+
+
+def _decorate_check(entry: dict) -> dict:
+    """附上逐条识别提醒（类别、是否已核对）和仍需核对的类别。"""
+    entry["check_lines"] = check_lines(entry.get("check_message"), entry.pop("check_reviewed", ""))
+    entry["check_open"] = open_categories(entry.get("check_status") or "", entry["check_lines"])
+    return entry
 
 
 class EntryRepo:
@@ -212,7 +221,7 @@ class EntryRepo:
         row = self.db.conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
         if not row:
             return None
-        entry = _row_to_dict(row)
+        entry = _decorate_check(_row_to_dict(row))
         entry["tags"] = json.loads(entry.get("tags") or "[]")
         entry["fields"] = self._fields(entry_id)
         entry["items"] = self._items(entry_id)
@@ -519,6 +528,7 @@ class EntryRepo:
         sql += (f" ORDER BY ({column} IS NULL OR TRIM({column}) = '') ASC, {column} {direction},"
                 " e.updated_at DESC, e.id")
         rows = self.db.conn.execute(sql, params).fetchall()
+        decorated = {r["id"]: _decorate_check(_row_to_dict(r)) for r in rows}
 
         result = []
         entry_ids = [r["id"] for r in rows]
@@ -580,7 +590,7 @@ class EntryRepo:
                 })
 
         for r in rows:
-            entry = _row_to_dict(r)
+            entry = decorated[r["id"]]
             if filters.get("modified_only") and not modified_by_entry[entry["id"]]:
                 continue
             entry["tags"] = json.loads(entry.get("tags") or "[]")
@@ -1018,9 +1028,57 @@ class EntryRepo:
             self.db.conn.commit()
         return status
 
-    def set_check(self, entry_id: str, check_status: str, message: str = "") -> None:
-        from ..services.inspection_pdf import INSPECTION_CHECK_PREFIX
+    def review_check_lines(self, entry_id: str, texts: list, reviewed: bool = True,
+                           operator_profile_id: str = "") -> dict:
+        """把识别提醒标为已核对或撤销。只认当前仍存在的提醒，已消失的记录一并清掉。"""
+        row = self._check_row(entry_id)
+        if not row:
+            raise ValueError("条目不存在")
+        if row["check_status"] == "blocked":
+            raise ValueError("条目有严重问题，请先处理严重问题再核对提醒。")
+        changed = self._apply_review(entry_id, row, texts, reviewed, operator_profile_id)
+        self.db.conn.commit()
+        return {"changed": len(changed)}
 
+    def review_all_check_lines(self, entry_ids: list, operator_profile_id: str = "") -> dict:
+        """把多个条目当前的识别提醒全部标为已核对；有严重问题或没有提醒的条目跳过。"""
+        entries = lines = 0
+        for entry_id in dict.fromkeys(entry_ids):
+            row = self._check_row(entry_id)
+            if not row or row["check_status"] != "warning":
+                continue
+            changed = self._apply_review(entry_id, row, None, True, operator_profile_id)
+            if changed:
+                entries += 1
+                lines += len(changed)
+        self.db.conn.commit()
+        return {"entries": entries, "lines": lines}
+
+    def _check_row(self, entry_id: str):
+        return self.db.conn.execute(
+            "SELECT check_status, check_message, check_reviewed FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+
+    def _apply_review(self, entry_id: str, row, texts, reviewed: bool, operator_profile_id: str) -> list:
+        """texts 为 None 时处理当前全部提醒。不提交事务，由调用方提交。"""
+        current = [line["text"] for line in check_lines(row["check_message"])]
+        before = set(reviewed_texts(row["check_reviewed"])) & set(current)
+        wanted = set(current) if texts is None else {str(text) for text in texts} & set(current)
+        after = (before | wanted) if reviewed else (before - wanted)
+        changed = [text for text in current if (text in after) != (text in before)]
+        self.db.conn.execute(
+            "UPDATE entries SET check_reviewed = ? WHERE id = ?",
+            (json.dumps([text for text in current if text in after], ensure_ascii=False), entry_id),
+        )
+        for text in changed:
+            self._log_history(
+                entry_id, "识别提醒已核对" if reviewed else "识别提醒撤销核对",
+                "", text, operator_profile_id,
+            )
+        # 核对不改条目内容，不动更新时间，免得列表按「最近更新」排序时跳位。
+        return changed
+
+    def set_check(self, entry_id: str, check_status: str, message: str = "") -> None:
         material_messages = self._payment_check_messages(entry_id)
         row = self.db.conn.execute("SELECT check_message FROM entries WHERE id=?", (entry_id,)).fetchone()
         material_messages.extend(part for part in str(row[0] if row else "").split("；")
@@ -1039,8 +1097,7 @@ class EntryRepo:
     def _refresh_inspection_check(self, entry_id: str) -> None:
         """缓存每份查验单的正文信息，随材料变化更新识别提醒。"""
         from ..services.inspection_pdf import (
-            INSPECTION_CHECK_PREFIX, INSPECTION_RECOGNITION_VERSION,
-            latest_inspection_message, read_inspection_pdf,
+            INSPECTION_RECOGNITION_VERSION, latest_inspection_message, read_inspection_pdf,
         )
 
         entry = self.db.conn.execute(
@@ -1052,6 +1109,7 @@ class EntryRepo:
             "SELECT * FROM attachments WHERE entry_id=? AND type='inspection_pdf'", (entry_id,)
         ).fetchall()
         results = []
+        other_numbers = []
         for row in rows:
             path = Path(self.db.db_path).parent / "attachments" / row["stored_path"]
             if not path.is_file():
@@ -1073,7 +1131,9 @@ class EntryRepo:
                      "recognized" if info.get("count") is not None else "unrecognized",
                      json.dumps(info, ensure_ascii=False), row["id"]),
                 )
+            # 正文里的发票号码与条目不同，多半是放错了材料：提醒出来，也不拿它的查验次数提示。
             if info.get("invoice_no") and entry["invoice_no"] and info["invoice_no"] != entry["invoice_no"]:
+                other_numbers.append(info["invoice_no"])
                 continue
             results.append({**info, "added_at": row["added_at"], "attachment_id": row["id"]})
         base = [part for part in str(entry["check_message"] or "").split("；")
@@ -1082,7 +1142,14 @@ class EntryRepo:
             f"{INSPECTION_CHECK_PREFIX} 当前条目有 {len(rows)} 份查验单，请核对并删除不需要的材料。"
             if len(rows) > 1 else ""
         )
-        message = "；".join(filter(None, [*base, duplicate_message, latest_inspection_message(results)]))
+        mismatch_messages = [
+            f"{INSPECTION_CHECK_PREFIX} 查验单上的发票号码 {number} 与当前条目的发票号码 {entry['invoice_no']} 不一致，"
+            "可能放错了材料，请核对。"
+            for number in dict.fromkeys(other_numbers)
+        ]
+        message = "；".join(filter(None, [
+            *base, *mismatch_messages, duplicate_message, latest_inspection_message(results),
+        ]))
         if message != (entry["check_message"] or ""):
             status = "blocked" if entry["check_status"] == "blocked" else ("warning" if message else "pass")
             self.db.conn.execute("UPDATE entries SET check_status=?, check_message=? WHERE id=?",

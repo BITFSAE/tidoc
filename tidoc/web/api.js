@@ -132,6 +132,8 @@ const Api = (() => {
     updateField: (id, field, value, pid) => call('update_field', id, field, value, pid || ''),
     setRecognizedPaidAmount: (id, value) => call('set_recognized_paid_amount', id, value),
     correctLocked: (id, field, value, pid) => call('correct_locked_field', id, field, value, pid || ''),
+    reviewCheckLines: (id, texts, reviewed, operatorProfileId) => call('review_check_lines', id, texts || [], reviewed !== false, operatorProfileId || ''),
+    reviewAllCheckLines: (ids, operatorProfileId) => call('review_all_check_lines', ids || [], operatorProfileId || ''),
     updateEntryProfile: (id, profileId, operatorProfileId) => call('update_entry_profile', id, profileId, operatorProfileId || ''),
     updateEntryProfiles: (ids, profileId, operatorProfileId) => call('update_entry_profiles', ids || [], profileId, operatorProfileId || ''),
     setStatus: (id, status) => call('set_status', id, status),

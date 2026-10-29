@@ -91,6 +91,7 @@ const f = currentFilters();
 assert.equal(f.batch_id, 'batch-7');
 assert.equal(f.payment_count, 'multiple');
 assert.equal(f.check_status, 'warning');
+assert.equal(f.check_open, undefined);
 assert.equal(f.keyword, 'samples');
 assert.equal(f.active_only, undefined);
 """)

@@ -10,8 +10,9 @@ from pathlib import Path
 from pypdf import PdfReader
 from pypdf.errors import DependencyError, PyPdfError
 
+from ..engine.check_lines import INSPECTION_CHECK_PREFIX
+
 INSPECTION_RECOGNITION_VERSION = "inspection-pdf-1"
-INSPECTION_CHECK_PREFIX = "[查验单]"
 
 
 def parse_inspection_text(text: str) -> dict:

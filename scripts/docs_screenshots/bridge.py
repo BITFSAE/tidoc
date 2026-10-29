@@ -71,6 +71,32 @@ SHIM = """<script>(function () {
       open();
     });
   }
+  // 带识别提醒的详情：打开「锂电池组」的详情，只把「关键信息」一栏摆在深色底上，裁剪时只留下它。
+  if (query.get("dialog") === "warning-detail") {
+    window.addEventListener("load", function () {
+      var opened = false;
+      function open() {
+        if (!opened) {
+          var card = [].slice.call(document.querySelectorAll(".entry-card")).find(function (node) {
+            return node.textContent.indexOf("锂电池组") >= 0;
+          });
+          if (!card) return setTimeout(open, 100);
+          openEntryDetail(card.dataset.entryId);
+          opened = true;
+        }
+        var block = document.querySelector("[data-check-block] .check-line");
+        if (!block) return setTimeout(open, 100);
+        var section = block.closest(".detail-section");
+        var cover = document.createElement("div");
+        cover.style.cssText = "position:fixed;inset:0;z-index:9998;background:#202020";
+        var wrap = document.createElement("div");
+        wrap.style.cssText = "position:fixed;top:24px;left:24px;width:620px;z-index:9999;padding:16px 20px;border-radius:12px;background:var(--panel)";
+        wrap.appendChild(section);
+        document.body.append(cover, wrap);
+      }
+      open();
+    });
+  }
   // 付款截图 AI 设置：打开设置和开发者选项，把这一小节单独摆在深色底上，裁剪时只留下它。
   if (query.get("dialog") === "payment-ai") {
     window.addEventListener("load", function () {

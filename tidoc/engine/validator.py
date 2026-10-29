@@ -6,6 +6,7 @@ import re
 from contextvars import ContextVar
 from decimal import Decimal
 
+from .check_lines import AMOUNT_PREFIX, INVOICE_PREFIX, TITLE_PREFIX, tag
 from .fields import words_match_total
 from .models import (
     CHECK_BLOCKED,
@@ -114,6 +115,15 @@ def _total_overridden(invoice: ParsedInvoice) -> bool:
 
 def _issue(issues: list, code: str, level: str, message: str) -> None:
     issues.append(CheckIssue(code, level, message))
+
+
+def _issue_prefix(code: str) -> str:
+    """按提醒代码给出识别提醒的类别标记。"""
+    if code.startswith(("total_", "words_")) or code == "tax_rate_estimate":
+        return AMOUNT_PREFIX
+    if code.startswith("buyer_"):
+        return TITLE_PREFIX
+    return INVOICE_PREFIX
 
 
 def _safe(value) -> str:
@@ -249,23 +259,24 @@ def check_invoice(invoice: ParsedInvoice, expected_title: str = "", context=None
         diff = money(invoice.total - item_sum)
         # 总额没读到时 total 只是占位的 0，拿它去比明细没有意义，改由「未能识别发票总额」提醒。
         if diff != Decimal("0.00") and invoice.total_present is not False:
-            problems_warning.append(
+            problems_warning.append(tag(
+                AMOUNT_PREFIX,
                 f"明细识别合计与发票总额相差 {fmt_money(diff)}，"
-                "可能是明细识别不完整，请以发票总额为准。"
-            )
+                "可能是明细识别不完整，请以发票总额为准。",
+            ))
     else:
-        problems_warning.append("未能自动识别物品明细，请确认或补充。")
-    problems_warning.extend(issue.message for issue in strong_issues)
+        problems_warning.append(tag(INVOICE_PREFIX, "未能自动识别物品明细，请确认或补充。"))
+    problems_warning.extend(tag(_issue_prefix(issue.code), issue.message) for issue in strong_issues)
 
     # 抬头与购买方税号识别。税号不参与材料齐备度，但会形成可恢复、可重识别的
     # 识别提醒，避免只凭名称把主体判断错。未配置任何抬头时不做抬头范围提醒。
     titles = supported_titles(context)
     if not invoice.buyer_name:
-        problems_warning.append("未能识别购买方抬头。")
+        problems_warning.append(tag(TITLE_PREFIX, "未能识别购买方抬头。"))
     elif titles and invoice.buyer_name not in titles:
-        problems_warning.append(
-            f"购买方抬头「{invoice.buyer_name}」不在已配置的抬头内。"
-        )
+        problems_warning.append(tag(
+            TITLE_PREFIX, f"购买方抬头「{invoice.buyer_name}」不在已配置的抬头内。"
+        ))
 
     buyer_tax_id = normalize_tax_id(invoice.buyer_tax_id)
     expected_tax_id = expected_tax_ids(context).get(invoice.buyer_name)
@@ -274,36 +285,41 @@ def check_invoice(invoice: ParsedInvoice, expected_title: str = "", context=None
         expected_tax_id = buyer_tax_id
     if expected_tax_id:
         if not buyer_tax_id:
-            problems_warning.append(
-                f"未能识别「{invoice.buyer_name}」的购买方税号，应为 {expected_tax_id}，请核对。"
-            )
+            problems_warning.append(tag(
+                TITLE_PREFIX,
+                f"未能识别「{invoice.buyer_name}」的购买方税号，应为 {expected_tax_id}，请核对。",
+            ))
         elif buyer_tax_id != expected_tax_id:
             recognized_title = _title_by_tax_id(context).get(buyer_tax_id)
             belongs_to = f"（该税号属于「{recognized_title}」）" if recognized_title else ""
-            problems_warning.append(
+            problems_warning.append(tag(
+                TITLE_PREFIX,
                 f"购买方税号「{invoice.buyer_tax_id}」与「{invoice.buyer_name}」不一致，"
-                f"应为 {expected_tax_id}{belongs_to}，请核对。"
-            )
+                f"应为 {expected_tax_id}{belongs_to}，请核对。",
+            ))
     elif buyer_tax_id in _title_by_tax_id(context):
         tax_title = _title_by_tax_id(context)[buyer_tax_id]
         if invoice.buyer_name:
-            problems_warning.append(
+            problems_warning.append(tag(
+                TITLE_PREFIX,
                 f"购买方税号 {buyer_tax_id} 属于「{tax_title}」，"
-                f"但识别到的抬头为「{invoice.buyer_name}」，请核对。"
-            )
+                f"但识别到的抬头为「{invoice.buyer_name}」，请核对。",
+            ))
         else:
-            problems_warning.append(
-                f"购买方税号 {buyer_tax_id} 属于「{tax_title}」，但购买方抬头未识别，请核对。"
-            )
+            problems_warning.append(tag(
+                TITLE_PREFIX,
+                f"购买方税号 {buyer_tax_id} 属于「{tax_title}」，但购买方抬头未识别，请核对。",
+            ))
 
     # 抬头与所属分区一致性（强隔离）
     if expected_title and invoice.buyer_name and invoice.buyer_name != expected_title:
-        problems_blocked.append(
-            f"发票抬头为「{invoice.buyer_name}」，与当前分区「{expected_title}」不一致，禁止混入。"
-        )
+        problems_blocked.append(tag(
+            TITLE_PREFIX,
+            f"发票抬头为「{invoice.buyer_name}」，与当前分区「{expected_title}」不一致，禁止混入。",
+        ))
 
     # 辅助级提示放在最后：税率估算、税号校验位、日期合法性只提示，不改变上面的判断。
-    problems_warning.extend(issue.message for issue in advisory_issues)
+    problems_warning.extend(tag(_issue_prefix(issue.code), issue.message) for issue in advisory_issues)
 
     # 所有新提醒仍作为「识别提醒」（warning）出现；只有抬头与分区冲突才是 blocked。
     if problems_blocked:

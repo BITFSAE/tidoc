@@ -9,6 +9,8 @@ const State = {
   titleOptions: [],
   titleProfiles: [],
   quickView: 'all',
+  checkCategory: '',         // 「识别提醒」视图里选中的提醒类别，'' 为全部，'reviewed' 为已核对
+  checkCategoryCounts: null, // 「识别提醒」视图各类别的条目数，其他视图为 null
   entries: [],
   selected: new Set(),
   lastSelectedId: null,
@@ -123,6 +125,12 @@ const DOCS_SITE_URL = 'https://tidoc.bitfsae.com';
 // 快捷键提示里的修饰键按平台显示：macOS 用 ⌘，其余用 Ctrl。
 const MOD_KEY = /Mac/i.test(globalThis.navigator?.platform || globalThis.navigator?.userAgent || '') ? '⌘' : 'Ctrl+';
 const CHECK_LABEL = { pass: '校验通过', warning: '识别提醒', blocked: '严重问题' };
+// 识别提醒的类别，顺序与 tidoc/engine/check_lines.py 的 CATEGORIES 一致。
+const CHECK_CATEGORIES = [
+  ['amount', '发票金额'], ['invoice', '发票信息'], ['title', '抬头税号'],
+  ['payment', '付款截图'], ['inspection', '查验单'], ['other', '其他'],
+];
+const CHECK_CATEGORY_LABEL = Object.fromEntries(CHECK_CATEGORIES);
 const USAGE_GUIDE_SEEN_KEY = 'tidoc.usageGuide.seen.v2';
 const MULTI_CLAIMANT_KEY = 'tidoc.multiClaimantMode';
 const DEFAULT_ENTRY_TITLE_KEY = 'tidoc.defaultEntryTitle';
@@ -486,13 +494,16 @@ function setupFastTooltips() {
       if (!node.getAttribute('aria-label') && !node.textContent.trim()) node.setAttribute('aria-label', value);
     });
   };
+  // 下拉列表或右键菜单展开时，只显示菜单内的提示；触发器和周围控件的提示会叠在菜单上。
+  const coveredByMenu = (target) => !!document.querySelector('.select-menu:not([hidden]), .entry-context-menu')
+    && !target.closest('.select-menu, .entry-context-menu');
   prepare(document.body);
   new MutationObserver((records) => {
     records.forEach((record) => {
       if (record.type === 'attributes') prepare(record.target);
       else record.addedNodes.forEach(prepare);
     });
-    if (active && !active.isConnected) hide();
+    if (active && (!active.isConnected || coveredByMenu(active))) hide();
   }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['title'] });
 
   let active = null;
@@ -513,8 +524,7 @@ function setupFastTooltips() {
   const show = (target) => {
     cancelPending();
     if (target && target === active) return;
-    // 下拉列表展开时，只显示列表内选项的提示；触发器和周围控件的提示会叠在列表上，直接隐藏。
-    if (target && document.querySelector('.select-menu:not([hidden])') && !target.closest('.select-menu')) {
+    if (target && coveredByMenu(target)) {
       hide();
       return;
     }
@@ -1125,6 +1135,7 @@ function currentFilters() {
   const dto = val('filterDateTo');
   const sort = val('sortSelect') || 'updated';
 
+  // 先按状态在库里筛，待核对和已核对的分开在 applyCheckCategory 里做。
   if (State.quickView === 'warning') f.check_status = 'warning';
   else if (State.quickView === 'modified') f.modified_only = true;
   else if (State.quickView === 'complete') f.status = 'complete';
@@ -1178,6 +1189,7 @@ async function refreshEntries() {
     if (State.quickView === 'incomplete') {
       entries = entries.filter((e) => (e.completeness?.status || e.status) !== 'complete');
     }
+    entries = applyCheckCategory(entries);
   } catch (e) {
     if (sequence !== entryRefreshSequence) return;
     toast(e.message, 'err');
@@ -1199,6 +1211,44 @@ async function refreshEntries() {
   renderedListKey = listKey;
   repaintEntryList(list);
   syncFilterControlStates();
+}
+
+// 「识别提醒」视图默认只列还有待核对提醒的条目，按类别统计条目数，一张发票有几类提醒就计入几类；
+// 「已核对」列出核对过至少一条提醒的条目，方便回看和撤销。
+function applyCheckCategory(entries) {
+  if (State.quickView !== 'warning') {
+    State.checkCategoryCounts = null;
+    return entries;
+  }
+  const open = entries.filter((e) => (e.check_open || []).length);
+  const reviewed = entries.filter((e) => (e.check_lines || []).some((line) => line.reviewed));
+  const counts = { '': open.length, reviewed: reviewed.length };
+  open.forEach((e) => e.check_open.forEach((id) => { counts[id] = (counts[id] || 0) + 1; }));
+  State.checkCategoryCounts = counts;
+  if (State.checkCategory === 'reviewed') return reviewed;
+  return State.checkCategory ? open.filter((e) => e.check_open.includes(State.checkCategory)) : open;
+}
+
+function renderCheckCategoryBar() {
+  const bar = $('#checkCategoryBar');
+  const counts = State.checkCategoryCounts;
+  bar.classList.toggle('hidden', !counts);
+  if (!counts) { bar.replaceChildren(); return; }
+  const chip = (id, label, extra = '') => {
+    const active = State.checkCategory === id;
+    return `<button type="button" class="check-category-btn${extra}${active ? ' active' : ''}" data-check-category="${id}" aria-pressed="${active}">` +
+      `${esc(label)}<span>${counts[id] || 0}</span></button>`;
+  };
+  // 只列有条目的类别；选中的类别核对完变成 0 时仍留着，免得列表突然换成全部。
+  bar.innerHTML = chip('', '全部') + CHECK_CATEGORIES
+    .filter(([id]) => counts[id] || State.checkCategory === id)
+    .map(([id, label]) => chip(id, label)).join('') +
+    '<span class="check-category-divider" aria-hidden="true"></span>' +
+    chip('reviewed', '已核对', ' reviewed') +
+    '<span class="check-category-hint">点卡片上的提醒标记可逐条核对</span>';
+  bar.querySelectorAll('[data-check-category]').forEach((button) => {
+    button.onclick = () => setQuickView('warning', button.dataset.checkCategory);
+  });
 }
 
 // macOS 的 WebKit 在滚动容器整体换内容后偶尔沿用旧画面，直到鼠标移动或滚动才重绘。
@@ -1255,6 +1305,7 @@ function renderEntries() {
 
   updateListSummary();
   updateOcrSuggestBar();
+  renderCheckCategoryBar();
 
   empty.hidden = !emptyAll;
   if (emptyAll) renderEmptyState();
@@ -1291,10 +1342,13 @@ function updateSelectionBar() {
     const labelText = allSelected ? '取消全选' : '全选';
     if (label && label.textContent !== labelText) label.textContent = labelText;
   }
+  const reviewBtn = $('#batchReviewBtn');
+  const hideReview = State.quickView !== 'warning' || State.checkCategory === 'reviewed';
+  if (reviewBtn && reviewBtn.classList.contains('hidden') !== hideReview) reviewBtn.classList.toggle('hidden', hideReview);
   const clearBtn = $('#clearSelBtn');
   const hideClear = !hasSelection || allSelected;
   if (clearBtn.classList.contains('hidden') !== hideClear) clearBtn.classList.toggle('hidden', hideClear);
-  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReparseBtn', 'batchOcrBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
+  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReviewBtn', 'batchReparseBtn', 'batchOcrBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
     const btn = $('#' + id);
     if (btn && btn.disabled === hasSelection) btn.disabled = !hasSelection;
   });
@@ -1484,8 +1538,7 @@ function entryCard(e) {
     ? `<i class="entry-title-dot${e.title ? '' : ' empty'}" aria-hidden="true"></i>` : '';
 
   // 校验状态：仅在 warning/blocked 时突出显示（pass 不占视觉）
-  const checkBadge = (e.check_status && e.check_status !== 'pass')
-    ? `<span class="badge ${e.check_status}"${e.check_message ? ` data-tooltip="${esc(checkMessageLines(e.check_message).join('\n'))}"` : ''}>${CHECK_LABEL[e.check_status] || ''}</span>` : '';
+  const checkBadge = entryCheckBadge(e);
 
   const fields = e.fields || {};
   const notesCur = fields.notes ? fields.notes.current : '';
@@ -1620,6 +1673,12 @@ function entryCard(e) {
     ev.preventDefault();
     ev.stopPropagation();
     openEntryDetail(e.id);
+  });
+  main.querySelector('[data-card-check]')?.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const rect = ev.currentTarget.getBoundingClientRect();
+    openCheckMenu(rect.left, rect.bottom + 4, e);
   });
   main.querySelectorAll('[data-card-batch]').forEach((badge) => {
     badge.addEventListener('click', (ev) => {
@@ -1793,10 +1852,91 @@ function entryHasManualChanges(entry) {
   return !!entry?.modified_fields?.length;
 }
 
-// 识别提醒在库里用「；」分隔；显示时逐条分行，去掉材料提醒的内部前缀。
+// 识别提醒在库里用「；」分隔；显示时逐条分行，去掉类别标记。条目上的提醒由后端拆好（check_lines），
+// 这里只给导入预览这类还没落库的校验结果用。
 function checkMessageLines(message) {
   return String(message || '').split('；').map((part) => part.trim()).filter(Boolean)
-    .map((part) => part.replace(/^\[(?:付款截图识别|查验单)\]\s*/, ''));
+    .map((part) => part.replace(/^\[(?:发票金额|发票信息|抬头税号|付款截图识别|查验单)\]\s*/, ''));
+}
+
+// 卡片上的校验标记：识别提醒写出类别，点开可逐条核对；全部核对过显示灰色「已核对」，点开可撤销。
+// 严重问题照旧，只显示不可点。
+function entryCheckBadge(e) {
+  if (!e.check_status || e.check_status === 'pass') return '';
+  const lines = e.check_lines || [];
+  if (e.check_status === 'warning') {
+    const open = e.check_open || [];
+    const describe = (line) => `${CHECK_CATEGORY_LABEL[line.category] || '其他'}：${line.text}`;
+    if (!open.length) {
+      if (!lines.length) return '';
+      const tooltip = ['提醒已核对', ...lines.map(describe), '点击查看或撤销'].join('\n');
+      return `<button type="button" class="badge reviewed badge-action" data-card-check data-tooltip="${esc(tooltip)}">已核对</button>`;
+    }
+    const labelOf = (id) => (id === 'other' ? '识别提醒' : CHECK_CATEGORY_LABEL[id]);
+    const label = open.length === 1 ? labelOf(open[0]) : `${labelOf(open[0])}等 ${open.length} 类`;
+    const pending = lines.filter((line) => !line.reviewed).map(describe);
+    const tooltip = ['识别提醒', ...pending, lines.length ? '点击逐条核对' : ''].filter(Boolean).join('\n');
+    return `<button type="button" class="badge warning badge-action" data-card-check data-tooltip="${esc(tooltip)}">${esc(label)}</button>`;
+  }
+  const tooltip = lines.map((line) => line.text).join('\n');
+  return `<span class="badge ${e.check_status}"${tooltip ? ` data-tooltip="${esc(tooltip)}"` : ''}>${CHECK_LABEL[e.check_status] || ''}</span>`;
+}
+
+// 待核对的按类别排在前面，已核对的排在后面；index 是在 check_lines 里的原位置。
+function sortedCheckLines(e) {
+  const order = Object.fromEntries(CHECK_CATEGORIES.map(([id], index) => [id, index]));
+  return (e.check_lines || []).map((line, index) => ({ ...line, index }))
+    .sort((a, b) => (a.reviewed - b.reviewed) || (order[a.category] - order[b.category]) || (a.index - b.index));
+}
+
+// 详情里的逐条提醒：待核对的在前，已核对的灰显在后，可撤销。严重问题的条目不能逐条核对。
+function checkLinesHtml(e) {
+  const lines = sortedCheckLines(e);
+  if (!lines.length) return '';
+  const reviewable = e.check_status === 'warning';
+  const pending = lines.filter((line) => !line.reviewed);
+  const rows = lines.map((line) => `
+    <li class="check-line${line.reviewed ? ' reviewed' : ''}">
+      <span class="check-line-cat">${esc(CHECK_CATEGORY_LABEL[line.category] || '其他')}</span>
+      <span class="check-line-text">${esc(line.text)}</span>
+      ${reviewable ? (line.reviewed
+        ? `<span class="check-line-state">已核对</span><button type="button" class="link-btn" data-check-review="${line.index}" data-reviewed="0">撤销</button>`
+        : `<button type="button" class="link-btn" data-check-review="${line.index}" data-reviewed="1" title="核对过、没有问题时点这里，这条提醒不再列入「识别提醒」">标为已核对</button>`) : ''}
+    </li>`).join('');
+  const all = reviewable && pending.length > 1
+    ? `<button type="button" class="link-btn check-review-all" data-check-review-all>全部标为已核对</button>` : '';
+  return `<div class="hint warn compact-hint check-lines-block"><ul class="check-lines">${rows}</ul>${all}</div>`;
+}
+
+// 详情里核对或撤销提醒：就地刷新提醒块和标题标记，不重开详情，便于连续核对几条。
+function bindCheckLineActions(body, entryId, lines) {
+  const run = async (texts, reviewed) => {
+    try {
+      const detail = await Api.reviewCheckLines(entryId, texts, reviewed, State.currentProfileId);
+      const block = body.querySelector('[data-check-block]');
+      if (block) block.innerHTML = checkLinesHtml(detail);
+      const badge = body.querySelector('[data-detail-check-badge]');
+      if (badge) badge.innerHTML = detailCheckBadge(detail);
+      bindCheckLineActions(body, entryId, detail.check_lines || []);
+      await syncEntryAfterChange(entryId, { affectsStatus: true }, detail);
+    } catch (err) { toast(err.message, 'err'); }
+  };
+  const block = body.querySelector('[data-check-block]');
+  if (!block) return;
+  block.querySelectorAll('[data-check-review]').forEach((button) => {
+    button.onclick = () => {
+      const line = lines[Number(button.dataset.checkReview)];
+      if (line) run([line.text], button.dataset.reviewed === '1');
+    };
+  });
+  const all = block.querySelector('[data-check-review-all]');
+  if (all) all.onclick = () => run(lines.filter((line) => !line.reviewed).map((line) => line.text), true);
+}
+
+function detailCheckBadge(e) {
+  if (!e.check_status || e.check_status === 'pass') return '';
+  if (e.check_status === 'warning' && !(e.check_open || []).length) return '<span class="badge pass">提醒已核对</span>';
+  return `<span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status]}</span>`;
 }
 
 function entryModifiedTooltip(entry) {
@@ -1892,6 +2032,12 @@ function renderEmptyState() {
     $('#emptySub').textContent = '当前要处理的条目都已完成批次并归档；可到「已归档」查看或恢复。';
     $('#emptyNew').textContent = '查看已归档';
     $('#emptyNew').onclick = () => focusBatch(ARCHIVED_BATCH_ID);
+  } else if (State.quickView === 'warning' && !State.checkCategory && State.checkCategoryCounts?.reviewed) {
+    illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="24" cy="24" r="16"/><path d="m16.5 24.5 5 5 10-11"/></svg>`;
+    $('#emptyTitle').textContent = '提醒都已核对';
+    $('#emptySub').textContent = '核对过的条目在「已核对」里，可以随时撤销。';
+    $('#emptyNew').textContent = '查看已核对';
+    $('#emptyNew').onclick = () => setQuickView('warning', 'reviewed');
   } else if (hasFilter) {
     illus.innerHTML = `<svg viewBox="0 0 48 48" width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="21" cy="21" r="13"/><path d="m31 31 7 7M16 21h10M21 16v10"/></svg>`;
     $('#emptyTitle').textContent = '没有匹配的条目';
@@ -1956,8 +2102,9 @@ function updateQuickViewButtons() {
   $$('[data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === State.quickView));
 }
 
-function setQuickView(v) {
+function setQuickView(v, checkCategory = '') {
   State.quickView = v || 'all';
+  State.checkCategory = State.quickView === 'warning' ? checkCategory : '';
   // 「识别提醒」本身就是按校验结果筛选，再叠加高级里的校验条件只会互相覆盖。
   if (State.quickView === 'warning') $('#filterCheck').value = '';
   updateQuickViewButtons();
@@ -3117,6 +3264,21 @@ function openEntryMenu(x, y, e, options) {
   if (cloudRecognitionVisible()) item('云识别', () => openOcrDialog([e.id]));
   item('编辑条目备注', () => quickNoteFlow(e));
   item('打标签', () => tagSelectionFlow([e.id]));
+  // 有待核对的提醒时，可以直接跳到同类提醒，或在不打开详情的情况下整条标为已核对。
+  (e.check_open || []).forEach((id) => {
+    if (State.quickView === 'warning' && State.checkCategory === id) return;
+    item(`只看「${id === 'other' ? '其他' : CHECK_CATEGORY_LABEL[id]}」提醒`, () => setQuickView('warning', id));
+  });
+  if (e.check_status === 'warning' && (e.check_open || []).length) {
+    item('提醒全部标为已核对', async () => {
+      const texts = (e.check_lines || []).filter((line) => !line.reviewed).map((line) => line.text);
+      try {
+        const detail = await Api.reviewCheckLines(e.id, texts, true, State.currentProfileId);
+        await syncEntryAfterChange(e.id, { affectsStatus: true }, detail);
+        toast(`已核对 ${texts.length} 条提醒`, 'ok');
+      } catch (err) { toast(err.message, 'err'); }
+    });
+  }
   if (actualBatchId()) item('批次催办备注', () => batchEntryNoteFlow(e));
   item(actualBatchId() ? '移出当前批次' : '批次', async () => {
     if (actualBatchId()) {
@@ -3133,6 +3295,51 @@ function openEntryMenu(x, y, e, options) {
   });
   item('删除条目', () => quickDelete(e), true);
   showContextMenu(menu, x, y, options);
+}
+
+// 卡片提醒标记的菜单：点一条提醒就标为已核对，已核对的点一下撤销，不用打开详情。
+function openCheckMenu(x, y, e) {
+  const lines = sortedCheckLines(e);
+  if (!lines.length) { openEntryDetail(e.id); return; }
+  const pending = lines.filter((line) => !line.reviewed);
+  const run = async (texts, reviewed) => {
+    try {
+      const detail = await Api.reviewCheckLines(e.id, texts, reviewed, State.currentProfileId);
+      await syncEntryAfterChange(e.id, { affectsStatus: true }, detail);
+      toast(reviewed ? `已核对 ${texts.length} 条提醒` : '已撤销核对', 'ok');
+    } catch (err) { toast(err.message, 'err'); }
+  };
+  const menu = el('div', 'entry-context-menu check-menu');
+  menu.appendChild(el('div', 'check-menu-head', pending.length ? '点一条提醒标为已核对' : '提醒都已核对，点一条可撤销'));
+  lines.forEach((line) => {
+    const b = el('button', 'check-menu-line' + (line.reviewed ? ' reviewed' : ''), `
+      <span class="check-line-cat">${esc(CHECK_CATEGORY_LABEL[line.category] || '其他')}</span>
+      <span class="check-menu-text">${esc(line.text)}</span>
+      <span class="check-menu-act">${line.reviewed ? '撤销' : '核对'}</span>`);
+    b.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await run([line.text], !line.reviewed); };
+    menu.appendChild(b);
+  });
+  const item = (label, fn) => {
+    const b = el('button', 'check-menu-more', esc(label));
+    b.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await fn(); };
+    menu.appendChild(b);
+  };
+  if (pending.length > 1) item(`全部标为已核对（${pending.length} 条）`, () => run(pending.map((line) => line.text), true));
+  item('打开详情', () => openEntryDetail(e.id));
+  showContextMenu(menu, x, y);
+}
+
+// 「识别提醒」视图里多选后一起核对：所选条目当前的提醒全部标为已核对，有严重问题的跳过。
+async function batchReviewChecks() {
+  const ids = [...State.selected];
+  if (!ids.length) return;
+  try {
+    const result = await Api.reviewAllCheckLines(ids, State.currentProfileId);
+    State.selected.clear();
+    await refreshEntries();
+    if (result.lines) toast(`已核对 ${result.entries} 个条目的 ${result.lines} 条提醒`, 'ok');
+    else toast('所选条目没有待核对的提醒');
+  } catch (err) { toast(err.message, 'err'); }
 }
 
 /*
@@ -3306,6 +3513,7 @@ function bindEvents() {
   $('#tagBtn').onclick = () => tagSelectionFlow();
   $('#tagBtn').oncontextmenu = event => { event.preventDefault(); AdapterUI.batchFill([...State.selected]); };
   $('#changeProfileBtn').onclick = () => changeSelectionProfile();
+  $('#batchReviewBtn').onclick = batchReviewChecks;
   $('#batchReparseBtn').onclick = batchReparse;
   $('#batchOcrBtn').onclick = () => openOcrDialog([...State.selected]);
   $('#batchSummaryBtn').onclick = () => exportSummary([...State.selected]);
@@ -3351,6 +3559,7 @@ function bindEvents() {
 function clearAllFilters() {
   ['filterCheck', 'filterProfile', 'filterTitle', 'filterKeyword', 'filterAmountMin', 'filterAmountMax', 'filterDateFrom', 'filterDateTo', 'filterTag', 'filterNotes', 'filterPaymentCount'].forEach((id) => { const n = $('#' + id); if (n) n.value = ''; });
   State.quickView = 'all';
+  State.checkCategory = '';
   updateQuickViewButtons();
   State.activeTitle = '';
   State.batchFilter = '';
@@ -4742,7 +4951,7 @@ function openNewEntry() {
             <span class="k">价税合计</span><span><b style="font-family:var(--font-serif);font-size:15px">${fmtMoney(p.total)}</b></span>
             <span class="k">明细条数</span><span>${p.items.length}</span>
           </div>
-          ${c.message ? `<p class="hint warn" style="margin-top:12px">${esc(c.message)}</p>` : ''}
+          ${c.message ? `<ul class="hint warn compact-hint check-lines">${checkMessageLines(c.message).map((line) => `<li>${esc(line)}</li>`).join('')}</ul>` : ''}
         </div>`;
       const titleSel = body.querySelector('#neTitle');
       if (!titleSel.value && p.buyer_name) titleSel.value = p.buyer_name;
@@ -5250,7 +5459,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
     // 缺哪些材料由「报账材料」分组逐项标注，这里只在齐全时给一句确认，避免重复。
     if (!state.ready) return '';
     // 识别提醒不影响材料齐备，但此时发票内容还没核对完，不能写「校验通过」。
-    const text = detail.check_status === 'warning'
+    const text = detail.check_status === 'warning' && (detail.check_open || []).length
       ? '材料齐全、实付已填；识别提醒还需要核对。'
       : '材料齐全、实付已填、校验通过。';
     return `<p class="hint ok-hint" style="margin-top:10px">${text}</p>`;
@@ -5260,7 +5469,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   body.innerHTML = `
     <div class="detail-top-grid">
       <div class="detail-section">
-        <h3>关键信息 ${e.check_status && e.check_status !== 'pass' ? `<span class="badge ${e.check_status}">${CHECK_LABEL[e.check_status]}</span>` : ''}<span class="h3-line"></span></h3>
+        <h3>关键信息 <span data-detail-check-badge>${detailCheckBadge(e)}</span><span class="h3-line"></span></h3>
         <div class="kv compact">
           ${lockedKV('发票号码', 'invoice_no', e.invoice_no, true)}
           ${lockedKV('发票日期', 'invoice_date', e.invoice_date)}
@@ -5273,7 +5482,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
             <button type="button" class="btn small ghost profile-create-btn" data-create-profile data-profile-target="#deProfile">新建</button>
           </span>
         </div>
-        ${e.check_message ? `<ul class="hint warn compact-hint check-lines">${checkMessageLines(e.check_message).map((line) => `<li>${esc(line)}</li>`).join('')}</ul>` : ''}
+        <div data-check-block>${checkLinesHtml(e)}</div>
       </div>
 
       <div class="detail-section">
@@ -5618,6 +5827,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   });
   State.activeDetailEntryId = entryId;
   State.activeDetailModal = mm;
+  bindCheckLineActions(body, entryId, e.check_lines || []);
   AdapterUI.decorateEntry(body,e,() => reopenEntryDetail(mm,entryId,{affectsStatus:true}));
 
   // ---- 阿里云识别结果（有差异时默认展开）：必须在 modal 创建后再加载，
@@ -5635,7 +5845,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
 function paymentAiSectionHtml(e) {
   const payments = (e.attachments || []).filter((a) => a.type === 'payment_screenshot');
   if (!payments.length || !(State.paymentAiAvailable || payments.some((a) => a.recognition_status))) return '';
-  const flagged = String(e.check_message || '').includes('[付款截图识别]');
+  const flagged = (e.check_lines || []).some((line) => line.category === 'payment' && !line.reviewed);
   return `<details class="detail-section minor-section" id="dePayAiSection"${flagged ? ' open' : ''}>
       <summary>付款截图识别${flagged ? ' <span class="badge warning">需核对</span>' : ''}</summary>
       <div class="ocr-detail-body" id="dePayAiBody"><div class="hint">正在读取识别结果…</div></div>

@@ -846,6 +846,17 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         return self.entries.get(entry_id)
 
     @_guard
+    def review_check_lines(self, entry_id, texts, reviewed=True, operator_profile_id=""):
+        """把条目的识别提醒标为已核对或撤销，返回刷新后的条目。"""
+        self.entries.review_check_lines(entry_id, texts or [], bool(reviewed), operator_profile_id)
+        return self.get_entry(entry_id)
+
+    @_guard
+    def review_all_check_lines(self, entry_ids, operator_profile_id=""):
+        """批量把所选条目的识别提醒全部标为已核对，返回涉及的条目数和提醒条数。"""
+        return self.entries.review_all_check_lines(entry_ids or [], operator_profile_id)
+
+    @_guard
     def update_entry_profile(self, entry_id, profile_id, operator_profile_id=""):
         return self.entries.set_profile(entry_id, profile_id, operator_profile_id)
 

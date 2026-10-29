@@ -89,8 +89,8 @@ def test_tooltips_stay_above_dropdown_menus_and_option_tips_only_show_when_trunc
     assert 'title=' not in menu and 'data-tooltip-overflow' in menu
     app=(WEB/'app.js').read_text('utf-8')
     tooltips=app.split('function setupFastTooltips()',1)[1].split('let autoUpdateCheckTimer',1)[0]
-    # 展开下拉时只显示列表内的提示；提示放在列表侧边；点击或按键后立即收起。
-    for needle in ("'.select-menu:not([hidden])'","target.closest('.select-menu')","addEventListener('pointerdown', hide, true)","addEventListener('keydown', hide, true)"):
+    # 展开下拉或右键菜单时只显示菜单内的提示；提示放在列表侧边；点击或按键后立即收起。
+    for needle in ("'.select-menu:not([hidden]), .entry-context-menu'","target.closest('.select-menu, .entry-context-menu')","addEventListener('pointerdown', hide, true)","addEventListener('keydown', hide, true)"):
         assert needle in tooltips,needle
 
 

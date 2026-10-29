@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS entries (
     status        TEXT NOT NULL DEFAULT 'draft',   -- draft/partial/complete
     check_status  TEXT NOT NULL DEFAULT 'warning', -- pass/warning/blocked
     check_message TEXT DEFAULT '',
+    check_reviewed TEXT DEFAULT '',           -- 已核对的识别提醒，JSON 数组（按显示文字）
     source        TEXT DEFAULT '',            -- 数据来源 xml/pdf/xml+pdf/manual
     recognition_version TEXT DEFAULT '',      -- 本地发票解析规则版本（缓存，不随绑定包迁移）
     recognition_fingerprint TEXT DEFAULT '',  -- 本次解析对应的原发票附件摘要
@@ -452,7 +453,7 @@ def init_db(conn: sqlite3.Connection, *, backup_path=None):
         _legacy_migrations(conn, previous_version)
         _migrate_v12(conn)
         columns = {row[1] for row in conn.execute('PRAGMA table_info(entries)')}
-        for name in ('seller_tax_id', 'recognition_data'):
+        for name in ('seller_tax_id', 'recognition_data', 'check_reviewed'):
             if name not in columns:
                 conn.execute(f"ALTER TABLE entries ADD COLUMN {name} TEXT DEFAULT ''")
         _execute_schema(conn, SCHEMA)

@@ -2307,3 +2307,49 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .entry-list.is-refreshing { opacity: .55; transition: opacity .12s; pointer-events: none; }
 .check-lines { padding-left: 26px; }
 .check-lines li + li { margin-top: 2px; }
+/* 详情里的逐条提醒：类别小标签 + 文字 + 核对按钮；已核对的灰显。 */
+.check-lines-block .check-lines { margin: 0; padding: 0; list-style: none; }
+.check-lines-block .check-lines li + li { margin-top: 5px; }
+.check-line { display: flex; align-items: baseline; gap: 8px; }
+.check-line-cat {
+  flex: 0 0 auto; font-size: 10.5px; font-weight: 700; padding: 0 6px; border-radius: 5px;
+  background: var(--panel-raised); color: var(--warn); border: 1px solid var(--warn-line);
+}
+.check-line-text { flex: 1 1 auto; min-width: 0; }
+.check-line .link-btn { flex: 0 0 auto; font-size: 11.5px; white-space: nowrap; }
+.check-line-state { flex: 0 0 auto; font-size: 11px; color: var(--ink-faint); }
+.check-line.reviewed { color: var(--ink-soft); }
+.check-line.reviewed .check-line-text { text-decoration: line-through; text-decoration-color: var(--line); }
+.check-line.reviewed .check-line-cat { color: var(--ink-faint); border-color: var(--line); }
+.check-review-all { margin-top: 8px; }
+/* 「识别提醒」视图的类别筛选，只在该视图出现。 */
+.check-category-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 10px; }
+.check-category-bar.hidden { display: none; }
+.check-category-btn {
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--line-soft); border-radius: 7px; background: var(--paper-2); color: var(--ink-soft); cursor: pointer;
+}
+.check-category-btn span { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); }
+.check-category-btn:hover { color: var(--ink); }
+.check-category-btn.active { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn); }
+.check-category-btn.active span { color: var(--warn); }
+.check-category-hint { margin-left: 4px; font-size: 11.5px; color: var(--ink-faint); }
+.check-category-divider { width: 1px; height: 16px; margin: 0 2px; background: var(--line); }
+.check-category-btn.reviewed.active { background: var(--pass-soft); border-color: var(--pass-line); color: var(--pass); }
+.check-category-btn.reviewed.active span { color: var(--pass); }
+/* 卡片上全部核对过的提醒：灰色小标记，点开可撤销。 */
+.badge-action.warning:hover { border-color: var(--warn-line); color: var(--warn); background: var(--warn-soft); }
+.badge.reviewed { background: var(--paper-2); color: var(--ink-faint); border: 1px solid var(--line-soft); font-weight: 600; }
+/* 卡片提醒标记的菜单：每行一条提醒，右侧是点下去的效果。 */
+.entry-context-menu.check-menu { width: 360px; max-width: calc(100vw - 16px); }
+.check-menu-head { padding: 4px 9px 6px; font-size: 11.5px; color: var(--ink-faint); }
+.entry-context-menu button.check-menu-line { display: flex; align-items: baseline; gap: 8px; line-height: 1.45; }
+.check-menu-text { flex: 1 1 auto; min-width: 0; font-size: 12.5px; }
+.check-menu-act { flex: 0 0 auto; font-size: 11.5px; color: var(--primary); }
+.check-menu-line.reviewed { color: var(--ink-soft); }
+.check-menu-line.reviewed .check-menu-text { text-decoration: line-through; text-decoration-color: var(--line); }
+.check-menu-line.reviewed .check-line-cat { color: var(--ink-faint); border-color: var(--line); }
+.check-menu-line.reviewed .check-menu-act { color: var(--ink-faint); }
+.entry-context-menu button.check-menu-more { border-top: 1px solid var(--line-soft); border-radius: 0 0 6px 6px; color: var(--ink-soft); font-size: 12.5px; }
+.check-menu-line + .check-menu-more { margin-top: 4px; }
+.check-menu-more + .check-menu-more { border-top: none; }

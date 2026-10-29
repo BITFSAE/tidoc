@@ -172,3 +172,25 @@ def test_startup_reads_old_material_once_and_reuses_the_cache(api, tmp_path, mon
     fresh.entries.recompute_status(entry_id)
     assert len(reads) == 1
     fresh.db.close()
+
+
+def test_inspection_for_another_invoice_number_is_a_reminder(api, tmp_path):
+    entry_id = new_entry(api)
+    api.add_attachment(entry_id, str(make_pdf(tmp_path / "check.pdf", 2)), "inspection_pdf")
+    assert "当日第 2 次" in api.entries.get(entry_id)["check_message"]
+
+    # 发票号码改过以后，原来的查验单对不上了：给出查验单类提醒，不再用它的查验次数。
+    other = "26000000000000000002"
+    assert api.correct_locked_field(entry_id, "invoice_no", other)["ok"]
+    entry = api.entries.get(entry_id)
+    assert entry["check_status"] == "warning"
+    assert "当日第 2 次" not in entry["check_message"]
+    mismatch = [line for line in entry["check_lines"] if NUMBER in line["text"]]
+    assert len(mismatch) == 1 and other in mismatch[0]["text"]
+    assert mismatch[0]["category"] == "inspection"
+    assert "inspection" in entry["check_open"]
+
+    assert api.correct_locked_field(entry_id, "invoice_no", NUMBER)["ok"]
+    entry = api.entries.get(entry_id)
+    assert not [line for line in entry["check_lines"] if "不一致" in line["text"]]
+    assert "当日第 2 次" in entry["check_message"]

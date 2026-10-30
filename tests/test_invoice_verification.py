@@ -804,7 +804,7 @@ def test_batch_verification_requires_selection(api):
     assert "请先选择" in result["error"]
 
 
-def test_batch_verification_skips_entries_without_required_fields(api):
+def test_batch_verification_skips_entries_without_required_fields(api, monkeypatch):
     import hashlib
     import json
     from tidoc.services import payment_ai
@@ -814,6 +814,8 @@ def test_batch_verification_skips_entries_without_required_fields(api):
         (cfg["provider"] + "\n" + cfg["base_url"]).encode()).hexdigest()
     api._set_preference_value(payment_ai.CONFIG_KEY, json.dumps(cfg))
     api._set_preference_value(slot, "sk-test")
+    # 自动保存查验单只支持 macOS / Windows；Linux 上会先因平台被拒绝。
+    monkeypatch.setattr(sys, "platform", "darwin")
     profile = api.profiles.create("张三", "李老师")
     entry_id = api.entries.create(
         profile["id"], parsed=ParsedInvoice(invoice_no="26957000000168907686"))

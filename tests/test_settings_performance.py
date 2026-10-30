@@ -120,6 +120,16 @@ def test_update_check_reads_the_manifest_without_holding_api_lock(api, monkeypat
         assert release.wait(5)
         return {'current_core_version': '0', 'updates': []}
     monkeypatch.setattr(updater, 'check_updates', check)
+    joined = Event()
+
+    class Jobs(dict):
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            if value is not None:
+                joined.set()  # A second caller found the request already on the way.
+            return value
+
+    api._update_check_jobs = Jobs()
     with ThreadPoolExecutor(max_workers=3) as pool:
         manual = pool.submit(api.check_updates)
         try:
@@ -127,6 +137,9 @@ def test_update_check_reads_the_manifest_without_holding_api_lock(api, monkeypat
             # The startup check joins the request already on the way instead of starting another.
             automatic = pool.submit(api.auto_check_updates)
             assert pool.submit(api.settings_data).result(timeout=2)['ok']
+            # Release only once the startup check has joined; on a slow runner it can otherwise
+            # start after the first request finished and fetch the manifest a second time.
+            assert joined.wait(5)
         finally:
             release.set()
         assert manual.result(timeout=2)['ok'] and automatic.result(timeout=2)['data']['checked']

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import re
 from urllib.error import HTTPError, URLError
 
@@ -20,9 +19,21 @@ from . import payment_ai
 
 PROMPT_VERSION = "captcha-1"
 MAX_TEXT_LENGTH = 8
+# 服务商限流后，下一次请求前多等几秒。
+RATE_LIMIT_PAUSE = 8
 # 允许汉字、英文字母和数字；字母不区分大小写，统一按小写提交。
 _TEXT_RE = re.compile(r"[0-9a-z\u4e00-\u9fff]+")
 _DATA_URL_RE = re.compile(r"^data:image/[a-zA-Z0-9.+-]+;base64,(.+)$", re.S)
+
+
+class CaptchaError(ValueError):
+    """识别失败。fatal 表示重试也不会好（Key 无效、余额不足等），应停止尝试；
+    pause 是下一次请求前建议多等的秒数。"""
+
+    def __init__(self, message: str, *, fatal: bool = False, pause: float = 0):
+        super().__init__(message)
+        self.fatal = fatal
+        self.pause = pause
 
 
 def mode_from_hint(hint: str) -> str:
@@ -196,7 +207,7 @@ def parse_result(raw) -> dict:
 def recognize(cfg, key: str, image: bytes | str, hint: str) -> dict:
     """识别一次验证码。每次调用都是新上下文，不复用上一次的结果。"""
     if not key or not cfg["base_url"]:
-        raise ValueError("请先在设置的开发者选项里填写 AI 识别的 Key")
+        raise CaptchaError("请先在设置的开发者选项里填写 AI 识别的 Key", fatal=True)
     raw_url, mask_url, mode = prepare(image, hint)
     payload = make_payload(cfg, raw_url, mask_url, mode)
     pricing = payment_ai.price_info(cfg)
@@ -205,15 +216,21 @@ def recognize(cfg, key: str, image: bytes | str, hint: str) -> dict:
             cfg["base_url"] + "/chat/completions", key, payload, 60
         )
     except HTTPError as exc:
-        labels = {401: "Key 无效", 403: "Key 无访问权限", 402: "余额不足",
-                  429: "请求受限，请降低并发"}
-        raise ValueError(labels.get(exc.code, f"服务请求失败（{exc.code}）")) from None
+        if exc.code == 429:
+            raise CaptchaError("AI 服务请求受限，稍后重试", pause=RATE_LIMIT_PAUSE) from None
+        fatal = {401: "Key 无效", 403: "Key 无访问权限", 402: "余额不足"}.get(exc.code)
+        if fatal:
+            raise CaptchaError(fatal, fatal=True) from None
+        raise CaptchaError(f"AI 服务请求失败（{exc.code}）") from None
     except (URLError, TimeoutError, OSError):
-        raise ValueError("网络超时，请重试") from None
+        raise CaptchaError("网络超时，请重试") from None
     except Exception:
-        raise ValueError("识别结果不完整，请重试") from None
+        raise CaptchaError("识别结果不完整，请重试") from None
     usage = response.get("usage") or {}
-    result = parse_result(response["result"])
+    try:
+        result = parse_result(response["result"])
+    except ValueError as exc:
+        raise CaptchaError(str(exc)) from None
     return {
         **result,
         "mode": mode,

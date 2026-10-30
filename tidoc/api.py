@@ -47,6 +47,8 @@ from .api_shared import (
     SHOW_CREATED_AT_PREF_KEY,
     INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY,
     INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY,
+    INVOICE_VERIFICATION_AUTO_CAPTCHA_PREF_KEY,
+    INVOICE_VERIFICATION_CAPTCHA_USAGE_PREF_KEY,
     UPDATE_LAST_CHECK_KEY,
     UPDATE_LAST_RESULT_KEY,
     MAX_DROPPED_FILE_BYTES,
@@ -160,7 +162,32 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
             "trash_source_after_archive": self._preference_value(
                 INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY, "0"
             ) == "1",
+            "auto_captcha": self._verification_auto_captcha_enabled(),
+            "auto_captcha_supported": sys.platform in ("darwin", "win32"),
+            **self._verification_captcha_usage(),
         }
+
+    @staticmethod
+    def _preference_flag(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _verification_auto_captcha_enabled(self) -> bool:
+        """「用 AI 自动填写验证码」总开关；没有保存过时默认开启。"""
+        return self._preference_value(INVOICE_VERIFICATION_AUTO_CAPTCHA_PREF_KEY, "1") != "0"
+
+    def _verification_captcha_usage(self) -> dict:
+        """验证码识别的累计次数和估算费用，只在本机统计，设置里显示。"""
+        try:
+            stats = json.loads(self._preference_value(
+                INVOICE_VERIFICATION_CAPTCHA_USAGE_PREF_KEY, "{}"))
+            return {
+                "captcha_calls": int(stats.get("count") or 0),
+                "captcha_cost": float(stats.get("cost") or 0),
+            }
+        except (TypeError, ValueError, AttributeError):
+            return {"captcha_calls": 0, "captcha_cost": 0.0}
 
     # ------------------------------------------------------------ 身份
     @_guard
@@ -267,6 +294,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         current = self._invoice_verification_preferences()
         watch_directory = current["watch_directory"]
         trash_source = current["trash_source_after_archive"]
+        auto_captcha = current["auto_captcha"]
 
         if "watch_directory" in values:
             watch_directory = str(values.get("watch_directory") or "").strip()
@@ -279,13 +307,9 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                     raise ValueError("查验单归档目录不能位于 tidoc 数据目录内。")
                 watch_directory = str(path)
         if "trash_source_after_archive" in values:
-            raw_trash_source = values["trash_source_after_archive"]
-            trash_source = (
-                raw_trash_source
-                if isinstance(raw_trash_source, bool)
-                else str(raw_trash_source).strip().lower()
-                in {"1", "true", "yes", "on"}
-            )
+            trash_source = self._preference_flag(values["trash_source_after_archive"])
+        if "auto_captcha" in values:
+            auto_captcha = self._preference_flag(values["auto_captcha"])
 
         self.db.conn.executemany(
             "INSERT INTO meta(key, value) VALUES(?, ?) "
@@ -296,13 +320,14 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                     INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY,
                     "1" if trash_source else "0",
                 ),
+                (
+                    INVOICE_VERIFICATION_AUTO_CAPTCHA_PREF_KEY,
+                    "1" if auto_captcha else "0",
+                ),
             ),
         )
         self.db.conn.commit()
-        return {
-            "watch_directory": watch_directory,
-            "trash_source_after_archive": trash_source,
-        }
+        return self._invoice_verification_preferences()
 
     @_guard
     def app_info(self):

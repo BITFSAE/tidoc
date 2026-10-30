@@ -20,6 +20,8 @@ INVOICE_VERIFICATION_WATCH_DIR_PREF_KEY = (
 INVOICE_VERIFICATION_TRASH_SOURCE_PREF_KEY = (
     "tidoc.invoiceVerification.trashSourceAfterArchive"
 )
+INVOICE_VERIFICATION_AUTO_CAPTCHA_PREF_KEY = "tidoc.invoiceVerification.autoCaptcha"
+INVOICE_VERIFICATION_CAPTCHA_USAGE_PREF_KEY = "tidoc.invoiceVerification.captchaUsage"
 UPDATE_LAST_CHECK_KEY = "tidoc.update.lastCheck"
 UPDATE_LAST_RESULT_KEY = "tidoc.update.lastResult"
 APP_LAST_SEEN_VERSION_KEY = "tidoc.update.lastSeenVersion"

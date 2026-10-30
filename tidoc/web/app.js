@@ -35,6 +35,8 @@ const State = {
   materialRequirements: {},
   verificationWatchDirectory: '',
   verificationTrashSource: false,
+  verificationAutoCaptcha: true,     // 设置里的「用 AI 自动填写验证码」总开关
+  verificationAutoSupported: false,  // 当前系统支持自动保存查验单
   activeDetailEntryId: null,
   activeDetailModal: null,
   updateStatus: null,
@@ -458,11 +460,20 @@ function cloudRecognitionVisible() {
   return invoiceCloudOcrVisible() || State.paymentAiAvailable;
 }
 
+// 批量查验依赖 AI 识别验证码：总开关打开、当前系统支持自动保存、已保存 Key 才显示入口。
+function verificationAutoVisible() {
+  return State.verificationAutoCaptcha && State.verificationAutoSupported && State.paymentAiAvailable;
+}
+
 function applyOcrUiVisibility() {
   const invoiceEnabled = invoiceCloudOcrVisible();
   const cloudEnabled = cloudRecognitionVisible();
   document.querySelectorAll('[data-ocr-ui]').forEach((el) => {
     el.classList.toggle('hidden', !(el.dataset.view ? invoiceEnabled : cloudEnabled));
+  });
+  const autoVisible = verificationAutoVisible();
+  document.querySelectorAll('[data-verification-auto-ui]').forEach((el) => {
+    el.classList.toggle('hidden', !autoVisible);
   });
 }
 
@@ -905,6 +916,9 @@ async function loadWorkflowPreferences() {
     await AdapterUI.refresh();
     State.verificationWatchDirectory = verification.watch_directory || '';
     State.verificationTrashSource = !!verification.trash_source_after_archive;
+    State.verificationAutoCaptcha = verification.auto_captcha !== false;
+    State.verificationAutoSupported = !!verification.auto_captcha_supported;
+    applyOcrUiVisibility();
     if (!State.verificationWatchDirectory && legacyVerificationWatch) {
       const migrated = await Api.setInvoiceVerificationPreferences({
         watch_directory: legacyVerificationWatch,
@@ -2940,7 +2954,7 @@ async function onlineVerificationFlow(entryId) {
     ? '设置中的归档目录，或下载、桌面、文档'
     : '下载、桌面或文档';
   const saveGuide = info.auto_save
-    ? '<li>点击官网「查验」后，发票详情出现时会自动保存查验单</li><li>请等待「查验单已保存」，材料会归入当前条目</li>'
+    ? '<li>官网显示发票详情后会自动保存查验单，不需要点击官网「打印」</li><li>请等待「查验单已保存」，材料会归入当前条目</li>'
     : `<li>查验成功后点击官网「打印」，在系统窗口另存为 PDF</li>
        <li>保存到${esc(archiveLocationHint)}后，请等待约 1–2 秒，软件会核对并归入当前条目</li>`;
   const body = el('div', 'verification-flow');
@@ -2961,12 +2975,12 @@ async function onlineVerificationFlow(entryId) {
     <label class="verification-auto">
       <input type="checkbox" data-verification-auto checked/>
       <span>用 AI 自动填写验证码</span>
-      <small>识别后自动提交；看不清或错误时换一张再试，最多 10 次</small>
+      <small>识别后自动提交，看不清或填错时换一张再试，最多 10 次。验证码图片会上传到 AI 服务商，按量计费</small>
     </label>` : ''}
     <div class="verification-guide">
       <ul>
         <li>${info.auto_available
-          ? '勾选上面的选项后由 AI 识别并填写验证码；取消勾选可在官网手动填写，通常不区分大小写'
+          ? '取消勾选，或 AI 没有通过验证码时，可以在官网手动填写，通常不区分大小写'
           : '验证码在官网填写，通常不区分大小写'}</li>
         ${saveGuide}
         ${!info.auto_save && State.verificationTrashSource
@@ -3042,6 +3056,8 @@ async function onlineVerificationFlow(entryId) {
       }
       if (result.state === 'processing') {
         setStatus('working', '正在保存并核对查验单', '处理完成后会自动归入当前条目…');
+      } else if (result.auto_save_rejected && result.message) {
+        setStatus('error', '还未归档', result.message);
       } else if (result.auto_state === 'failed') {
         setStatus('error', '自动查验未完成', result.auto_message
           || '可以在官网手动填写验证码，或重新打开查验。');
@@ -3051,10 +3067,10 @@ async function onlineVerificationFlow(entryId) {
       } else if (result.auto_state && result.auto_state !== 'success') {
         const autoTitles = {
           starting: '正在打开查验平台',
-          waiting: 'AI 正在等待验证码',
+          waiting: '正在读取验证码',
           recognizing: 'AI 正在识别验证码',
           submitting: '正在提交验证码',
-          retry: '验证码未通过，正在重试',
+          retry: '正在换一张验证码重试',
         };
         setStatus('working', autoTitles[result.auto_state] || 'AI 正在自动查验',
           result.auto_message || '');
@@ -3107,9 +3123,11 @@ async function onlineVerificationFlow(entryId) {
     stopPolling();
     await syncEntryAfterChange(entryId, { affectsStatus: true });
     const warning = result.cleanup_warning || '';
-    const detail = warning || (result.source_trashed
+    const captchaCost = Number(result.auto_cost) > 0
+      ? `验证码识别费用：${PaymentAiUI.money(Number(result.auto_cost))}。` : '';
+    const detail = warning || ((result.source_trashed
       ? '已归入当前条目，原 PDF 已移到废纸篓或回收站。'
-      : '已归入当前条目的查验材料。');
+      : '已归入当前条目的查验材料。') + captchaCost);
     setStatus(warning ? 'done warning' : 'done', '查验单已保存', detail);
     openBtn.style.display = 'none';
     chooseBtn.style.display = 'none';
@@ -3157,7 +3175,7 @@ async function openBatchVerification(ids) {
   const aiReady = !!State.paymentAiAvailable;
   body.innerHTML = `
     <div class="hint">${aiReady
-      ? '用 AI 识别验证码后自动提交，每个条目最多尝试 10 次。查验单会自动保存到对应条目。'
+      ? '用 AI 识别验证码后自动提交，每个条目最多尝试 10 次，查验单自动保存到对应条目。验证码图片会上传到 AI 服务商，按量计费。'
       : '还没有保存 AI 识别的 Key，请先在「设置 → 开发者选项 → 付款截图 AI 识别」里填写。'}</div>
     <div class="verification-batch-head">
       <label>同时查验
@@ -3187,6 +3205,17 @@ async function openBatchVerification(ids) {
   let jobId = '';
   let timer = null;
   let done = false;
+  const skippedHere = entries.length - runnable;
+
+  const describe = (job) => {
+    const cancelled = (job.items || []).filter((item) => item.state === 'cancelled').length;
+    const parts = [job.done ? '已结束' : `进度 ${job.completed}/${job.total}`, `已保存 ${job.succeeded} 条`];
+    if (job.failed) parts.push(`未完成 ${job.failed} 条`);
+    if (cancelled) parts.push(`已取消 ${cancelled} 条`);
+    if (skippedHere + job.skipped) parts.push(`跳过 ${skippedHere + job.skipped} 条`);
+    if (job.cost > 0) parts.push(`识别费用 ${PaymentAiUI.money(job.cost)}`);
+    return parts.join(' · ');
+  };
 
   const render = (items) => {
     items.forEach((item) => {
@@ -3199,7 +3228,9 @@ async function openBatchVerification(ids) {
       const detail = item.state === 'verifying'
         ? `${autoLabels[item.auto_state] || '自动查验中'}${item.attempts ? ` · 第 ${item.attempts} 次` : ''}`
         : (item.message || label);
-      row.querySelector('.verification-batch-state').textContent = detail;
+      const stateNode = row.querySelector('.verification-batch-state');
+      stateNode.textContent = detail;
+      stateNode.title = item.state === 'failed' ? detail : '';
     });
   };
 
@@ -3208,17 +3239,13 @@ async function openBatchVerification(ids) {
     try {
       const job = await Api.invoiceVerificationBatchStatus(jobId);
       render(job.items || []);
+      summary.classList.remove('hidden');
+      summary.textContent = describe(job);
       if (job.done) {
         done = true;
-        stopBtn.disabled = true;
-        stopBtn.textContent = '已完成';
-        startBtn.style.display = 'none';
-        summary.classList.remove('hidden');
-        const cancelled = (job.items || []).filter((item) => item.state === 'cancelled').length;
-        summary.textContent = `完成 ${job.succeeded} 条，未完成 ${job.failed} 条`
-          + `${job.skipped ? `，跳过 ${job.skipped} 条` : ''}`
-          + `${cancelled ? `，已取消 ${cancelled} 条` : ''}`
-          + `${job.cost ? ` · 识别费用 ¥${Number(job.cost).toFixed(4)}` : ''}`;
+        stopBtn.style.display = 'none';
+        closeBtn.classList.remove('ghost');
+        closeBtn.classList.add('primary');
         await refreshEntries();
         return;
       }
@@ -3260,13 +3287,20 @@ async function openBatchVerification(ids) {
   });
   stopBtn.disabled = true;
   if (!aiReady || !runnable) startBtn.disabled = true;
-  const closeBtn = mkBtn('关闭', 'ghost', () => m.close());
+  const closeBtn = mkBtn('关闭', 'ghost', () => m.requestClose());
   const m = modal({
     title: '批量查验',
     subhead: 'AI 自动填写验证码；已有查验单的条目会跳过',
     body,
     wide: true,
     footer: [closeBtn, stopBtn, startBtn],
+    // 关闭窗口会取消剩余条目，进行中先确认，避免误以为会在后台继续。
+    guard: async () => !jobId || done || confirmDialog({
+      title: '批量查验还在进行',
+      message: '关闭窗口会取消剩余条目，已保存的查验单会保留。',
+      confirmText: '取消剩余并关闭',
+      cancelText: '继续查验',
+    }),
     onClose: () => {
       if (timer) clearTimeout(timer);
       if (jobId && !done) Api.cancelInvoiceVerificationBatch(jobId).catch(() => {});
@@ -4236,6 +4270,17 @@ async function buildSettings(options = {}) {
       <!-- 查验单归档 -->
       <div class="settings-block">
         <div class="settings-block-title">查验单</div>
+        ${verificationPrefs.auto_captcha_supported ? `
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>用 AI 自动填写验证码</b>
+            <span>在线查验和批量查验时由 AI 识别并提交验证码，实验性。使用「开发者选项」里付款截图 AI 识别的服务商和 Key，验证码图片会上传到该服务商，按量计费${verificationPrefs.captcha_calls
+              ? `；已识别 ${verificationPrefs.captcha_calls} 次${verificationPrefs.captcha_cost > 0 ? `，约 ${PaymentAiUI.money(verificationPrefs.captcha_cost)}` : ''}`
+              : ''}</span>
+          </div>
+          <label class="switch-line"><input type="checkbox" id="setVerificationAuto" aria-label="用 AI 自动填写验证码"
+            ${verificationPrefs.auto_captcha ? 'checked' : ''}/><span>${verificationPrefs.auto_captcha ? '已开启' : '已关闭'}</span></label>
+        </div>` : ''}
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>额外归档目录</b>
@@ -4486,6 +4531,29 @@ async function buildSettings(options = {}) {
     } catch (e) {
       ev.target.disabled = false;
       toast(e.message, 'err');
+    }
+  };
+  const autoCaptchaToggle = body.querySelector('#setVerificationAuto');
+  if (autoCaptchaToggle) autoCaptchaToggle.onchange = async (ev) => {
+    const enabled = ev.target.checked;
+    const label = ev.target.nextElementSibling;
+    ev.target.disabled = true;
+    try {
+      const result = await Api.setInvoiceVerificationPreferences({ auto_captcha: enabled });
+      State.verificationAutoCaptcha = !!result.auto_captcha;
+      label.textContent = State.verificationAutoCaptcha ? '已开启' : '已关闭';
+      applyOcrUiVisibility();
+      toast(
+        State.verificationAutoCaptcha
+          ? '在线查验时可以用 AI 自动填写验证码'
+          : '已关闭，在线查验需要在官网手动填写验证码',
+        'ok',
+      );
+    } catch (e) {
+      ev.target.checked = !enabled;
+      toast(e.message, 'err');
+    } finally {
+      ev.target.disabled = false;
     }
   };
   body.querySelector('#setVerificationTrash').onchange = async (ev) => {

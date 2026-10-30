@@ -8,7 +8,13 @@ import time
 import uuid
 from pathlib import Path
 from send2trash import send2trash
-from .api_shared import InspectionConflictError, _guard, _is_inside, activate_main_window
+from .api_shared import (
+    INVOICE_VERIFICATION_CAPTCHA_USAGE_PREF_KEY,
+    InspectionConflictError,
+    _guard,
+    _is_inside,
+    activate_main_window,
+)
 
 
 # 轮询约每 1.2 秒一次，同一份文件连续读取失败这么多次后不再等待。
@@ -22,6 +28,9 @@ AUTO_OUTCOME_TIMEOUT = 12
 AUTO_PAGE_TIMEOUT = 30
 BATCH_DEFAULT_CONCURRENCY = 2
 BATCH_MAX_CONCURRENCY = 4
+BATCH_MAX_ENTRIES = 100
+# 批量中单个条目从打开窗口到保存查验单的总时限（秒）。
+BATCH_ITEM_TIMEOUT = 600
 
 
 class InvoiceVerificationApi:
@@ -48,6 +57,16 @@ class InvoiceVerificationApi:
                 return self.attachments.update(target, src_path=path, note=note or None)
         return self.attachments.add(entry_id, path, TYPE_INSPECTION, note, role_id=role_id)
 
+    def _auto_captcha_blocker(self) -> str:
+        """不能用 AI 自动填写验证码的原因；可以使用时返回空字符串。"""
+        if sys.platform not in ("darwin", "win32"):
+            return "当前系统不支持自动保存查验单，请在官网手动查验"
+        if not self._verification_auto_captcha_enabled():
+            return "已在「设置 → 查验单」里关闭「用 AI 自动填写验证码」"
+        if not self._payment_ai_available():
+            return "请先在设置的开发者选项里填写 AI 识别的 Key"
+        return ""
+
     @_guard
     def invoice_verification_info(self, entry_id):
         """从已有发票材料准备官网查验表单，但不主动联网。"""
@@ -59,7 +78,7 @@ class InvoiceVerificationApi:
         return {
             **build_verification_info(entry),
             "auto_save": sys.platform in ("darwin", "win32"),
-            "auto_available": self._payment_ai_available() and sys.platform in ("darwin", "win32"),
+            "auto_available": not self._auto_captcha_blocker(),
         }
 
     @_guard
@@ -93,10 +112,9 @@ class InvoiceVerificationApi:
             raise ValueError("缺少发票号码，请先在条目详情补正发票号码。")
         if not info["invoice_date"]:
             raise ValueError("缺少开票日期，请先在条目详情补正开票日期。")
-        if auto and sys.platform not in ("darwin", "win32"):
-            raise ValueError("当前系统不支持自动保存查验单，请在官网手动查验")
-        if auto and not self._payment_ai_available():
-            raise ValueError("请先在设置的开发者选项里填写 AI 识别的 Key")
+        blocker = self._auto_captcha_blocker() if auto else ""
+        if blocker:
+            raise ValueError(blocker)
 
         session_id = uuid.uuid4().hex
         auto_save = sys.platform in ("darwin", "win32")
@@ -446,6 +464,18 @@ class InvoiceVerificationApi:
         if wait > 0:
             time.sleep(wait)
 
+    @staticmethod
+    def _auto_sleep(session: dict, seconds: float) -> bool:
+        """等待一段时间；中途被取消或窗口关闭时立即返回 False。"""
+        deadline = time.monotonic() + seconds
+        while True:
+            if session.get("auto_stop") or session.get("window_closed"):
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            time.sleep(min(0.5, remaining))
+
     def _auto_eval(self, window, method: str, argument: str = "") -> dict | None:
         call = f"window.__tidocAutoCaptcha.{method}({argument})" if argument else \
             f"window.__tidocAutoCaptcha.{method}()"
@@ -545,29 +575,25 @@ class InvoiceVerificationApi:
         return {"timeout": True}
 
     def _record_captcha_usage(self, value: dict, session: dict) -> None:
-        cost = value.get("cost")
-        if cost:
-            session["auto_cost"] = round(float(session.get("auto_cost") or 0) + float(cost), 6)
-        usage = value.get("usage") or {}
-        if not usage:
-            return
+        """累计本次会话和本机的验证码识别次数、估算费用（设置里显示）。"""
+        cost = float(value.get("cost") or 0)
+        session["auto_cost"] = round(float(session.get("auto_cost") or 0) + cost, 6)
         try:
             with self._api_lock:
                 stats = json.loads(self._preference_value(
-                    "tidoc.verification.captchaUsage", "{}"))
-                row = stats.setdefault("captcha", {
-                    "count": 0, "input": 0, "cached": 0, "output": 0, "cost": 0})
-                row["count"] += 1
-                row["input"] += usage.get("prompt_tokens", 0)
-                row["cached"] += usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                row["output"] += usage.get("completion_tokens", 0)
-                row["cost"] += cost or 0
+                    INVOICE_VERIFICATION_CAPTCHA_USAGE_PREF_KEY, "{}"))
                 self._set_preference_value(
-                    "tidoc.verification.captchaUsage", json.dumps(stats))
+                    INVOICE_VERIFICATION_CAPTCHA_USAGE_PREF_KEY,
+                    json.dumps({
+                        "count": int(stats.get("count") or 0) + 1,
+                        "cost": round(float(stats.get("cost") or 0) + cost, 6),
+                    }),
+                )
         except Exception:  # noqa: BLE001 - 统计失败不影响查验
             pass
 
     def _run_auto_verification(self, session: dict) -> None:
+        """在查验窗口里循环：读验证码、识别、提交，直到通过、失败或被取消。"""
         from .services import verification_captcha
 
         window = session.get("window")
@@ -585,11 +611,24 @@ class InvoiceVerificationApi:
         except Exception:  # noqa: BLE001
             self._set_auto_state(session, "failed", "查验平台加载失败", 0)
             return
-        time.sleep(0.6)
-        try:
-            self._auto_eval(window, "closeResult")
-        except Exception:  # noqa: BLE001
-            pass
+        if not self._auto_sleep(session, 0.6):
+            return
+        self._auto_eval(window, "closeResult")
+
+        def retry(attempt: int, message: str, pause: float) -> bool:
+            """换一张验证码；返回 False 表示等待时被取消。"""
+            self._set_auto_state(session, "retry", message, attempt)
+            self._auto_refresh(window)
+            return self._auto_sleep(session, pause)
+
+        def back_off(attempt: int, message: str, *, reload: bool) -> bool:
+            """官网提示访问频繁：等待后继续；返回 False 表示被取消或窗口已关闭。"""
+            self._set_auto_state(session, "backoff", message, attempt)
+            if not self._auto_sleep(session, CAPTCHA_FREQUENT_BACKOFF):
+                return False
+            return self._auto_reload(window) if reload else True
+
+        frequent = "官网提示访问过于频繁，稍后重试"
         for attempt in range(1, AUTO_MAX_ATTEMPTS + 1):
             if session.get("auto_stop") or session.get("window_closed"):
                 return
@@ -599,10 +638,7 @@ class InvoiceVerificationApi:
             if page.get("stopped"):
                 return
             if page.get("frequent"):
-                self._set_auto_state(
-                    session, "backoff", "官网提示访问过于频繁，稍后重试", attempt)
-                time.sleep(CAPTCHA_FREQUENT_BACKOFF)
-                if not self._auto_reload(window):
+                if not back_off(attempt, frequent, reload=True):
                     return
                 continue
             image = page.get("image")
@@ -616,22 +652,18 @@ class InvoiceVerificationApi:
             try:
                 result = verification_captcha.recognize(cfg, key, image, page.get("hint", ""))
             except Exception as exc:  # noqa: BLE001 - 单次识别失败不应结束整个任务
-                message = str(exc)
-                if any(word in message for word in ("Key", "余额", "证书", "接口", "设置")):
-                    self._set_auto_state(session, "failed", message, attempt)
+                if getattr(exc, "fatal", False):
+                    self._set_auto_state(session, "failed", str(exc), attempt)
                     return
-                self._set_auto_state(
-                    session, "retry", f"第 {attempt} 次识别失败：{message}", attempt)
-                self._auto_refresh(window)
-                time.sleep(1.5)
+                pause = 1.5 + float(getattr(exc, "pause", 0) or 0)
+                if not retry(attempt, f"第 {attempt} 次识别失败：{exc}", pause):
+                    return
                 continue
             self._record_captcha_usage(result, session)
             answer = result.get("text") or ""
             if result.get("uncertain") or not answer:
-                self._set_auto_state(
-                    session, "retry", f"第 {attempt} 次看不清，换一张验证码", attempt)
-                self._auto_refresh(window)
-                time.sleep(1.2)
+                if not retry(attempt, f"第 {attempt} 次看不清，换一张验证码", 1.2):
+                    return
                 continue
             before = int(page.get("checks") or 0)
             self._set_auto_state(
@@ -639,10 +671,8 @@ class InvoiceVerificationApi:
             submitted = self._auto_eval(
                 window, "submit", json.dumps(answer, ensure_ascii=False))
             if not submitted or not submitted.get("submitted"):
-                self._set_auto_state(
-                    session, "retry", "查验按钮暂不可用，重新填写", attempt)
-                self._auto_refresh(window)
-                time.sleep(1.5)
+                if not retry(attempt, "查验按钮暂不可用，重新填写", 1.5):
+                    return
                 continue
             outcome = self._auto_wait_outcome(session, before)
             if outcome.get("stopped"):
@@ -652,33 +682,26 @@ class InvoiceVerificationApi:
                     session, "success", "验证码通过，正在保存查验单", attempt)
                 return
             if outcome.get("frequent"):
-                self._set_auto_state(
-                    session, "backoff", "官网提示访问过于频繁，稍后重试", attempt)
-                time.sleep(CAPTCHA_FREQUENT_BACKOFF)
-                if not self._auto_reload(window):
+                if not back_off(attempt, frequent, reload=True):
                     return
                 continue
             if outcome.get("captcha_error"):
-                self._set_auto_state(
-                    session, "retry", f"第 {attempt} 次验证码错误，换一张", attempt)
-                self._auto_refresh(window)
-                time.sleep(1.2)
+                if not retry(attempt, f"第 {attempt} 次验证码错误，换一张", 1.2):
+                    return
                 continue
             if outcome.get("error"):
                 message = outcome["error"]
                 if any(word in message for word in ("频繁", "稍后")):
-                    self._set_auto_state(session, "backoff", message, attempt)
-                    time.sleep(CAPTCHA_FREQUENT_BACKOFF)
+                    if not back_off(attempt, message, reload=False):
+                        return
                     continue
                 self._set_auto_state(session, "failed", message, attempt)
                 return
             # 没有响应：可能是网络中断，换一张再试。
-            self._set_auto_state(
-                session, "retry", f"第 {attempt} 次没有等到查验结果", attempt)
-            self._auto_refresh(window)
-            time.sleep(1.5)
+            if not retry(attempt, f"第 {attempt} 次没有等到查验结果", 1.5):
+                return
         self._set_auto_state(
-            session, "failed", f"已尝试 {AUTO_MAX_ATTEMPTS} 次，仍未通过验证码")
+            session, "failed", f"已尝试 {AUTO_MAX_ATTEMPTS} 次，仍未通过验证码", AUTO_MAX_ATTEMPTS)
 
     @_guard
     def start_invoice_verification_batch(self, entry_ids=None, concurrency=None):
@@ -689,40 +712,34 @@ class InvoiceVerificationApi:
         ids = list(dict.fromkeys(str(value) for value in (entry_ids or [])))
         if not ids:
             raise ValueError("请先选择要查验的条目")
-        if len(ids) > 100:
-            raise ValueError("一次最多查验 100 个条目")
+        if len(ids) > BATCH_MAX_ENTRIES:
+            raise ValueError(f"一次最多查验 {BATCH_MAX_ENTRIES} 个条目")
         try:
             workers = int(concurrency or BATCH_DEFAULT_CONCURRENCY)
         except (TypeError, ValueError):
             workers = BATCH_DEFAULT_CONCURRENCY
         workers = max(1, min(BATCH_MAX_CONCURRENCY, workers))
-        if sys.platform not in ("darwin", "win32"):
-            raise ValueError("当前系统不支持自动保存查验单，请在官网手动查验")
-        if not self._payment_ai_available():
-            raise ValueError("请先在设置的开发者选项里填写 AI 识别的 Key")
+        blocker = self._auto_captcha_blocker()
+        if blocker:
+            raise ValueError(blocker)
 
         items, skipped = [], 0
         for entry_id in ids:
             entry = self.entries.get(entry_id)
-            blocker = ""
+            reason = ""
             if not entry:
-                blocker = "条目不存在"
-            else:
-                info = build_verification_info(entry)
-                if not info["complete"]:
-                    blocker = "缺少发票号码、开票日期或价税合计"
-                elif any(att["type"] == "inspection_pdf"
-                         for att in entry.get("attachments") or []):
-                    blocker = "已有查验单"
-            if blocker:
-                skipped += 1
+                reason = "条目不存在"
+            elif not build_verification_info(entry)["complete"]:
+                reason = "缺少发票号码、开票日期或价税合计"
+            elif entry.get("has_inspection"):
+                reason = "已有查验单"
+            skipped += bool(reason)
             items.append({
                 "entry_id": entry_id,
-                "invoice_no": (entry or {}).get("invoice_no", ""),
-                "label": (entry or {}).get("title") or (entry or {}).get("seller") or "条目",
-                "state": "skipped" if blocker else "queued",
-                "message": blocker,
+                "state": "skipped" if reason else "queued",
+                "message": reason,
                 "attempts": 0,
+                "cost": 0.0,
             })
         if skipped == len(items):
             raise ValueError("所选条目都缺少查验信息或已有查验单")
@@ -739,12 +756,11 @@ class InvoiceVerificationApi:
             "cancelled": False,
             "done": False,
             "started": time.monotonic(),
-            "cost": 0.0,
             "sessions": {},
             "lock": threading.Lock(),
         }
         with self._api_lock:
-            if any(not item["done"] for item in self._verification_batch_jobs.values()):
+            if any(not other["done"] for other in self._verification_batch_jobs.values()):
                 raise ValueError("请等待当前批量查验完成")
             for old in list(self._verification_batch_jobs):
                 if len(self._verification_batch_jobs) < 20:
@@ -753,140 +769,94 @@ class InvoiceVerificationApi:
                     del self._verification_batch_jobs[old]
             self._verification_batch_jobs[job_id] = job
 
+        def task(entry_id):
+            try:
+                self._run_batch_item(job, entry_id)
+            except Exception as exc:  # noqa: BLE001 - 单个条目失败不拖住整批
+                self._finish_batch_item(job, entry_id, "failed", str(exc) or "查验失败")
+
         def run():
             pending = [item["entry_id"] for item in items if item["state"] == "queued"]
-
-            def task(entry_id):
-                try:
-                    self._run_batch_item(job, entry_id)
-                except Exception as exc:  # noqa: BLE001 - 单个条目失败不拖住整批
-                    item = job["items"][entry_id]
-                    if item["state"] not in {"done", "failed", "cancelled"}:
-                        item["state"] = "failed"
-                        item["message"] = str(exc) or "查验失败"
-                        with job["lock"]:
-                            job["failed"] = job.get("failed", 0) + 1
-
             try:
                 with ThreadPoolExecutor(max_workers=workers,
                                         thread_name_prefix="verification") as pool:
                     list(pool.map(task, pending))
             finally:
                 job["done"] = True
-                job["finished"] = time.monotonic()
 
         threading.Thread(target=run, daemon=True, name="verification-batch").start()
         return {"id": job_id, "total": len(items), "skipped": skipped}
 
+    @staticmethod
+    def _finish_batch_item(job: dict, entry_id: str, state: str, message: str) -> None:
+        """每个条目只结束一次，并计入批次的成功或失败数。"""
+        item = job["items"][entry_id]
+        with job["lock"]:
+            if item["state"] in {"done", "failed", "cancelled", "skipped"}:
+                return
+            item["state"] = state
+            item["message"] = message
+            if state == "done":
+                job["succeeded"] += 1
+            elif state == "failed":
+                job["failed"] += 1
+
     def _run_batch_item(self, job: dict, entry_id: str) -> None:
-        def count(name):
-            with job["lock"]:
-                job[name] = job.get(name, 0) + 1
-
-        def add_cost(session):
-            if session:
-                with job["lock"]:
-                    job["cost"] = round(job.get("cost", 0) + float(
-                        session.get("auto_cost") or 0), 6)
-
         item = job["items"][entry_id]
         if job["cancelled"]:
-            item["state"] = "cancelled"
-            item["message"] = "已取消"
+            self._finish_batch_item(job, entry_id, "cancelled", "已取消")
             return
         item["state"] = "opening"
         item["message"] = "正在打开查验平台…"
         try:
             with self._api_lock:
                 if job["cancelled"]:
-                    item["state"] = "cancelled"
-                    item["message"] = "已取消"
+                    self._finish_batch_item(job, entry_id, "cancelled", "已取消")
                     return
                 opened = self._open_verification_session(entry_id, None, auto=True)
-            session_id = opened["session_id"]
-            with job["lock"]:
-                job["sessions"][entry_id] = session_id
-            item["state"] = "verifying"
-            item["message"] = "正在自动查验…"
+                session_id = opened["session_id"]
+                session = self._verification_sessions[session_id]
         except Exception as exc:  # noqa: BLE001 - 单个条目失败不应中断批次
-            item["state"] = "failed"
-            item["message"] = str(exc)
-            count("failed")
+            self._finish_batch_item(job, entry_id, "failed", str(exc) or "查验平台没有打开")
             return
+        with job["lock"]:
+            job["sessions"][entry_id] = session_id
+        item["state"] = "verifying"
+        item["message"] = "正在自动查验…"
+        try:
+            state, message = self._watch_batch_session(job, item, session_id, session)
+        finally:
+            item["cost"] = float(session.get("auto_cost") or 0)
+            # 无论成功、失败还是取消，都关闭窗口并移除会话，不留下临时文件。
+            self.close_invoice_verification(session_id)
+        self._finish_batch_item(job, entry_id, state, message)
 
-        deadline = time.monotonic() + 600
+    def _watch_batch_session(self, job: dict, item: dict, session_id: str, session: dict):
+        """等待一个自动查验会话结束，返回 (done | failed | cancelled, 说明)。"""
+        deadline = time.monotonic() + BATCH_ITEM_TIMEOUT
         while time.monotonic() < deadline:
             if job["cancelled"]:
-                with self._api_lock:
-                    session = self._verification_sessions.get(session_id)
-                    if session:
-                        item["attempts"] = int(session.get("auto_attempt") or 0)
-                        session["auto_stop"] = True
-                        self._close_verification_window(session)
-                add_cost(session)
-                item["state"] = "cancelled"
-                item["message"] = "已取消"
-                return
-            session = self._verification_sessions.get(session_id)
-            if session:
-                item["attempts"] = int(session.get("auto_attempt") or 0)
-                item["auto_state"] = session.get("auto_state") or ""
-                if session.get("auto_state"):
-                    item["message"] = session.get("auto_message") or ""
-                if session.get("auto_save_rejected"):
-                    item["state"] = "failed"
-                    item["message"] = session.get("last_message") or "自动保存查验单失败"
-                    count("failed")
-                    add_cost(session)
-                    with self._api_lock:
-                        self.close_invoice_verification(session_id)
-                    return
-                if session.get("auto_state") == "failed":
-                    item["state"] = "failed"
-                    item["message"] = session.get("auto_message") or "自动查验未完成"
-                    count("failed")
-                    add_cost(session)
-                    with self._api_lock:
-                        self.close_invoice_verification(session_id)
-                    return
-            try:
-                result = self.invoice_verification_status(session_id)
-            except Exception as exc:  # noqa: BLE001
-                item["state"] = "failed"
-                item["message"] = str(exc)
-                count("failed")
-                add_cost(session)
-                with self._api_lock:
-                    self.close_invoice_verification(session_id)
-                return
-            data = result.get("data") if isinstance(result, dict) else None
-            if data and data.get("state") == "attached":
-                item["state"] = "done"
-                item["message"] = data.get("message") or "查验单已保存"
-                count("succeeded")
-                add_cost(session)
-                return
-            if data and data.get("auto_state") == "failed":
-                item["state"] = "failed"
-                item["message"] = data.get("auto_message") or "自动查验未完成"
-                count("failed")
-                add_cost(session)
-                with self._api_lock:
-                    self.close_invoice_verification(session_id)
-                return
-            if data and data.get("window_closed"):
-                item["state"] = "failed"
-                item["message"] = "查验窗口已关闭"
-                count("failed")
-                add_cost(session)
-                return
+                return "cancelled", "已取消"
+            item["attempts"] = int(session.get("auto_attempt") or 0)
+            item["auto_state"] = session.get("auto_state") or ""
+            item["cost"] = float(session.get("auto_cost") or 0)
+            if item["auto_state"]:
+                item["message"] = session.get("auto_message") or ""
+            if session.get("auto_save_rejected"):
+                return "failed", session.get("last_message") or "自动保存查验单失败"
+            if item["auto_state"] == "failed":
+                return "failed", session.get("auto_message") or "自动查验未完成"
+            result = self.invoice_verification_status(session_id)
+            if not result.get("ok"):
+                # 例如查验过程中条目已被补上查验单：批量不弹确认框，也不替换。
+                return "failed", result.get("error") or "查验单没有保存"
+            data = result.get("data") or {}
+            if data.get("state") == "attached":
+                return "done", "查验单已保存"
+            if data.get("window_closed"):
+                return "failed", "查验窗口已关闭"
             time.sleep(1.0)
-        item["state"] = "failed"
-        item["message"] = "查验超时"
-        count("failed")
-        add_cost(session)
-        with self._api_lock:
-            self.close_invoice_verification(session_id)
+        return "failed", "查验超时"
 
     @_guard
     def invoice_verification_batch_status(self, job_id):
@@ -905,7 +875,7 @@ class InvoiceVerificationApi:
             "skipped": job["skipped"],
             "cancelled": job["cancelled"],
             "done": job["done"],
-            "cost": round(job.get("cost", 0), 6),
+            "cost": round(sum(item.get("cost") or 0 for item in items), 6),
             "elapsed": round(time.monotonic() - job["started"], 1),
             "items": items,
         }

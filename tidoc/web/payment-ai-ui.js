@@ -12,7 +12,7 @@ const PaymentAiUI = (() => {
   function markup(cfg) {
     return `<section class="dev-subsection payment-ai-settings" aria-label="付款截图 AI 识别">
       <div class="dev-subsection-title">付款截图 AI 识别 <small>实验性</small></div>
-      <div class="settings-note">在线查验的「用 AI 自动填写验证码」和批量查验也使用这里的服务商与 Key。</div>
+      <div class="settings-note">在线查验的「用 AI 自动填写验证码」和批量查验也使用这里的服务商与 Key，开关在「查验单」设置里。</div>
       <div class="settings-row"><label class="settings-row-copy" for="paymentAiProvider"><b>服务商</b>
         <span>每个服务商的 Key 分开保存，切换后自动换用</span></label>
         <div class="settings-row-control"><select id="paymentAiProvider" class="settings-select" data-ai-provider>${Object.entries(presets)

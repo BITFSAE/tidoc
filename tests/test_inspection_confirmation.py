@@ -211,3 +211,92 @@ def test_transient_save_error_is_retried_until_the_file_can_be_archived(api, tmp
     assert result['state'] == 'attached'
     assert len(api.attachments.list(entry_id)) == 1
     assert not output.exists()
+
+
+def chosen_session(api, tmp_path, entry_id, name='choice', **extra):
+    directory = tempfile.TemporaryDirectory(dir=tmp_path)
+    output = make_pdf(Path(directory.name) / 'automatic.pdf', 2, '2026-10-30 10:00:00')
+    session = {'id': name, 'entry_id': entry_id, 'invoice_no': NUMBER,
+               'auto_save_dir': directory, 'auto_save_path': output,
+               'window': None, 'window_closed': False, 'attached': None,
+               'watch_directories': [], 'before': {}, 'started_ns': time.time_ns(),
+               'candidate_sizes': {}, 'seen_candidates': set(), 'last_message': '',
+               'trash_source_after_archive': False, **extra}
+    api._verification_sessions[name] = session
+    assert api.invoice_verification_status(name)['data']['state'] == 'processing'
+    return session, output
+
+
+def test_choice_made_before_verifying_replaces_without_asking(api, tmp_path):
+    entry_id, old = existing_entry(api, tmp_path)
+    session, output = chosen_session(api, tmp_path, entry_id, inspection_mode='replace')
+    result = api.invoice_verification_status('choice')
+    assert result['ok'], result
+    data = result['data']
+    assert data['state'] == 'attached' and data['replaced'] is True
+    assert data['message'] == '查验单已替换原有的查验单。'
+    assert data['inspection']['count'] == 2 and data['inspection']['count_scope'] == 'day'
+    attachments = api.attachments.list(entry_id)
+    assert [a['id'] for a in attachments] == [old['id']]
+    assert api.attachments.get(old['id'])['sha256'] != old['sha256'], '原文件已被新查验单替换'
+    # 再次读取状态返回同样的结果，不重复保存。
+    again = api.invoice_verification_status('choice')['data']
+    assert again['replaced'] is True and again['inspection']['count'] == 2
+    assert len(api.attachments.list(entry_id)) == 1
+    assert '当日第 2 次' in api.entries.get(entry_id)['check_message']
+
+
+def test_choice_made_before_verifying_can_keep_both(api, tmp_path):
+    entry_id, old = existing_entry(api, tmp_path)
+    chosen_session(api, tmp_path, entry_id, inspection_mode='keep')
+    data = api.invoice_verification_status('choice')['data']
+    assert data['state'] == 'attached' and data['replaced'] is False
+    assert len(api.attachments.list(entry_id)) == 2
+    assert '2 份查验单' in api.entries.get(entry_id)['check_message']
+
+
+def test_chosen_file_is_replaced_and_a_missing_one_falls_back_to_the_newest(api, tmp_path):
+    entry_id, first = existing_entry(api, tmp_path)
+    second = api.attachments.add(entry_id, make_pdf(tmp_path / 'second.pdf', 1, '2026-10-29 15:00:00'), 'inspection_pdf')
+    chosen_session(api, tmp_path, entry_id, inspection_mode='replace', inspection_replace_id=first['id'])
+    assert api.invoice_verification_status('choice')['data']['state'] == 'attached'
+    assert {a['id'] for a in api.attachments.list(entry_id)} == {first['id'], second['id']}
+    assert Path(api.attachments.get(first['id'])['abs_path']).is_file()
+    assert api.attachments.get(first['id'])['sha256'] != first['sha256']
+    assert api.attachments.get(second['id'])['sha256'] == second['sha256']
+
+    (tmp_path / 'other').mkdir()
+    other_id, _ = existing_entry(api, tmp_path / 'other')
+    newest = api.attachments.list(other_id)[-1]['id']
+    chosen_session(api, tmp_path, other_id, name='fallback', inspection_mode='replace',
+                      inspection_replace_id='removed-meanwhile')
+    assert api.invoice_verification_status('fallback')['data']['state'] == 'attached'
+    assert [a['id'] for a in api.attachments.list(other_id)] == [newest]
+
+
+def test_choice_follows_materials_changed_while_verifying(api, tmp_path):
+    entry_id, old = existing_entry(api, tmp_path)
+    chosen_session(api, tmp_path, entry_id, inspection_mode='replace')
+    added = api.attachments.add(entry_id, make_pdf(tmp_path / 'late.pdf', 1, '2026-10-29 15:00:00'), 'inspection_pdf')
+    assert api.invoice_verification_status('choice')['data']['state'] == 'attached'
+    # 查验期间多出来的一份是最近添加的，被替换；先前的那份保持不变。
+    assert {a['id'] for a in api.attachments.list(entry_id)} == {old['id'], added['id']}
+    assert api.attachments.get(old['id'])['sha256'] == old['sha256']
+    assert api.attachments.get(added['id'])['sha256'] != added['sha256']
+
+
+def test_without_a_choice_the_conflict_still_asks(api, tmp_path):
+    entry_id, _ = existing_entry(api, tmp_path)
+    for mode in ('ask', 'unknown'):
+        session, _ = chosen_session(api, tmp_path, entry_id, name=mode, inspection_mode=mode)
+        assert api.invoice_verification_status(mode)['code'] == 'inspection_conflict'
+    assert len(api.attachments.list(entry_id)) == 1
+
+
+def test_choice_is_ignored_when_the_entry_has_no_inspection(api, tmp_path):
+    entry_id = new_entry(api)
+    chosen_session(api, tmp_path, entry_id, inspection_mode='replace')
+    data = api.invoice_verification_status('choice')['data']
+    assert data['state'] == 'attached' and data['replaced'] is False
+    assert data['message'] == '查验单已保存到当前条目。'
+    assert len(api.attachments.list(entry_id)) == 1

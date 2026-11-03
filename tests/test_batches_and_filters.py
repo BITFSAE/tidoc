@@ -358,10 +358,10 @@ def test_entry_list_uses_bounded_query_count(api, tmp_path):
     assert len({selects for _, selects in repo_counts}) == 1
     assert len({selects for _, selects in api_counts}) == 1
     # 原列表预取加上当前人工差异所需的原值、历史、明细和识别依据，
-    # 仍按条目集合批量读取，最多 14 次，不随条目数增加。
-    assert repo_counts[0][1] <= 14
+    # 仍按条目集合批量读取，最多 15 次，不随条目数增加（含卡片查验单标记读缓存的一次）。
+    assert repo_counts[0][1] <= 15
     # 接口层多一次 OCR 状态同步。
-    assert api_counts[0][1] <= 15
+    assert api_counts[0][1] <= 16
 
 
 def test_amount_filter_and_sort_are_numeric(repos):

@@ -8,6 +8,8 @@ from pypdf import PdfWriter
 from tidoc.engine.models import ParsedInvoice
 from tidoc.services.inspection_pdf import (
     INSPECTION_RECOGNITION_VERSION,
+    cached_inspection_info,
+    inspection_summary,
     latest_inspection_message,
     parse_inspection_text,
     read_inspection_pdf,
@@ -83,7 +85,43 @@ def test_missing_check_time_uses_comparable_added_time_format():
     assert latest_inspection_message([known, undated]) == ""
 
 
-def make_pdf(path, count=2, when="2026-10-29 13:56:27", number=NUMBER):
+def test_unreadable_count_is_a_reminder_unless_a_newer_first_check_exists():
+    unreadable = {"count": None, "added_at": "2026-10-29T08:00:00", "attachment_id": "a"}
+    message = latest_inspection_message([unreadable])
+    assert message.startswith("[查验单]") and "没有读出查验次数" in message
+    # 较新的第 1 次查验单可以确认这是第一次查验，不再提示。
+    newer_first = {"count": 1, "checked_at": "2026-10-29 09:00:00"}
+    assert latest_inspection_message([unreadable, newer_first]) == ""
+    # 更晚添加的读不出次数，就轮到它提示。
+    later_unreadable = {"count": None, "added_at": "2026-10-30T08:00:00", "attachment_id": "b"}
+    assert "没有读出查验次数" in latest_inspection_message([newer_first, later_unreadable])
+    assert latest_inspection_message([]) == ""
+
+
+def test_second_check_and_unreadable_count_use_different_reminders():
+    second = latest_inspection_message([{"count": 2, "count_scope": "day", "checked_at": "2026-10-29 08:00:00"}])
+    assert "当日第 2 次" in second and "没有读出" not in second
+
+
+def test_cached_info_needs_matching_version_and_digest():
+    stored = json.dumps({"count": 3, "sha256": "abc"})
+    assert cached_inspection_info(INSPECTION_RECOGNITION_VERSION, stored, "abc")["count"] == 3
+    assert cached_inspection_info(INSPECTION_RECOGNITION_VERSION, stored, "other") is None
+    assert cached_inspection_info("old-version", stored, "abc") is None
+    assert cached_inspection_info(INSPECTION_RECOGNITION_VERSION, "not json", "abc") is None
+    assert cached_inspection_info(INSPECTION_RECOGNITION_VERSION, "", "abc") is None
+
+
+def test_summary_keeps_only_what_the_detail_shows():
+    assert inspection_summary(None) == {"count": None, "count_scope": "unspecified", "checked_at": "", "invoice_no": ""}
+    summary = inspection_summary({"count": 2, "count_scope": "day", "checked_at": "2026-10-29 13:56:27",
+                                  "invoice_no": NUMBER, "sha256": "abc"})
+    assert summary == {"count": 2, "count_scope": "day", "checked_at": "2026-10-29 13:56:27", "invoice_no": NUMBER}
+    assert inspection_summary({"count": 0})["count"] is None
+
+
+def make_pdf(path, count=2, when="2026-10-29 13:56:27", number=NUMBER, header=None):
+    """header 不为空时只写这一行，用来做读不出查验次数的查验单。"""
     pytest.importorskip("reportlab")
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
@@ -92,7 +130,9 @@ def make_pdf(path, count=2, when="2026-10-29 13:56:27", number=NUMBER):
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     pdf = canvas.Canvas(str(path))
     pdf.setFont("STSong-Light", 10)
-    for index, line in enumerate([f"当日查验次数：第{count}次", f"查验时间：{when}", f"发票号码：{number}"]):
+    lines = [header] if header else [
+        f"当日查验次数：第{count}次", f"查验时间：{when}", f"发票号码：{number}"]
+    for index, line in enumerate(lines):
         pdf.drawString(40, 800 - 18 * index, line)
     pdf.save()
     return path
@@ -194,3 +234,97 @@ def test_inspection_for_another_invoice_number_is_a_reminder(api, tmp_path):
     entry = api.entries.get(entry_id)
     assert not [line for line in entry["check_lines"] if "不一致" in line["text"]]
     assert "当日第 2 次" in entry["check_message"]
+
+
+def test_detail_lists_each_inspection_pdf_with_its_check_number(api, tmp_path):
+    entry_id = new_entry(api)
+    first = api.add_attachment(entry_id, str(make_pdf(tmp_path / "first.pdf", 1)), "inspection_pdf")["data"]
+    second = api.add_attachment(entry_id, str(make_pdf(tmp_path / "second.pdf", 3, "2026-10-30 09:00:00")),
+                                "inspection_pdf", options={
+        "inspection_action": "keep", "inspection_existing_ids": [first["id"]]})["data"]
+    by_id = {att["id"]: att for att in api.entries.get(entry_id)["attachments"]}
+    assert by_id[first["id"]]["inspection"] == {
+        "count": 1, "count_scope": "day", "checked_at": "2026-10-29 13:56:27", "invoice_no": NUMBER}
+    assert by_id[second["id"]]["inspection"]["count"] == 3
+    assert api.entries.inspection_info(entry_id, second["id"])["checked_at"] == "2026-10-30 09:00:00"
+    assert api.entries.inspection_info(entry_id, "missing") is None
+
+
+def test_detail_reads_old_material_without_cache_and_other_types_have_no_summary(api, tmp_path):
+    entry_id = new_entry(api)
+    att = api.attachments.add(entry_id, make_pdf(tmp_path / "old.pdf", 2), "inspection_pdf")
+    other = api.attachments.add(entry_id, make_pdf(tmp_path / "doc.pdf", 2), "other")
+    assert not api.attachments.get(att["id"])["recognized_value"]
+    by_id = {a["id"]: a for a in api.entries.get(entry_id)["attachments"]}
+    assert by_id[att["id"]]["inspection"]["count"] == 2
+    assert "inspection" not in by_id[other["id"]]
+    # 只是读取，没有写库。
+    assert not api.attachments.get(att["id"])["recognized_value"]
+
+
+def test_inspection_without_a_readable_count_is_a_reminder_and_keeps_materials_complete(api, tmp_path):
+    entry_id = new_entry(api)
+    uncounted = make_pdf(tmp_path / "scan.pdf", header=f"全国增值税发票查验平台　发票号码：{NUMBER}")
+    complete = api.entries.get(entry_id)["completeness"]
+    added = api.add_attachment(entry_id, str(uncounted), "inspection_pdf")
+    assert added["ok"], added
+    att = added["data"]
+    entry = api.entries.get(entry_id)
+    assert entry["check_status"] == "warning"
+    lines = [line for line in entry["check_lines"] if line["category"] == "inspection"]
+    assert len(lines) == 1 and "没有读出查验次数" in lines[0]["text"]
+    assert "inspection" in entry["check_open"]
+    assert entry["completeness"]["missing"] == complete["missing"]
+    [detail] = [a for a in entry["attachments"] if a["id"] == att["id"]]
+    assert detail["inspection"]["count"] is None
+
+    # 换成正文写明第 1 次的查验单后，提醒消失。
+    assert api.update_attachment(att["id"], {"src_path": str(make_pdf(tmp_path / "ok.pdf", 1))})["ok"]
+    entry = api.entries.get(entry_id)
+    assert entry["check_status"] == "pass"
+    assert not [line for line in entry["check_lines"] if line["category"] == "inspection"]
+
+
+def test_card_overview_counts_files_and_reports_the_latest_check_in_list_and_detail(api, tmp_path):
+    plain = new_entry(api)
+    assert api.entries.get(plain)["inspection"] is None
+    assert [e for e in api.entries.list() if e["id"] == plain][0]["inspection"] is None
+
+    entry_id = api.entries.create(api.profiles.create("乙", "丙")["id"], parsed=ParsedInvoice(invoice_no=NUMBER))
+    first = api.add_attachment(entry_id, str(make_pdf(tmp_path / "a.pdf", 1)), "inspection_pdf")["data"]
+    listed = [e for e in api.entries.list() if e["id"] == entry_id][0]["inspection"]
+    assert listed == {"files": 1, "count": 1, "count_scope": "day", "checked_at": "2026-10-29 13:56:27"}
+
+    api.add_attachment(entry_id, str(make_pdf(tmp_path / "b.pdf", 4, "2026-10-30 09:00:00")), "inspection_pdf", options={
+        "inspection_action": "keep", "inspection_existing_ids": [first["id"]]})
+    expected = {"files": 2, "count": 4, "count_scope": "day", "checked_at": "2026-10-30 09:00:00"}
+    assert [e for e in api.entries.list() if e["id"] == entry_id][0]["inspection"] == expected
+    assert api.entries.get(entry_id)["inspection"] == expected
+
+
+def test_card_overview_for_unreadable_and_foreign_inspections(api, tmp_path):
+    entry_id = new_entry(api)
+    api.add_attachment(entry_id, str(make_pdf(tmp_path / "scan.pdf", header=f"全国增值税发票查验平台　发票号码：{NUMBER}")),
+                       "inspection_pdf")
+    assert api.entries.get(entry_id)["inspection"]["count"] is None
+    assert api.entries.get(entry_id)["inspection"]["files"] == 1
+    # 号码与条目不同的查验单不参与次数判断，但仍算一份。
+    other = api.entries.create(api.profiles.create("丁", "戊")["id"], parsed=ParsedInvoice(invoice_no="26000000000000000002"))
+    api.attachments.add(other, make_pdf(tmp_path / "foreign.pdf", 3), "inspection_pdf")
+    api.entries.recompute_status(other)
+    overview = [e for e in api.entries.list() if e["id"] == other][0]["inspection"]
+    assert overview["files"] == 1 and overview["count"] is None
+
+
+def test_list_does_not_open_pdfs_for_the_card_badge(api, tmp_path, monkeypatch):
+    from tidoc.services import inspection_pdf
+
+    entry_id = new_entry(api)
+    api.add_attachment(entry_id, str(make_pdf(tmp_path / "a.pdf", 2)), "inspection_pdf")
+
+    def refuse(path):
+        raise AssertionError("列表不能为卡片标记逐个读取 PDF")
+
+    monkeypatch.setattr(inspection_pdf, "read_inspection_pdf", refuse)
+    assert api.entries.list()[0]["inspection"]["count"] == 2
+

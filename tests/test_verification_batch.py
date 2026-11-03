@@ -230,9 +230,10 @@ def new_job(api, *entry_ids):
 def batch(api, monkeypatch):
     """用假的查验会话驱动 _run_batch_item，不打开窗口。"""
     monkeypatch.setattr(api_verification.time, "sleep", lambda seconds: None)
-    context = {"status": {"ok": True, "data": {"state": "waiting"}}, "opened": []}
+    context = {"status": {"ok": True, "data": {"state": "waiting"}}, "opened": [], "modes": {}}
 
-    def open_session(entry_id, fields=None, auto=False):
+    def open_session(entry_id, fields=None, auto=False, inspection_mode="ask", replace_id=""):
+        context["modes"][entry_id] = inspection_mode
         session = {"id": "s-" + entry_id, "auto": True, "auto_state": "waiting",
                    "auto_attempt": 3, "auto_message": "第 3 次", "auto_cost": 0.004,
                    "window": None, "window_closed": False}
@@ -315,7 +316,7 @@ def test_cancel_during_item_closes_its_window(api, batch):
 def test_open_failure_marks_item_failed(api, batch):
     job = new_job(api, "a")
 
-    def refuse(entry_id, fields=None, auto=False):
+    def refuse(entry_id, fields=None, auto=False, **options):
         raise ValueError("无法打开查验平台窗口。")
 
     api._open_verification_session = refuse
@@ -381,6 +382,114 @@ def test_batch_refuses_more_than_the_limit(api, supported):
     assert result["ok"] is False and str(api_verification.BATCH_MAX_ENTRIES) in result["error"]
 
 
+def add_inspection(api, entry_id, tmp_path, count=1, name="old.pdf", when="2026-10-29 13:56:27"):
+    from tests.test_inspection_pdf import make_pdf
+
+    return api.attachments.add(
+        entry_id, make_pdf(tmp_path / name, count, when, number="26957000000168907686"), "inspection_pdf")
+
+
+def run_batch(api, entry_ids, replace_existing=None):
+    """启动批量任务但不运行条目，返回 (任务编号, 各条目状态)。"""
+    ran = []
+    api._run_batch_item = lambda job, entry_id: ran.append(entry_id)
+    args = (entry_ids, 2) if replace_existing is None else (entry_ids, 2, replace_existing)
+    started = api.start_invoice_verification_batch(*args)["data"]
+    for _ in range(50):
+        status = api.invoice_verification_batch_status(started["id"])["data"]
+        if status["done"]:
+            break
+        time.sleep(0.05)
+    return started, {item["entry_id"]: item for item in status["items"]}, ran
+
+
+def test_batch_skips_entries_with_an_inspection_unless_told_to_replace(api, supported, tmp_path):
+    enable_payment_ai(api)
+    plain = make_entry(api)
+    checked = make_entry(api, invoice_no="26957000000168907687")
+    add_inspection(api, checked, tmp_path)
+
+    started, items, ran = run_batch(api, [plain, checked])
+    assert started["skipped"] == 1
+    assert items[checked]["state"] == "skipped" and items[checked]["message"] == "已有查验单"
+    assert ran == [plain]
+
+    started, items, ran = run_batch(api, [plain, checked], True)
+    assert started["skipped"] == 0
+    assert items[checked]["replace"] is True and items[plain]["replace"] is False
+    assert sorted(ran) == sorted([plain, checked])
+
+
+def test_batch_of_only_checked_entries_can_still_start_when_replacing(api, supported, tmp_path):
+    enable_payment_ai(api)
+    checked = make_entry(api)
+    add_inspection(api, checked, tmp_path)
+    refused = api.start_invoice_verification_batch([checked], 2)
+    assert refused["ok"] is False and "已有查验单" in refused["error"]
+    started, items, ran = run_batch(api, [checked], "true")
+    assert started["skipped"] == 0 and ran == [checked]
+
+
+def test_replacing_never_rescues_an_entry_missing_invoice_data(api, supported, tmp_path):
+    enable_payment_ai(api)
+    plain = make_entry(api)
+    incomplete = make_entry(api, invoice_no="26957000000168907687", total=None)
+    add_inspection(api, incomplete, tmp_path)
+    started, items, ran = run_batch(api, [plain, incomplete], True)
+    assert items[incomplete]["state"] == "skipped" and "缺少" in items[incomplete]["message"]
+    assert items[incomplete]["replace"] is False and ran == [plain]
+
+
+def test_only_entries_that_had_an_inspection_replace_it(api, batch):
+    job = new_job(api, "plain", "checked")
+    job["items"]["checked"]["replace"] = True
+    batch["status"] = {"ok": True, "data": {"state": "attached", "replaced": True,
+                                            "inspection": {"count": 2, "count_scope": "day"}}}
+    batch["run"](job, "plain")
+    batch["run"](job, "checked")
+    assert batch["modes"] == {"plain": "ask", "checked": "replace"}
+    assert job["items"]["checked"]["message"] == "查验单已替换 · 当日第 2 次查验"
+
+
+def test_saved_message_says_replaced_and_which_check_it_was():
+    message = InvoiceVerificationApi._batch_saved_message
+    assert message({}) == "查验单已保存"
+    assert message({"inspection": {"count": None}}) == "查验单已保存"
+    assert message({"inspection": {"count": 1, "count_scope": "unspecified"}}) == "查验单已保存 · 第 1 次查验"
+    assert message({"replaced": True, "inspection": {"count": 3, "count_scope": "day"}}) == \
+        "查验单已替换 · 当日第 3 次查验"
+
+
+def test_verification_info_lists_existing_inspections_with_their_check_number(api, supported, tmp_path):
+    entry_id = make_entry(api)
+    assert api.invoice_verification_info(entry_id)["data"]["existing_inspections"] == []
+    first = add_inspection(api, entry_id, tmp_path, 1, "one.pdf")
+    second = add_inspection(api, entry_id, tmp_path, 2, "two.pdf", "2026-10-30 09:00:00")
+    listed = api.invoice_verification_info(entry_id)["data"]["existing_inspections"]
+    assert [item["id"] for item in listed] == [first["id"], second["id"]]
+    assert listed[0]["name"] == "one.pdf" and listed[0]["count"] == 1
+    assert listed[1]["count"] == 2 and listed[1]["checked_at"] == "2026-10-30 09:00:00"
+    assert {"id", "name", "added_at", "count", "count_scope", "checked_at", "invoice_no"} <= set(listed[0])
+
+
+def test_start_passes_only_a_known_save_choice_to_the_session(api, monkeypatch):
+    calls = []
+    monkeypatch.setattr(api, "_open_verification_session",
+                        lambda entry_id, fields=None, auto=False, **options: calls.append((auto, options)) or {})
+    api.start_invoice_verification("e", None, False)
+    api.start_invoice_verification("e", None, True, {"mode": "replace", "replace_id": "att"})
+    api.start_invoice_verification("e", None, False, {"mode": "keep"})
+    api.start_invoice_verification("e", None, False, {"mode": "delete-everything"})
+    api.start_invoice_verification("e", None, False, "replace")
+    assert calls == [
+        (False, {"inspection_mode": "ask", "replace_id": ""}),
+        (True, {"inspection_mode": "replace", "replace_id": "att"}),
+        (False, {"inspection_mode": "keep", "replace_id": ""}),
+        (False, {"inspection_mode": "ask", "replace_id": ""}),
+        (False, {"inspection_mode": "ask", "replace_id": ""}),
+    ]
+
+
 # --------------------------------------------------------------------- 前端
 
 def test_batch_button_follows_switch_key_and_platform():
@@ -397,3 +506,69 @@ assert.equal(hidden(), true, '设置里关闭后不显示');
 State.verificationAutoCaptcha = true; State.verificationAutoSupported = false;
 assert.equal(hidden(), true, '系统不支持自动保存时不显示');
 """)
+
+
+def test_ai_captcha_switch_lives_in_developer_options_not_the_inspection_block():
+    from tests.test_selection_performance import SOURCE
+
+    source = SOURCE.read_text("utf-8")
+    developer = source[source.index('id="setDevOptions"'):]
+    developer = developer[:developer.index("</details>")]
+    assert 'id="setVerificationAuto"' in developer
+    assert "在线查验验证码 AI 识别" in developer
+    archive = source[source.index("<!-- 查验单归档 -->"):source.index("<!-- 数据位置 -->")]
+    assert "setVerificationAuto" not in archive
+    assert "setVerificationWatchPick" in archive
+
+
+def test_inspection_count_text_names_the_check_number_or_says_it_is_unreadable():
+    run_selection(r"""
+assert.equal(inspectionCountText({count: 1, count_scope: 'day', checked_at: '2026-10-29 13:56:27'}), '当日第 1 次查验 · 2026-10-29 13:56');
+assert.equal(inspectionCountText({count: 2, count_scope: 'unspecified', checked_at: ''}), '第 2 次查验');
+assert.equal(inspectionCountText({count: 3, count_scope: 'day', checked_at: '2026-10-29 13:56:27'}, false), '当日第 3 次查验');
+assert.equal(inspectionCountText({count: null}), '未读出查验次数');
+assert.equal(inspectionCountText(undefined), '未读出查验次数');
+""")
+
+
+def test_detail_marks_later_unreadable_and_foreign_inspections_as_reminders():
+    run_selection(r"""
+const hint = (inspection, entryNo = '123') => inspectionAttachmentHint({inspection}, entryNo);
+const first = hint({count: 1, count_scope: 'day', checked_at: '2026-10-29 13:56:27', invoice_no: '123'});
+assert.ok(first.includes('当日第 1 次查验 · 2026-10-29 13:56') && !first.includes('warn'));
+const second = hint({count: 2, count_scope: 'day', checked_at: '', invoice_no: '123'});
+assert.ok(second.includes('第 2 次查验') && second.includes('warn'));
+const unreadable = hint({count: null, invoice_no: ''});
+assert.ok(unreadable.includes('未读出查验次数') && unreadable.includes('请打开核对') && unreadable.includes('warn'));
+const foreign = hint({count: 1, invoice_no: '999'});
+assert.ok(foreign.includes('999') && foreign.includes('与条目不一致') && foreign.includes('warn'));
+assert.equal(inspectionAttachmentHint({}, '123'), '');
+// 发票号码读不出来时不能当作不一致。
+assert.ok(!hint({count: 1, invoice_no: ''}).includes('不一致'));
+""")
+
+
+def test_card_badge_shows_ordinal_unreadable_and_file_count_only_when_there_is_something_to_see():
+    run_selection(r"""
+const badge = (inspection, open = true) => inspectionCardBadge({inspection, check_open: open ? ['inspection'] : []});
+const chips = (inspection, open) => [...badge(inspection, open).html.matchAll(/>([^<]+)</g)].map(m => m[1]);
+const one = {files: 1, count: 1, count_scope: 'day', checked_at: '2026-10-29 13:56:27'};
+assert.deepEqual(chips(one), [], '第 1 次且只有一份：不显示');
+assert.equal(badge(one).tip, '');
+assert.deepEqual(chips(null), []);
+assert.deepEqual(chips({files: 0}), []);
+for (const [n, text] of [[2, '2nd'], [3, '3rd'], [4, '4th'], [11, '11th'], [12, '12th'], [13, '13th'], [21, '21st'], [22, '22nd'], [101, '101st'], [111, '111th']]) {
+  assert.deepEqual(chips({...one, count: n}), [text]);
+}
+assert.deepEqual(chips({...one, count: null}), ['?']);
+assert.deepEqual(chips({...one, files: 3}), ['×3'], '第 1 次但有多份：只显示份数');
+assert.deepEqual(chips({...one, count: 4, files: 2}), ['4th', '×2']);
+const tip = badge({...one, count: 4, files: 2}).tip;
+assert.ok(tip.includes('当日第 4 次查验') && tip.includes('共 2 份查验单'));
+assert.ok(badge({...one, count: null}).tip.includes('没有读出查验次数'));
+// 提醒核对过后标记变灰，仍然显示。
+assert.ok(badge({...one, count: 2}, true).html.includes('warn'));
+assert.ok(!badge({...one, count: 2}, false).html.includes('warn'));
+assert.deepEqual(chips({...one, count: 2}, false), ['2nd']);
+""")
+

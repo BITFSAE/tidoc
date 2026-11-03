@@ -226,6 +226,8 @@ class EntryRepo:
         entry["fields"] = self._fields(entry_id)
         entry["items"] = self._items(entry_id)
         entry["attachments"] = self._attachments(entry_id)
+        entry["inspection"] = self._inspection_overview(entry.get("invoice_no") or "", [
+            (att, att["inspection"]) for att in entry["attachments"] if att["type"] == "inspection_pdf"])
         entry["batches"] = self._batches(entry_id)
         entry["batch_id"] = entry["batches"][0]["id"] if entry["batches"] else None
         entry["batch_name"] = entry["batches"][0]["name"] if entry["batches"] else ""
@@ -328,7 +330,44 @@ class EntryRepo:
         rows = self.db.conn.execute(
             "SELECT * FROM attachments WHERE entry_id = ? ORDER BY added_at", (entry_id,)
         ).fetchall()
-        return [_row_to_dict(r) for r in rows]
+        attachments = [_row_to_dict(r) for r in rows]
+        for attachment in attachments:
+            if attachment["type"] == "inspection_pdf":
+                attachment["inspection"] = self._inspection_summary(attachment)
+        return attachments
+
+    @staticmethod
+    def _inspection_overview(invoice_no: str, items: list) -> dict | None:
+        from ..services.inspection_pdf import inspection_overview
+
+        return inspection_overview(invoice_no, items)
+
+    def _cached_inspection_overview(self, invoice_no: str, rows: list[dict]) -> dict | None:
+        from ..services.inspection_pdf import cached_inspection_info
+
+        return self._inspection_overview(invoice_no, [
+            (row, cached_inspection_info(row["recognition_version"], row["recognized_value"], row["sha256"]))
+            for row in rows])
+
+    def _inspection_summary(self, attachment: dict) -> dict:
+        """详情里显示第几次查验。缓存缺失（旧版本留下的材料）时临时读取正文，不写库。"""
+        from ..services.inspection_pdf import (
+            cached_inspection_info, inspection_summary, read_inspection_pdf,
+        )
+
+        info = cached_inspection_info(
+            attachment.get("recognition_version"), attachment.get("recognized_value"),
+            attachment.get("sha256"),
+        )
+        if info is None:
+            path = Path(self.db.db_path).parent / "attachments" / attachment["stored_path"]
+            info = read_inspection_pdf(path) if path.is_file() else None
+        return inspection_summary(info)
+
+    def inspection_info(self, entry_id: str, attachment_id: str) -> dict | None:
+        """一份查验单的次数与查验时间；材料不存在或不是查验单时返回 None。"""
+        return next((attachment["inspection"] for attachment in self._attachments(entry_id)
+                     if attachment["id"] == attachment_id and "inspection" in attachment), None)
 
     def _batches(self, entry_id: str) -> list[dict]:
         rows = self.db.conn.execute(
@@ -534,6 +573,7 @@ class EntryRepo:
         entry_ids = [r["id"] for r in rows]
         modified_by_entry = self._modified_fields_map(entry_ids)
         attachments_by_entry = {entry_id: {} for entry_id in entry_ids}
+        inspections_by_entry = {entry_id: [] for entry_id in entry_ids}
         fields_by_entry = {entry_id: {} for entry_id in entry_ids}
         batches_by_entry = {entry_id: [] for entry_id in entry_ids}
         role_counts_by_entry = {entry_id: {} for entry_id in entry_ids}
@@ -553,6 +593,12 @@ class EntryRepo:
                 f"WHERE entry_id IN ({placeholders}) GROUP BY entry_id,type,role_id,role_definition_revision_id",
                 batch_ids,
             ).fetchall()
+            for row in self.db.conn.execute(
+                "SELECT id, entry_id, added_at, sha256, recognition_version, recognized_value "
+                f"FROM attachments WHERE type='inspection_pdf' AND entry_id IN ({placeholders})",
+                batch_ids,
+            ):
+                inspections_by_entry[row["entry_id"]].append(dict(row))
             for row in attachment_rows:
                 by_type = attachments_by_entry[row["entry_id"]]
                 by_type[row["type"]] = by_type.get(row["type"], 0) + row["c"]
@@ -608,6 +654,9 @@ class EntryRepo:
             entry["has_payment"] = bool(by_type.get("payment_screenshot"))
             entry["has_physical"] = bool(by_type.get("physical_image"))
             entry["has_inspection"] = bool(by_type.get("inspection_pdf"))
+            # 只读已缓存的正文信息；没有缓存的材料启动时会补读，这里不为列表逐个打开 PDF。
+            entry["inspection"] = self._cached_inspection_overview(
+                entry.get("invoice_no") or "", inspections_by_entry[entry["id"]])
             entry["batches"] = batches_by_entry[entry["id"]]
             # 列表附上可改字段当前值（备注 / 实付金额 / 实际物资名），供卡片预览
             ef = fields_by_entry[entry["id"]]
@@ -1097,7 +1146,8 @@ class EntryRepo:
     def _refresh_inspection_check(self, entry_id: str) -> None:
         """缓存每份查验单的正文信息，随材料变化更新识别提醒。"""
         from ..services.inspection_pdf import (
-            INSPECTION_RECOGNITION_VERSION, latest_inspection_message, read_inspection_pdf,
+            INSPECTION_RECOGNITION_VERSION, cached_inspection_info, latest_inspection_message,
+            read_inspection_pdf,
         )
 
         entry = self.db.conn.execute(
@@ -1114,14 +1164,8 @@ class EntryRepo:
             path = Path(self.db.db_path).parent / "attachments" / row["stored_path"]
             if not path.is_file():
                 continue
-            info = None
-            if row["recognition_version"] == INSPECTION_RECOGNITION_VERSION:
-                try:
-                    cached = json.loads(row["recognized_value"])
-                    if isinstance(cached, dict) and cached.get("sha256") == row["sha256"]:
-                        info = cached
-                except (ValueError, TypeError):
-                    pass
+            info = cached_inspection_info(
+                row["recognition_version"], row["recognized_value"], row["sha256"])
             if info is None:
                 info = {**read_inspection_pdf(path), "sha256": row["sha256"]}
                 self.db.conn.execute(

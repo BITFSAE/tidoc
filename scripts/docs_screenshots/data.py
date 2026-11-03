@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import time
 from pathlib import Path
 
@@ -83,6 +84,20 @@ def _blank_pdf(path: Path, size: int) -> None:
         writer.write(handle)
 
 
+def _record_first_check(api, attachment: dict, invoice_no: str) -> None:
+    """虚构的查验单是空白 PDF，读不出查验次数，卡片会出现提醒；这里写入「当日第 1 次」的读取结果，
+    让截图里的查验单是正常状态（与软件读到真实查验单正文后保存的内容相同）。"""
+    from tidoc.services.inspection_pdf import INSPECTION_RECOGNITION_VERSION
+
+    info = {"invoice_no": invoice_no, "count": 1, "count_scope": "day",
+            "checked_at": "2026-09-20 10:00:00", "sha256": attachment["sha256"]}
+    api.db.conn.execute(
+        "UPDATE attachments SET recognition_version=?, recognition_status='recognized', recognized_value=? WHERE id=?",
+        (INSPECTION_RECOGNITION_VERSION, json.dumps(info, ensure_ascii=False), attachment["id"]),
+    )
+    api.db.conn.commit()
+
+
 def _blank_png(path: Path, color: tuple[int, int, int]) -> None:
     Image.new("RGB", (40, 40), color).save(path)
 
@@ -120,7 +135,7 @@ def seed(api, work_dir: Path) -> None:
             elif code == "q":
                 path = work_dir / f"inspection{n}.pdf"
                 _blank_pdf(path, 300 + n)
-                api.attachments.add(entry_id, str(path), TYPE_INSPECTION)
+                _record_first_check(api, api.attachments.add(entry_id, str(path), TYPE_INSPECTION), invoice_no)
             else:
                 path = work_dir / f"image{n}.png"
                 _blank_png(path, (200, 100 + n, 100) if code == "p" else (100, 100 + n, 200))

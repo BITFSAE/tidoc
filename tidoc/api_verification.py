@@ -62,7 +62,7 @@ class InvoiceVerificationApi:
         if sys.platform not in ("darwin", "win32"):
             return "当前系统不支持自动保存查验单，请在官网手动查验"
         if not self._verification_auto_captcha_enabled():
-            return "已在「设置 → 查验单」里关闭「用 AI 自动填写验证码」"
+            return "已在「设置 → 开发者选项」里关闭「用 AI 自动填写验证码」"
         if not self._payment_ai_available():
             return "请先在设置的开发者选项里填写 AI 识别的 Key"
         return ""
@@ -72,6 +72,8 @@ class InvoiceVerificationApi:
         """从已有发票材料准备官网查验表单，但不主动联网。"""
         from .services.invoice_verification import build_verification_info
 
+        from .db import TYPE_INSPECTION
+
         entry = self.entries.get(entry_id)
         if not entry:
             raise FileNotFoundError(f"条目不存在：{entry_id}")
@@ -79,14 +81,29 @@ class InvoiceVerificationApi:
             **build_verification_info(entry),
             "auto_save": sys.platform in ("darwin", "win32"),
             "auto_available": not self._auto_captcha_blocker(),
+            # 已有的查验单（含第几次查验），重新查验前让用户决定替换哪一份。
+            "existing_inspections": [
+                {"id": att["id"], "name": att["original_name"], "added_at": att["added_at"],
+                 **att["inspection"]}
+                for att in entry.get("attachments", []) if att["type"] == TYPE_INSPECTION
+            ],
         }
 
     @_guard
-    def start_invoice_verification(self, entry_id, fields=None, auto=False):
-        """用户主动打开税务官网，预填发票信息并创建结果保存会话。"""
-        return self._open_verification_session(entry_id, fields, auto=bool(auto))
+    def start_invoice_verification(self, entry_id, fields=None, auto=False, save=None):
+        """用户主动打开税务官网，预填发票信息并创建结果保存会话。
 
-    def _open_verification_session(self, entry_id, fields=None, auto=False):
+        save 是用户在开始前选好的保存方式：{"mode": "replace" | "keep", "replace_id": 查验单 id}。
+        条目已有查验单、又没有选择时，保存结果时再询问。
+        """
+        save = save if isinstance(save, dict) else {}
+        mode = save.get("mode") if save.get("mode") in ("replace", "keep") else "ask"
+        return self._open_verification_session(
+            entry_id, fields, auto=bool(auto),
+            inspection_mode=mode, replace_id=str(save.get("replace_id") or ""))
+
+    def _open_verification_session(self, entry_id, fields=None, auto=False,
+                                   inspection_mode="ask", replace_id=""):
         import webview
 
         from .services.invoice_verification import (
@@ -152,6 +169,8 @@ class InvoiceVerificationApi:
             "auto_message": "" if not auto else "正在打开查验平台…",
             "auto_stop": False,
             "auto_cost": 0.0,
+            "inspection_mode": inspection_mode,
+            "inspection_replace_id": replace_id,
             "trash_source_after_archive": verification_preferences[
                 "trash_source_after_archive"
             ],
@@ -264,6 +283,35 @@ class InvoiceVerificationApi:
             "auto_save_rejected": bool(session.get("auto_save_rejected")),
         }
 
+    @staticmethod
+    def _attached_fields(session: dict) -> dict:
+        return {
+            "inspection": session.get("inspection"),
+            "replaced": bool(session.get("replaced")),
+        }
+
+    def _session_inspection_options(self, session: dict) -> dict | None:
+        """开始前已选好「替换」或「另加一份」时，保存时直接按选择处理，不再询问。
+
+        已有查验单取保存当时的状态，所以查验期间有人增删了材料也能对上；
+        选好的那份已经不在时，改为替换最近添加的一份。
+        """
+        from .db import TYPE_INSPECTION
+
+        mode = session.get("inspection_mode")
+        if mode not in ("replace", "keep"):
+            return None
+        existing = [att["id"] for att in self.attachments.list(session["entry_id"])
+                    if att["type"] == TYPE_INSPECTION]
+        if not existing:
+            return None
+        target = session.get("inspection_replace_id")
+        return {
+            "inspection_action": mode,
+            "inspection_existing_ids": existing,
+            "inspection_replace_id": target if target in existing else existing[-1],
+        }
+
     @_guard
     def invoice_verification_status(self, session_id, options=None):
         """检测用户刚保存的官网查验单，确认归属后直接绑定到当前条目。"""
@@ -288,6 +336,7 @@ class InvoiceVerificationApi:
                 ),
                 "cleanup_warning": session.get("cleanup_warning", ""),
                 "source_trashed": bool(session.get("source_trashed")),
+                **self._attached_fields(session),
                 **self._auto_fields(session),
             }
 
@@ -361,15 +410,21 @@ class InvoiceVerificationApi:
                     processed = False
                     waiting_for_write = True
                     continue
+                chosen = options or self._session_inspection_options(session)
                 attachment = self._add_inspection_attachment(
                     session["entry_id"], path,
                     note=("由全国增值税发票查验平台自动保存" if automatic
                           else "由全国增值税发票查验平台原生打印保存"),
-                    options=options,
+                    options=chosen,
                 )
                 self.entries.recompute_status(session["entry_id"])
                 session["attached"] = attachment
-                result_message = "查验单已保存到当前条目。"
+                session["replaced"] = bool(
+                    chosen and chosen.get("inspection_action") == "replace")
+                session["inspection"] = self.entries.inspection_info(
+                    session["entry_id"], attachment["id"])
+                result_message = ("查验单已替换原有的查验单。" if session["replaced"]
+                                  else "查验单已保存到当前条目。")
                 cleanup_warning = ""
                 source_trashed = False
                 if session.get("trash_source_after_archive") and not automatic:
@@ -398,6 +453,7 @@ class InvoiceVerificationApi:
                     "message": result_message,
                     "cleanup_warning": cleanup_warning,
                     "source_trashed": source_trashed,
+                    **self._attached_fields(session),
                     **self._auto_fields(session),
                 }
             except InspectionConflictError:
@@ -704,8 +760,12 @@ class InvoiceVerificationApi:
             session, "failed", f"已尝试 {AUTO_MAX_ATTEMPTS} 次，仍未通过验证码", AUTO_MAX_ATTEMPTS)
 
     @_guard
-    def start_invoice_verification_batch(self, entry_ids=None, concurrency=None):
-        """批量自动查验。默认两个窗口并发，最多四个。"""
+    def start_invoice_verification_batch(self, entry_ids=None, concurrency=None,
+                                         replace_existing=False):
+        """批量自动查验。默认两个窗口并发，最多四个。
+
+        已有查验单的条目默认跳过；replace_existing 为真时重新查验，成功后替换其中最近添加的一份。
+        """
         from concurrent.futures import ThreadPoolExecutor
         from .services.invoice_verification import build_verification_info
 
@@ -723,16 +783,19 @@ class InvoiceVerificationApi:
         if blocker:
             raise ValueError(blocker)
 
+        replace_existing = self._preference_flag(replace_existing)
         items, skipped = [], 0
         for entry_id in ids:
             entry = self.entries.get(entry_id)
             reason = ""
+            replace = False
             if not entry:
                 reason = "条目不存在"
             elif not build_verification_info(entry)["complete"]:
                 reason = "缺少发票号码、开票日期或价税合计"
             elif entry.get("has_inspection"):
-                reason = "已有查验单"
+                replace = replace_existing
+                reason = "" if replace else "已有查验单"
             skipped += bool(reason)
             items.append({
                 "entry_id": entry_id,
@@ -740,6 +803,7 @@ class InvoiceVerificationApi:
                 "message": reason,
                 "attempts": 0,
                 "cost": 0.0,
+                "replace": replace,
             })
         if skipped == len(items):
             raise ValueError("所选条目都缺少查验信息或已有查验单")
@@ -747,6 +811,7 @@ class InvoiceVerificationApi:
         job_id = uuid.uuid4().hex
         job = {
             "id": job_id,
+            "replace_existing": replace_existing,
             "total": len(items),
             "items": {item["entry_id"]: item for item in items},
             "order": [item["entry_id"] for item in items],
@@ -813,7 +878,9 @@ class InvoiceVerificationApi:
                 if job["cancelled"]:
                     self._finish_batch_item(job, entry_id, "cancelled", "已取消")
                     return
-                opened = self._open_verification_session(entry_id, None, auto=True)
+                opened = self._open_verification_session(
+                    entry_id, None, auto=True,
+                    inspection_mode="replace" if item.get("replace") else "ask")
                 session_id = opened["session_id"]
                 session = self._verification_sessions[session_id]
         except Exception as exc:  # noqa: BLE001 - 单个条目失败不应中断批次
@@ -852,11 +919,21 @@ class InvoiceVerificationApi:
                 return "failed", result.get("error") or "查验单没有保存"
             data = result.get("data") or {}
             if data.get("state") == "attached":
-                return "done", "查验单已保存"
+                return "done", self._batch_saved_message(data)
             if data.get("window_closed"):
                 return "failed", "查验窗口已关闭"
             time.sleep(1.0)
         return "failed", "查验超时"
+
+    @staticmethod
+    def _batch_saved_message(data: dict) -> str:
+        """批量列表里每条保存结果的说明，带上这是第几次查验。"""
+        message = "查验单已替换" if data.get("replaced") else "查验单已保存"
+        info = data.get("inspection") or {}
+        if info.get("count"):
+            scope = "当日" if info.get("count_scope") == "day" else ""
+            message += f" · {scope}第 {info['count']} 次查验"
+        return message
 
     @_guard
     def invoice_verification_batch_status(self, job_id):

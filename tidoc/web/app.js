@@ -1636,6 +1636,7 @@ function entryCard(e) {
     ? `付款<span class="payment-count">×${paymentCount}</span>`
     : '付款';
   const onlineVerify = verificationVisible(e);
+  const inspectionBadge = inspectionCardBadge(e);
   const commonActions = [
     actionBtn('invoice', '发票', e.has_invoice, e.has_invoice ? '左键补充发票 PDF；右键打开已有材料' : '添加发票 PDF'),
     actionBtn('paid', '实付', !!paidCur, paidCur ? '已填写实付金额；点击修改' : '填写实付金额'),
@@ -1643,9 +1644,10 @@ function entryCard(e) {
       ? actionBtn('pay', paymentActionLabel, e.has_payment, e.has_payment ? `已有 ${paymentCount} 张付款截图；左键继续添加，右键打开最近一张` : '添加付款截图')
       : '',
     quickRole('inspection_pdf')
-      ? actionBtn('inspect', '查验', e.has_inspection, onlineVerify
-        ? (e.has_inspection ? '左键重新查验或补充；右键打开已有查验单' : '打开官网查验并自动归档 PDF')
-        : (e.has_inspection ? '左键补充查验单 PDF；右键打开已有查验单' : '添加查验单 PDF'))
+      ? actionBtn('inspect', `查验${inspectionBadge.html}`, e.has_inspection,
+        (inspectionBadge.tip ? `${inspectionBadge.tip}。` : '') + (onlineVerify
+          ? (e.has_inspection ? '左键重新查验或补充；右键打开已有查验单' : '打开官网查验并自动归档 PDF')
+          : (e.has_inspection ? '左键补充查验单 PDF；右键打开已有查验单' : '添加查验单 PDF')))
       : '',
     AdapterUI.cardActions(e),
   ].join('');
@@ -2940,6 +2942,33 @@ async function quickAddAttachment(entryId, type) {
   finally { progress?.close(); }
 }
 
+// 查验单正文里读到的次数，例如「当日第 2 次查验 · 2026-10-29 13:56」；读不出时直说读不出。
+function inspectionCountText(info, withTime = true) {
+  if (!info?.count) return '未读出查验次数';
+  const text = `${info.count_scope === 'day' ? '当日' : ''}第 ${info.count} 次查验`;
+  return withTime && info.checked_at ? `${text} · ${info.checked_at.slice(0, 16)}` : text;
+}
+
+// 卡片「查验」按钮上的小标记：最新一份不是第 1 次时写序数（2nd、4th），读不出次数写 ?，
+// 有多份查验单写 ×N；第 1 次且只有一份时不显示。查验单提醒已核对过的标记变灰。
+function inspectionCardBadge(entry) {
+  const info = entry.inspection;
+  if (!info?.files) return { html: '', tip: '' };
+  const count = Number(info.count) || 0;
+  const ordinal = (n) => `${n}${['th', 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || ['th', 'st', 'nd', 'rd'][n % 100] || 'th'}`;
+  const chips = [];
+  if (count > 1) chips.push(ordinal(count));
+  else if (!count) chips.push('?');
+  if (info.files > 1) chips.push(`×${info.files}`);
+  const tips = [count ? `最新一份：${inspectionCountText(info)}` : '最新一份没有读出查验次数'];
+  if (info.files > 1) tips.push(`共 ${info.files} 份查验单`);
+  const open = (entry.check_open || []).includes('inspection');
+  return {
+    html: chips.map((chip) => `<span class="inspection-count${open ? ' warn' : ''}">${esc(chip)}</span>`).join(''),
+    tip: chips.length ? tips.join('；') : '',
+  };
+}
+
 async function onlineVerificationFlow(entryId) {
   let info;
   try {
@@ -2957,6 +2986,19 @@ async function onlineVerificationFlow(entryId) {
     ? '<li>官网显示发票详情后会自动保存查验单，不需要点击官网「打印」</li><li>请等待「查验单已保存」，材料会归入当前条目</li>'
     : `<li>查验成功后点击官网「打印」，在系统窗口另存为 PDF</li>
        <li>保存到${esc(archiveLocationHint)}后，请等待约 1–2 秒，软件会核对并归入当前条目</li>`;
+  const existing = info.existing_inspections || [];
+  const existingBlock = existing.length ? `
+    <div class="verification-existing">
+      <b>条目已有 ${existing.length} 份查验单</b>
+      <ul>${existing.map((att) => `<li><span data-tooltip-overflow="${esc(att.name)}">${esc(att.name)}</span><small>${esc(inspectionCountText(att))}</small></li>`).join('')}</ul>
+      <label><span>重新查验后</span>
+        <select data-verification-save>
+          ${existing.map((att, index) => `<option value="replace:${esc(att.id)}"${index === existing.length - 1 ? ' selected' : ''}>${existing.length > 1 ? `替换「${esc(att.name)}」` : '替换这份查验单'}</option>`).join('')}
+          <option value="keep">另加一份，保留已有的</option>
+        </select>
+      </label>
+      <small>同一天内重新查验，新查验单会是第 2 次或以后，条目的「识别提醒」会写明次数。没查验成功时保留已有的查验单</small>
+    </div>` : '';
   const body = el('div', 'verification-flow');
   body.innerHTML = `
     <div class="verification-fields">
@@ -2971,6 +3013,7 @@ async function onlineVerificationFlow(entryId) {
           placeholder="按发票价税合计填写"/>
       </label>
     </div>
+    ${existingBlock}
     ${info.auto_available ? `
     <label class="verification-auto">
       <input type="checkbox" data-verification-auto checked/>
@@ -2999,6 +3042,14 @@ async function onlineVerificationFlow(entryId) {
   let closed = false;
   const status = body.querySelector('[data-verification-status]');
   const autoToggle = body.querySelector('[data-verification-auto]');
+  const saveSelect = body.querySelector('[data-verification-save]');
+  // 开始前选好替换哪一份或另加一份，保存时就不再询问；没有已有查验单时为 null。
+  const saveChoice = () => {
+    if (!saveSelect) return null;
+    return saveSelect.value === 'keep'
+      ? { mode: 'keep' }
+      : { mode: 'replace', replace_id: saveSelect.value.slice('replace:'.length) };
+  };
   const fields = () => Object.fromEntries(
     [...body.querySelectorAll('[data-verification-field]')].map((input) => [
       input.dataset.verificationField, input.value.trim(),
@@ -3046,6 +3097,8 @@ async function onlineVerificationFlow(entryId) {
         sessionId = '';
         openBtn.style.display = '';
         openBtn.disabled = false;
+        if (autoToggle) autoToggle.disabled = false;
+        if (saveSelect) saveSelect.disabled = false;
         body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = false; });
         setStatus('waiting', '已取消添加', '已有查验单保持不变。');
         return;
@@ -3097,11 +3150,12 @@ async function onlineVerificationFlow(entryId) {
     const auto = !!(autoToggle && autoToggle.checked);
     openBtn.disabled = true;
     if (autoToggle) autoToggle.disabled = true;
+    if (saveSelect) saveSelect.disabled = true;
     body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = true; });
     setStatus('working', '正在打开官网',
       auto ? 'AI 会自动填写验证码并提交，请等待查验结果…' : '加载完成后请填写验证码并点击“查验”…');
     try {
-      const result = await Api.startInvoiceVerification(entryId, values, auto);
+      const result = await Api.startInvoiceVerification(entryId, values, auto, saveChoice());
       sessionId = result.session_id;
       openBtn.style.display = 'none';
       setStatus('waiting', auto ? 'AI 正在自动查验' : (result.auto_save ? '请在官网填写验证码并查验' : '请在官网完成查验并打印'),
@@ -3112,6 +3166,7 @@ async function onlineVerificationFlow(entryId) {
     } catch (err) {
       openBtn.disabled = false;
       if (autoToggle) autoToggle.disabled = false;
+      if (saveSelect) saveSelect.disabled = false;
       body.querySelectorAll('[data-verification-field]').forEach((input) => { input.readOnly = false; });
       setStatus('error', '官网未打开', err.message);
     }
@@ -3125,9 +3180,16 @@ async function onlineVerificationFlow(entryId) {
     const warning = result.cleanup_warning || '';
     const captchaCost = Number(result.auto_cost) > 0
       ? `验证码识别费用：${PaymentAiUI.money(Number(result.auto_cost))}。` : '';
+    const countLine = result.inspection
+      ? (result.inspection.count > 1
+        ? `这是${inspectionCountText(result.inspection, false)}，条目的「识别提醒」里会写明次数。`
+        : result.inspection.count
+          ? `这是${inspectionCountText(result.inspection, false)}。`
+          : '查验单正文没有读出查验次数，「识别提醒」里会请你核对。')
+      : '';
     const detail = warning || ((result.source_trashed
       ? '已归入当前条目，原 PDF 已移到废纸篓或回收站。'
-      : '已归入当前条目的查验材料。') + captchaCost);
+      : result.replaced ? '已替换原有的查验单。' : '已归入当前条目的查验材料。') + countLine + captchaCost);
     setStatus(warning ? 'done warning' : 'done', '查验单已保存', detail);
     openBtn.style.display = 'none';
     chooseBtn.style.display = 'none';
@@ -3156,12 +3218,26 @@ async function openBatchVerification(ids) {
     toast('所选条目的方案没有开放在线查验', 'err');
     return;
   }
+  // 已有查验单的条目默认跳过；勾选「重新查验」后也查验，成功后替换原查验单。
+  let replaceExisting = false;
+  const inspectionCount = (entry) => Number(entry.attachment_types?.inspection_pdf || 0);
+  const hasInspection = (entry) => inspectionCount(entry) > 0;
+  // 查验单有未核对的提醒（读不出次数、第 2 次或以后、号码不一致、多份）：这些才最有理由重新查验。
+  const flagged = (entry) => (entry.check_open || []).includes('inspection');
+  const complete = (entry) => !!(entry.invoice_no && entry.invoice_date && entry.total);
   const noteFor = (entry) => {
-    if (!entry.invoice_no || !entry.invoice_date || !entry.total) return '缺少发票号码、开票日期或价税合计';
-    if (entry.attachment_types?.inspection_pdf) return '已有查验单，跳过';
+    if (!complete(entry)) return '缺少发票号码、开票日期或价税合计';
+    if (hasInspection(entry) && !replaceExisting) return `已有查验单${flagged(entry) ? '（有查验单提醒）' : ''}，跳过`;
     return '';
   };
-  const runnable = entries.filter((entry) => !noteFor(entry)).length;
+  const waitingText = (entry) => {
+    if (!hasInspection(entry)) return '等待开始';
+    return inspectionCount(entry) > 1 ? '等待开始 · 成功后替换最近的一份，其余保留' : '等待开始 · 成功后替换原查验单';
+  };
+  const runnableCount = () => entries.filter((entry) => !noteFor(entry)).length;
+  const reverifiableEntries = entries.filter((entry) => complete(entry) && hasInspection(entry));
+  const reverifiable = reverifiableEntries.length;
+  const reverifiableFlagged = reverifiableEntries.filter(flagged).length;
   const stateLabels = {
     queued: '排队中', opening: '正在打开', verifying: '自动查验中',
     done: '已保存', failed: '未完成', skipped: '已跳过', cancelled: '已取消',
@@ -3186,26 +3262,42 @@ async function openBatchVerification(ids) {
           <option value="4">4 个窗口</option>
         </select>
       </label>
-      <span>共 ${entries.length} 条，可立即查验 ${runnable} 条</span>
+      <span data-batch-count></span>
     </div>
+    ${reverifiable ? `<label class="verification-batch-replace">
+      <input type="checkbox" data-batch-replace/>
+      <span>已有查验单的 ${reverifiable} 条也重新查验${reverifiableFlagged ? `（${reverifiableFlagged} 条的查验单有提醒）` : ''}，成功后替换原查验单</span>
+      <small>同一天内重新查验，查验单上会是第 2 次或以后，条目的「识别提醒」会写明次数，核对后标为已核对即可。没查验成功的条目保留原来的查验单；每个条目都会再产生一次验证码识别费用</small>
+    </label>` : ''}
     <div class="verification-batch-list" data-batch-list>
-      ${entries.map((entry) => {
-        const note = noteFor(entry);
-        return `<div class="verification-batch-row ${note ? 'muted' : ''}" data-batch-row="${esc(entry.id)}">
+      ${entries.map((entry) => `<div class="verification-batch-row" data-batch-row="${esc(entry.id)}">
           <span class="verification-batch-name">${esc(entry.invoice_no || entry.seller || '未识别销售方')}</span>
           <span class="verification-batch-amount">${entry.total ? fmtMoney(entry.total) : ''}</span>
-          <span class="verification-batch-state">${note || '等待开始'}</span>
-        </div>`;
-      }).join('')}
+          <span class="verification-batch-state"></span>
+        </div>`).join('')}
     </div>
     <div class="verification-batch-summary hidden" data-batch-summary></div>`;
   const list = body.querySelector('[data-batch-list]');
   const concurrent = body.querySelector('[data-batch-concurrency]');
   const summary = body.querySelector('[data-batch-summary]');
+  const replaceBox = body.querySelector('[data-batch-replace]');
   let jobId = '';
   let timer = null;
   let done = false;
-  const skippedHere = entries.length - runnable;
+  let skippedHere = 0;
+
+  // 开始前按「重新查验」勾选情况刷新每行的说明和可查验数量。
+  const renderPlan = () => {
+    entries.forEach((entry) => {
+      const row = list.querySelector(`[data-batch-row="${entry.id}"]`);
+      const note = noteFor(entry);
+      row.classList.toggle('muted', !!note);
+      row.querySelector('.verification-batch-state').textContent = note || waitingText(entry);
+    });
+    const runnable = runnableCount();
+    body.querySelector('[data-batch-count]').textContent = `共 ${entries.length} 条，可立即查验 ${runnable} 条`;
+    startBtn.disabled = !aiReady || !runnable;
+  };
 
   const describe = (job) => {
     const cancelled = (job.items || []).filter((item) => item.state === 'cancelled').length;
@@ -3261,11 +3353,14 @@ async function openBatchVerification(ids) {
     startBtn.disabled = true;
     startBtn.textContent = '正在打开…';
     concurrent.disabled = true;
+    if (replaceBox) replaceBox.disabled = true;
     try {
       const job = await Api.startInvoiceVerificationBatch(
         entries.filter((entry) => !noteFor(entry)).map((entry) => entry.id),
         Number(concurrent.value) || 2,
+        replaceExisting,
       );
+      skippedHere = entries.length - runnableCount();
       jobId = job.id;
       stopBtn.disabled = false;
       startBtn.style.display = 'none';
@@ -3274,6 +3369,7 @@ async function openBatchVerification(ids) {
       startBtn.disabled = false;
       startBtn.textContent = '开始查验';
       concurrent.disabled = false;
+      if (replaceBox) replaceBox.disabled = false;
       summary.classList.remove('hidden');
       summary.textContent = err.message;
     }
@@ -3286,11 +3382,12 @@ async function openBatchVerification(ids) {
     catch (err) { toast(err.message, 'err'); }
   });
   stopBtn.disabled = true;
-  if (!aiReady || !runnable) startBtn.disabled = true;
+  if (replaceBox) replaceBox.onchange = () => { replaceExisting = replaceBox.checked; renderPlan(); };
+  renderPlan();
   const closeBtn = mkBtn('关闭', 'ghost', () => m.requestClose());
   const m = modal({
     title: '批量查验',
-    subhead: 'AI 自动填写验证码；已有查验单的条目会跳过',
+    subhead: 'AI 自动填写验证码；已有查验单的条目默认跳过，可勾选重新查验',
     body,
     wide: true,
     footer: [closeBtn, stopBtn, startBtn],
@@ -3467,7 +3564,7 @@ function openEntryMenu(x, y, e, options) {
   item('打开详情', () => openEntryDetail(e.id), false, 'Enter');
   item('填写实付金额', () => quickPaidFlow(e));
   if (roleQuick('payment_screenshot')) item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'));
-  if (roleQuick('inspection_pdf') && verificationVisible(e)) item('在线查验', () => onlineVerificationFlow(e.id));
+  if (roleQuick('inspection_pdf') && verificationVisible(e)) item(e.has_inspection ? '重新在线查验' : '在线查验', () => onlineVerificationFlow(e.id));
   if (roleQuick('inspection_pdf')) item('上传已有查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
   item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'));
   if (cloudRecognitionVisible()) item('云识别', () => openOcrDialog([e.id]));
@@ -4270,17 +4367,6 @@ async function buildSettings(options = {}) {
       <!-- 查验单归档 -->
       <div class="settings-block">
         <div class="settings-block-title">查验单</div>
-        ${verificationPrefs.auto_captcha_supported ? `
-        <div class="settings-row">
-          <div class="settings-row-copy">
-            <b>用 AI 自动填写验证码</b>
-            <span>在线查验和批量查验时由 AI 识别并提交验证码，实验性。使用「开发者选项」里付款截图 AI 识别的服务商和 Key，验证码图片会上传到该服务商，按量计费${verificationPrefs.captcha_calls
-              ? `；已识别 ${verificationPrefs.captcha_calls} 次${verificationPrefs.captcha_cost > 0 ? `，约 ${PaymentAiUI.money(verificationPrefs.captcha_cost)}` : ''}`
-              : ''}</span>
-          </div>
-          <label class="switch-line"><input type="checkbox" id="setVerificationAuto" aria-label="用 AI 自动填写验证码"
-            ${verificationPrefs.auto_captcha ? 'checked' : ''}/><span>${verificationPrefs.auto_captcha ? '已开启' : '已关闭'}</span></label>
-        </div>` : ''}
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>额外归档目录</b>
@@ -4353,7 +4439,7 @@ async function buildSettings(options = {}) {
 
       <!-- 开发者选项：需要自备服务账号、按量计费或面向方案维护的功能 -->
       <details class="settings-block dev-options" id="setDevOptions">
-        <summary class="settings-block-title">开发者选项<small>报账方案、付款截图 AI 识别、发票阿里云 OCR</small></summary>
+        <summary class="settings-block-title">开发者选项<small>报账方案、付款截图 AI 识别、查验验证码 AI 识别、发票阿里云 OCR</small></summary>
         <section class="dev-subsection" aria-label="报账方案">
           <div class="settings-row">
             <div class="settings-row-copy">
@@ -4364,6 +4450,20 @@ async function buildSettings(options = {}) {
           </div>
         </section>
         ${PaymentAiUI.markup(paymentAi)}
+        ${verificationPrefs.auto_captcha_supported ? `
+        <section class="dev-subsection" aria-label="在线查验验证码 AI 识别">
+          <div class="dev-subsection-title">在线查验验证码 AI 识别 <small>实验性</small></div>
+          <div class="settings-row">
+            <div class="settings-row-copy">
+              <b>用 AI 自动填写验证码</b>
+              <span>在线查验和批量查验时由 AI 识别并提交验证码。使用上面「付款截图 AI 识别」的服务商和 Key，验证码图片会上传到该服务商，按量计费${verificationPrefs.captcha_calls
+                ? `；已识别 ${verificationPrefs.captcha_calls} 次${verificationPrefs.captcha_cost > 0 ? `，约 ${PaymentAiUI.money(verificationPrefs.captcha_cost)}` : ''}`
+                : ''}</span>
+            </div>
+            <label class="switch-line"><input type="checkbox" id="setVerificationAuto" aria-label="用 AI 自动填写验证码"
+              ${verificationPrefs.auto_captcha ? 'checked' : ''}/><span>${verificationPrefs.auto_captcha ? '已开启' : '已关闭'}</span></label>
+          </div>
+        </section>` : ''}
         <section class="dev-subsection" aria-label="阿里云 OCR">
           <div class="dev-subsection-title">发票阿里云 OCR</div>
           <div class="settings-row is-actionable" id="setOcrManage">
@@ -5598,7 +5698,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const reclassifiableRoles = roles.filter((role) => role.id !== 'invoice' && role.reclassifiable !== false);
   const attRow = (a, byRole) => `
       <div class="attach-item">
-        <span class="attach-name" data-tooltip-overflow="${esc(a.original_name)}">${esc(a.original_name)}${a.type === 'payment_screenshot' ? paymentAttachmentBadge(a) : ''}${a.type === 'payment_screenshot' && a.recognition_message ? `<small class="attachment-ai-hint">${esc(a.recognition_message)}</small>` : ''}</span>
+        <span class="attach-name" data-tooltip-overflow="${esc(a.original_name)}">${esc(a.original_name)}${a.type === 'payment_screenshot' ? paymentAttachmentBadge(a) : ''}${a.type === 'payment_screenshot' && a.recognition_message ? `<small class="attachment-ai-hint">${esc(a.recognition_message)}</small>` : ''}${a.type === 'inspection_pdf' ? inspectionAttachmentHint(a, e.invoice_no) : ''}</span>
         <div class="attach-actions">
           ${byRole
             ? `<select class="attach-type-select" data-att-role="${a.id}" aria-label="调整材料角色">
@@ -5628,7 +5728,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
           <span class="att-group-required">${spec.required ? '必需' : '可选'}</span>
           <span class="att-group-status">${has ? `已上传 ${list.length}` : (spec.required ? '未上传' : '可选 · 未上传')}</span>
           <span class="att-group-actions">
-            ${spec.online ? '<button class="btn small att-group-add verify-online" data-online-verification>在线查验</button>' : ''}
+            ${spec.online ? `<button class="btn small att-group-add verify-online" data-online-verification>${has ? '重新查验' : '在线查验'}</button>` : ''}
             <button class="btn small att-group-add" ${spec.roleId ? `data-add-att-role="${esc(spec.roleId)}"` : `data-add-att-type="${esc(spec.addType)}"`}>＋ ${spec.online ? '上传' : '添加'}</button>
           </span>
         </div>
@@ -6102,6 +6202,18 @@ function paymentAttachmentBadge(a) {
   const text = a.recognized_value ? fmtMoney(a.recognized_value) : PAY_AI_STATUS[a.recognition_status] || '';
   const tip = `付款截图 AI 识别：${PAY_AI_STATUS[a.recognition_status] || a.recognition_status}${a.recognized_value ? ` ${fmtMoney(a.recognized_value)}` : ''}`;
   return `<span class="attachment-ai-amount${warn ? ' warn' : ''}" data-tooltip="${esc(tip)}">${text}${warn && a.recognized_value ? ' · 需核对' : ''}</span>`;
+}
+
+// 查验单正文里的次数写在文件名下面：第 2 次或以后、读不出次数、号码与条目不同都用提醒色。
+function inspectionAttachmentHint(a, entryInvoiceNo) {
+  const info = a.inspection;
+  if (!info) return '';
+  const mismatch = !!(info.invoice_no && entryInvoiceNo && info.invoice_no !== entryInvoiceNo);
+  const parts = [inspectionCountText(info)];
+  if (!info.count) parts.push('请打开核对是否为第 1 次查验');
+  if (mismatch) parts.push(`正文发票号码 ${info.invoice_no} 与条目不一致`);
+  const warn = mismatch || !info.count || info.count > 1;
+  return `<small class="attachment-ai-hint attachment-inspection-hint${warn ? ' warn' : ''}">${esc(parts.join(' · '))}</small>`;
 }
 
 const PAY_AI_STATUS = {

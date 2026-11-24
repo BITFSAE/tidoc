@@ -13,9 +13,9 @@ description: 下载 Tidoc 最新版安装包，Windows 和 macOS 各有一个。
 
 <TidocDownload />
 
-点击「下载」没有反应时，可以从下面两个入口下载，内容相同：
+点击上方按钮没有反应时，也可以通过下面两个入口下载，内容相同：
 
-- **官网**：打开 [www.bitfsae.com](https://www.bitfsae.com/)，在首页底部选择「报账软件」。
+- **直链下载**：[Windows 安装包（.exe）](https://www.bitfsae.com/api/downloads/tidoc-core/windows) · [macOS 安装包（.dmg）](https://www.bitfsae.com/api/downloads/tidoc-core/macos)
 - **GitHub Releases**：打开 [Releases 页面](https://github.com/BITFSAE/tidoc/releases/latest)，在最新版本的文件列表中选择安装包。
 
 安装包文件名如下，`{version}` 是版本号：

@@ -24,8 +24,8 @@ Tidoc 是一款跨平台桌面程序（Windows、macOS），以一张发票为�
 ## 下载
 
 - [文档站下载页](https://tidoc.bitfsae.com/start/install.html)：直接提供 Windows 和 macOS 最新版安装包的下载按钮。
-- [GitHub Releases](https://github.com/totok22/tidoc/releases/latest)：下载最新 Windows 或 macOS 安装包。
-- [BITFSAE 官网](https://www.bitfsae.com/)：首页底部选择「报账软件」。
+- [GitHub Releases](https://github.com/BITFSAE/tidoc/releases/latest)：下载最新 Windows 或 macOS 安装包。
+- [BITFSAE 官网](https://www.bitfsae.com/)：首页底部选择「报账软件」可直达本文档站。
 
 Windows 下载 `tidoc-core-windows-v{version}.exe` 后按提示安装。macOS 下载 `tidoc-core-macos-v{version}.dmg`，打开后把 Tidoc 拖入“应用程序”。
 

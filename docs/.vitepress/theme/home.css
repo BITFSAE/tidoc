@@ -191,11 +191,12 @@
   color: var(--vp-c-text-1);
 }
 .hero-tagline {
-  max-width: 33em;
+  max-width: 35em;
   margin: 18px 0 0;
-  font-size: clamp(15.5px, 1.6vw, 17px);
-  line-height: 1.8;
+  font-size: clamp(15.5px, 1.55vw, 16.5px);
+  line-height: 1.85;
   color: var(--vp-c-text-2);
+  text-wrap: pretty;
   /* 只在标点处换行，避免「打印件」这类词被拆在两行 */
   word-break: keep-all;
   overflow-wrap: anywhere;
@@ -344,10 +345,24 @@
   border-radius: 4px;
 }
 .feature-icon {
-  display: block;
-  margin-bottom: 18px;
-  line-height: 0;
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 16px;
+  border-radius: 10px;
+  background: var(--vp-c-brand-soft);
   color: var(--vp-c-brand-1);
+  transition: transform 200ms var(--home-ease), background-color 200ms ease;
+}
+.feature-icon svg {
+  width: 20px;
+  height: 20px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .feature:hover .feature-icon {
+    transform: translateY(-2px);
+  }
 }
 .feature-title {
   margin: 0 0 8px;
@@ -780,9 +795,13 @@
   justify-content: space-between;
   gap: 24px 40px;
   padding: 32px 36px;
-  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 24%, transparent);
   border-radius: 16px;
-  background: var(--vp-c-brand-soft);
+  background: linear-gradient(
+    135deg,
+    var(--vp-c-brand-soft) 0%,
+    color-mix(in srgb, var(--vp-c-brand-1) 4%, var(--vp-c-bg-soft)) 100%
+  );
 }
 .cta-title {
   margin: 0 0 6px;
@@ -847,16 +866,19 @@
 .feedback-link {
   display: inline-flex;
   align-items: center;
-  height: 36px;
+  height: 38px;
   padding: 0 16px;
   border: 1px solid var(--vp-c-divider);
-  border-radius: 8px;
+  border-radius: 10px;
   font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
   color: var(--vp-c-text-1) !important;
   text-decoration: none !important;
-  transition: border-color 160ms ease, color 160ms ease;
+  transition: border-color 160ms ease, color 160ms ease, transform 140ms var(--home-ease);
+}
+.feedback-link:active {
+  transform: scale(0.97);
 }
 .feedback-link:hover {
   border-color: var(--vp-c-brand-1);
@@ -910,6 +932,8 @@
   }
   .home-btn,
   .feature::before,
+  .feature-icon,
+  .feedback-link,
   .step::after,
   .step-num,
   .video-strip-icon,

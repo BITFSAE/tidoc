@@ -23,7 +23,7 @@ const PaymentAiUI = (() => {
           <button class="btn small" data-ai-save>保存</button><button class="btn small ghost" data-ai-clear>清除</button></div></div>
       <div class="settings-row"><div class="settings-row-copy"><b>添加截图时自动识别</b>
         <span>关闭后不会自动上传，仍可选中条目在「云识别」里手动识别</span></div>
-        <label class="switch-line"><input type="checkbox" aria-label="添加付款截图时自动识别" data-ai-enabled ${cfg.enabled ? 'checked' : ''}/><span>${cfg.enabled ? '已开启' : '已关闭'}</span></label></div>
+        <label class="switch-line"><input type="checkbox" role="switch" aria-label="添加付款截图时自动识别" data-ai-enabled ${cfg.enabled ? 'checked' : ''}/><span>${cfg.enabled ? '已开启' : '已关闭'}</span></label></div>
       <div class="settings-row"><div class="settings-row-copy"><b>费用估算</b><span class="payment-ai-cost" data-ai-cost></span></div>
         <button class="link-btn" type="button" data-ai-price-link>官方价格</button></div>
       <details class="settings-advanced payment-ai-advanced"><summary>高级选项</summary>
@@ -105,12 +105,19 @@ const PaymentAiUI = (() => {
         input_price: Number(field('input-price').value), output_price: Number(field('output-price').value) };
     }
     // changes 覆盖当前表单值；只有开关传 enabled，其余保存不改自动识别。
+    // 连续修改时只让最后一次保存的结果生效，避免较早的响应覆盖较新的编辑。
+    let saveSeq = 0;
     async function save(changes = {}, { key = null, clear = false, done = '' } = {}) {
+      const seq = ++saveSeq;
       showError('');
       root.classList.add('is-saving');
+      let saved = false;
       try {
         const wasEnabled = cfg.enabled;
-        cfg = await Api.savePaymentAiSettings({ ...values(), ...changes }, key, clear);
+        const next = await Api.savePaymentAiSettings({ ...values(), ...changes }, key, clear);
+        if (seq !== saveSeq) return;
+        cfg = next;
+        saved = true;
         $('#paymentAiKey').value = '';
         State.paymentAiEnabled = cfg.enabled && cfg.available;
         State.paymentAiAvailable = cfg.available;
@@ -118,10 +125,13 @@ const PaymentAiUI = (() => {
         const note = wasEnabled && !cfg.enabled && !('enabled' in changes) ? '，自动识别已关闭' : '';
         if (done) toast(done + note, 'ok');
       } catch (error) {
-        showError(error.message);
+        if (seq === saveSeq) showError(error.message);
       } finally {
-        root.classList.remove('is-saving');
-        render();
+        if (seq === saveSeq) {
+          root.classList.remove('is-saving');
+          // 保存失败时保留用户输入，只有成功保存后才按服务端数据重绘。
+          if (saved) render();
+        }
       }
     }
     field('provider').onchange = () => {

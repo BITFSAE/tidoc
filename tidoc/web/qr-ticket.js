@@ -267,7 +267,7 @@ function openQrFailureDialog(report) {
   const m = modal({
     title: '二维码取票没有成功',
     body,
-    footer: [mkBtn('关闭', 'primary', () => m.close())],
+    footer: [mkBtn('关闭', 'ghost', () => m.close())],
   });
   return m;
 }

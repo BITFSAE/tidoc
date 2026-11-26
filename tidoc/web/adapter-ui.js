@@ -240,6 +240,7 @@ const AdapterUI = (() => {
       const label = el('label', 'switch-line'), input = el('input'), text = el('span');
       input.type = 'checkbox';
       input.checked = value === true;
+      input.setAttribute('role', 'switch');
       input.setAttribute('aria-label', labels[key] || key);
       const paint = () => { text.textContent = input.checked ? '已开启' : '已关闭'; };
       input.onchange = () => { paint(); notify(); };
@@ -493,7 +494,10 @@ const AdapterUI = (() => {
       save.textContent = count ? `保存 ${count} 项更改` : '保存更改';
     };
     const save = mkBtn('保存更改', 'primary', () => view.save());
-    const resetAll = mkBtn('全部恢复默认', 'ghost', () => view.resetAll());
+    const resetAll = mkBtn('全部恢复默认', 'ghost', async () => {
+      const ok = await confirmDialog({ title: '恢复默认设置', message: '将当前方案的所有自定义设置恢复为默认值？', confirmText: '恢复默认', danger: true });
+      if (ok) view.resetAll();
+    });
     const confirmLeave = async () => {
       const count = view.dirtyCount();
       return !count || confirmAction({ title: '放弃未保存的更改？', message: `有 ${count} 项设置还没有保存，离开后这些修改会丢失。`, confirmText: '放弃更改', cancelText: '继续编辑', danger: true });
@@ -692,13 +696,19 @@ const AdapterUI = (() => {
     const body = el('div'); body.innerHTML = '<label class="form-row">副本名称<input data-copy-name/></label><p class="field-help">副本沿用当前的设置，收款信息和个人填写值不会复制。已有条目仍使用原方案。</p>';
     const input = $('[data-copy-name]', body); input.value = scheme.name + ' 副本';
     let m;
-    const submit = async () => { try { const copied = await Api.copyScheme(scheme.id, input.value); await refresh(); m.close(); if (onCopied) await onCopied(copied); toast('已复制方案', 'ok'); } catch (e) { showErrors(body, e); } };
-    m = modal({ title: '复制报账方案', key: 'scheme-copy', compact: true, body, footer: [mkBtn('取消', 'ghost', () => m.close()), mkBtn('复制', 'primary', submit)] });
+    let submitBtn;
+    const submit = async () => {
+      window.TidocUI?.setBusy(submitBtn, true);
+      try { const copied = await Api.copyScheme(scheme.id, input.value); await refresh(); m.close(); if (onCopied) await onCopied(copied); toast('已复制方案', 'ok'); } catch (e) { showErrors(body, e); }
+      finally { window.TidocUI?.setBusy(submitBtn, false); }
+    };
+    m = modal({ title: '复制报账方案', key: 'scheme-copy', compact: true, body, footer: [mkBtn('取消', 'ghost', () => m.close()), (submitBtn = mkBtn('复制', 'primary', submit))] });
     input.focus(); input.select();
   }
   async function exportScheme(scheme) {
     const body=el('div');body.innerHTML=`<p class="hint">公共包包含 ${scheme.definition.scheme.titles.length} 个抬头、${scheme.definition.materials.length} 类材料和 ${scheme.definition.outputs.length} 项输出。收款对象、账号、个人填写值及历史记录不包含在公共包中。</p><label class="form-row">方案标识<input data-package-id value="${esc(scheme.package_id)}"/></label><label class="form-row">名称<input data-package-name value="${esc(scheme.definition.manifest.name)}"/></label><label class="form-row">作者<input data-package-author value="${esc(scheme.definition.manifest.author||'')}"/></label><label class="form-row">说明<textarea data-package-description>${esc(scheme.definition.manifest.description||'')}</textarea></label>`;let m;
-    m=modal({title:'导出报账方案',key:'scheme-export',body,footer:[mkBtn('取消','ghost',()=>m.close()),mkBtn('导出','primary',async()=>{try{const r=await Api.exportAdapter(scheme.id,{package_id:$('[data-package-id]',body).value,name:$('[data-package-name]',body).value,author:$('[data-package-author]',body).value,description:$('[data-package-description]',body).value});if(!r.path){showErrors(body,new Error(r.message||'请填写修改后的方案标识'));return;}m.close();await Api.openPath(r.path);toast('方案已导出','ok');}catch(e){showErrors(body,e);}})]});
+    const exportBtn=mkBtn('导出','primary',async()=>{window.TidocUI?.setBusy(exportBtn,true);try{const r=await Api.exportAdapter(scheme.id,{package_id:$('[data-package-id]',body).value,name:$('[data-package-name]',body).value,author:$('[data-package-author]',body).value,description:$('[data-package-description]',body).value});if(!r.path){showErrors(body,new Error(r.message||'请填写修改后的方案标识'));return;}m.close();await Api.openPath(r.path);toast('方案已导出','ok');}catch(e){showErrors(body,e);}finally{window.TidocUI?.setBusy(exportBtn,false);}});
+    m=modal({title:'导出报账方案',key:'scheme-export',body,footer:[mkBtn('取消','ghost',()=>m.close()),exportBtn]});
   }
   async function editFields(scope,ownerId,schemeId=null,revisionId=null,onSaved=null) {
     try {
@@ -766,7 +776,7 @@ const AdapterUI = (() => {
     const form=SchemaForm.create({fields,values:person||{account_type:'personal_bank'}}); let m;
     // 只有方案声明了收款对象级附加字段时，保存后才需要继续填写。
     const hasPayeeFields=scheme.definition.fields.some(f=>f.scope==='payee');
-    const save=mkBtn('保存','primary',async()=>{try{const values=form.values();for(const field of ['name','personnel_id','contact','bank_name','account_number'])values[field]=values[field]??'';const updated=await Api.savePayee(person?.id||null,values);m.close();await onSaved();if(hasPayeeFields&&updated.id)await editFields('payee',updated.id,schemeId);}catch(e){form.errors(e);}});
+    const save=mkBtn('保存','primary',async()=>{window.TidocUI?.setBusy(save,true);try{const values=form.values();for(const field of ['name','personnel_id','contact','bank_name','account_number'])values[field]=values[field]??'';const updated=await Api.savePayee(person?.id||null,values);m.close();await onSaved();if(hasPayeeFields&&updated.id)await editFields('payee',updated.id,schemeId);}catch(e){form.errors(e);}finally{window.TidocUI?.setBusy(save,false);}});
     const type=$('select',form.root);type.onchange=()=>{for(const key of ['bank_name','account_number']){const index=fields.findIndex(f=>f.id===key);form.root.querySelectorAll('.form-row')[index].hidden=type.value==='none';}};type.onchange();
     m=modal({title:person?'编辑收款对象':'新建收款对象',key:'payee-edit',body:form.root,footer:[mkBtn('取消','ghost',()=>m.close()),save]});
   }

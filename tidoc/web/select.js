@@ -20,11 +20,13 @@
 (function () {
   'use strict';
 
-  const CHECK_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">' +
-    '<path d="m5 12.5 4.6 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.1" ' +
+  const CHECK_ICON = (window.TidocIcons && window.TidocIcons.icon('check', 14)) ||
+    '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">' +
+    '<path d="M20 6 9 17l-5-5" fill="none" stroke="currentColor" stroke-width="1.9" ' +
     'stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  const CHEVRON_ICON = '<svg class="select-chevron" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">' +
-    '<path d="m3 4.5 3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.4" ' +
+  const CHEVRON_ICON = (window.TidocIcons && window.TidocIcons.icon('chevronDown', 13, 'select-chevron')) ||
+    '<svg class="select-chevron" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">' +
+    '<path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="1.75" ' +
     'stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
   const WIDTH_CAP = 420;        // 浮层最大宽度（长抬头不撑满整屏）
@@ -258,10 +260,14 @@
     if (!record.options.length) return;
     openRecord = record;
     node.hidden = false;
+    node.dataset.state = 'entering';
     node.setAttribute('aria-label', record.select.getAttribute('aria-label') || '选项');
     record.trigger.setAttribute('aria-expanded', 'true');
     record.trigger.setAttribute('aria-controls', node.id);
     positionMenu(record);
+    requestAnimationFrame(() => {
+      if (openRecord === record && !node.hidden) node.dataset.state = 'open';
+    });
     let index = typeof fromIndex === 'number' && fromIndex >= 0
       ? fromIndex
       : Math.max(0, record.options.findIndex((option) => option.value === record.select.value));
@@ -278,6 +284,7 @@
     const record = openRecord;
     openRecord = null;
     const node = menuEl();
+    delete node.dataset.state;
     node.hidden = true;
     node.innerHTML = '';
     record.trigger.setAttribute('aria-expanded', 'false');
@@ -305,28 +312,37 @@
 
   function positionMenu(record) {
     const node = menuEl();
-    const anchor = record.trigger.getBoundingClientRect();
-    const fieldBox = record.field.getBoundingClientRect();
+    const chipHost = record.field.closest('.chip-select, .chip-toggle');
+    const anchorEl = chipHost || record.field;
+    const anchor = anchorEl.getBoundingClientRect();
     // 宽度要够把选项完整显示出来：列表项被省略号截断会看不出选的是哪个抬头
     const widest = record.options.reduce((max, option) => Math.max(max, textWidth(option.label)), 0);
-    const width = clamp(Math.max(anchor.width, widest + 48), MIN_MENU_WIDTH, WIDTH_CAP);
+    const width = clamp(Math.max(anchor.width, widest + 52), MIN_MENU_WIDTH, WIDTH_CAP);
     node.style.width = width + 'px';
-    // 弹窗遮罩是全屏 fixed 且 z-index 按弹窗层数递增，浮层必须压过当前最高的那个，
-    // 否则展开的下拉会被遮罩盖住（工具条与弹窗里都会出现）
+    if (window.TidocUI?.positionFloating) {
+      const pos = window.TidocUI.positionFloating(node, anchorEl, {
+        placement: 'bottom-start',
+        offset: GAP,
+        padding: EDGE,
+        zIndexBase: MENU_Z,
+      });
+      node.classList.toggle('drop-up', pos.side === 'top');
+      return;
+    }
+    // 兜底：脱离 ui-primitives.js 独立运行时仍正常定位
     const scrimTop = [...document.querySelectorAll('.modal-mask')]
       .reduce((max, el) => Math.max(max, parseInt(getComputedStyle(el).zIndex, 10) || 0), 0);
     node.style.zIndex = String(Math.max(MENU_Z, scrimTop + 2));
-    // 先定宽量高，再决定向上还是向下展开
     const height = node.offsetHeight;
     const below = window.innerHeight - anchor.bottom - EDGE;
     const above = anchor.top - EDGE;
     const dropUp = height > below && above > below;
     const top = dropUp ? anchor.top - GAP - height : anchor.bottom + GAP;
-    // 左边缘跟包装盒对齐：行内 chip 的触发器因为图标和留白偏右，跟着触发器走会明显错位
-    const left = clamp(Math.min(anchor.left, fieldBox.left), EDGE, Math.max(EDGE, window.innerWidth - EDGE - width));
+    const left = clamp(anchor.left, EDGE, Math.max(EDGE, window.innerWidth - EDGE - width));
     node.classList.toggle('drop-up', dropUp);
     node.style.top = Math.round(clamp(top, EDGE, Math.max(EDGE, window.innerHeight - EDGE - height))) + 'px';
     node.style.left = Math.round(left) + 'px';
+    node.style.setProperty('--transform-origin', dropUp ? 'left bottom' : 'left top');
   }
 
   const measureCanvas = document.createElement('canvas');

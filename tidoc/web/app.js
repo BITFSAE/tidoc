@@ -64,12 +64,34 @@ const el = (tag, cls, html) => {
 };
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const CLOSE_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+const uiIcon = (name, size = 14) => (typeof window !== 'undefined' && window.TidocIcons?.icon(name, size)) || '';
+const CLOSE_ICON = uiIcon('close', 14) || '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>';
 
 function toast(msg, kind, duration = 2600) {
   const t = el('div', 'toast' + (kind ? ' ' + kind : ''), esc(msg));
+  t.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+  t.setAttribute('aria-atomic', 'true');
   $('#toastRoot').appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .25s'; setTimeout(() => t.remove(), 280); }, duration);
+  requestAnimationFrame(() => { if (t.isConnected) t.dataset.state = 'open'; });
+  let remaining = duration;
+  let startedAt = Date.now();
+  let timer = 0;
+  const dismiss = () => {
+    if (!t.isConnected || t.classList.contains('is-leaving')) return;
+    t.classList.add('is-leaving');
+    setTimeout(() => t.remove(), 200);
+  };
+  const schedule = (ms) => {
+    clearTimeout(timer);
+    startedAt = Date.now();
+    timer = setTimeout(dismiss, Math.max(200, ms));
+  };
+  t.addEventListener('pointerenter', () => {
+    clearTimeout(timer);
+    remaining = Math.max(400, remaining - (Date.now() - startedAt));
+  });
+  t.addEventListener('pointerleave', () => schedule(remaining));
+  schedule(remaining);
 }
 
 function taskProgress(message) {
@@ -77,7 +99,9 @@ function taskProgress(message) {
     <span class="task-spinner" aria-hidden="true"></span>
     <span data-task-progress>${esc(message)}</span>`);
   node.setAttribute('role', 'status');
+  node.setAttribute('aria-atomic', 'true');
   $('#toastRoot').appendChild(node);
+  requestAnimationFrame(() => { if (node.isConnected) node.dataset.state = 'open'; });
   let closed = false;
   return {
     update(next) {
@@ -327,21 +351,21 @@ function exportDefaultName(ids) {
   return '报账导出-' + filenameTimestamp();
 }
 
-// inline SVG icons (no emoji)
+// inline SVG icons (优先复用 TidocIcons 统一图标集，独立单测沙箱下保留兜底)
 const I = {
-  pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m4 20 4-1 11-11-3-3L5 16l-1 4z"/><path d="m14 5 3 3"/></svg>',
-  note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v16H5z"/><path d="M8 9h8M8 13h6M8 17h4"/></svg>',
-  pdf: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><text x="9" y="16" font-size="6" fill="currentColor" stroke="none" font-family="JetBrains Mono, monospace">PDF</text></svg>',
-  xml: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="m9 12-2 2 2 2M13 12l2 2-2 2" stroke-width="1.5"/></svg>',
-  image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.4"/><path d="m4 17 5-4 4 3 3-2 4 4"/></svg>',
-  inspect: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="m20 20-3.5-3.5M8 11h6"/></svg>',
-  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg>',
-  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>',
-  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
-  github: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-1.05-.01-1.9-2.78.62-3.37-1.21-3.37-1.21-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .08 1.53 1.06 1.53 1.06.9 1.57 2.35 1.12 2.92.85.09-.66.35-1.12.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.3 9.3 0 0 1 12 6.95a9.3 9.3 0 0 1 2.5.35c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.59.69.49A10.24 10.24 0 0 0 22 12.23C22 6.58 17.52 2 12 2Z"/></svg>',
-  bilibili: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 3 3 3M16 3l-3 3"/><rect x="3" y="6" width="18" height="14" rx="3"/><path d="M8 12v2M16 12v2M9 17h6"/></svg>',
-  globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.6 3.9 5.6 3.9 9s-1.3 6.4-3.9 9c-2.6-2.6-3.9-5.6-3.9-9s1.3-6.4 3.9-9z"/></svg>',
-  doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h8l4 4v14H7z"/><path d="M15 3v4h4"/><path d="M10 12h6M10 16h6"/></svg>',
+  pencil: uiIcon('pencil', 16) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m4 20 4-1 11-11-3-3L5 16l-1 4z"/><path d="m14 5 3 3"/></svg>',
+  note: uiIcon('note', 16) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14v16H5z"/><path d="M8 9h8M8 13h6M8 17h4"/></svg>',
+  pdf: uiIcon('pdf', 18) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>',
+  xml: uiIcon('xml', 18) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m10 13-2 2 2 2M14 13l2 2-2 2"/></svg>',
+  image: uiIcon('image', 18) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>',
+  inspect: uiIcon('inspect', 18) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="m8.5 11 1.7 1.7 3.3-3.4"/></svg>',
+  check: uiIcon('check', 16) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  search: uiIcon('search', 16) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>',
+  lock: uiIcon('lock', 12) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="10" x="5" y="11" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+  github: uiIcon('github', 15) || '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-1.05-.01-1.9-2.78.62-3.37-1.21-3.37-1.21-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.63.07-.63 1 .08 1.53 1.06 1.53 1.06.9 1.57 2.35 1.12 2.92.85.09-.66.35-1.12.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05A9.3 9.3 0 0 1 12 6.95a9.3 9.3 0 0 1 2.5.35c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.59.69.49A10.24 10.24 0 0 0 22 12.23C22 6.58 17.52 2 12 2Z"/></svg>',
+  bilibili: uiIcon('bilibili', 15) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 3 3 3M16 3l-3 3"/><rect x="3" y="6" width="18" height="14" rx="3"/><path d="M8 12v2M16 12v2M9 17h6"/></svg>',
+  globe: uiIcon('globe', 15) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14.5 14.5 0 0 0 0 18 14.5 14.5 0 0 0 0-18"/></svg>',
+  doc: uiIcon('doc', 15) || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 13h4M10 17h4"/></svg>',
 };
 function iconPencil(s) { return wrapSvg(I.pencil, s); }
 function iconNote(s) { return wrapSvg(I.note, s); }
@@ -351,6 +375,9 @@ function iconImage() { return I.image; }
 function iconInspect() { return I.inspect; }
 function iconCheck(s) { return wrapSvg(I.check, s); }
 function wrapSvg(svg, s) {
+  if (/width="[^"]*"/.test(svg)) {
+    return svg.replace(/width="[^"]*"/, `width="${s}"`).replace(/height="[^"]*"/, `height="${s}"`);
+  }
   return svg.replace('<svg ', `<svg width="${s}" height="${s}" `);
 }
 
@@ -530,9 +557,10 @@ function setupFastTooltips() {
     cancelPending();
     if (!active) return;
     active = null;
+    tooltip.removeAttribute('data-instant');
     tooltip.classList.remove('visible');
   };
-  const show = (target) => {
+  const show = (target, { instant = false } = {}) => {
     cancelPending();
     if (target && target === active) return;
     if (target && coveredByMenu(target)) {
@@ -551,32 +579,44 @@ function setupFastTooltips() {
     }
     active = target;
     tooltip.textContent = text;
+    if (instant) tooltip.setAttribute('data-instant', '');
+    else tooltip.removeAttribute('data-instant');
     tooltip.classList.add('visible');
-    const rect = target.getBoundingClientRect();
-    const tip = tooltip.getBoundingClientRect();
-    let left = Math.max(8, Math.min(rect.left + rect.width / 2 - tip.width / 2, window.innerWidth - tip.width - 8));
-    const below = rect.bottom + 7;
-    let top = below + tip.height <= window.innerHeight - 8 ? below : Math.max(8, rect.top - tip.height - 7);
     const menu = target.closest('.select-menu');
     if (menu) {
+      const rect = target.getBoundingClientRect();
+      const tip = tooltip.getBoundingClientRect();
       // 下拉列表里的提示放在列表右侧（放不下就放左侧），垂直对齐到选项，不盖住相邻选项。
       const box = menu.getBoundingClientRect();
+      let left = Math.max(8, Math.min(rect.left + rect.width / 2 - tip.width / 2, window.innerWidth - tip.width - 8));
       const right = box.right + 8;
+      let side = 'right';
       if (right + tip.width <= window.innerWidth - 8) left = right;
-      else if (box.left - tip.width - 8 >= 8) left = box.left - tip.width - 8;
-      top = Math.max(8, Math.min(rect.top + rect.height / 2 - tip.height / 2, window.innerHeight - tip.height - 8));
+      else if (box.left - tip.width - 8 >= 8) { left = box.left - tip.width - 8; side = 'left'; }
+      const top = Math.max(8, Math.min(rect.top + rect.height / 2 - tip.height / 2, window.innerHeight - tip.height - 8));
+      tooltip.style.left = `${Math.round(left)}px`;
+      tooltip.style.top = `${Math.round(top)}px`;
+      tooltip.style.setProperty('--transform-origin', side === 'right' ? '0% 50%' : '100% 50%');
+    } else if (window.TidocUI?.positionFloating) {
+      window.TidocUI.positionFloating(tooltip, target, { placement: 'bottom', offset: 7, padding: 8 });
+    } else {
+      const rect = target.getBoundingClientRect();
+      const tip = tooltip.getBoundingClientRect();
+      const left = Math.max(8, Math.min(rect.left + rect.width / 2 - tip.width / 2, window.innerWidth - tip.width - 8));
+      const below = rect.bottom + 7;
+      const top = below + tip.height <= window.innerHeight - 8 ? below : Math.max(8, rect.top - tip.height - 7);
+      tooltip.style.left = `${Math.round(left)}px`;
+      tooltip.style.top = `${Math.round(top)}px`;
     }
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
   };
   const tooltipTarget = (node) => node?.closest?.('[data-tooltip], [data-tooltip-overflow]');
   const hover = (target) => {
     if (!target || performance.now() < hoverBlockedUntil) { hide(); return; }
     if (target === active || target === pendingTarget) return;
     // 整张卡片的抬头提示只在明确停留后出现，扫读列表时不跟着鼠标逐张弹出；
-    // 按钮、徽标等小目标之间切换仍即时响应。
+    // 按钮、徽标等小目标之间切换即时响应，跳过延迟与入场动画。
     const isCard = target.classList.contains('entry-card');
-    if (active && !isCard) { show(target); return; }
+    if (active && !isCard) { show(target, { instant: true }); return; }
     if (active) hide();
     cancelPending();
     pendingTarget = target;
@@ -2254,7 +2294,7 @@ function renderBatchFolders() {
     return `<span class="batch-folder${batch.archived ? ' archived' : ''}${State.batchFilter === batch.id ? ' active' : ''}" data-folder="${esc(batch.id)}">
       <button type="button" class="folder-open"><span data-tooltip-overflow="${esc(batch.name)}">${esc(batch.name)}</span>${meta ? `<small>${meta}</small>` : ''}</button>
       ${batch.note ? `<span class="batch-folder-note" data-tooltip="批次备注：${esc(batch.note)}">${iconNote(11)}</span>` : ''}
-      <button type="button" class="folder-menu" data-folder-menu="${esc(batch.id)}" title="${hint}">⋯</button>
+      <button type="button" class="folder-menu" data-folder-menu="${esc(batch.id)}" title="${hint}" aria-label="批次菜单">${uiIcon('moreHorizontal', 14) || '⋯'}</button>
     </span>`;
   };
 
@@ -2302,6 +2342,19 @@ function renderBatchFolders() {
       } else openBatchMenu(ev.clientX, ev.clientY, b);
     };
   });
+  const scopeEl = wrap.querySelector('.batch-scope');
+  if (scopeEl) {
+    scopeEl.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+      const tabs = [...scopeEl.querySelectorAll('.batch-scope-btn')];
+      const idx = tabs.indexOf(document.activeElement);
+      if (idx < 0 || tabs.length < 2) return;
+      ev.preventDefault();
+      const next = tabs[(idx + (ev.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+      next.focus();
+      next.click();
+    });
+  }
   const newBtn = $('#folderNewBatch');
   if (newBtn) newBtn.onclick = () => newBatchFlow();
 
@@ -2429,16 +2482,19 @@ function hasArchivedBatches() {
 
 function openBatchMenu(x, y, b, options) {
   const menu = el('div', 'entry-context-menu');
-  const item = (label, fn, danger) => {
-    const btn = el('button', danger ? 'danger' : '', esc(label));
+  const item = (label, fn, { danger = false, icon = '' } = {}) => {
+    const ico = icon ? uiIcon(icon, 14) : '';
+    const btn = el('button', danger ? 'danger' : '', `${ico}<span>${esc(label)}</span>`);
     btn.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await fn(); };
     menu.appendChild(btn);
   };
-  item('打开这批', () => focusBatch(b.id));
-  item('编辑批次', () => renameBatchFlow(b));
-  item('批次备注', () => batchNoteFlow(b));
-  item(b.archived ? '恢复到在办' : '归档批次', () => archiveBatchFlow(b));
-  item('删除批次', () => deleteBatchFlow(b), true);
+  const sep = () => { const d = el('div', 'menu-sep'); d.setAttribute('role', 'separator'); menu.appendChild(d); };
+  item('打开这批', () => focusBatch(b.id), { icon: 'folder' });
+  item('编辑批次', () => renameBatchFlow(b), { icon: 'pencil' });
+  item('批次备注', () => batchNoteFlow(b), { icon: 'note' });
+  item(b.archived ? '恢复到在办' : '归档批次', () => archiveBatchFlow(b), { icon: b.archived ? 'rotateCcw' : 'archive' });
+  sep();
+  item('删除批次', () => deleteBatchFlow(b), { danger: true, icon: 'trash' });
   showContextMenu(menu, x, y, options);
 }
 
@@ -3549,11 +3605,18 @@ function askUseRecognizedPaymentAmount(amounts, sum, currentPaid = '', invoiceTo
 function openEntryMenu(x, y, e, options) {
   const menu = el('div', 'entry-context-menu');
   // keys：右侧淡色显示的对应按键，只给键盘上能直接做到的项。
-  const item = (label, fn, danger, keys) => {
-    const b = el('button', danger ? 'danger' : '', keys ? `<span>${esc(label)}</span><kbd>${esc(keys)}</kbd>` : esc(label));
+  const item = (label, fn, { danger = false, keys = '', icon = '' } = {}) => {
+    const ico = icon ? uiIcon(icon, 14) : '';
+    const b = el('button', danger ? 'danger' : '', `${ico}<span>${esc(label)}</span>${keys ? `<kbd>${esc(keys)}</kbd>` : ''}`);
     if (keys) b.classList.add('with-keys');
     b.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await fn(); };
     menu.appendChild(b);
+  };
+  const sep = () => {
+    if (!menu.lastElementChild || menu.lastElementChild.classList.contains('menu-sep')) return;
+    const d = el('div', 'menu-sep');
+    d.setAttribute('role', 'separator');
+    menu.appendChild(d);
   };
   // 方案关掉快捷操作或隐藏起来的材料角色不进菜单；旧条目没有方案角色时保持原有菜单。
   const hasRoles = !!e.material_roles?.length;
@@ -3561,19 +3624,21 @@ function openEntryMenu(x, y, e, options) {
     const role = entryMaterialRole(e, roleId);
     return hasRoles ? !!role && role.presentation !== 'hidden' && !!role.quick_action : true;
   };
-  item('打开详情', () => openEntryDetail(e.id), false, 'Enter');
-  item('填写实付金额', () => quickPaidFlow(e));
-  if (roleQuick('payment_screenshot')) item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'));
-  if (roleQuick('inspection_pdf') && verificationVisible(e)) item(e.has_inspection ? '重新在线查验' : '在线查验', () => onlineVerificationFlow(e.id));
-  if (roleQuick('inspection_pdf')) item('上传已有查验单', () => quickAddAttachment(e.id, 'inspection_pdf'));
-  item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'));
-  if (cloudRecognitionVisible()) item('云识别', () => openOcrDialog([e.id]));
-  item('编辑条目备注', () => quickNoteFlow(e));
-  item('打标签', () => tagSelectionFlow([e.id]));
+  item('打开详情', () => openEntryDetail(e.id), { keys: 'Enter', icon: 'eye' });
+  sep();
+  item('填写实付金额', () => quickPaidFlow(e), { icon: 'wallet' });
+  if (roleQuick('payment_screenshot')) item('添加付款截图', () => quickAddAttachment(e.id, 'payment_screenshot'), { icon: 'image' });
+  if (roleQuick('inspection_pdf') && verificationVisible(e)) item(e.has_inspection ? '重新在线查验' : '在线查验', () => onlineVerificationFlow(e.id), { icon: 'inspect' });
+  if (roleQuick('inspection_pdf')) item('上传已有查验单', () => quickAddAttachment(e.id, 'inspection_pdf'), { icon: 'upload' });
+  item('添加发票 PDF', () => quickAddAttachment(e.id, 'invoice_pdf'), { icon: 'pdf' });
+  if (cloudRecognitionVisible()) item('云识别', () => openOcrDialog([e.id]), { icon: 'cloud' });
+  sep();
+  item('编辑条目备注', () => quickNoteFlow(e), { icon: 'note' });
+  item('打标签', () => tagSelectionFlow([e.id]), { icon: 'tag' });
   // 有待核对的提醒时，可以直接跳到同类提醒，或在不打开详情的情况下整条标为已核对。
   (e.check_open || []).forEach((id) => {
     if (State.quickView === 'warning' && State.checkCategory === id) return;
-    item(`只看「${id === 'other' ? '其他' : CHECK_CATEGORY_LABEL[id]}」提醒`, () => setQuickView('warning', id));
+    item(`只看「${id === 'other' ? '其他' : CHECK_CATEGORY_LABEL[id]}」提醒`, () => setQuickView('warning', id), { icon: 'filter' });
   });
   if (e.check_status === 'warning' && (e.check_open || []).length) {
     item('提醒全部标为已核对', async () => {
@@ -3583,9 +3648,9 @@ function openEntryMenu(x, y, e, options) {
         await syncEntryAfterChange(e.id, { affectsStatus: true }, detail);
         toast(`已核对 ${texts.length} 条提醒`, 'ok');
       } catch (err) { toast(err.message, 'err'); }
-    });
+    }, { icon: 'checkCircle' });
   }
-  if (actualBatchId()) item('批次催办备注', () => batchEntryNoteFlow(e));
+  if (actualBatchId()) item('批次催办备注', () => batchEntryNoteFlow(e), { icon: 'pencil' });
   item(actualBatchId() ? '移出当前批次' : '批次', async () => {
     if (actualBatchId()) {
       try {
@@ -3598,8 +3663,9 @@ function openEntryMenu(x, y, e, options) {
       return;
     }
     await addSelectionToBatch([e.id]);
-  });
-  item('删除条目', () => quickDelete(e), true);
+  }, { icon: actualBatchId() ? 'folderOutput' : 'folder' });
+  sep();
+  item('删除条目', () => quickDelete(e), { danger: true, icon: 'trash' });
   showContextMenu(menu, x, y, options);
 }
 
@@ -3657,10 +3723,25 @@ function showContextMenu(menu, x, y, { keyboard = false } = {}) {
   closeEntryMenu();
   const items = [...menu.querySelectorAll('button')];
   menu.setAttribute('role', 'menu');
+  if (keyboard) menu.dataset.keyboard = '1';
   items.forEach((item) => { item.setAttribute('role', 'menuitem'); item.tabIndex = -1; });
   document.body.appendChild(menu);
-  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px';
-  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + 'px';
+  if (window.TidocUI?.positionFloating) {
+    window.TidocUI.positionFloating(menu, { x, y, width: 0, height: 0 }, {
+      placement: 'bottom-start',
+      offset: 2,
+      padding: 8,
+      zIndexBase: 120,
+    });
+  } else {
+    menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+    menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + 'px';
+  }
+  if (keyboard) {
+    menu.dataset.state = 'open';
+  } else {
+    requestAnimationFrame(() => { if (menu.isConnected) menu.dataset.state = 'open'; });
+  }
   const focusItem = (index) => items[(index + items.length) % items.length]?.focus();
   menu._opener = document.activeElement;
   menu._onKeydown = (ev) => {
@@ -3675,7 +3756,13 @@ function showContextMenu(menu, x, y, { keyboard = false } = {}) {
     // 在菜单外按了别的键：菜单收起，这个键照常生效。
     else if (!menu.contains(ev.target) && !['Shift', 'Control', 'Alt', 'Meta'].includes(ev.key)) closeEntryMenu();
   };
+  menu._onViewport = (ev) => {
+    if (ev && ev.target instanceof Node && menu.contains(ev.target)) return;
+    closeEntryMenu();
+  };
   document.addEventListener('keydown', menu._onKeydown, true);
+  window.addEventListener('resize', menu._onViewport, true);
+  window.addEventListener('scroll', menu._onViewport, true);
   setTimeout(() => { if (menu.isConnected) document.addEventListener('click', closeEntryMenu, { once: true }); }, 0);
   if (keyboard) items[0]?.focus();
 }
@@ -3703,6 +3790,8 @@ function closeEntryMenu({ restoreFocus = false } = {}) {
   const menu = $('.entry-context-menu');
   if (!menu) return;
   document.removeEventListener('keydown', menu._onKeydown, true);
+  window.removeEventListener('resize', menu._onViewport, true);
+  window.removeEventListener('scroll', menu._onViewport, true);
   document.removeEventListener('click', closeEntryMenu);
   menu.remove();
   if (restoreFocus && menu._opener?.isConnected) menu._opener.focus({ preventScroll: true });
@@ -3746,6 +3835,16 @@ function bindEvents() {
 
   $$('[data-view]').forEach((btn) => {
     btn.onclick = () => setQuickView(btn.dataset.view);
+  });
+  $('#viewPresets')?.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+    const buttons = $$('[data-view]:not(.hidden)', $('#viewPresets'));
+    const idx = buttons.indexOf(document.activeElement);
+    if (idx < 0 || buttons.length < 2) return;
+    ev.preventDefault();
+    const next = buttons[(idx + (ev.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length];
+    next.focus();
+    next.click();
   });
 
   let kwTimer = null;
@@ -3847,7 +3946,7 @@ function bindEvents() {
     }
     // 弹窗打开时，列表快捷键（/、n、t、?、Cmd+A）不应作用到后面的页面。
     if ($('#modalRoot').lastChild) return;
-    if (e.target.matches?.('input, textarea, select')) {   // 事件目标可能是 document（脚本派发的事件），没有 matches
+    if (e.target?.isContentEditable || e.target.matches?.('input, textarea, select')) {   // 事件目标可能是 document（脚本派发的事件），没有 matches
       if (e.key === 'Escape') e.target.blur();
       return;
     }
@@ -4089,7 +4188,7 @@ async function openOnce(key, open, title = '正在打开…', { wide = false, co
 }
 
 const prefersReducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-const MODAL_EASE = 'cubic-bezier(.2, .8, .2, 1)';
+const MODAL_EASE = 'cubic-bezier(0.23, 1, 0.32, 1)';
 
 // 新窗口接替加载窗口：遮罩保持当前深浅，窗口从加载窗口的高度、透明度和位移过渡到最终状态；
 // 宽度不同时只过渡透明度，避免逐帧重新排版正文。
@@ -4130,10 +4229,10 @@ function fadeOutModal(mask) {
   const sourceBody = $('.modal-body', mask), ghostBody = $('.modal-body', ghost);
   if (sourceBody && ghostBody) ghostBody.scrollTop = sourceBody.scrollTop;
   const remove = () => ghost.remove();
-  ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 130, easing: 'ease-in' }).finished.then(remove, remove);
+  ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: MODAL_EASE }).finished.then(remove, remove);
   // 窗口隐藏或最小化时动画可能暂停，快照不能因此一直留着。
   setTimeout(remove, 400);
-  $('.modal', ghost)?.animate([{ transform: 'none' }, { transform: 'translateY(4px) scale(.985)' }], { duration: 130, easing: 'ease-in' });
+  $('.modal', ghost)?.animate([{ transform: 'none' }, { transform: 'translateY(4px) scale(.975)' }], { duration: 150, easing: MODAL_EASE });
 }
 
 // 已打开的窗口内容大幅变化（加载完成、切换步骤）时，窗口高度平滑过渡到新内容。
@@ -4317,7 +4416,7 @@ async function buildSettings(options = {}) {
             <b>代填模式</b>
             <span>新建/导入时选择报账人</span>
           </div>
-          <label class="switch-line"><input type="checkbox" id="setMultiClaimant" ${multiMode ? 'checked' : ''}/><span>${multiMode ? '已开启' : '已关闭'}</span></label>
+          <label class="switch-line"><input type="checkbox" role="switch" id="setMultiClaimant" ${multiMode ? 'checked' : ''}/><span>${multiMode ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
 
@@ -4360,7 +4459,7 @@ async function buildSettings(options = {}) {
             <b>卡片显示创建时间</b>
             <span>精确到分钟</span>
           </div>
-          <label class="switch-line"><input type="checkbox" id="setShowCreatedAt" ${showCreatedAtMode ? 'checked' : ''}/><span>${showCreatedAtMode ? '已开启' : '已关闭'}</span></label>
+          <label class="switch-line"><input type="checkbox" role="switch" id="setShowCreatedAt" ${showCreatedAtMode ? 'checked' : ''}/><span>${showCreatedAtMode ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
 
@@ -4385,7 +4484,7 @@ async function buildSettings(options = {}) {
             <b>归档后清理原 PDF</b>
             <span>手动另存的 PDF 归档后，将外部原文件移到废纸篓或回收站；自动保存不受此项影响</span>
           </div>
-          <label class="switch-line"><input type="checkbox" id="setVerificationTrash"
+          <label class="switch-line"><input type="checkbox" role="switch" id="setVerificationTrash"
             ${verificationPrefs.trash_source_after_archive ? 'checked' : ''}/><span>${verificationPrefs.trash_source_after_archive ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
@@ -4426,14 +4525,14 @@ async function buildSettings(options = {}) {
           <div class="settings-row-copy">
             <b>启动后检查更新</b>
           </div>
-          <label class="switch-line"><input type="checkbox" id="setAutoUpdate" ${autoUpdateMode ? 'checked' : ''}/><span>${autoUpdateMode ? '已开启' : '已关闭'}</span></label>
+          <label class="switch-line"><input type="checkbox" role="switch" id="setAutoUpdate" ${autoUpdateMode ? 'checked' : ''}/><span>${autoUpdateMode ? '已开启' : '已关闭'}</span></label>
         </div>
         <div class="settings-row">
           <div class="settings-row-copy">
             <b>接收测试版更新</b>
             <span>提前体验新功能，稳定性较低</span>
           </div>
-          <label class="switch-line"><input type="checkbox" id="setBetaChannel" ${betaChannel ? 'checked' : ''}/><span>${betaChannel ? '已开启' : '已关闭'}</span></label>
+          <label class="switch-line"><input type="checkbox" role="switch" id="setBetaChannel" ${betaChannel ? 'checked' : ''}/><span>${betaChannel ? '已开启' : '已关闭'}</span></label>
         </div>
       </div>
 
@@ -4460,7 +4559,7 @@ async function buildSettings(options = {}) {
                 ? `；已识别 ${verificationPrefs.captcha_calls} 次${verificationPrefs.captcha_cost > 0 ? `，约 ${PaymentAiUI.money(verificationPrefs.captcha_cost)}` : ''}`
                 : ''}</span>
             </div>
-            <label class="switch-line"><input type="checkbox" id="setVerificationAuto" aria-label="用 AI 自动填写验证码"
+            <label class="switch-line"><input type="checkbox" role="switch" id="setVerificationAuto" aria-label="用 AI 自动填写验证码"
               ${verificationPrefs.auto_captcha ? 'checked' : ''}/><span>${verificationPrefs.auto_captcha ? '已开启' : '已关闭'}</span></label>
           </div>
         </section>` : ''}
@@ -5203,14 +5302,13 @@ function openNewEntry() {
   };
 
   function uploadTile(key, label, hint, ph, ico, attrs = '') {
-    return `<div class="upload-tile" data-tile="${key}"${attrs}>
-      <div class="ut-title">${ico} ${label}</div>
+    return `<button type="button" class="upload-tile" data-tile="${key}" data-pick="${key}"${attrs}>
+      <div class="ut-head"><span class="ut-title">${ico} ${label}</span><span class="ut-action">${ph}</span></div>
       <div class="ut-hint">${hint}</div>
-      <button class="btn small" data-pick="${key}">${ph}</button>
       <div class="ut-name" id="ne-${key}-name" hidden></div>
-    </div>`;
+    </button>`;
   }
-  const utIco = (svg) => svg.replace('<svg ', '<svg width="18" height="18" ');
+  const utIco = (svg) => wrapSvg(svg, 16);
   const materialTile = (role) => {
     const key = ENTRY_ROLE_KEYS[role.id];
     const single = key === 'inspection';
@@ -5219,8 +5317,7 @@ function openNewEntry() {
   };
 
   body.innerHTML = `
-    <div class="hint">推荐同时上传发票 PDF 和 XML，识别更准。材料不齐可先存草稿，之后补齐。</div>
-    <div class="form-row" style="margin-top:14px">
+    <div class="form-row">
       <label>抬头</label>
       <select id="neTitle">
         ${titleChoiceOptions(State.defaultEntryTitle)}
@@ -5229,7 +5326,7 @@ function openNewEntry() {
     ${claimantConfirmHtml()}
     <div class="upload-grid">
       ${uploadTile('pdf', '发票 PDF', '推荐上传', '选择文件', utIco(iconPdf()))}
-      ${uploadTile('xml', '发票 XML', '让识别更准', '选择文件', utIco(iconXml()))}
+      ${uploadTile('xml', '发票 XML', '识别更准', '选择文件', utIco(iconXml()))}
     </div>
     <div id="nePreview"></div>`;
 
@@ -5242,6 +5339,8 @@ function openNewEntry() {
     nameEl.textContent = ['pdf', 'xml', 'inspection'].includes(key) ? baseName(paths[0]) : `${paths.length} 张${roleLabel(key)}`;
     nameEl.hidden = false;
     tile.classList.add('has-file');
+    const act = tile.querySelector('.ut-action');
+    if (act) act.textContent = '已选';
   };
   const restorePicks = () => {
     if (picked.payments.length) showPickName('payment', picked.payments);
@@ -5272,7 +5371,7 @@ function openNewEntry() {
     const grid = body.querySelector('.upload-grid');
     grid.querySelectorAll('[data-material-tile]').forEach((tile) => tile.remove());
     grid.insertAdjacentHTML('beforeend', entryMaterialRoles(schemeDefinition()).map(materialTile).join(''));
-    grid.querySelectorAll('[data-material-tile] [data-pick]').forEach(bindPick);
+    grid.querySelectorAll('[data-material-tile][data-pick], [data-material-tile] [data-pick]').forEach(bindPick);
   };
 
   body.querySelectorAll('[data-pick]').forEach(bindPick);
@@ -5292,7 +5391,7 @@ function openNewEntry() {
             <span class="k">发票日期</span><span>${esc(p.invoice_date || '—')}</span>
             <span class="k">销售方</span><span>${esc(p.seller || '—')}</span>
             <span class="k">购买方抬头</span><span>${esc(p.buyer_name || '—')}</span>
-            <span class="k">价税合计</span><span><b style="font-family:var(--font-serif);font-size:15px">${fmtMoney(p.total)}</b></span>
+            <span class="k">价税合计</span><span><b class="ne-preview-total">${fmtMoney(p.total)}</b></span>
             <span class="k">明细条数</span><span>${p.items.length}</span>
           </div>
           ${c.message ? `<ul class="hint warn compact-hint check-lines">${checkMessageLines(c.message).map((line) => `<li>${esc(line)}</li>`).join('')}</ul>` : ''}
@@ -5303,7 +5402,9 @@ function openNewEntry() {
     finally { progress.close(); }
   }
 
+  let saveBtn = null;
   const create = async () => {
+    window.TidocUI?.setBusy(saveBtn, true, '保存中…');
     const progress = taskProgress('正在保存条目并识别材料…');
     try {
       const paymentAiJobId = await PaymentAiUI.prepare(picked.payments, progress);
@@ -5326,7 +5427,10 @@ function openNewEntry() {
       await loadBatches();
       await refreshEntries();
       toast('已保存', 'ok');
-    } catch (e) { toast(e.message, 'err'); }
+    } catch (e) {
+      window.TidocUI?.setBusy(saveBtn, false);
+      toast(e.message, 'err');
+    }
     finally { progress.close(); }
   };
 
@@ -5342,13 +5446,14 @@ function openNewEntry() {
     restorePicks();
     preview();
   };
+  saveBtn = mkBtn('保存', 'primary', () => create());
   const m = modal({
     title: '新建报账条目',
-    subhead: '上传后自动识别，发票号、金额等无需手输；状态按材料齐全度自动判定',
+    subhead: '上传 PDF / XML 自动识别，材料不齐可先存草稿',
     wide: true, body,
     footer: [
       mkBtn('取消', 'ghost', () => m.close()),
-      mkBtn('保存', 'primary', () => create()),
+      saveBtn,
     ],
   });
 }
@@ -5843,8 +5948,9 @@ async function openEntryDetail(entryId, currentDetail = null) {
     <div class="detail-section">
       <h3>报账材料<span class="h3-line"></span></h3>
       <div class="material-drop" id="materialDrop">
-        <b>拖拽或粘贴材料到当前条目</b>
-        <span>打开详情后粘贴的图片会直接作为本条目的付款截图，并继续进行金额识别和材料校验。</span>
+        ${uiIcon('upload', 14)}
+        <b>拖拽或粘贴材料到此</b>
+        <span>粘贴图片直接作为付款截图</span>
       </div>
       <div class="att-groups">${attachSection}</div>
     </div>
@@ -5884,7 +5990,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
     if (field === 'notes') {
       return `<div class="form-row"${full ? ' style="grid-column:1/-1"' : ''}>
         <label>${label}${modified ? '<span class="field-modified-mark">' + iconPencil(11) + '已人工修改</span>' : ''}</label>
-        <textarea data-edit="${field}" rows="3" style="width:100%;font-family:inherit;font-size:13px;padding:10px;border-radius:9px;border:1px solid var(--line);resize:vertical">${esc(val)}</textarea>
+        <textarea data-edit="${field}" rows="3">${esc(val)}</textarea>
       </div>`;
     }
     return `<div class="form-row"${full ? ' style="grid-column:1/-1"' : ''}>

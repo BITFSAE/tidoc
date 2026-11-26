@@ -375,6 +375,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
     const newBatchInput = row.querySelector('[data-bind-entry-new-batch]');
     adjustButton.onclick = () => {
       const opening = editor.classList.contains('hidden');
+      // 收起面板时如果焦点还在里面，收起后把焦点放回该行的「设置」，不要落回页面。
+      const focusedRow = entryRowElements.find((otherRow) =>
+        otherRow.querySelector('[data-bind-entry-override]').contains(document.activeElement));
       entryRowElements.forEach((otherRow) => {
         const expanded = otherRow === row && opening;
         otherRow.querySelector('[data-bind-entry-override]').classList.toggle('hidden', !expanded);
@@ -383,6 +386,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
         button.textContent = expanded ? '收起' : '设置';
         button.setAttribute('aria-expanded', String(expanded));
       });
+      if (focusedRow && focusedRow.querySelector('[data-bind-entry-override]').classList.contains('hidden')) {
+        focusedRow.querySelector('[data-bind-entry-adjust]').focus();
+      }
       if (opening) enhanceNativeSelects(select);
     };
     select.onchange = () => {
@@ -506,6 +512,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
   let m;
   m = modal({
     title: '导入绑定包',
+    key: 'bindle-import',
     wide: true,
     body,
     onClose: () => { if(!reopening&&options.onClose)options.onClose(); },
@@ -517,6 +524,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
         if (!reviewing) { startReview(); return; }
         const { tampered, options } = collected;
         const progress = taskProgress('正在导入条目和材料…');
+        window.TidocUI?.setBusy(importButton, true, '正在导入…');
         try {
           const r = await Api.importBindle(path, State.currentProfileId, !!tampered, options);
           progress.update('正在刷新条目列表…');
@@ -527,7 +535,11 @@ async function openBindleImportPreview(path, insp, options = {}) {
           await refreshTagOptions();
           toast(r.message, r.tampered && r.tampered.length ? 'err' : 'ok');
         } catch (e) { toast(e.message, 'err'); }
-        finally { progress.close(); }
+        finally {
+          progress.close();
+          // 窗口还开着（失败或只是停留）时恢复按钮；已关闭就不必再动它。
+          if (m.mask?.isConnected) { window.TidocUI?.setBusy(importButton, false); syncBindleSelection(); }
+        }
       })),
     ],
   });

@@ -1,9 +1,7 @@
-# tidoc 联网更新发布说明
+# Tidoc 发布与更新机制
 
-更新源使用车队已有腾讯云 COS：
+更新源使用车队已有的腾讯云 COS：桶 `bitfsae-1416420925`，地域 `ap-beijing`，与 `.github/workflows/release.yml` 中的配置一致。桶内 `tidoc/` 目录通过 CDN 公开读取：
 
-- Bucket：`bitfsae-1416420925`
-- 地域：`ap-beijing`
 - 公开地址：`https://img.bitfsae.com/tidoc`
 - 清单：`https://img.bitfsae.com/tidoc/manifest.json`（正式版）
 - 测试版清单：`https://img.bitfsae.com/tidoc/manifest-beta.json`（仅测试版发布时写入）
@@ -74,7 +72,7 @@ git tag -a v0.1.39-beta.1 -m "Tidoc 0.1.39-beta.1"
 git push origin v0.1.39-beta.1
 ```
 
-- 构建、自检和上传与正式版相同；区别是只写入 `manifest-beta.json`，**不会改写 `manifest.json`**，所以没有打开「接收测试版更新」的用户完全不受影响。
+- 构建、自检和上传与正式版相同；区别是只写入 `manifest-beta.json`，**不会改写 `manifest.json`**，所以没有打开「接收测试版更新」的用户不受影响。
 - 版本号必须是 `1.2.3` 或 `1.2.3-beta.1`、`1.2.3-rc.2` 这种形式：连字符后只能是字母、数字和点（`1.2.3-rc-1` 会被拒绝）。发布流程第一步就会检查，不合格时不会开始构建。
 - 打印、OCR 组件每次发布都会重新构建，并以固定的「组件+版本」文件名上传；PyInstaller 的产物每次字节都不同。如果测试版把正式版清单正在使用的组件版本再传一遍，正式版清单里的 sha256 就对不上了。因此测试版发布时 `build_manifest.py` 会读取线上 `manifest.json`（`--stable-manifest`），**跳过正式版已经在用的组件版本**；只有组件号比正式版新时才随测试版上传。读不到正式版清单时发布直接失败，不会冒险上传。
 - GitHub Release 标为预发布（Pre-release），不会成为 Latest。
@@ -104,7 +102,7 @@ tidoc/ocr/windows/tidoc-ocr-windows-v<ocr_version>.exe
 tidoc/ocr/macos/tidoc-ocr-macos-v<ocr_version>.zip
 ```
 
-`0.1.42-beta.3` 使用打印组件 `0.1.23` 和 OCR 组件 `0.2.2`。预发布流程只上传新组件号，并保留正式版组件文件；正式版发布时重新构建并上传各组件。正式版与测试版清单指向同一组件版本时，测试版客户端以正式版清单为准。兼容性仍需检查 `--capabilities`，不能只依赖版本号。
+预发布流程只上传新组件号，并保留正式版组件文件；正式版发布时重新构建并上传各组件。正式版与测试版清单指向同一组件版本时，测试版客户端以正式版清单为准。具体版本变化见 [CHANGELOG.md](../CHANGELOG.md)，兼容性仍需检查 `--capabilities`，不能只依赖版本号。
 
 ## 客户端行为
 

@@ -1,6 +1,7 @@
 ---
 title: 更新日志：Tidoc 各版本变化记录
 editLink: false
+aside: false
 description: Tidoc 每个版本新增、调整和修复的内容，按时间倒序排列，软件更新弹窗里的「本次更新」取自这里。
 ---
 

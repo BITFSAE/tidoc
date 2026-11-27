@@ -9,11 +9,12 @@ const siteName = 'Tidoc'
 const siteDescription = 'Tidoc 是一款整理报账发票和相关材料的桌面软件，支持 Windows 和 macOS，默认在本机解析发票，可选云识别。'
 const ogImage = `${siteUrl}/og-image.png`
 
-// 「开始使用」和「使用指南」共用一份侧栏，读完安装可以顺着往下读。
+// 「简介」「开始使用」「使用指南」和「常见问题」共用一份侧栏，浏览时不会遇到没有侧栏的页面。
 const usageSidebar = [
   {
     text: '开始使用',
     items: [
+      { text: '软件简介', link: '/intro/' },
       { text: '下载与安装', link: '/start/install' },
       { text: '快速入门', link: '/start/quickstart' }
     ]
@@ -22,21 +23,36 @@ const usageSidebar = [
     text: '使用指南',
     items: [
       { text: '基本概念', link: '/guide/concepts' },
+      { text: '报账方案', link: '/guide/schemes' },
       { text: '导入发票', link: '/guide/import' },
-      { text: '省时间的操作', link: '/guide/shortcuts' },
       { text: '补齐材料', link: '/guide/materials' },
       { text: '核对识别结果', link: '/guide/check' },
       { text: '筛选、标签与批次', link: '/guide/organize' },
       { text: '导出、打印与交接', link: '/guide/export' },
-      { text: '报账方案', link: '/guide/schemes' },
-      { text: '设置与数据', link: '/guide/settings' },
-      { text: '键盘快捷键', link: '/guide/keyboard' }
+      { text: '设置与数据', link: '/guide/settings' }
+    ]
+  },
+  {
+    text: '效率与参考',
+    items: [
+      { text: '省时间的操作', link: '/guide/shortcuts' },
+      { text: '键盘快捷键', link: '/guide/keyboard' },
+      { text: '常见问题', link: '/faq' }
     ]
   },
   {
     text: '可选功能',
     items: [{ text: '阿里云 OCR', link: '/guide/aliyun-ocr' }]
   }
+]
+
+const sections = [
+  { match: /^\/intro\//, text: '简介', link: '/intro/' },
+  { match: /^\/start\//, text: '开始使用', link: '/start/install' },
+  { match: /^\/guide\//, text: '使用指南', link: '/guide/concepts' },
+  { match: /^\/update\//, text: '更新与组件', link: '/update/' },
+  { match: /^\/faq/, text: '常见问题', link: '/faq' },
+  { match: /^\/dev\//, text: '开发相关', link: '/dev/' }
 ]
 
 // 地址形式与 cleanUrls: false 的构建结果一致：首页和各栏目首页以 / 结尾，其余页面带 .html。
@@ -48,7 +64,7 @@ function pagePath(relativePath: string): string {
 }
 
 function linkPath(link: string): string {
-  return link.endsWith('/') ? link : `${link}.html`
+  return link.endsWith('/') || link.endsWith('.html') ? link : `${link}.html`
 }
 
 // 页面没有写 description 时，取正文第一段，避免每页都落到同一句站点简介。
@@ -163,9 +179,7 @@ export default defineConfig({
     } else {
       const names = sidebarNames(themeConfig.sidebar as Record<string, SidebarItem[]>)
       const here = pagePath(pageData.relativePath)
-      const section = (themeConfig.nav as { text: string; link: string; activeMatch?: string }[]).find(
-        (item) => item.activeMatch && new RegExp(item.activeMatch).test(here.replace(/\.html$/, ''))
-      )
+      const section = sections.find((item) => item.match.test(here.replace(/\.html$/, '')))
       const crumbs = [{ name: '首页', url: `${siteUrl}/` }]
       if (section && linkPath(section.link) !== here) {
         crumbs.push({ name: section.text, url: siteUrl + linkPath(section.link) })
@@ -186,12 +200,11 @@ export default defineConfig({
     return head
   },
 
-  // README 是仓库入口，不作为站点页面。
-  srcExclude: ['README.md', 'node_modules/**'],
+  // README 是仓库入口，UPDATE.md 由 dev/release.md 引入，均不作为独立站点页面。
+  srcExclude: ['README.md', 'UPDATE.md', 'node_modules/**'],
 
-  // 源文件保持原位置（命令行工具和仓库内链接都依赖它），站内地址放到「开发相关」下。
+  // 适配包文档保持原位置，站内地址放到「开发相关」下。
   rewrites: {
-    'UPDATE.md': 'dev/release.md',
     'adapters/:page.md': 'dev/adapters/:page.md'
   },
 
@@ -218,6 +231,7 @@ export default defineConfig({
       '<span class="nav-wordmark"><svg xmlns="http://www.w3.org/2000/svg" viewBox="84 21 501 141" fill="none" class="tidoc-wordmark" aria-hidden="true"><g fill="currentColor" shape-rendering="geometricPrecision"><path fill-rule="evenodd" clip-rule="evenodd" d="M0 0 C71.96 0 71.96 0 89.8 9.49 C98.92 14.89 106.88 22.11 112.44 31.19 C113.31 32.78 114.17 34.38 115 36 C115.39 36.7 115.78 37.4 116.18 38.12 C121.35 47.77 121.45 57.26 121.43 68 C121.23 79.12 119.41 87.94 113.98 97.76 C107.82 108.22 100.11 116.26 89.67 122.5 C80.72 127.52 73.75 128.85 63 131 C42.21 131 21.42 131 0 131 C0 87.77 0 44.54 0 0 Z M29 26 L29 105 C50.5 105 55.52 108.15 70.76 100.64 C76.97 96.99 81.38 93.29 85.14 87.13 C88.69 80.53 91.14 73.46 91.31 65.94 C91.05 58.76 89.61 52.25 86.19 45.91 C81.67 38.66 75.75 33.67 68.36 29.52 C60.5 26 60.5 26 29 26 Z" transform="translate(248 25)"/><path fill-rule="evenodd" clip-rule="evenodd" d="M0 0 C1.63 0.01 1.63 0.01 3.3 0.02 C12.78 0.28 20.5 2.1 28.81 6.62 C32.12 8.7 34.96 10.96 37.81 13.62 C38.42 14.12 39.03 14.62 39.66 15.13 C45.61 20.34 48.73 27.49 51.81 34.62 C54.35 43.18 53.66 53.83 52.13 62.52 C49.6 71.37 45.31 78.13 39.06 84.81 C32.39 91.15 24.69 95.42 15.84 97.93 C10.65 98.99 5.4 99.02 0.12 99.06 C-1.32 99.08 -1.32 99.08 -2.79 99.09 C-11.56 98.99 -19.26 97.05 -26.94 92.75 C-35.5 87.81 -40.86 81.9 -46.19 73.62 C-50.46 65.8 -52.29 58.26 -52.56 49.38 C-52.41 40.06 -49.98 32.54 -45.5 24.44 C-40.5 16.64 -34.05 10.44 -25.91 6 C-17.33 1.66 -9.6 -0.1 0 0 Z M5.8125 22.625 C11.7025 24.695 17.0925 27.385 21.3725 32.005 C24.0425 35.605 25.8925 39.215 26.8125 43.625 C27.3625 48.825 27.3425 53.815 25.6925 58.815 C23.3625 64.055 20.2825 68.395 16.0225 72.235 C12.4425 74.695 9.0525 75.705 4.7725 76.135 C-0.7275 76.455 -5.9375 76.505 -11.1075 74.485 C-13.3975 73.025 -15.2575 71.525 -17.1875 69.625 C-17.9475 68.905 -17.9475 68.905 -18.7275 68.175 C-21.5375 65.175 -23.3875 61.825 -24.6875 57.965 C-25.8675 52.475 -25.8075 46.865 -24.7575 41.355 C-23.2775 36.685 -20.5975 33.005 -17.2575 29.455 C-10.5675 23.545 -3.0375 20.935 5.8125 22.625 Z" transform="translate(429.1875 59.375)"/><path d="M0 0 H97 V26 H63 V131 H34 V26 H0 Z" transform="translate(87 25)"/><path d="M0 0 C5.84 1.93 10.59 4.53 15.38 8.38 C16.03 8.9 16.69 9.42 17.37 9.95 C20.42 12.47 23.35 14.93 25.38 18.38 C25.38 19.36 25.38 20.36 25.38 21.38 C22.79 23 20.21 24.63 17.62 26.25 C16.9 26.71 16.17 27.17 15.41 27.64 C14.71 28.09 14 28.53 13.27 28.99 C12.62 29.4 11.97 29.81 11.3 30.23 C9.37 31.38 7.4 32.39 5.38 33.38 C4.9 32.9 4.43 32.43 3.94 31.95 C-0.2 28.05 -3.82 25.32 -9.34 23.82 C-13.25 23.06 -16.69 22.67 -20.62 23.38 C-25.42 25.09 -29.41 27.19 -33.06 30.75 C-33.58 31.62 -34.09 32.48 -34.62 33.38 C-35.49 34.83 -35.49 34.83 -36.38 36.31 C-38.64 42.03 -38.23 48.37 -37.62 54.38 C-36.59 58.48 -35.06 61.73 -32.27 64.93 C-28.81 68.07 -25.05 70 -20.62 71.38 C-16 71.95 -11.68 71.95 -7.16 70.68 C-1.48 68.36 1.38 65.66 6.38 61.38 C12.64 65.33 18.91 69.3 25.38 73.38 C23.14 78.97 20.78 82.34 16.38 86.38 C8.85 91.7 0.86 95.63 -8.37 96.69 C-11.24 96.85 -14.07 96.89 -16.94 96.88 C-18.45 96.87 -18.45 96.87 -19.99 96.86 C-28.1 96.66 -34.52 95.51 -41.62 91.38 C-49.06 86.69 -55.57 80.37 -60.16 72.86 C-65.58 62.53 -66.16 52.91 -65.93 41.46 C-65.67 35.48 -64.51 30.63 -61.62 25.38 C-60.86 23.96 -60.86 23.96 -60.08 22.52 C-55.49 14.72 -50.09 9.28 -42.31 4.69 C-40.76 3.89 -39.2 3.12 -37.62 2.38 C-36.85 1.98 -36.08 1.59 -35.28 1.18 C-24.4 -3.63 -11.33 -2.92 0 0 Z" transform="translate(556.625 61.625)"/><path d="M227 65 V157 H199 V72 L227 65 Z"/></g><circle cx="213" cy="38.6" r="14.25" fill="#1657FC" shape-rendering="geometricPrecision"/></svg></span>',
 
     nav: [
+      { text: '首页', link: '/' },
       { text: '简介', link: '/intro/', activeMatch: '^/intro/' },
       { text: '开始使用', link: '/start/install', activeMatch: '^/start/' },
       { text: '使用指南', link: '/guide/concepts', activeMatch: '^/guide/' },
@@ -227,8 +241,10 @@ export default defineConfig({
     ],
 
     sidebar: {
+      '/intro/': usageSidebar,
       '/start/': usageSidebar,
       '/guide/': usageSidebar,
+      '/faq': usageSidebar,
       '/update/': [
         {
           text: '更新与组件',
@@ -245,17 +261,18 @@ export default defineConfig({
             { text: '概览', link: '/dev/' },
             { text: '参与贡献', link: '/dev/contributing' },
             { text: '设计文档', link: '/dev/design' },
+            { text: '付款截图 AI 评测', link: '/dev/payment-ai-benchmark' },
             { text: '发布与更新机制', link: '/dev/release' }
           ]
         },
         {
           text: '团队适配包',
           items: [
-            { text: '适配包开发', link: '/dev/adapters/README' },
+            { text: '团队适配包开发', link: '/dev/adapters/README' },
             { text: '包格式', link: '/dev/adapters/FORMAT' },
             { text: '字段与设置', link: '/dev/adapters/FIELDS' },
             { text: '条件规则', link: '/dev/adapters/RULES' },
-            { text: '模板', link: '/dev/adapters/TEMPLATES' },
+            { text: 'Word 模板', link: '/dev/adapters/TEMPLATES' },
             { text: '输出', link: '/dev/adapters/OUTPUTS' },
             { text: '兼容性', link: '/dev/adapters/COMPATIBILITY' },
             { text: '注册表参考', link: '/dev/adapters/REFERENCE' }
@@ -270,8 +287,6 @@ export default defineConfig({
       provider: 'local',
       options: {
         miniSearch,
-        // 设计文档和发布说明篇幅大、术语多，搜索使用说明时会挤掉真正要找的页面。
-        exclude: (path: string) => path === 'dev/design.md' || path === 'dev/release.md',
         locales: {
           root: {
             translations: {

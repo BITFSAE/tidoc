@@ -1,11 +1,11 @@
 ---
 title: 下载与安装：Windows 和 macOS
-description: 下载 Tidoc 最新版安装包，Windows 和 macOS 各有一个。本页说明两个系统的安装步骤、首次启动和以后的更新方式。
+description: 下载 Tidoc 最新版安装包，按系统完成安装和首次启动，并处理 Windows SmartScreen 与 macOS 的开发者验证提示。之后的更新在软件里进行。
 ---
 
 # 下载与安装
 
-下载安装包，安装后即可使用。
+Tidoc 有 Windows 和 macOS 两个安装包，装好后打开即可使用。
 
 ## 下载
 
@@ -50,7 +50,7 @@ description: 下载 Tidoc 最新版安装包，Windows 和 macOS 各有一个。
 
 ## 首次启动
 
-首次打开会依次要求选择报账方案、创建报账人，完成后进入主界面。BITFSAE 车队队员选「BITFSAE 车队报账」，其他团队的选择见[快速入门](/start/quickstart)。
+首次打开会依次要求选择报账方案、创建报账人，完成后进入主界面。BITFSAE 车队队员选「BITFSAE 车队报账」，其他团队选「通用报账」或导入团队方案文件；各方案的区别见[报账方案](/guide/schemes)。
 
 ![首次启动选择方案](/images/first-run-scheme.png)
 

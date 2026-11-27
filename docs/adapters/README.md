@@ -1,8 +1,6 @@
 # 团队适配包开发
 
-团队适配包用 JSON、DOCX 模板和静态资源描述报账规则。适配包不能执行代码，也不能访问核心数据库。
-
-完整格式以 JSON Schema 和运行时注册表为准。开发时从一个示例复制，再运行 CLI 检查。
+团队适配包用 JSON、DOCX 模板和静态资源描述报账规则，不能执行代码，也不能访问核心数据库。完整格式以 JSON Schema 和运行时注册表为准：从一个示例复制，再用 CLI 检查和打包。
 
 ```bash
 python -m tidoc.adapter_tools init ./my-team --from generic --id org.example.team

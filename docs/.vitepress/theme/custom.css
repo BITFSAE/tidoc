@@ -1,5 +1,18 @@
-/* 品牌色取自软件界面：浅色 #2b5fd1，深色 #59a6f8。 */
+/* 浅色对齐 Tidoc 主界面的暖纸质感（#fbf9f4 / #f4f1ea / #e2ddd2），深色保持中性近黑。 */
 :root {
+  --td-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
+  --vp-c-bg: #fbf9f4;
+  --vp-c-bg-alt: #f4f1ea;
+  --vp-c-bg-soft: #f3efe6;
+  --vp-c-bg-elv: #ffffff;
+  --vp-c-divider: #e2ddd2;
+  --vp-c-border: #d5cfc2;
+  --vp-c-gutter: #e2ddd2;
+  --vp-c-text-1: #1a1d24;
+  --vp-c-text-2: #5d6273;
+  --vp-c-text-3: #828896;
+
   --vp-c-brand-1: #2b5fd1;
   --vp-c-brand-2: #2452b8;
   --vp-c-brand-3: #2b5fd1;
@@ -8,7 +21,7 @@
   --vp-button-brand-hover-bg: #2452b8;
   --vp-button-brand-active-bg: #1f4698;
   --vp-button-alt-bg: var(--vp-c-bg-soft);
-  --vp-button-alt-border: var(--vp-c-divider);
+  --vp-button-alt-border: var(--vp-c-border);
   --vp-button-alt-text: var(--vp-c-text-1);
   --vp-button-alt-hover-bg: var(--vp-c-bg-elv);
   --vp-button-alt-hover-border: var(--vp-c-text-3);
@@ -16,25 +29,23 @@
   --vp-custom-block-tip-bg: var(--vp-c-brand-soft);
 }
 
-/* 深色模式底色：VitePress 默认的 #1b1b1f、#202127 带蓝紫调，这里改成无色相的中性灰黑。 */
+/* 深色模式底色：纯中性近黑，强调色为 #59a6f8。 */
 .dark {
-  --vp-c-bg: #1a1a1a;
+  --vp-c-bg: #181818;
   --vp-c-bg-alt: #141414;
   --vp-c-bg-elv: #212121;
   --vp-c-bg-soft: #212121;
   --vp-c-border: #3a3a3a;
   --vp-c-divider: #2b2b2b;
-  --vp-c-gutter: #000000;
-  --vp-c-text-1: #e3e3e3;
-  --vp-c-text-2: #a0a0a0;
-  --vp-c-text-3: #707070;
+  --vp-c-gutter: #262626;
+  --vp-c-text-1: #e6e6e6;
+  --vp-c-text-2: #a6a6a6;
+  --vp-c-text-3: #7b7b7b;
   --vp-c-gray-1: #555555;
   --vp-c-gray-2: #444444;
   --vp-c-gray-3: #333333;
   --vp-c-gray-soft: rgba(128, 128, 128, 0.16);
-}
 
-.dark {
   --vp-c-brand-1: #59a6f8;
   --vp-c-brand-2: #7fbaf9;
   --vp-c-brand-3: #59a6f8;
@@ -46,11 +57,81 @@
   --vp-button-brand-hover-text: #0b1928;
   --vp-button-brand-active-text: #0b1928;
   --vp-button-alt-bg: var(--vp-c-bg-soft);
-  --vp-button-alt-border: var(--vp-c-divider);
+  --vp-button-alt-border: var(--vp-c-border);
   --vp-button-alt-text: var(--vp-c-text-1);
   --vp-button-alt-hover-bg: var(--vp-c-bg-elv);
   --vp-button-alt-hover-border: var(--vp-c-text-3);
   --vp-button-alt-hover-text: var(--vp-c-text-1);
+}
+
+/* -------------------------------------------------------------
+ * 通用按钮：首页与文档组件（如 TidocDownload）共用
+ * ------------------------------------------------------------- */
+.td-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  border: 1px solid var(--vp-c-border);
+  border-radius: 9px;
+  background: var(--vp-c-bg-elv);
+  color: var(--vp-c-text-1) !important;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none !important;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    transform 120ms var(--td-ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .td-btn:hover {
+    background: var(--vp-c-bg-soft);
+    border-color: var(--vp-c-text-3);
+  }
+}
+.td-btn:active {
+  transform: scale(0.97);
+}
+.td-btn:focus-visible {
+  outline: 2px solid var(--vp-c-brand-1);
+  outline-offset: 2px;
+}
+.td-btn.is-primary {
+  border-color: var(--vp-button-brand-bg);
+  background: var(--vp-button-brand-bg);
+  color: var(--vp-button-brand-text, #ffffff) !important;
+}
+@media (hover: hover) and (pointer: fine) {
+  .td-btn.is-primary:hover {
+    border-color: var(--vp-button-brand-hover-bg);
+    background: var(--vp-button-brand-hover-bg);
+  }
+}
+.td-btn.is-primary:active {
+  border-color: var(--vp-button-brand-active-bg);
+  background: var(--vp-button-brand-active-bg);
+}
+.td-btn[data-icon]::before {
+  content: '';
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  background: currentColor;
+  -webkit-mask: var(--ico) center / contain no-repeat;
+  mask: var(--ico) center / contain no-repeat;
+  opacity: 0.85;
+}
+.td-btn[data-icon='download'] {
+  --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v12m0 0-4.5-4.5M12 15l4.5-4.5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2'/%3E%3C/svg%3E");
+}
+.td-btn[data-icon='changelog'] {
+  --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01'/%3E%3C/svg%3E");
 }
 
 /* 截图：细边框和圆角，在浅色和深色背景上都能看出边界。 */
@@ -69,24 +150,16 @@
 .VPNavBarTitle .title {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
 }
 .VPNavBarTitle .logo {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
   overflow: hidden;
   margin-right: 0;
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  box-shadow: 0 2px 8px rgba(24, 61, 145, 0.18);
-  background: #183d91;
-  transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+  transition: transform 120ms var(--td-ease-out);
   flex-shrink: 0;
-}
-@media (hover: hover) and (pointer: fine) {
-  .VPNavBarTitle .title:hover .logo {
-    transform: scale(1.05);
-  }
 }
 .VPNavBarTitle .title:active .logo {
   transform: scale(0.97);
@@ -102,26 +175,44 @@
   line-height: 0;
 }
 .nav-wordmark .tidoc-wordmark {
-  height: 20px;
+  height: 19px;
   width: auto;
   aspect-ratio: 501 / 141;
-  color: #1b1f2a;
+  color: var(--vp-c-text-1);
   display: block;
 }
 .dark .nav-wordmark .tidoc-wordmark {
   color: #ffffff;
 }
 
-/* 平板宽度（768 到 959）：导航项和搜索按钮收紧，避免顶栏超出屏幕产生横向滚动。 */
-@media (min-width: 768px) and (max-width: 959px) {
+/* 平板宽度（768 到 1040）：7 个导航项与搜索按钮适当收紧，避免横向溢出。 */
+@media (min-width: 768px) and (max-width: 1040px) {
+  .VPNavBar .wrapper {
+    padding: 0 20px;
+  }
+  .VPNavBarTitle .title {
+    gap: 8px;
+  }
+  .nav-wordmark .tidoc-wordmark {
+    height: 17px;
+  }
   .VPNavBar .VPNavBarMenu .VPNavBarMenuLink {
-    padding: 0 8px;
+    padding: 0 7px;
+    font-size: 13px;
   }
   .VPNavBarSearch {
-    padding-left: 12px;
+    padding-left: 8px;
   }
   .VPNavBarSearch .DocSearch-Button-Keys {
     display: none;
+  }
+}
+@media (min-width: 768px) and (max-width: 860px) {
+  .VPNavBar .VPNavBarMenu .VPNavBarMenuLink {
+    padding: 0 5px;
+  }
+  .VPNavBarSearch .DocSearch-Button {
+    padding: 0 8px;
   }
 }
 
@@ -159,15 +250,24 @@
 .Layout .VPFooter a {
   color: inherit;
   text-decoration: none;
-  transition: color 160ms ease;
+  transition: color 150ms ease;
 }
-.Layout .VPFooter a:hover {
-  color: var(--vp-c-brand-1);
-  text-decoration: underline;
-  text-underline-offset: 3px;
+@media (hover: hover) and (pointer: fine) {
+  .Layout .VPFooter a:hover {
+    color: var(--vp-c-brand-1);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
 }
 .Layout .VPFooter a:focus-visible {
   outline: 2px solid var(--vp-c-brand-1);
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .td-btn,
+  .VPNavBarTitle .logo {
+    transition: none;
+  }
 }

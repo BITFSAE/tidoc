@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import type { ChangeKind, Release } from '../../../update/changelog.data'
 
 // 更新日志：按版本分组的时间线。数据在构建时由 docs/update/changelog.data.ts 从 CHANGELOG.md 解析，
@@ -60,10 +60,17 @@ function onToggle(id: string, event: Event) {
   else open.value.delete(id)
 }
 
-// 从外部链接（如 #v0.1.38）或右侧目录进入时，把对应版本展开。
+// 从外部链接（如 #v0.1.38）进入时，把对应版本展开并平滑滚动到视图内。
 function openFromHash() {
   const id = decodeURIComponent(window.location.hash.slice(1))
-  if (id && props.releases.some((release) => release.id === id)) open.value.add(id)
+  if (!id || !props.releases.some((release) => release.id === id)) return
+  open.value.add(id)
+  nextTick(() => {
+    const target = document.getElementById(id)
+    if (!target) return
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    target.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+  })
 }
 
 onMounted(() => {
@@ -103,7 +110,7 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
               <time v-if="release.version" class="cl-date ignore-header" :datetime="release.date">{{ release.date }}</time>
               <span v-if="index === 0 && filter === 'all'" class="cl-latest ignore-header">最新</span>
             </h2>
-            <span class="cl-counts" aria-hidden="true">
+            <span class="cl-counts">
               <span v-for="group in release.groups" :key="group.label" class="cl-count" :class="`is-${group.kind}`">
                 {{ group.label }} {{ group.items.length }}
               </span>
@@ -136,7 +143,7 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
   --cl-changed: var(--vp-c-brand-1);
   --cl-fixed: #b0620a;
   --cl-other: var(--vp-c-text-3);
-  --cl-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --cl-ease: var(--td-ease-out, cubic-bezier(0.23, 1, 0.32, 1));
   margin: 28px 0 8px;
 }
 .dark .tidoc-changelog {
@@ -173,21 +180,22 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 160ms ease, color 160ms ease, transform 160ms var(--cl-ease);
+  transition: background-color 150ms ease, color 150ms ease, transform 120ms var(--cl-ease);
 }
-.cl-chip:hover:not(:disabled):not(.is-active) {
-  color: var(--vp-c-text-1);
+@media (hover: hover) and (pointer: fine) {
+  .cl-chip:hover:not(:disabled):not(.is-active) {
+    color: var(--vp-c-text-1);
+  }
 }
 .cl-chip:active:not(:disabled) {
   transform: scale(0.97);
 }
 .cl-chip.is-active {
-  background: var(--vp-c-bg);
+  background: var(--vp-c-bg-elv);
   color: var(--vp-c-text-1);
-  box-shadow: 0 0 0 1px var(--vp-c-divider), 0 1px 2px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 0 0 1px var(--vp-c-divider), 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 .dark .cl-chip.is-active {
-  background: var(--vp-c-bg-elv);
   box-shadow: 0 0 0 1px var(--vp-c-border);
 }
 .cl-chip:disabled {
@@ -195,17 +203,26 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
   cursor: default;
 }
 .cl-toggle {
-  padding: 4px 2px;
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 8px;
   border: 0;
+  border-radius: 6px;
   background: transparent;
   color: var(--vp-c-text-2);
   font: inherit;
   font-size: 13px;
   cursor: pointer;
-  transition: color 160ms ease;
+  transition: color 150ms ease, transform 120ms var(--cl-ease);
 }
-.cl-toggle:hover {
-  color: var(--vp-c-brand-1);
+@media (hover: hover) and (pointer: fine) {
+  .cl-toggle:hover {
+    color: var(--vp-c-brand-1);
+  }
+}
+.cl-toggle:active {
+  transform: scale(0.97);
 }
 .cl-chip:focus-visible,
 .cl-toggle:focus-visible,
@@ -254,14 +271,17 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
   border-radius: 10px;
   list-style: none;
   cursor: pointer;
-  transition: background-color 160ms ease;
+  transition: background-color 150ms ease;
 }
 .cl-head::-webkit-details-marker {
   display: none;
 }
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
   .cl-head:hover {
     background: var(--vp-c-bg-soft);
+  }
+  .cl-head:hover .cl-chevron {
+    color: var(--vp-c-text-2);
   }
 }
 .cl-dot {
@@ -274,7 +294,7 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
   border: 2px solid var(--vp-c-text-3);
   border-radius: 50%;
   background: var(--vp-c-bg);
-  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+  transition: border-color 150ms ease, background-color 150ms ease;
 }
 .cl-release[open] .cl-dot {
   border-color: var(--vp-c-brand-1);
@@ -282,7 +302,6 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
 .cl-release.is-latest .cl-dot {
   border-color: var(--vp-c-brand-1);
   background: var(--vp-c-brand-1);
-  box-shadow: 0 0 0 4px var(--vp-c-brand-soft);
 }
 
 .vp-doc .cl-title {
@@ -295,6 +314,7 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
   border: 0;
   letter-spacing: 0;
   line-height: 1.4;
+  scroll-margin-top: calc(var(--vp-nav-height, 64px) + 20px);
 }
 .cl-version {
   color: var(--vp-c-text-1);
@@ -355,13 +375,10 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
 }
 .cl-chevron {
   color: var(--vp-c-text-3);
-  transition: transform 200ms var(--cl-ease), color 160ms ease;
+  transition: transform 180ms var(--cl-ease), color 150ms ease;
 }
 .cl-release[open] .cl-chevron {
   transform: rotate(180deg);
-}
-.cl-head:hover .cl-chevron {
-  color: var(--vp-c-text-2);
 }
 
 .cl-body {
@@ -369,13 +386,15 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
 }
 @media (prefers-reduced-motion: no-preference) {
   .cl-release[open] .cl-body {
-    animation: cl-in 220ms var(--cl-ease);
+    animation: cl-in 180ms var(--cl-ease);
   }
 }
 @keyframes cl-in {
   from {
     opacity: 0;
-    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
   }
 }
 .cl-intro {
@@ -447,6 +466,15 @@ onUnmounted(() => window.removeEventListener('hashchange', openFromHash))
   }
   .cl-version {
     font-size: 17px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cl-chip,
+  .cl-toggle,
+  .cl-head,
+  .cl-dot,
+  .cl-chevron {
+    transition: none;
   }
 }
 </style>

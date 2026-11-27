@@ -8,9 +8,13 @@ const repoRoot = path.resolve(__dirname, '../..')
 
 export const repo = 'https://github.com/BITFSAE/tidoc'
 
-// 这几页只是把仓库根目录的文件嵌进来，正文里的相对链接是相对仓库根目录写的。
+// 这几页只是把仓库里的既有文档嵌进来，正文里的相对链接分别相对各自基准目录写的。
 // 更新日志页不在其中：它在构建时解析 CHANGELOG.md，条目里的链接另行改写。
-const rootIncludes = new Set(['docs/dev/design.md', 'docs/dev/contributing.md'])
+const includeBaseDirs = new Map<string, string>([
+  ['docs/dev/design.md', repoRoot],
+  ['docs/dev/contributing.md', repoRoot],
+  ['docs/dev/release.md', path.join(repoRoot, 'docs')]
+])
 
 export function repoLinks(repo: string) {
   const github = (rel: string, hash: string) => {
@@ -37,7 +41,7 @@ export function repoLinks(repo: string) {
       const file: string | undefined = state.env?.realPath ?? state.env?.path
       if (!file) return
       const fileRel = path.relative(repoRoot, file).split(path.sep).join('/')
-      const dir = rootIncludes.has(fileRel) ? repoRoot : path.dirname(file)
+      const dir = includeBaseDirs.get(fileRel) ?? path.dirname(file)
       for (const block of state.tokens) {
         for (const token of block.children ?? []) {
           if (token.type !== 'link_open') continue

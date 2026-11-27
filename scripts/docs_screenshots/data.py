@@ -1,4 +1,4 @@
-"""截图用的虚构数据：8 条条目、2 位报账人、2 个批次，另有一个导入预览用的绑定包，全部写进隔离数据目录。
+"""截图用的虚构数据：8 条条目、2 位报账人、2 个批次，导入预览用的文件和绑定包，全部写进隔离数据目录。
 
 这里没有真实发票、姓名、税号或账号。抬头沿用内置 BITFSAE 方案里的两个公开抬头。
 """
@@ -38,6 +38,8 @@ ROWS = [
 REVIEWED = {106: ["付款截图识别到 820.00，但截图里有优惠券抵扣，请核对。"]}
 
 BATCH_NAMES = {1: "9 月第一批", 2: "9 月第二批"}
+# 批次的示例备注，让「编辑批次」截图里能看到一段真实的填写内容。
+BATCH_NOTES = {1: "9 月上旬采购，月底前报账"}
 
 
 class Backend:
@@ -84,6 +86,41 @@ def _blank_pdf(path: Path, size: int) -> None:
         writer.write(handle)
 
 
+def _text_pdf(path: Path, lines: list[str]) -> None:
+    """写一页只含纯文本的 PDF，用来让导入扫描从正文读到发票号。
+
+    手写对象表而不依赖额外库：截图脚本只需要能被 pypdf 读出文字的页面。
+    """
+    operations = ["BT", "/F1 12 Tf", "72 760 Td"]
+    for index, line in enumerate(lines):
+        if index:
+            operations.append("0 -18 Td")
+        operations.append(f"({line}) Tj")
+    operations.append("ET")
+    stream = "\n".join(operations).encode("latin-1")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ).encode()
+    path.write_bytes(bytes(out))
+
+
 def _record_first_check(api, attachment: dict, invoice_no: str) -> None:
     """虚构的查验单是空白 PDF，读不出查验次数，卡片会出现提醒；这里写入「当日第 1 次」的读取结果，
     让截图里的查验单是正常状态（与软件读到真实查验单正文后保存的内容相同）。"""
@@ -114,7 +151,7 @@ def seed(api, work_dir: Path) -> None:
         "张三": backend.create_profile("张三", "王老师", True)["id"],
         "李四": backend.create_profile("李四", "王老师", False)["id"],
     }
-    batches = {key: backend.create_batch(name)["id"] for key, name in BATCH_NAMES.items()}
+    batches = {key: backend.create_batch(name, BATCH_NOTES.get(key, ""))["id"] for key, name in BATCH_NAMES.items()}
 
     work_dir.mkdir(parents=True, exist_ok=True)
     counter = itertools.count(1)
@@ -180,3 +217,36 @@ def seed_bindle_preview(api, work_dir: Path) -> Path:
     for entry_id in new_ids:
         backend.delete_entry(entry_id)
     return package
+
+
+def seed_import_preview(work_dir: Path) -> list[Path]:
+    """生成导入预览用的虚构文件：4 组 XML+PDF、1 个只有 PDF 的发票、1 张付款截图和 1 份查验单。
+
+    发票号沿用 20 位虚构号码，PDF 正文里带同一个号码，扫描时能和 XML 配对。
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    sellers = ["示例办公用品有限公司", "示例五金工具有限公司", "示例文具商行", "示例电子科技有限公司"]
+    paths: list[Path] = []
+    for offset, seller in enumerate(sellers):
+        number = f"26999000000000000{301 + offset}"
+        amount = f"{120 + offset * 35}.00"
+        xml_path = work_dir / f"发票_{number}.xml"
+        _invoice_xml(xml_path, number, "2026-09-24", seller, UNIVERSITY, "办公用品", amount)
+        pdf_path = work_dir / f"发票_{number}.pdf"
+        _text_pdf(pdf_path, ["E-INVOICE", f"Invoice No: {number}", f"Amount: {amount}"])
+        paths.extend([pdf_path, xml_path])
+
+    pdf_only = "26999000000000000305"
+    pdf_only_path = work_dir / f"发票_{pdf_only}.pdf"
+    _text_pdf(pdf_only_path, ["E-INVOICE", f"Invoice No: {pdf_only}", "Amount: 88.00"])
+    paths.append(pdf_only_path)
+
+    payment = work_dir / "付款截图_0924.png"
+    Image.new("RGB", (240, 320), (232, 236, 243)).save(payment)
+    paths.append(payment)
+
+    inspection_number = "26999000000000000301"
+    inspection = work_dir / f"发票查验结果_{inspection_number}.pdf"
+    _text_pdf(inspection, ["VERIFICATION RESULT", f"Invoice No: {inspection_number}", "Check count: 1"])
+    paths.append(inspection)
+    return paths

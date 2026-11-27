@@ -16,12 +16,14 @@ const current = ref<Platform | null>(null)
 const mobile = ref(false)
 
 onMounted(() => {
-  const device = `${navigator.platform} ${navigator.userAgent}`.toLowerCase()
-  const touchMac = device.includes('mac') && navigator.maxTouchPoints > 1
-  mobile.value = /android|iphone|ipad|ipod/.test(device) || touchMac
+  const uaData = (navigator as Navigator & { userAgentData?: { platform?: string; mobile?: boolean } }).userAgentData
+  const platformHint = (uaData?.platform ?? navigator.platform ?? '').toLowerCase()
+  const ua = navigator.userAgent.toLowerCase()
+  const touchMac = (platformHint.includes('mac') || ua.includes('mac')) && navigator.maxTouchPoints > 1
+  mobile.value = Boolean(uaData?.mobile) || /android|iphone|ipad|ipod/.test(ua) || touchMac
   if (mobile.value) return
-  if (device.includes('mac')) current.value = 'macos'
-  else if (device.includes('win')) current.value = 'windows'
+  if (platformHint.includes('mac') || ua.includes('mac')) current.value = 'macos'
+  else if (platformHint.includes('win') || ua.includes('win')) current.value = 'windows'
 })
 </script>
 
@@ -45,8 +47,8 @@ onMounted(() => {
           <span class="dl-hint">{{ item.hint }}</span>
         </span>
         <a
-          class="home-btn no-icon"
-          :class="{ 'is-brand': current === item.id }"
+          class="td-btn"
+          :class="{ 'is-primary': current === item.id }"
           data-icon="download"
           :href="`${GATEWAY}/${item.id}`"
           :aria-label="`下载 ${item.name} 版安装包`"
@@ -63,7 +65,7 @@ onMounted(() => {
   margin: 20px 0 8px;
   overflow: hidden;
   border: 1px solid var(--vp-c-divider);
-  border-radius: 14px;
+  border-radius: 12px;
   background: var(--vp-c-bg-soft);
 }
 .dl-list {
@@ -77,36 +79,37 @@ onMounted(() => {
   gap: 14px;
   margin: 0;
   padding: 16px 18px;
-  transition: background-color 160ms ease;
+  transition: background-color 150ms ease;
 }
 .dl-item + .dl-item {
   margin-top: 0;
   border-top: 1px solid var(--vp-c-divider);
 }
 .dl-item.is-current {
-  background: var(--vp-c-bg);
-  box-shadow: inset 3px 0 0 var(--vp-c-brand-1);
+  background: var(--vp-c-bg-elv);
+}
+@media (hover: hover) and (pointer: fine) {
+  .dl-item:not(.is-current):hover {
+    background: color-mix(in srgb, var(--vp-c-bg-elv) 55%, transparent);
+  }
 }
 .dl-icon {
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  width: 42px;
-  height: 42px;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 10px;
-  background: var(--vp-c-bg);
-  color: var(--vp-c-text-1);
+  width: 24px;
+  height: 24px;
+  color: var(--vp-c-text-2);
 }
 .dl-item.is-current .dl-icon {
-  border-color: color-mix(in srgb, var(--vp-c-brand-1) 35%, transparent);
   color: var(--vp-c-brand-1);
 }
 .dl-info {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 .dl-name {
@@ -119,12 +122,12 @@ onMounted(() => {
   color: var(--vp-c-text-1);
 }
 .dl-badge {
-  padding: 2px 8px;
+  padding: 1px 8px;
   border-radius: 999px;
   background: var(--vp-c-brand-soft);
   font-size: 12px;
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 1.5;
   color: var(--vp-c-brand-1);
 }
 .dl-hint {
@@ -146,9 +149,9 @@ onMounted(() => {
     padding: 16px;
   }
   .dl-info {
-    flex-basis: calc(100% - 58px);
+    flex-basis: calc(100% - 40px);
   }
-  .dl-item .home-btn {
+  .dl-item .td-btn {
     flex: 1 1 100%;
   }
 }

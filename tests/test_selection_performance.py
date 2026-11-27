@@ -135,11 +135,13 @@ def test_a_slower_earlier_list_refresh_does_not_overwrite_the_latest_one():
     run_selection(r"""
 const pending = [];
 globalThis.Api = { listEntries: () => new Promise((resolve) => pending.push(resolve)), getBatch: async () => null,
+  listBatches: async () => ({batches: [{id: 'batch', stats: {incomplete: pending.length}}]}),
   invoiceRecognitionNotice: async () => ({version: 'test', dismissed: false}) };
 refreshTitleOptions = async () => {};
 currentFilters = () => ({});
 let renders = 0;
 renderEntries = () => { renders++; };
+renderBatchFolders = () => {};
 syncFilterControlStates = () => {};
 (async () => {
   const first = refreshEntries();
@@ -152,5 +154,6 @@ syncFilterControlStates = () => {};
   await first;
   assert.deepEqual(State.entries.map((entry) => entry.id), ['new']);
   assert.equal(renders, 1);
+  assert.equal(State.batches[0].stats.incomplete, 2);
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """)

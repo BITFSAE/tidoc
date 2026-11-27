@@ -425,7 +425,6 @@ async function init() {
   await AdapterUI.initializeViewPreference();
   await loadWorkflowPreferences();
   await loadProfiles();
-  await loadBatches();
   await refreshEntries();
   await refreshTagOptions();
   showSearchHintIfEmpty();
@@ -1222,7 +1221,7 @@ let entryRefreshSequence = 0;
 let renderedListKey = '';
 async function refreshEntries() {
   const sequence = ++entryRefreshSequence;
-  let currentBatch = null, entries = [], recognitionNotice = null, listKey = '';
+  let currentBatch = null, entries = [], recognitionNotice = null, batchListing = null, listKey = '';
   // 后端忙时切换批次或搜索可能要等一会儿；稍等仍未返回就把列表标成刷新中，不让旧列表看起来像结果。
   const list = $('#entryList');
   const busyTimer = setTimeout(() => {
@@ -1235,10 +1234,14 @@ async function refreshEntries() {
     const batchId = actualBatchId();
     const filters = currentFilters();
     listKey = JSON.stringify([filters, State.quickView, State.groupBy]);
-    [currentBatch, entries, recognitionNotice] = await Promise.all([
+    [currentBatch, entries, recognitionNotice, batchListing] = await Promise.all([
       batchId ? Api.getBatch(batchId) : null,
       Api.listEntries(filters),
       Api.invoiceRecognitionNotice(),
+      Api.listBatches(true).catch((error) => {
+        if (sequence === entryRefreshSequence) toast(`批次统计刷新失败：${error.message}`, 'err');
+        return null;
+      }),
     ]);
     if (State.quickView === 'incomplete') {
       entries = entries.filter((e) => (e.completeness?.status || e.status) !== 'complete');
@@ -1256,6 +1259,8 @@ async function refreshEntries() {
   }
   if (sequence !== entryRefreshSequence) return;
   State.currentBatch = currentBatch;
+  // 批次汇总取完整成员的统计，不随搜索或「齐备」筛选缩小，也不沿用补材料前的数字。
+  if (batchListing) applyBatchListing(batchListing);
   State.entries = entries;
   State.invoiceRecognitionNotice = recognitionNotice;
   renderInvoiceRecognitionNotice();
@@ -1537,6 +1542,7 @@ async function syncEntryAfterChange(entryId, { searchable = false, notes = false
     await refreshEntries();
     return;
   }
+  if (affectsStatus) await loadBatches();
   await refreshEntryCard(entryId, detail);
 }
 
@@ -2257,12 +2263,17 @@ function toggleSelectAllVisible() {
 async function loadBatches() {
   try {
     const result = await Api.listBatches(true);
-    State.batches = Array.isArray(result) ? result : (result?.batches || []);
-    State.unbatchedCount = Array.isArray(result) ? 0 : Number(result?.unbatched_count || 0);
+    applyBatchListing(result);
   } catch (e) {
-    State.batches = [];
-    State.unbatchedCount = 0;
+    toast(`批次统计刷新失败：${e.message}`, 'err');
   }
+}
+
+function applyBatchListing(result) {
+  State.batches = Array.isArray(result) ? result : (result?.batches || []);
+  State.unbatchedCount = Array.isArray(result) ? 0 : Number(result?.unbatched_count || 0);
+  const current = State.batches.find((batch) => batch.id === State.currentBatch?.id);
+  if (current) State.currentBatch = { ...State.currentBatch, ...current };
   renderBatchFolders();
 }
 
@@ -2612,8 +2623,7 @@ async function renameBatchFlow(b) {
       if (!name) { toast('名称不能为空', 'err'); return; }
       try {
         await Api.updateBatch(b.id, { name, note: body.querySelector('#bNote').value });
-        m.close(); await loadBatches();
-        await refreshEntries();
+        m.close(); await refreshEntries();
         toast('已保存', 'ok');
       } catch (e) { toast(e.message, 'err'); }
     })],
@@ -2633,7 +2643,6 @@ async function batchNoteFlow(b) {
         try {
           await Api.updateBatch(b.id, { note: body.querySelector('#batchNote').value });
           m.close();
-          await loadBatches();
           await refreshEntries();
           toast('批次备注已保存', 'ok');
         } catch (e) { toast(e.message, 'err'); }
@@ -3656,7 +3665,6 @@ function openEntryMenu(x, y, e, options) {
       try {
         const r = await Api.removeEntriesFromBatch(actualBatchId(), [e.id]);
         State.selected.delete(e.id);
-        await loadBatches();
         await refreshEntries();
         toast(r.removed ? '已移出当前批次' : '条目已不在当前批次', 'ok');
       } catch (err) { toast(err.message, 'err'); }
@@ -3820,7 +3828,6 @@ async function quickDelete(e) {
   if (!confirm(`确认删除「${e.seller || '该条目'}」？此操作不可撤销。`)) return;
   try {
     const result = await Api.deleteEntry(e.id);
-    await loadBatches();
     await refreshEntries();
     toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
   }
@@ -5424,7 +5431,6 @@ function openNewEntry() {
         paid_amount: att.recognized_value || '', payment_ai: {needs_review: att.recognition_status === 'review', reason: att.recognition_message || ''},
       }));
       if (payments.length) await settlePaymentAmountAfterAdd(createdEntry.id, payments);
-      await loadBatches();
       await refreshEntries();
       toast('已保存', 'ok');
     } catch (e) {
@@ -5686,7 +5692,6 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
     const cleanupNow = allPreviewPaths().filter((p) => !manualPaths.has(p));
     cleanupOnClose = () => [];
     await cleanupDroppedPaths(cleanupNow);
-    await loadBatches();
     await refreshEntries();
     m.close();
     if (bind.auto && bind.auto.length) {
@@ -5739,7 +5744,6 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
               group.error = '';
             }
           });
-          await loadBatches();
           await refreshEntries();
           if (r.failed && r.failed.length) {
             render();
@@ -6266,7 +6270,6 @@ async function openEntryDetail(entryId, currentDetail = null) {
         try {
           const result = await Api.deleteEntry(entryId);
           mm.close();
-          await loadBatches();
           await refreshEntries();
           toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
         }
@@ -7582,17 +7585,45 @@ async function batchDelete() {
   try {
     const result = await Api.deleteEntries(ids);
     State.selected.clear();
-    await loadBatches();
     await refreshEntries();
     toast(result.cleanup_warning || '已删除', result.cleanup_warning ? 'err' : 'ok');
   } catch (e) { toast(e.message, 'err'); }
 }
 
 // 「重新识别」只在本机重新读发票文件，不联网、不计费；付款截图 AI 识别在「云识别」里。
+function openReparseFailures(failures, labels) {
+  const body = el('div', '', `
+    <p class="hint">以下条目未能完成重新识别。打开详情核对原发票材料，处理后可以重试。</p>
+    <div class="diagnostic-section is-blocked" role="alert">
+      <b class="diagnostic-title">${failures.length} 张发票识别失败</b>
+      <ul class="diagnostic-list">${failures.map((row, index) => `
+        <li><b>${esc(labels.get(row.entry_id) || `第 ${index + 1} 个条目`)}</b>
+          <div>${esc(row.error || '未返回失败原因，请重试。')}</div>
+          <button type="button" class="link-btn" data-reparse-failure="${index}">打开详情</button>
+        </li>`).join('')}</ul>
+    </div>`);
+  body.querySelectorAll('[data-reparse-failure]').forEach((button) => {
+    button.onclick = () => openEntryDetail(failures[Number(button.dataset.reparseFailure)].entry_id);
+  });
+  const m = modal({
+    title: '重新识别失败明细', body,
+    footer: [
+      mkBtn('关闭', 'ghost', () => m.close()),
+      mkBtn('重试失败条目', 'primary', () => {
+        m.close();
+        return batchReparse(failures.map((row) => row.entry_id));
+      }),
+    ],
+  });
+}
+
 async function batchReparse(entryIds, fromNotice = false) {
   const explicitIds = Array.isArray(entryIds);
   const ids = explicitIds ? [...entryIds] : [...State.selected];
   if (!ids.length) return;
+  // 刷新后条目可能被当前筛选移走，先保留可辨认的名称供失败明细使用。
+  const labels = new Map(State.entries.map((entry) => [entry.id,
+    entry.invoice_no ? `发票 ${entry.invoice_no}` : (entry.seller || '')]));
   let preview;
   try { preview = await Api.recognitionPreview(ids); }
   catch (e) { toast(e.message, 'err'); return; }
@@ -7632,10 +7663,12 @@ async function batchReparse(entryIds, fromNotice = false) {
       if (!explicitIds) State.selected.clear();
       await refreshEntries();
       const parts = [];
-      if (result.processed) parts.push(`发票 ${result.processed} 张`);
+      const succeeded = Math.max(0, result.processed - result.failed.length);
+      if (succeeded) parts.push(`成功 ${succeeded} 张`);
       if (result.skipped_current) parts.push(`跳过 ${result.skipped_current} 张已是最新`);
       if (result.failed.length) parts.push(`${result.failed.length} 张失败`);
       toast(parts.join('，') || '当前规则已处理，无需重复识别', result.failed.length ? 'err' : 'ok');
+      if (result.failed.length) openReparseFailures(result.failed, labels);
     } catch (e) {
       toast(e.message, 'err');
       runBtn.disabled = false;

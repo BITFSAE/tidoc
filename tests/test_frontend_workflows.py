@@ -2,6 +2,163 @@
 from tests.test_selection_performance import run_selection
 
 
+def test_reparse_failures_show_reasons_and_retry_only_failed_entries():
+    run_selection(r"""
+(async () => {
+  const dialogs = [], messages = [], requested = [], opened = [];
+  document.createElement = () => {
+    const node = makeNode();
+    node.querySelector = () => ({checked: true});
+    node.querySelectorAll = () => {
+      node.failureButtons = [...node.innerHTML.matchAll(/data-reparse-failure="(\d+)"/g)]
+        .map(match => ({dataset: {reparseFailure: match[1]}}));
+      return node.failureButtons;
+    };
+    return node;
+  };
+  mkBtn = (text, cls, onclick) => ({textContent: text, onclick});
+  modal = options => {
+    const dialog = {...options, closed: false, close() {this.closed = true;}};
+    dialogs.push(dialog); return dialog;
+  };
+  taskProgress = () => ({update() {}, close() {}});
+  toast = message => messages.push(message);
+  openEntryDetail = id => opened.push(id);
+  State.entries = [{id: 'good'}, {id: 'bad', invoice_no: 'TEST-002'}];
+  globalThis.Api = {
+    recognitionPreview: async ids => {
+      requested.push(ids); return {invoice: {total: ids.length, pending: ids.length}};
+    },
+    rerecognizeMaterials: async ([id]) => ({invoice: {
+      processed: 1, failed: id === 'bad' ? [{entry_id: id, error: '无法读取 <原发票>'}] : [],
+    }}),
+  };
+  refreshEntries = async () => {State.entries = [];};
+  await batchReparse(['good', 'bad']);
+  await dialogs[0].footer[1].onclick();
+  assert.equal(dialogs[0].closed, true);
+  assert.equal(messages.at(-1), '成功 1 张，1 张失败');
+  const failures = dialogs[1];
+  assert.equal(failures.title, '重新识别失败明细');
+  assert.ok(failures.body.innerHTML.includes('发票 TEST-002'));
+  assert.ok(failures.body.innerHTML.includes('无法读取 &lt;原发票&gt;'));
+  assert.ok(failures.body.innerHTML.includes('role="alert"'));
+  assert.equal(failures.body.failureButtons.length, 1);
+  failures.body.failureButtons[0].onclick();
+  assert.deepEqual(opened, ['bad']);
+  assert.equal(failures.closed, false);
+  await failures.footer[1].onclick();
+  assert.deepEqual(requested, [['good', 'bad'], ['bad']]);
+  await dialogs[2].footer[1].onclick();
+  assert.equal(messages.at(-1), '1 张失败');
+  Api.rerecognizeMaterials = async () => ({invoice: {processed: 1, failed: []}});
+  await batchReparse(['good']);
+  const successDialog = dialogs.at(-1), dialogCount = dialogs.length;
+  await successDialog.footer[1].onclick();
+  assert.equal(messages.at(-1), '成功 1 张');
+  assert.equal(dialogs.length, dialogCount);
+  Api.rerecognizeMaterials = async () => ({invoice: {processed: 0, skipped_current: 1, failed: []}});
+  await batchReparse(['good']);
+  await dialogs.at(-1).footer[1].onclick();
+  assert.equal(messages.at(-1), '跳过 1 张已是最新');
+})().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
+def test_list_refresh_updates_batch_counts_without_using_filtered_entry_count():
+    run_selection(r"""
+(async () => {
+  State.batchFilter = 'batch';
+  State.quickView = 'complete';
+  State.batches = [{id: 'batch', stats: {count: 11, incomplete: 1}}];
+  const batch = {id: 'batch', stats: {count: 11, incomplete: 0}, entry_notes: {}};
+  let matches = Array.from({length: 11}, (_, i) => ({id: 'e' + i}));
+  globalThis.Api = {
+    getBatch: async () => batch,
+    listBatches: async () => ({batches: [batch], unbatched_count: 3}),
+    listEntries: async () => matches,
+    invoiceRecognitionNotice: async () => ({}),
+  };
+  refreshTitleOptions = async () => {};
+  currentFilters = () => ({batch_id: State.batchFilter || undefined, status: 'complete'});
+  renderEntries = syncFilterControlStates = () => {};
+  const displayed = [];
+  renderBatchFolders = () => displayed.push(State.batches[0].stats.incomplete);
+  await refreshEntries();
+  assert.deepEqual(displayed, [0]);
+  assert.equal(State.batches[0].stats.count, 11);
+  assert.equal(State.entries.length, 11);
+  assert.equal(State.unbatchedCount, 3);
+  assert.equal(State.currentBatch.stats.incomplete, 0);
+  matches = [{id: 'matched'}];
+  State.batchFilter = '';
+  await refreshEntries();
+  assert.equal(State.entries.length, 1);
+  assert.equal(State.batches[0].stats.count, 11);
+  assert.equal(State.batches[0].stats.incomplete, 0);
+})().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
+def test_material_and_paid_amount_changes_refresh_batches_with_card_update():
+    run_selection(r"""
+(async () => {
+  State.quickView = 'all';
+  State.batches = [{id: 'batch', stats: {count: 11, incomplete: 1}}];
+  State.currentBatch = {id: 'batch', stats: {count: 11, incomplete: 1}, entry_notes: {e: '保留备注'}};
+  document.querySelector('#filterKeyword').value = '';
+  document.querySelector('#filterCheck').value = '';
+  let incomplete = 0, calls = 0;
+  globalThis.Api = {listBatches: async () => {
+    calls++;
+    return {batches: [{id: 'batch', stats: {count: 11, incomplete}}]};
+  }};
+  renderBatchFolders = () => {};
+  refreshEntryCard = async () => {
+    assert.equal(State.batches[0].stats.incomplete, incomplete);
+    assert.equal(State.currentBatch.stats.incomplete, incomplete);
+    assert.equal(State.currentBatch.entry_notes.e, '保留备注');
+  };
+  refreshEntries = async () => {throw new Error('应保留单卡刷新');};
+  await syncEntryAfterChange('e', {affectsStatus: true});
+  incomplete = 1;
+  await syncEntryAfterChange('e', {affectsStatus: true});
+  assert.equal(calls, 2);
+  await syncEntryAfterChange('e', {notes: true});
+  assert.equal(calls, 2);
+})().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
+def test_batch_stats_failure_keeps_the_entry_list_and_previous_batch_counts():
+    run_selection(r"""
+(async () => {
+  const errors = [];
+  State.batches = [{id: 'batch', stats: {count: 11, incomplete: 0}}];
+  State.unbatchedCount = 3;
+  const previous = State.batches;
+  globalThis.Api = {
+    listBatches: async () => {throw new Error('读取失败');},
+    listEntries: async () => [{id: 'entry'}],
+    invoiceRecognitionNotice: async () => ({}),
+  };
+  refreshTitleOptions = async () => {};
+  currentFilters = () => ({});
+  renderEntries = syncFilterControlStates = () => {};
+  renderBatchFolders = () => {throw new Error('不应清空批次栏');};
+  toast = message => errors.push(message);
+  await refreshEntries();
+  assert.deepEqual(State.entries.map(entry => entry.id), ['entry']);
+  assert.equal(State.batches, previous);
+  assert.equal(State.unbatchedCount, 3);
+  await loadBatches();
+  assert.equal(State.batches, previous);
+  assert.equal(State.unbatchedCount, 3);
+  assert.deepEqual(errors, ['批次统计刷新失败：读取失败', '批次统计刷新失败：读取失败']);
+})().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
 def test_parser_update_notice_scopes_actions_and_persists_dismissal():
     run_selection(r"""
 (async () => {

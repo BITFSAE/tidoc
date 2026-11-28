@@ -41,6 +41,7 @@ class Database:
         # Backup written by this start's schema upgrade, if any.
         self.migration_backup = None
         self._lock = threading.RLock()
+        self._on_close = []
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute('PRAGMA foreign_keys=ON')
@@ -78,5 +79,18 @@ class Database:
         with self._lock:
             return backup_connection(self.conn, target)
 
+    def add_close_listener(self, callback) -> None:
+        with self._lock:
+            if callback not in self._on_close:
+                self._on_close.append(callback)
+
     def close(self) -> None:
+        with self._lock:
+            listeners = list(self._on_close)
+            self._on_close.clear()
+        for callback in listeners:
+            try:
+                callback()
+            except Exception:
+                pass
         self.conn.close()

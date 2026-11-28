@@ -1997,12 +1997,14 @@ class EntryRepo:
 
     # ------------------------------------------------------------------ 删除
     def delete(self, entry_id: str) -> None:
-        self.db.conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
-        self.db.conn.commit()
+        self.delete_many([entry_id], commit=True)
 
     def delete_many(self, entry_ids: list[str], *, commit: bool = True) -> int:
         if not entry_ids:
             return 0
+        from ..services.hub_batch_sync import record_deleted_remote_entries
+
+        record_deleted_remote_entries(self.db.conn, entry_ids)
         placeholders = ",".join("?" * len(entry_ids))
         cur = self.db.conn.execute(f"DELETE FROM entries WHERE id IN ({placeholders})", entry_ids)
         if commit:

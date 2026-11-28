@@ -105,8 +105,8 @@ SHIM = """<script>(function () {
     });
   }
   function hubPull(done) {
-    hubSpace("pull", function (button) {
-      button.click();
+    hubReady(function () {
+      HubUI.openPullPreview({ id: hubShot.spaceId, name: "11 月报账" });
       until(function () { return document.querySelector(".bindle-entry-row"); }, done);
     });
   }
@@ -142,6 +142,35 @@ SHIM = """<script>(function () {
   }
 
   var scenes = {
+    "hub-batch-settings": function () {
+      hubReady(async function () {
+        await HubUI.refreshState();
+        await focusBatch(hubShot.batchId);
+        await HubUI.openBatchSharing(State.currentBatch);
+        until(function () { return document.querySelector("#hubBatchAutoSync"); }, settle);
+      });
+    },
+    "hub-shared-batch": function () {
+      hubReady(async function () {
+        await HubUI.refreshState();
+        await focusBatch(hubShot.batchId);
+        until(function () { return document.querySelector("[data-hub-batch-mark]"); }, settle);
+      });
+    },
+    "hub-batch-menu": function () {
+      hubReady(async function () {
+        await HubUI.refreshState();
+        await focusBatch(hubShot.batchId);
+        openBatchMenu(24, 24, State.currentBatch);
+        until(function () { return document.querySelector(".entry-context-menu"); }, function (menu) {
+          var copy = menu.cloneNode(true);
+          closeEntryMenu();
+          copy.style.cssText = "position:relative;left:auto;top:auto;opacity:1;transform:none";
+          isolate(copy, 12);
+          settle();
+        });
+      });
+    },
     "hub-workspace": function () { hubSpace("view", settle); },
     "hub-entries": function () {
       hubSpace("view", function (button) {

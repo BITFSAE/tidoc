@@ -632,6 +632,63 @@ class HubDB:
                 raise HubDbError("无权查看其他成员的条目。", status=403, code="forbidden")
             return self._entry_dict(row)
 
+    def sync_state(self, user: dict, space_id: str) -> dict:
+        """Return lightweight per-entry revision/digest metadata scoped by RBAC."""
+        with self._lock:
+            space = self.conn.execute("SELECT * FROM spaces WHERE id = ?", (space_id,)).fetchone()
+            if not space:
+                raise HubDbError("共享空间不存在。", status=404, code="space_not_found")
+            where = ["space_id = ?"]
+            params: list[Any] = [space_id]
+            if user["role"] != "admin":
+                where.append("owner_user_id = ?")
+                params.append(user["id"])
+            rows = self.conn.execute(
+                f"""SELECT id, revision, review_state, review_note, snapshot_digest, updated_at
+                      FROM space_entries
+                     WHERE {' AND '.join(where)}
+                     ORDER BY id""",
+                params,
+            ).fetchall()
+            entries = [
+                {
+                    "id": r["id"],
+                    "revision": int(r["revision"]),
+                    "review_state": r["review_state"],
+                    "review_note": r["review_note"] or "",
+                    "snapshot_digest": r["snapshot_digest"],
+                    "updated_at": r["updated_at"],
+                }
+                for r in rows
+            ]
+            space_dict = self._space_dict(space, None)
+            version_material = {
+                "space_status": space_dict["status"],
+                "space_name": space_dict["name"],
+                "space_updated_at": space_dict["updated_at"],
+                "entries": [
+                    [
+                        e["id"],
+                        e["revision"],
+                        e["review_state"],
+                        e["review_note"],
+                        e["snapshot_digest"],
+                    ]
+                    for e in entries
+                ],
+            }
+            encoded = json.dumps(
+                version_material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            version = hashlib.sha256(encoded).hexdigest()
+            return {
+                "space": space_dict,
+                "version": version,
+                "max_revision": max((e["revision"] for e in entries), default=0),
+                "entry_count": len(entries),
+                "entries": entries,
+            }
+
     def upload_state(self, user: dict, space_id: str, entry_ids: list[str]) -> dict:
         with self._lock:
             space = self.conn.execute("SELECT status FROM spaces WHERE id = ?", (space_id,)).fetchone()

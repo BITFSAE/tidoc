@@ -235,6 +235,13 @@ const Api = (() => {
 
     // 团队协同共享区（全部由用户显式触发，无后台自动联网）
     hubSettings: () => call('hub_settings'),
+    hubBatchLinks: () => call('hub_batch_links'),
+    hubLinkBatch: (batchId, spaceId, autoSync) => call('hub_link_batch', batchId || '', spaceId || '', !!autoSync),
+    hubUnlinkBatch: (batchId) => call('hub_unlink_batch', batchId),
+    hubSetBatchAutoSync: (batchId, enabled) => call('hub_set_batch_auto_sync', batchId, !!enabled),
+    hubSyncBatch: (batchId) => call('hub_sync_batch', batchId),
+    hubDetachOtherSpaceEntries: (batchId) => call('hub_detach_other_space_entries', batchId),
+    hubSyncTick: () => call('hub_sync_tick'),
     hubJoin: (serverUrl, inviteCode, name, reviewer) => call('hub_join', serverUrl, inviteCode, name || '', reviewer || ''),
     hubConnectToken: (serverUrl, token) => call('hub_connect_token', serverUrl, token),
     hubRefreshMe: () => call('hub_refresh_me'),

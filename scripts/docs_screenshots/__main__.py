@@ -134,6 +134,9 @@ SHOTS = [
 ]
 
 HUB_SHOTS = [
+    Shot("hub-batch-settings", scene="hub-batch-settings", kind="dialog", expect_width=460),
+    Shot("hub-shared-batch", scene="hub-shared-batch", lossless=True),
+    Shot("hub-batch-menu", scene="hub-batch-menu", kind="isolate", lossless=True),
     Shot("hub-workspace", scene="hub-workspace", kind="dialog", expect_width=880),
     Shot("hub-entries", scene="hub-entries", kind="dialog", expect_width=880),
     Shot("hub-before-pull", scene="hub-before-pull", kind="dialog", expect_width=880, size=(1200, 700)),

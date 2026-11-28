@@ -381,7 +381,11 @@ html.batch-dragging, html.batch-dragging * { cursor: grabbing !important; }
   display: flex; flex-direction: column; gap: 1px; min-width: 0; cursor: pointer; color: inherit;
 }
 .folder-open > span:first-child {
-  font-size: 12px; font-weight: 600; line-height: 1.15; max-width: 15ch;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 600; line-height: 1.15;
+}
+.folder-title > span:first-child {
+  max-width: 15ch;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .folder-open small { color: var(--ink-faint); font-size: 10.5px; line-height: 1.1; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -2928,3 +2932,20 @@ details.settings-block { padding-top:0; padding-bottom:0; }
 .hub-settings-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
 .hub-review-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .hub-withdrawn-banner { margin-bottom: 10px; }
+.batch-shared-mark {
+  display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0;
+  color: var(--ink-soft); font-size: 11px; line-height: 1;
+}
+.batch-shared-mark.is-syncing { color: var(--primary); }
+.batch-shared-mark.is-conflict, .batch-shared-mark.is-error, .batch-shared-mark.is-partial { color: var(--warn); }
+.hub-batch-other-space {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+.hub-batch-other-space .hint { margin: 0; }
+.hub-batch-summary { display: flex; flex-direction: column; gap: 4px; margin-bottom: 18px; }
+.hub-batch-settings .hint {
+  margin: 10px 0 0; padding: 0; border: 0; border-radius: 0;
+  background: transparent; box-shadow: none; line-height: 1.6;
+}
+.hub-batch-summary .hint { margin-top: 0; }

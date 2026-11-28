@@ -281,6 +281,15 @@ def _serve_instance_requests(instance, api, window, stop_event, document_request
 
 
 def main() -> None:
+    if "--check-data-compatibility" in sys.argv:
+        from .services.startup import check_data_compatibility
+
+        try:
+            compatible = check_data_compatibility()
+        except Exception:
+            # An unreadable or unprovable database must never authorize a downgrade.
+            compatible = False
+        sys.exit(0 if compatible else 1)
     if "--self-test" in sys.argv:
         try:
             self_test()
@@ -309,11 +318,41 @@ def main() -> None:
         _install_native_stderr_filter()
         from .db.paths import resolve_data_root
 
-        api = Api(
-            resolve_data_root(),
-            launch_file=launch_files[0] if launch_files else "",
-            update_health_path=_update_health_path_from_argv(),
-        )
+        from .services.startup import show_startup_error
+
+        update_health_path = _update_health_path_from_argv()
+
+        def show_help(exc: Exception | None = None, *, recovery: bool = False) -> None:
+            # The helper window must outlive this handler; if the native window cannot be
+            # created, exit non-zero instead of stacking another error dialog.
+            try:
+                show_startup_error(exc, update_recovery=recovery)
+            except Exception:
+                if sys.stderr is not None:
+                    import traceback
+
+                    traceback.print_exc()
+                sys.exit(1)
+
+        if "--update-recovery" in sys.argv:
+            show_help(recovery=True)
+            return
+        try:
+            api = Api(
+                resolve_data_root(),
+                launch_file=launch_files[0] if launch_files else "",
+                update_health_path=update_health_path,
+            )
+        except Exception as exc:
+            if sys.stderr is not None:
+                import traceback
+
+                traceback.print_exc()
+            # The installer must detect failure immediately instead of waiting for a dialog.
+            if update_health_path is not None:
+                sys.exit(1)
+            show_help(exc)
+            return
         for extra_file in launch_files[1:]:
             api.queue_launch_file(extra_file)
         index = web_dir() / "index.html"

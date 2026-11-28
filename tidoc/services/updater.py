@@ -57,10 +57,12 @@ param(
     [Parameter(Mandatory=$true)][string]$WorkDir,
     [Parameter(Mandatory=$true)][string]$ExpectedVersion,
     [Parameter(Mandatory=$true)][string]$HealthFile,
-    [int]$OldPid = 0
+    [int]$OldPid = 0,
+    [int]$HealthTimeoutSeconds = 45,
+    [int]$ProbeTimeoutMs = 15000
 )
 $ErrorActionPreference = "Stop"
-function Start-Tidoc([string]$Directory, [bool]$WithHealth) {
+function Start-Tidoc([string]$Directory, [bool]$WithHealth, [bool]$Recovery = $false) {
     $target = Join-Path $Directory "tidoc.exe"
     if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw "tidoc.exe missing" }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -68,7 +70,32 @@ function Start-Tidoc([string]$Directory, [bool]$WithHealth) {
     $psi.WorkingDirectory = $Directory
     $psi.UseShellExecute = $true
     if ($WithHealth) { $psi.Arguments = "--update-health-file `"$HealthFile`"" }
+    if ($Recovery) { $psi.Arguments = "--update-recovery" }
     return [System.Diagnostics.Process]::Start($psi)
+}
+function Test-OldDataCompatibility([string]$Directory) {
+    # Anything other than a clean "compatible" exit keeps the new build in place. An older
+    # app that predates this switch opens its own window instead of answering, so the probe
+    # is killed at the deadline and reported as incompatible.
+    $probe = $null
+    try {
+        $target = Join-Path $Directory "tidoc.exe"
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { return $false }
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $target
+        $psi.WorkingDirectory = $Directory
+        $psi.Arguments = "--check-data-compatibility"
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $probe = [System.Diagnostics.Process]::Start($psi)
+        if (-not $probe.WaitForExit($ProbeTimeoutMs)) {
+            try { $probe.Kill() } catch {}
+            try { $probe.WaitForExit(5000) | Out-Null } catch {}
+            return $false
+        }
+        return $probe.ExitCode -eq 0
+    } catch { return $false }
+    finally { if ($probe) { $probe.Dispose() } }
 }
 function Move-OldTidoc([string]$Source, [string]$DestinationLeaf) {
     $attempt = 0
@@ -99,7 +126,14 @@ $new = $null
 try {
     Move-OldTidoc $AppDir (Split-Path $backup -Leaf)
     $movedOld = $true
-    Move-Item -LiteralPath $StagedDir -Destination $AppDir
+    try {
+        Move-Item -LiteralPath $StagedDir -Destination $AppDir -ErrorAction Stop
+    } catch {
+        # The data root and the program folder may sit on different volumes; a directory
+        # rename cannot cross them, so copy the staged build and drop the source.
+        Copy-Item -LiteralPath $StagedDir -Destination $AppDir -Recurse -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $StagedDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     foreach ($unins in @("unins000.exe", "unins000.dat")) {
         $src = Join-Path $backup $unins
         if (Test-Path -LiteralPath $src -PathType Leaf) {
@@ -108,7 +142,7 @@ try {
     }
     Remove-Item -LiteralPath $HealthFile -Force -ErrorAction SilentlyContinue
     $new = Start-Tidoc $AppDir $true
-    $deadline = (Get-Date).AddSeconds(45)
+    $deadline = (Get-Date).AddSeconds($HealthTimeoutSeconds)
     $healthy = $false
     while ((Get-Date) -lt $deadline) {
         $new.Refresh()
@@ -120,21 +154,61 @@ try {
                     $healthy = $true
                     break
                 }
-            } catch { break }
+            } catch {
+                # A partially visible or malformed file is retried until the deadline; the
+                # app writes it atomically, so the next read is complete.
+            }
         }
         Start-Sleep -Milliseconds 250
     }
     if (-not $healthy) { throw "new Tidoc did not report healthy" }
     Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($new) { try { $new.Dispose() } catch {} }
     exit 0
 } catch {
-    if ($new -and -not $new.HasExited) { Stop-Process -Id $new.Id -Force -ErrorAction SilentlyContinue }
+    if ($new -and -not $new.HasExited) {
+        Stop-Process -Id $new.Id -Force -ErrorAction SilentlyContinue
+        try { $new.WaitForExit(10000) | Out-Null } catch {}
+    }
+    $startedNew = [bool]$new
+    $newStopped = -not $new -or $new.HasExited
+    if ($new) { try { $new.Dispose() } catch {} }
     if ($movedOld -and (Test-Path -LiteralPath $backup)) {
-        Remove-Item -LiteralPath $AppDir -Recurse -Force -ErrorAction SilentlyContinue
-        Move-Item -LiteralPath $backup -Destination $AppDir
+        if (-not $newStopped) {
+            # The replacement did not stop; leave both builds untouched instead of racing it.
+            exit 24
+        }
+        # Never downgrade the program over data it can no longer read. Keep both apps and
+        # show a database-free recovery window; do not restore a stale database backup.
+        if (-not (Test-OldDataCompatibility $backup)) {
+            try { Start-Tidoc $AppDir $false $true | Out-Null } catch {}
+            exit 24
+        }
+        $parked = "$AppDir.failed-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
+        $parkedNew = $false
+        try {
+            if (Test-Path -LiteralPath $AppDir) {
+                Rename-Item -LiteralPath $AppDir -NewName (Split-Path $parked -Leaf) -ErrorAction Stop
+                $parkedNew = $true
+            }
+            Move-Item -LiteralPath $backup -Destination $AppDir -ErrorAction Stop
+        } catch {
+            # Put the new build back so the rejected install still leaves a runnable app.
+            if ($parkedNew) {
+                try { Rename-Item -LiteralPath $parked -NewName (Split-Path $AppDir -Leaf) -ErrorAction Stop } catch {}
+            }
+            try { Start-Tidoc $AppDir $false $true | Out-Null } catch {}
+            exit 24
+        }
+        if ($parkedNew) { Remove-Item -LiteralPath $parked -Recurse -Force -ErrorAction SilentlyContinue }
         try { Start-Tidoc $AppDir $false | Out-Null } catch {}
     } elseif (Test-Path -LiteralPath $AppDir) {
+        if ($startedNew) {
+            # The backup disappeared after the replacement started; only the new build is left.
+            try { Start-Tidoc $AppDir $false $true | Out-Null } catch {}
+            exit 24
+        }
         try { Start-Tidoc $AppDir $false | Out-Null } catch {}
     }
     exit 23
@@ -150,28 +224,124 @@ WORK_DIR="$3"
 EXPECTED_VERSION="$4"
 HEALTH_FILE="$5"
 OLD_PID="$6"
+# Tests pass shorter values; the app always uses the defaults.
+PROBE_TIMEOUT="${7:-15}"
+HEALTH_TICKS="${8:-180}"
 BACKUP_DIR="${APP_DIR}.old-$(date -u +%Y%m%d%H%M%S)"
-i=0
-while kill -0 "$OLD_PID" 2>/dev/null && [ "$i" -lt 80 ]; do sleep 0.25; i=$((i + 1)); done
-if kill -0 "$OLD_PID" 2>/dev/null; then kill -9 "$OLD_PID" 2>/dev/null || true; fi
-mv "$APP_DIR" "$BACKUP_DIR"
-rollback() {
-  if [ -n "${NEW_PID:-}" ]; then kill -9 "$NEW_PID" 2>/dev/null || true; fi
-  rm -rf "$APP_DIR"
-  mv "$BACKUP_DIR" "$APP_DIR"
-  open -n "$APP_DIR" || true
+PARKED_DIR="${APP_DIR}.failed-$(date -u +%Y%m%d%H%M%S)"
+NEW_PID=""
+
+# A background child that already exited still answers kill -0 until it is reaped.
+process_alive() {
+  pid="$1"
+  kill -0 "$pid" 2>/dev/null || return 1
+  state="$(ps -p "$pid" -o stat= 2>/dev/null)" || state=""
+  case "$state" in
+    Z*) return 1 ;;
+  esac
+  return 0
 }
-trap rollback EXIT HUP INT TERM
+
+wait_for_exit() {
+  pid="$1"
+  ticks="$2"
+  i=0
+  while process_alive "$pid" && [ "$i" -lt "$ticks" ]; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  ! process_alive "$pid"
+}
+
+stop_process() {
+  pid="$1"
+  process_alive "$pid" || return 0
+  kill -9 "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 80 || true
+  wait "$pid" 2>/dev/null || true
+}
+
+launch_app() {
+  if ! open -n "$1" >/dev/null 2>&1; then
+    "$1/Contents/MacOS/tidoc" >/dev/null 2>&1 </dev/null &
+  fi
+}
+
+launch_recovery() {
+  if ! open -n "$APP_DIR" --args --update-recovery >/dev/null 2>&1; then
+    "$APP_DIR/Contents/MacOS/tidoc" --update-recovery >/dev/null 2>&1 </dev/null &
+  fi
+}
+
+# Fail closed: only a clean exit 0 from the previous build allows a downgrade. An older
+# build without this switch shows its own window instead of answering, so the deadline
+# kills the probe and the newer program stays installed.
+probe_old_app() {
+  [ -x "$BACKUP_DIR/Contents/MacOS/tidoc" ] || return 1
+  "$BACKUP_DIR/Contents/MacOS/tidoc" --check-data-compatibility >/dev/null 2>&1 </dev/null &
+  probe_pid=$!
+  if wait_for_exit "$probe_pid" "$((PROBE_TIMEOUT * 4))"; then
+    if wait "$probe_pid"; then return 0; fi
+    return 1
+  fi
+  stop_process "$probe_pid"
+  return 1
+}
+
+rollback() {
+  trap - EXIT HUP INT TERM
+  if [ -n "$NEW_PID" ]; then
+    stop_process "$NEW_PID"
+    if [ ! -d "$BACKUP_DIR" ] || ! probe_old_app; then
+      # Without the previous build there is nothing safe to restore; keep the new one.
+      launch_recovery
+      exit 24
+    fi
+  fi
+  if [ -d "$BACKUP_DIR" ]; then
+    if [ -e "$APP_DIR" ]; then
+      # Park the failed build instead of deleting it, so a failed restore can be undone.
+      if ! mv "$APP_DIR" "$PARKED_DIR"; then
+        launch_recovery
+        exit 24
+      fi
+    fi
+    if ! mv "$BACKUP_DIR" "$APP_DIR"; then
+      if [ -d "$PARKED_DIR" ]; then mv "$PARKED_DIR" "$APP_DIR" 2>/dev/null || true; fi
+      launch_recovery
+      exit 24
+    fi
+    rm -rf "$PARKED_DIR" 2>/dev/null || true
+    launch_app "$APP_DIR"
+  elif [ -d "$APP_DIR" ]; then
+    launch_app "$APP_DIR"
+  fi
+  exit 23
+}
+
+i=0
+while process_alive "$OLD_PID" && [ "$i" -lt 80 ]; do sleep 0.25; i=$((i + 1)); done
+if process_alive "$OLD_PID"; then
+  kill -9 "$OLD_PID" 2>/dev/null || true
+  wait_for_exit "$OLD_PID" 80 || true   # The single-instance lock must be free before probing.
+fi
+# Install the traps before touching the install, and let rollback inspect the
+# filesystem: a signal between the rename and the next statement must still restore.
+trap 'exit 23' HUP INT TERM
+trap rollback EXIT
+mv "$APP_DIR" "$BACKUP_DIR"
 mv "$STAGED_DIR" "$APP_DIR"
 rm -f "$HEALTH_FILE"
-"$APP_DIR/Contents/MacOS/tidoc" --update-health-file "$HEALTH_FILE" >/dev/null 2>&1 &
+"$APP_DIR/Contents/MacOS/tidoc" --update-health-file "$HEALTH_FILE" >/dev/null 2>&1 </dev/null &
 NEW_PID=$!
 i=0
-while [ "$i" -lt 180 ]; do
-  if ! kill -0 "$NEW_PID" 2>/dev/null; then exit 23; fi
-  if [ -f "$HEALTH_FILE" ] && grep -Fq "\"version\": \"$EXPECTED_VERSION\"" "$HEALTH_FILE"; then
+while [ "$i" -lt "$HEALTH_TICKS" ]; do
+  if ! process_alive "$NEW_PID"; then exit 23; fi
+  if [ -f "$HEALTH_FILE" ] \
+     && grep -Fq "\"pid\": $NEW_PID" "$HEALTH_FILE" 2>/dev/null \
+     && grep -Fq "\"version\": \"$EXPECTED_VERSION\"" "$HEALTH_FILE" 2>/dev/null; then
     trap - EXIT HUP INT TERM
-    rm -rf "$BACKUP_DIR" "$WORK_DIR"
+    rm -rf "$BACKUP_DIR" "$WORK_DIR" 2>/dev/null || true
     exit 0
   fi
   sleep 0.25

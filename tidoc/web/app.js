@@ -2411,7 +2411,7 @@ function renderBatchFolders() {
       : `${st.count || 0} 条${st.incomplete ? ` · <span class="miss">缺 ${st.incomplete}</span>` : ''}`;
     const hint = batch.archived ? '恢复到在办' : '通过菜单归档批次';
     return `<span class="batch-folder${batch.archived ? ' archived' : ''}${State.batchFilter === batch.id ? ' active' : ''}" data-folder="${esc(batch.id)}">
-      <button type="button" class="folder-open"><span data-tooltip-overflow="${esc(batch.name)}">${esc(batch.name)}</span>${meta ? `<small>${meta}</small>` : ''}</button>
+      <button type="button" class="folder-open"><span class="folder-title"><span data-tooltip-overflow="${esc(batch.name)}">${esc(batch.name)}</span>${typeof HubUI !== 'undefined' ? HubUI.batchIndicatorHtml(batch) : ''}</span>${meta ? `<small>${meta}</small>` : ''}</button>
       ${batch.note ? `<span class="batch-folder-note" data-tooltip="批次备注：${esc(batch.note)}">${iconNote(11)}</span>` : ''}
       <button type="button" class="folder-menu" data-folder-menu="${esc(batch.id)}" title="${hint}" aria-label="批次菜单">${uiIcon('moreHorizontal', 14) || '⋯'}</button>
     </span>`;
@@ -2448,6 +2448,14 @@ function renderBatchFolders() {
       if (ev.target instanceof Element && ev.target.closest('[data-folder-menu]')) return;
       focusBatch(node.dataset.folder || '');
     };
+    const batch = State.batches.find((b) => b.id === node.dataset.folder);
+    if (batch) {
+      node.oncontextmenu = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        openBatchMenu(ev.clientX, ev.clientY, batch);
+      };
+    }
   });
   wrap.querySelectorAll('[data-folder-menu]').forEach((btn) => {
     btn.onclick = (ev) => {
@@ -2613,6 +2621,16 @@ function openBatchMenu(x, y, b, options) {
   item('打开这批', () => focusBatch(b.id), { icon: 'folder' });
   item('编辑批次', () => renameBatchFlow(b), { icon: 'pencil' });
   item('批次备注', () => batchNoteFlow(b), { icon: 'note' });
+  if (typeof HubUI !== 'undefined' && HubUI.isConnected()) {
+    const shared = HubUI.batchInfo(b);
+    if (shared) {
+      item('立即同步', () => HubUI.syncBatch(b), { icon: 'rotateCcw' });
+      item('核对共享变化', () => HubUI.openBatchChanges(b), { icon: 'cloud' });
+      item('共享设置', () => HubUI.openBatchSharing(b), { icon: 'pencil' });
+    } else {
+      item('共享此批次', () => HubUI.openBatchSharing(b), { icon: 'cloud' });
+    }
+  }
   item(b.archived ? '恢复到在办' : '归档批次', () => archiveBatchFlow(b), { icon: b.archived ? 'rotateCcw' : 'archive' });
   sep();
   item('删除批次', () => deleteBatchFlow(b), { danger: true, icon: 'trash' });

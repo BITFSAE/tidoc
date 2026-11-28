@@ -32,6 +32,18 @@ import sqlite3
 # v15：新增共享区条目关联表 hub_entry_links，记录条目与共享区的映射、远端版本与审核状态。
 SCHEMA_VERSION = 15
 
+
+class DatabaseVersionError(ValueError):
+    """An older client must leave a newer database untouched."""
+
+    def __init__(self, actual: int, supported: int):
+        self.actual = actual
+        self.supported = supported
+        super().__init__(
+            f"数据库版本 {actual} 高于当前支持的 {supported}，拒绝写入。请更新软件。"
+        )
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -463,7 +475,7 @@ def init_db(conn: sqlite3.Connection, *, backup_path=None):
     from datetime import datetime
     previous = schema_version(conn)
     if previous is not None and previous > SCHEMA_VERSION:
-        raise ValueError(f"数据库版本 {previous} 高于当前支持的 {SCHEMA_VERSION}，拒绝写入。请更新软件。")
+        raise DatabaseVersionError(previous, SCHEMA_VERSION)
     existing = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='entries'").fetchone())
     previous_version = previous if previous is not None else (1 if existing else SCHEMA_VERSION)
     backup = None

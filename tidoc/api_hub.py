@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from .api_shared import _bridge, _guard, mask_secret
 from .services import hub_sync
+from .services.hub_batch_sync import HUB_BATCH_LINKS_META_KEY, HubBatchSyncManager
 
 HUB_CONFIG_META_KEY = "tidoc.hub.config"
 HUB_TOKEN_META_KEY = "tidoc.hub.token"
@@ -20,6 +21,42 @@ HUB_DEFAULT_URL = "https://www.bitfsae.com/tidoc-hub"
 
 class HubApi:
     """Mixin for Api exposing shared-space sync and admin operations."""
+
+    def _hub_sync_manager(self) -> HubBatchSyncManager:
+        with self._api_lock:
+            mgr = getattr(self, "_hub_sync_mgr", None)
+            db_id = getattr(self, "_hub_sync_db_id", None)
+            if mgr is None or db_id != id(self.db):
+                if mgr is not None:
+                    mgr.stop()
+                mgr = HubBatchSyncManager(
+                    self.data_root.db_path,
+                    self.data_root,
+                    payment_ai_flags_getter=self._hub_payment_ai_flags,
+                )
+                self._hub_sync_mgr = mgr
+                self._hub_sync_db_id = id(self.db)
+                self.db.add_close_listener(self._stop_hub_sync)
+            return mgr
+
+    def _hub_payment_ai_flags(self) -> tuple[bool, bool]:
+        with self._api_lock:
+            return self._payment_ai_available(), self._payment_ai_enabled()
+
+    def _init_hub_sync(self) -> None:
+        self._hub_sync_manager()
+
+    def _stop_hub_sync(self) -> None:
+        mgr = getattr(self, "_hub_sync_mgr", None)
+        if mgr is not None:
+            mgr.stop()
+        transport = getattr(self, "_hub_transport", None)
+        self._hub_transport = None
+        if transport is not None:
+            transport.close()
+
+    def _attach_shared_batches(self, batches: list[dict]) -> list[dict]:
+        return self._hub_sync_manager().attach_to_batches(self.db.conn, batches)
 
     def _hub_meta_get(self, key: str) -> str:
         with self._api_lock:
@@ -109,6 +146,8 @@ class HubApi:
         with self._api_lock:
             self._hub_pull_cache = None
             self._hub_push_plan = None
+            old_transport = getattr(self, "_hub_transport", None)
+            self._hub_transport = None
             self._save_hub_token(token)
             self._save_hub_config({
                 "server_url": url,
@@ -118,6 +157,9 @@ class HubApi:
                 "role": user.get("role", "member"),
                 "last_space_id": "",
             })
+            self._hub_sync_manager().on_account_changed(self.db.conn, url, str(user.get("id", "")))
+        if old_transport is not None:
+            old_transport.close()
         return {"hub": self._hub_public_state(), "message": f"已加入共享区（{user.get('name')}）。"}
 
     @_bridge
@@ -128,11 +170,16 @@ class HubApi:
         if not tok:
             raise ValueError("请填写访问令牌。")
         client = hub_sync.HubClient(url, tok)
-        res = client.me()
+        try:
+            res = client.me()
+        finally:
+            client.close()
         user = res["user"]
         with self._api_lock:
             self._hub_pull_cache = None
             self._hub_push_plan = None
+            old_transport = getattr(self, "_hub_transport", None)
+            self._hub_transport = None
             self._save_hub_token(tok)
             self._save_hub_config({
                 "server_url": url,
@@ -142,6 +189,9 @@ class HubApi:
                 "role": user.get("role", "member"),
                 "last_space_id": "",
             })
+            self._hub_sync_manager().on_account_changed(self.db.conn, url, str(user.get("id", "")))
+        if old_transport is not None:
+            old_transport.close()
         return {"hub": self._hub_public_state(), "message": f"已连接到共享区（{user.get('name')}）。"}
 
     @_bridge
@@ -151,22 +201,31 @@ class HubApi:
         user = res["user"]
         with self._api_lock:
             cfg = self._hub_config()
+            prev_uid = str(cfg.get("user_id") or "")
+            new_uid = str(user.get("id", prev_uid) or "")
+            cur_url = str(cfg.get("server_url") or "")
             cfg.update({
-                "user_id": user.get("id", cfg.get("user_id", "")),
+                "user_id": new_uid,
                 "name": user.get("name", cfg.get("name", "")),
                 "reviewer": user.get("reviewer", cfg.get("reviewer", "")),
                 "role": user.get("role", cfg.get("role", "")),
             })
             self._save_hub_config(cfg)
+            if new_uid != prev_uid:
+                self._hub_sync_manager().on_account_changed(self.db.conn, cur_url, new_uid)
         return {"hub": self._hub_public_state()}
 
     @_guard
     def hub_disconnect(self):
         self._hub_pull_cache = None
         self._hub_push_plan = None
+        transport = getattr(self, "_hub_transport", None)
         self._hub_transport = None
+        if transport is not None:
+            transport.close()
         self._save_hub_token("")
         self._save_hub_config({})
+        self._hub_sync_manager().on_disconnected(self.db.conn)
         return {"hub": self._hub_public_state(), "message": "已断开共享区连接（本机数据不受影响）。"}
 
     @_bridge
@@ -267,6 +326,15 @@ class HubApi:
         if space_id and cfg.get("last_space_id") != space_id:
             cfg["last_space_id"] = space_id
             self._save_hub_config(cfg)
+        self._hub_sync_manager().on_manual_push_applied(
+            self.entries,
+            self.attachments,
+            self.adapters,
+            client.base_url,
+            str(cfg.get("user_id") or ""),
+            space_id,
+            result.get("pushed") or [],
+        )
         return result
 
     @_guard
@@ -322,12 +390,22 @@ class HubApi:
         self._hub_pull_cache = None
         for entry_id in list(dict.fromkeys((result.get("entry_ids") or []) + (result.get("updated_entry_ids") or []))):
             self._refresh_payment_ai_check(entry_id)
+        cfg = self._hub_config()
+        self._hub_sync_manager().on_manual_pull_applied(
+            self.entries,
+            self.attachments,
+            self.adapters,
+            client.base_url,
+            str(cfg.get("user_id") or ""),
+            space_id,
+            result,
+        )
         return result
 
     @_guard
     def hub_review_entry(self, entry_id: str, review_state: str, review_note: str = "", push_local: bool = True):
         client = self._hub_client()
-        return hub_sync.review_entry(
+        result = hub_sync.review_entry(
             client,
             self.entries,
             self.attachments,
@@ -337,8 +415,73 @@ class HubApi:
             push_local=bool(push_local),
             adapter_service=self.adapters,
         )
+        cfg = self._hub_config()
+        lnk = result.get("link") or {}
+        if lnk.get("space_id"):
+            self._hub_sync_manager().on_manual_push_applied(
+                self.entries,
+                self.attachments,
+                self.adapters,
+                client.base_url,
+                str(cfg.get("user_id") or ""),
+                str(lnk["space_id"]),
+                [{
+                    "entry_id": entry_id,
+                    "remote_entry_id": str(lnk.get("remote_entry_id") or ""),
+                    "revision": int(lnk.get("remote_revision") or 0),
+                }],
+            )
+        return result
 
     @_guard
     def hub_withdraw_entry(self, entry_id: str):
         client = self._hub_client()
-        return hub_sync.withdraw_entry(client, self.entries, entry_id)
+        result = hub_sync.withdraw_entry(client, self.entries, entry_id)
+        cfg = self._hub_config()
+        lnk = result.get("link") or {}
+        if lnk.get("space_id"):
+            self._hub_sync_manager().on_manual_push_applied(
+                self.entries,
+                self.attachments,
+                self.adapters,
+                client.base_url,
+                str(cfg.get("user_id") or ""),
+                str(lnk["space_id"]),
+                [{
+                    "entry_id": entry_id,
+                    "remote_entry_id": str(lnk.get("remote_entry_id") or ""),
+                    "revision": int(lnk.get("remote_revision") or 0),
+                }],
+            )
+        return result
+
+    # ------------------------------------------------------------------ Shared batches & auto-sync
+    @_guard
+    def hub_batch_links(self):
+        return self._hub_sync_manager().batch_links(self.db.conn)
+
+    @_bridge
+    def hub_link_batch(self, batch_id: str = "", space_id: str = "", auto_sync: bool = False):
+        return self._hub_sync_manager().link_batch(
+            self, batch_id=batch_id, space_id=space_id, auto_sync=bool(auto_sync)
+        )
+
+    @_guard
+    def hub_unlink_batch(self, batch_id: str):
+        return self._hub_sync_manager().unlink_batch(self.db.conn, batch_id)
+
+    @_guard
+    def hub_set_batch_auto_sync(self, batch_id: str, enabled: bool):
+        return self._hub_sync_manager().set_batch_auto_sync(self.db.conn, batch_id, bool(enabled))
+
+    @_guard
+    def hub_sync_batch(self, batch_id: str):
+        return self._hub_sync_manager().sync_batch(self.db.conn, batch_id)
+
+    @_guard
+    def hub_detach_other_space_entries(self, batch_id: str):
+        return self._hub_sync_manager().detach_other_space_entries(self.db.conn, batch_id)
+
+    @_guard
+    def hub_sync_tick(self):
+        return self._hub_sync_manager().tick(self.db.conn)

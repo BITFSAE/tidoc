@@ -35,6 +35,7 @@ function el() {
 let dialog, finishCurrent;
 const calls = [];
 const context = vm.createContext({
+  setTimeout, clearTimeout,
   el, esc: (value) => value, $: () => null,
   State: {entries: [{id: 'b', invoice_no: '0002'}]},
   taskProgress: () => ({close() {}}), toast() {}, refreshEntries() {},

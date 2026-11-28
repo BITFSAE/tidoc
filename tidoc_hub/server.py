@@ -24,6 +24,7 @@ JOIN_RATE_WINDOW = 600
 JOIN_RATE_LIMIT = 20
 
 RE_SPACE = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)$")
+RE_SPACE_SYNC_STATE = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/sync-state$")
 RE_SPACE_ENTRIES = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/entries$")
 RE_SPACE_ENTRY = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/entries/([a-zA-Z0-9_-]+)$")
 RE_SPACE_PUSH = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/entries/push$")
@@ -268,7 +269,7 @@ class _HubHandler(BaseHTTPRequestHandler):
                     "api_version": 1,
                     "storage": self.server.store.mode,
                     "max_blob_bytes": self.server.config.max_blob_bytes,
-                    "features": ["batch_blob_upload", "incremental_push"],
+                    "features": ["batch_blob_upload", "incremental_push", "space_sync_state"],
                 })
                 return
 
@@ -296,7 +297,7 @@ class _HubHandler(BaseHTTPRequestHandler):
                 user = self._require_auth()
                 include_archived = (qs.get("include_archived", ["0"])[0] == "1")
                 spaces = self.server.db.list_spaces(user, include_archived=include_archived)
-                self._send_json(200, {"ok": True, "spaces": spaces, "features": ["batch_blob_upload", "incremental_push"]})
+                self._send_json(200, {"ok": True, "spaces": spaces, "features": ["batch_blob_upload", "incremental_push", "space_sync_state"]})
                 return
 
             if method == "POST" and rel_path == "/api/v1/spaces":
@@ -403,6 +404,12 @@ class _HubHandler(BaseHTTPRequestHandler):
                 return
 
             # Space entries
+            m = RE_SPACE_SYNC_STATE.match(rel_path)
+            if m and method == "GET":
+                user = self._require_auth()
+                self._send_json(200, {"ok": True, **self.server.db.sync_state(user, m.group(1))})
+                return
+
             m = RE_SPACE_ENTRIES.match(rel_path)
             if m and method == "GET":
                 user = self._require_auth()

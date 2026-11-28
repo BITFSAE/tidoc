@@ -12,6 +12,7 @@ import json
 import mimetypes
 import re
 import shutil
+import socket
 import tempfile
 import threading
 from collections import defaultdict
@@ -116,12 +117,33 @@ class HubClient:
         else:
             self._hub_connection = HTTPConnection(endpoint.hostname, endpoint.port)
         self._hub_connection_lock = threading.Lock()
+        self._closed = threading.Event()
+
+    def close(self) -> None:
+        # Disconnect is a UI action: do not wait behind a stalled HTTP response. Interrupt
+        # the socket now; the request owner closes its connection when it releases the lock.
+        self._closed.set()
+        connection = self._hub_connection
+        sock = connection.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        if self._hub_connection_lock.acquire(blocking=False):
+            try:
+                connection.close()
+            finally:
+                self._hub_connection_lock.release()
 
     def _hub_exchange(self, method: str, route: str, data: bytes | None, headers: dict, timeout: int):
         with self._hub_connection_lock:
             connection = self._hub_connection
             reuse = connection.sock is not None
             for attempt in range(2):
+                if self._closed.is_set():
+                    connection.close()
+                    raise OSError("共享区连接已关闭")
                 try:
                     connection.timeout = timeout
                     if connection.sock is not None:
@@ -133,6 +155,9 @@ class HubClient:
                     connection.close()
                     if attempt or not reuse or method != "GET":
                         raise
+                finally:
+                    if self._closed.is_set():
+                        connection.close()
 
     def _request_json(
         self,
@@ -392,6 +417,9 @@ class HubClient:
             f"/api/v1/spaces/{space_id}/entries",
             query={"include_withdrawn": "1" if include_withdrawn else "0", "view": "summary" if summary else ""},
         )
+
+    def sync_state(self, space_id: str) -> dict:
+        return self._request_json("GET", f"/api/v1/spaces/{space_id}/sync-state")
 
     def get_space_entry(self, space_id: str, entry_id: str) -> dict:
         res = self._request_json("GET", f"/api/v1/spaces/{space_id}/entries/{entry_id}")
@@ -896,8 +924,9 @@ def preview_pull(
     *,
     adapter_service=None,
     target_scheme_id: str | None = None,
+    listing: dict | None = None,
 ) -> dict:
-    listing = client.list_space_entries(space_id, include_withdrawn=True)
+    listing = listing if listing is not None else client.list_space_entries(space_id, include_withdrawn=True)
     space = listing.get("space") or {"id": space_id, "name": ""}
     space_name = str(space.get("name") or "")
     remote_entries = list(listing.get("entries") or [])
@@ -1153,6 +1182,8 @@ def apply_pull(
     *,
     preview: dict | None = None,
     adapter_service=None,
+    cancel_check=None,
+    on_before_commit=None,
 ) -> dict:
     opts = options if isinstance(options, dict) else {}
     service = storage._adapter_service(entries_repo, adapter_service)
@@ -1216,6 +1247,12 @@ def apply_pull(
 
     local_snapshots = storage._import_preview_snapshots(entries_repo, existing_ids_needed)
     local_bases_map = load_exchange_bases(conn, existing_ids_needed)
+    pre_download_matched = set(existing_ids_needed)
+    pre_download_version = (
+        storage._local_preview_version(entries_repo, pre_download_matched, snapshots=local_snapshots)
+        if pre_download_matched
+        else ""
+    )
 
     # Collect (sha256, remote_entry_id, arcname) for only the missing files actually needed.
     needed_downloads: dict[str, tuple[str, str]] = {}  # sha -> (remote_entry_id, original_name)
@@ -1280,6 +1317,8 @@ def apply_pull(
         tmp_root = Path(tmp_dir)
         member_paths: dict[str, Path] = {}
         for sha, (remote_id, _orig_name) in needed_downloads.items():
+            if cancel_check is not None and cancel_check():
+                raise HubError("同步已取消。", code="cancelled")
             safe_sha = _validate_sha256(sha)
             presigned = client.presign_download(safe_sha, space_id, remote_id)
             dest = tmp_root / safe_sha
@@ -1290,54 +1329,13 @@ def apply_pull(
         archive = _DownloadedBlobArchive(member_paths)
         now = datetime.now().isoformat(timespec="seconds")
         package_profiles = {str(p.get("id") or ""): p for p in (inspected.get("profiles") or []) if p.get("id")}
-        existing_profiles = [dict(r) for r in conn.execute("SELECT id, name, reviewer FROM profiles").fetchall()]
-        profile_count_before = len(existing_profiles)
-        created_profile_ids: list[str] = []
-        source_profile_map: dict[str, str] = {}
-        for src_id, dst_id in (profile_mappings.items() if isinstance(profile_mappings, dict) else []):
-            if str(dst_id or "").strip():
-                source_profile_map[str(src_id)] = str(dst_id).strip()
-
-        def resolve_profile(source_profile: dict | None, source_id: str) -> str:
-            if source_id and source_id in source_profile_map:
-                return source_profile_map[source_id]
-            name = str((source_profile or {}).get("name") or "").strip()
-            reviewer = str((source_profile or {}).get("reviewer") or "").strip()
-            if not name:
-                return profile_id
-            if reviewer:
-                for p in existing_profiles:
-                    if p["name"] == name and str(p.get("reviewer") or "").strip() == reviewer:
-                        if source_id:
-                            source_profile_map[source_id] = p["id"]
-                        return p["id"]
-            else:
-                same_name = [p for p in existing_profiles if p["name"] == name]
-                if len(same_name) == 1:
-                    if source_id:
-                        source_profile_map[source_id] = same_name[0]["id"]
-                    return same_name[0]["id"]
-                if len(same_name) > 1:
-                    raise HubError(f"本机存在多位名为「{name}」的报账人，请先在预览中指定对应身份。")
-            import uuid
-            new_pid = uuid.uuid4().hex
-            conn.execute(
-                """INSERT INTO profiles(id, name, reviewer, is_default, created_at)
-                   VALUES(?,?,?,0,?)""",
-                (new_pid, name, reviewer, now),
-            )
-            created_profile_ids.append(new_pid)
-            existing_profiles.append({"id": new_pid, "name": name, "reviewer": reviewer})
-            if source_id:
-                source_profile_map[source_id] = new_pid
-            return new_pid
-
         created_files: list[Path] = []
         created_dirs: list[Path] = []
         removed_files: list[Path] = []
         imported_ids: list[str] = []
         updated_ids: list[str] = []
         status_updated_ids: list[str] = []
+        withdrawn_updated = 0
         merged_details: list[dict] = []
         skipped: list[dict] = []
         destination_by_entry_index: dict[int, str] = {}
@@ -1345,23 +1343,84 @@ def apply_pull(
         pending_batch_notes: list[tuple[str, str, bool]] = []
         imported_exchange_records: list[tuple[str, dict]] = []
 
-        restorer = bindle_import._EntryRestorer(
-            entries_repo=entries_repo,
-            attachments_repo=attachments_repo,
-            requested_scheme_id=requested_scheme_id,
-            adapter_service=service,
-            inspected=inspected,
-            import_tags=import_tags,
-            package_profiles=package_profiles,
-            resolve_profile=resolve_profile,
-            source_profile_map=source_profile_map,
-            created_files=created_files,
-            created_dirs=created_dirs,
-            role_mappings_by_entry=role_mappings_by_entry if isinstance(role_mappings_by_entry, dict) else {},
-            now=now,
-        )
-
         try:
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+
+            if pre_download_matched:
+                live_version = storage._local_preview_version(entries_repo, pre_download_matched)
+                if live_version != pre_download_version:
+                    raise HubError("同步下载期间本机条目已发生变化，请重试。", code="local_changed")
+            live_by_number, live_by_hash = storage._entry_identity_maps(conn)
+            live_links_by_remote = _hub_link_by_remote(conn, client.base_url, space_id)
+            for _idx, entry, expected_matched in selected_rows:
+                rid = str((entry.get("hub_meta") or {}).get("remote_entry_id") or "")
+                live_link = live_links_by_remote.get(rid)
+                live_matched = live_link["entry_id"] if live_link else storage._matching_entry_id(entry, live_by_number, live_by_hash)
+                if live_matched != expected_matched:
+                    raise HubError("同步下载期间本机条目已发生变化，请重试。", code="local_changed")
+            if target_batch_id and not conn.execute("SELECT 1 FROM batches WHERE id = ?", (target_batch_id,)).fetchone():
+                raise HubError("所选报账批次不存在。", code="local_changed")
+            if on_before_commit is not None:
+                on_before_commit(conn)
+
+            existing_profiles = [dict(r) for r in conn.execute("SELECT id, name, reviewer FROM profiles").fetchall()]
+            profile_count_before = len(existing_profiles)
+            created_profile_ids: list[str] = []
+            source_profile_map: dict[str, str] = {}
+            for src_id, dst_id in (profile_mappings.items() if isinstance(profile_mappings, dict) else []):
+                if str(dst_id or "").strip():
+                    source_profile_map[str(src_id)] = str(dst_id).strip()
+
+            def resolve_profile(source_profile: dict | None, source_id: str) -> str:
+                if source_id and source_id in source_profile_map:
+                    return source_profile_map[source_id]
+                name = str((source_profile or {}).get("name") or "").strip()
+                reviewer = str((source_profile or {}).get("reviewer") or "").strip()
+                if not name:
+                    return profile_id
+                if reviewer:
+                    for p in existing_profiles:
+                        if p["name"] == name and str(p.get("reviewer") or "").strip() == reviewer:
+                            if source_id:
+                                source_profile_map[source_id] = p["id"]
+                            return p["id"]
+                else:
+                    same_name = [p for p in existing_profiles if p["name"] == name]
+                    if len(same_name) == 1:
+                        if source_id:
+                            source_profile_map[source_id] = same_name[0]["id"]
+                        return same_name[0]["id"]
+                    if len(same_name) > 1:
+                        raise HubError(f"本机存在多位名为「{name}」的报账人，请先在预览中指定对应身份。")
+                import uuid
+                new_pid = uuid.uuid4().hex
+                conn.execute(
+                    """INSERT INTO profiles(id, name, reviewer, is_default, created_at)
+                       VALUES(?,?,?,0,?)""",
+                    (new_pid, name, reviewer, now),
+                )
+                created_profile_ids.append(new_pid)
+                existing_profiles.append({"id": new_pid, "name": name, "reviewer": reviewer})
+                if source_id:
+                    source_profile_map[source_id] = new_pid
+                return new_pid
+
+            restorer = bindle_import._EntryRestorer(
+                entries_repo=entries_repo,
+                attachments_repo=attachments_repo,
+                requested_scheme_id=requested_scheme_id,
+                adapter_service=service,
+                inspected=inspected,
+                import_tags=import_tags,
+                package_profiles=package_profiles,
+                resolve_profile=resolve_profile,
+                source_profile_map=source_profile_map,
+                created_files=created_files,
+                created_dirs=created_dirs,
+                role_mappings_by_entry=role_mappings_by_entry if isinstance(role_mappings_by_entry, dict) else {},
+                now=now,
+            )
             for idx, entry, matched_id in selected_rows:
                 hub_meta = entry.get("hub_meta") or {}
                 remote_link_payload = {
@@ -1465,12 +1524,13 @@ def apply_pull(
             for w in inspected.get("withdrawn_local") or []:
                 local_id = w.get("local_entry_id")
                 if local_id:
-                    conn.execute(
+                    cur = conn.execute(
                         """UPDATE hub_entry_links
                               SET review_state = 'withdrawn', remote_revision = ?, last_synced_at = ?
                             WHERE entry_id = ? AND server_url = ? AND space_id = ?""",
                         (int(w.get("revision") or 0), now, local_id, client.base_url, space_id),
                     )
+                    withdrawn_updated += int(cur.rowcount or 0)
 
             (target_batch_id, batch_created, global_batch_created,
              individually_assigned, globally_assigned) = bindle_import._assign_batches(
@@ -1558,13 +1618,16 @@ def apply_pull(
                     if not has_local_pay_rec:
                         entries_repo.clear_payment_check(affected_id, commit=False)
 
+            remote_snapshot_digests: dict[str, str] = {}
             if imported_exchange_records:
                 post_snapshots = storage._import_preview_snapshots(
                     entries_repo, {entry_id for entry_id, _ in imported_exchange_records}
                 )
                 for rec_entry_id, incoming_entry in imported_exchange_records:
                     inc_snap = build_entry_snapshot(incoming_entry)
-                    record_exchange_base(conn, rec_entry_id, inc_snap, "import", now)
+                    remote_snapshot_digests[rec_entry_id] = record_exchange_base(
+                        conn, rec_entry_id, inc_snap, "import", now
+                    )
                     post_local = post_snapshots.get(rec_entry_id)
                     if post_local is not None:
                         local_snap = build_entry_snapshot(
@@ -1613,9 +1676,11 @@ def apply_pull(
         "imported": len(imported_ids),
         "updated": len(updated_ids),
         "status_updated": len(status_updated_ids),
+        "withdrawn_updated": withdrawn_updated,
         "entry_ids": imported_ids,
         "updated_entry_ids": updated_ids,
         "status_updated_entry_ids": status_updated_ids,
+        "remote_snapshot_digests": remote_snapshot_digests,
         "merged": merged_details,
         "skipped": skipped,
         "withdrawn_local": inspected.get("withdrawn_local") or [],

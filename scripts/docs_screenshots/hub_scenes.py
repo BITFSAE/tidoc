@@ -127,9 +127,14 @@ def make_server(work_dir, scene, sprite_titles, sprite_heights, sprite_width):
         else:
             ids = _seed_reviews(reviewer, member, member_profile, space_id, work_dir)
 
+        batch_id = ""
+        if scene in {"hub-batch-settings", "hub-shared-batch", "hub-batch-menu"}:
+            batch_id = member.create_batch(SPACE_NAME, "", ids)["id"]
+            member.hub_link_batch(batch_id, space_id, False)
+
         web = bridge.make_server(
             member_api, sprite_titles, sprite_heights, sprite_width,
-            hub_shot={"spaceId": space_id, "entryIds": ids},
+            hub_shot={"spaceId": space_id, "entryIds": ids, "batchId": batch_id},
         )
         yield web
     finally:

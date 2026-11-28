@@ -74,6 +74,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      # The release tag builds on Windows without the full test job; run the startup
+      # recovery and rollback helpers here so their Windows branch is exercised before
+      # the installer and update package are produced.
+      - name: Run startup recovery and update rollback tests
+        run: |
+          python -m pip install pytest
+          python -m pytest -q tests/test_startup_recovery.py tests/test_update_rollback.py
+
       - name: Build Windows core
         # Core only needs Pillow to decode ticket QR images (tidoc/services/qr_fetch.py) and to
         # verify PNG/JPEG materials. The modules excluded below are never reached by that code:

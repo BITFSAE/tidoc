@@ -107,6 +107,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         _cleanup_old_dropped_files(self.data_root.dropped_dir)
         self._sync_entry_statuses()
         self._sync_payment_checks()
+        self._init_hub_sync()
         from .services.updater import CoreUpdateManager
         self._core_updater = CoreUpdateManager(self.data_root.updates_dir)
 
@@ -980,22 +981,27 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
     # ------------------------------------------------------------ 批次（运营组工作单元）
     @_guard
     def list_batches(self, include_archived=False):
+        batches = self._attach_shared_batches(self.batches.list(include_archived=include_archived))
         return {
-            "batches": self.batches.list(include_archived=include_archived),
+            "batches": batches,
             "unbatched_count": self.batches.unbatched_count(),
         }
 
     @_guard
     def reorder_batches(self, batch_ids=None):
         self.batches.set_order(batch_ids or [])
+        batches = self._attach_shared_batches(self.batches.list(include_archived=True))
         return {
-            "batches": self.batches.list(include_archived=True),
+            "batches": batches,
             "unbatched_count": self.batches.unbatched_count(),
         }
 
     @_guard
     def get_batch(self, batch_id):
-        return self.batches.get(batch_id)
+        batch = self.batches.get(batch_id)
+        if batch is not None:
+            self._attach_shared_batches([batch])
+        return batch
 
     @_guard
     def create_batch(self, name, note="", entry_ids=None):
@@ -1956,6 +1962,11 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
             raise
 
         try:
+            from .services.hub_batch_sync import linked_batches_for_entries
+
+            affected_shared_batches = linked_batches_for_entries(self.db.conn, existing_ids)
+            if affected_shared_batches:
+                self._hub_sync_manager().on_entries_deleted(affected_shared_batches)
             if delete_batch_id:
                 deleted = self.entries.delete_many(existing_ids, commit=False)
                 self.batches.delete(delete_batch_id, commit=False)

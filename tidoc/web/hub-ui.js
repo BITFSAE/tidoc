@@ -1,4 +1,4 @@
-/* hub-ui.js — 团队协同共享区界面；所有网络操作均由用户显式触发。 */
+/* hub-ui.js — 共享批次；近实时同步按批次开启，默认手动同步。 */
 const HubUI = (() => {
   const REVIEW_LABELS = {
     submitted: '已提交',
@@ -22,6 +22,17 @@ const HubUI = (() => {
     reviewer: '',
     role: '',
     last_space_id: '',
+  };
+  let batchLinks = {};
+  let syncTimer = null;
+  let syncInFlight = false;
+  let syncGeneration = 0;
+  let manualSyncPending = false;
+  let sessionEpoch = 0;
+  let syncIdentity = '';
+  const SYNC_LABELS = {
+    manual: '手动同步', idle: '待同步', syncing: '同步中', synced: '已同步',
+    conflict: '待核对', partial: '部分未上传', error: '同步失败', paused: '已暂停', offline: '等待连接',
   };
 
   function isConnected() {
@@ -47,7 +58,201 @@ const HubUI = (() => {
       // 读取本地配置失败时按未连接处理，不干扰启动。
     }
     applyVisibility();
+    const identity = state.connected ? `${state.server_url}|${state.user_id}` : '';
+    if (identity !== syncIdentity) {
+      sessionEpoch++;
+      syncIdentity = identity;
+      syncGeneration = 0;
+      batchLinks = {};
+      manualSyncPending = false;
+      clearTimeout(syncTimer);
+      syncTimer = null;
+    }
+    if (!state.connected) {
+      sessionEpoch++;
+      batchLinks = {};
+      manualSyncPending = false;
+      clearTimeout(syncTimer);
+      syncTimer = null;
+    } else if (typeof Api.hubBatchLinks === 'function') {
+      try {
+        const result = await Api.hubBatchLinks();
+        batchLinks = result.batches || {};
+        scheduleSync();
+      } catch (e) {
+        batchLinks = {};
+        clearTimeout(syncTimer);
+        syncTimer = null;
+      }
+    }
     return state;
+  }
+
+  function batchInfo(batch) {
+    if (!state.connected) return null;
+    return batchLinks[batch.id] || batch.shared_batch || null;
+  }
+
+  function batchIndicatorHtml(batch) {
+    const shared = batchInfo(batch);
+    if (!shared) return '';
+    const status = shared.state || (shared.auto_sync ? 'idle' : 'manual');
+    const label = SYNC_LABELS[status] || '待同步';
+    const attention = ['conflict', 'partial', 'error', 'offline', 'paused'].includes(status);
+    const title = `共享批次 · ${shared.space_name || batch.name} · ${label}${shared.message ? `：${shared.message}` : ''}`;
+    return `<span class="batch-shared-mark is-${esc(status)}" data-hub-batch-mark="${esc(batch.id)}" title="${esc(title)}" aria-label="${esc(title)}">${uiIcon('cloud', 12)}${attention ? `<span>${esc(label)}</span>` : ''}</span>`;
+  }
+
+  function paintBatchStates() {
+    if (typeof document.querySelectorAll !== 'function') return;
+    document.querySelectorAll('[data-hub-batch-mark]').forEach((node) => {
+      const batch = State.batches.find((item) => item.id === node.dataset.hubBatchMark);
+      if (!batch) return;
+      const html = batchIndicatorHtml(batch);
+      if (node.outerHTML !== html) node.outerHTML = html;
+    });
+  }
+
+  function scheduleSync(delay = 2000) {
+    if (syncTimer !== null || !state.connected) return;
+    const needed = manualSyncPending || Object.values(batchLinks).some((link) => link.auto_sync || link.state === 'syncing');
+    if (!needed) return;
+    syncTimer = setTimeout(() => { syncTimer = null; pollSync(); }, delay);
+  }
+
+  async function pollSync() {
+    if (!state.connected || typeof Api.hubSyncTick !== 'function') return;
+    if (syncInFlight) { scheduleSync(); return; }
+    const epoch = sessionEpoch;
+    syncInFlight = true;
+    let delay = 2000;
+    try {
+      const result = await Api.hubSyncTick();
+      if (epoch !== sessionEpoch || !state.connected) return;
+      batchLinks = result.batches || {};
+      manualSyncPending = Object.values(batchLinks).some((link) => link.state === 'syncing');
+      paintBatchStates();
+      if (Number(result.generation || 0) !== syncGeneration) {
+        syncGeneration = Number(result.generation || 0);
+        await refreshEntries();
+      }
+    } catch (e) {
+      delay = 10000;
+    } finally {
+      syncInFlight = false;
+      if (epoch === sessionEpoch) scheduleSync(delay);
+    }
+  }
+
+  async function syncBatch(batch) {
+    const epoch = sessionEpoch;
+    try {
+      await Api.hubSyncBatch(batch.id);
+      if (epoch !== sessionEpoch || !state.connected) return;
+      if (batchLinks[batch.id]) batchLinks[batch.id] = { ...batchLinks[batch.id], state: 'syncing' };
+      manualSyncPending = true;
+      paintBatchStates();
+      await pollSync();
+      scheduleSync(500);
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function openBatchChanges(batch) {
+    const shared = batchInfo(batch);
+    if (!shared) return;
+    if (!Number(shared.conflict_count || 0) && Number(shared.other_space_count || 0) > 0) {
+      await openBatchSharing(batch);
+      return;
+    }
+    await openPullPreview({ id: shared.space_id, name: shared.space_name || batch.name }, {
+      batchId: batch.id,
+      onDone: async () => { await syncBatch(batch); },
+    });
+  }
+
+  async function openBatchSharing(batch = null, { space = null } = {}) {
+    const shared = batch ? batchInfo(batch) : null;
+    const body = el('div', 'hub-batch-settings');
+    let dialog;
+    if (shared) {
+      const otherCount = Number(shared.other_space_count || 0);
+      const otherNames = Array.isArray(shared.other_space_names) && shared.other_space_names.length
+        ? `（${shared.other_space_names.slice(0, 2).join('、')}${shared.other_space_names.length > 2 ? '等' : ''}）`
+        : '';
+      body.innerHTML = `<div class="hub-batch-summary"><b>${esc(shared.space_name || batch.name)}</b><span class="hint" role="status">${esc(shared.message || SYNC_LABELS[shared.state] || '手动同步')}</span></div>
+        <label class="hub-inline-check"><input id="hubBatchAutoSync" type="checkbox" ${shared.auto_sync ? 'checked' : ''}/>近实时同步</label>
+        <p class="hint">开启后，Tidoc 打开时自动同步这批条目和材料。关闭软件后暂停；冲突需要核对。</p>
+        ${otherCount > 0 ? `<div class="hub-batch-other-space">
+          <span class="hint">有 ${otherCount} 条仍关联其他共享批次${esc(otherNames)}，不会自动上传到当前批次。</span>
+          <button type="button" class="btn small ghost" id="hubDetachOtherSpaceBtn">解除旧关联并同步</button>
+        </div>` : ''}`;
+      const toggle = body.querySelector('#hubBatchAutoSync');
+      toggle.onchange = async () => {
+        const enabled = toggle.checked;
+        toggle.disabled = true;
+        try {
+          await Api.hubSetBatchAutoSync(batch.id, enabled);
+          await refreshState();
+          paintBatchStates();
+          body.querySelector('[role="status"]').textContent = enabled ? '近实时同步已开启' : '已切换为手动同步';
+        } catch (e) { toggle.checked = !enabled; toast(e.message, 'err'); }
+        finally { toggle.disabled = false; }
+      };
+      const detachBtn = body.querySelector('#hubDetachOtherSpaceBtn');
+      if (detachBtn && typeof Api.hubDetachOtherSpaceEntries === 'function') {
+        detachBtn.onclick = async () => {
+          detachBtn.disabled = true;
+          try {
+            await Api.hubDetachOtherSpaceEntries(batch.id);
+            dialog.close();
+            await refreshState();
+            await syncBatch(batch);
+          } catch (e) { detachBtn.disabled = false; toast(e.message, 'err'); }
+        };
+      }
+      const unlink = mkBtn('取消关联', 'ghost', async () => {
+        if (!confirm('取消关联后停止同步，本机和共享批次中的条目都会保留。继续吗？')) return;
+        unlink.disabled = true;
+        try {
+          await Api.hubUnlinkBatch(batch.id);
+          dialog.close();
+          await refreshState();
+          await refreshEntries();
+        } catch (e) { unlink.disabled = false; toast(e.message, 'err'); }
+      });
+      dialog = modal({ title: '共享设置', compact: true, body, footer: [unlink, mkBtn('完成', 'primary', () => dialog.close())] });
+      return;
+    }
+    let spaces;
+    const progress = taskProgress('正在读取共享批次…');
+    try {
+      spaces = space ? [space] : (await Api.hubListSpaces(false)).spaces || [];
+    } catch (e) { toast(e.message, 'err'); return; }
+    finally { progress.close(); }
+    const choices = spaces.filter((item) => item.status !== 'archived');
+    body.innerHTML = `<div class="form-row"><label for="hubBatchSpace">共享批次</label><select id="hubBatchSpace">
+      ${isAdmin() && batch && !space ? '<option value="">新建同名共享批次</option>' : ''}
+      ${choices.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}${item.status === 'closed' ? '（已截止）' : ''}</option>`).join('')}
+      </select></div>
+      <label class="hub-inline-check"><input type="checkbox" id="hubBatchAutoSync"/>近实时同步</label>
+      <p class="hint">开启后，Tidoc 打开时自动同步这批条目和材料。关闭软件后暂停；冲突需要核对。</p>
+      <p class="hint">${isAdmin() ? '管理员可汇总全部成员条目。' : '队员仅同步自己的条目。'}</p>`;
+    const confirmBtn = mkBtn(batch ? '共享并同步' : '加入并同步', 'primary', async () => {
+      confirmBtn.disabled = true;
+      try {
+        const result = await Api.hubLinkBatch(batch?.id || '', body.querySelector('#hubBatchSpace').value, body.querySelector('#hubBatchAutoSync').checked);
+        dialog.close();
+        await refreshState();
+        await loadBatches();
+        if (State.batchFilter !== result.batch_id) await focusBatch(result.batch_id);
+        else await refreshEntries();
+        await syncBatch({ id: result.batch_id });
+      } catch (e) { confirmBtn.disabled = false; toast(e.message, 'err'); }
+    });
+    confirmBtn.disabled = !choices.length && !(isAdmin() && batch && !space);
+    if (confirmBtn.disabled) body.appendChild(el('p', 'hint', '暂无共享批次，请联系管理员创建。'));
+    dialog = modal({ title: batch ? `共享「${batch.name}」` : '加入共享批次', compact: true, body,
+      footer: [mkBtn('取消', 'ghost', () => dialog.close()), confirmBtn] });
   }
 
   function summaryText() {
@@ -132,7 +337,7 @@ const HubUI = (() => {
     }
   }
 
-  async function openPullPreview(space, { onDone } = {}) {
+  async function openPullPreview(space, { onDone, batchId = '' } = {}) {
     if (!State.currentProfileId) { toast('请先创建报账人', 'err'); return; }
     const progress = taskProgress(`正在读取共享区「${space.name}」…`);
     try {
@@ -183,6 +388,7 @@ const HubUI = (() => {
         title: `从共享区拉取 · ${space.name}`,
         sourceLabel: `共享区 · ${space.name}`,
         suggestedBatchName: space.name,
+        defaults: batchId ? { batchMode: 'existing', batchId } : undefined,
         comparisonLabel: '共享区',
         sourceBanner: withdrawnBanner,
         entryReviewLabel: (entry) => REVIEW_LABELS[entry.hub_meta?.review_state] || '审核意见已更新',
@@ -215,7 +421,7 @@ const HubUI = (() => {
       const query = search.value.trim().toLowerCase();
       const rows = entries.filter((entry) => [entry.invoice_no, entry.seller, entry.title, entry.owner_name]
         .some((value) => String(value || '').toLowerCase().includes(query)));
-      status.textContent = !entries.length ? '这个空间暂无可查看的条目。'
+      status.textContent = !entries.length ? '这个共享批次暂无可查看的条目。'
         : query ? `显示 ${rows.length} / ${entries.length} 条` : `共 ${entries.length} 条`;
       results.innerHTML = rows.length ? `
         <table class="items-table hub-entry-table" aria-label="共享条目">
@@ -256,7 +462,7 @@ const HubUI = (() => {
       title: `共享条目 · ${space.name}`,
       wide: true,
       body,
-      footer: [mkBtn('返回空间列表', 'ghost', () => m.close()), refreshBtn],
+      footer: [mkBtn('返回共享批次', 'ghost', () => m.close()), refreshBtn],
     });
     await load();
   }
@@ -267,6 +473,7 @@ const HubUI = (() => {
       return;
     }
     const body = el('div', 'hub-workspace');
+    if (typeof Api.hubBatchLinks === 'function') batchLinks = (await Api.hubBatchLinks()).batches || {};
     let includeArchived = false;
     let spaces = [];
     let modalHandle = null;
@@ -275,6 +482,7 @@ const HubUI = (() => {
       const roleLabel = isAdmin() ? '管理员（可查看全部成员条目）' : '队员（仅同步自己的条目）';
       const rowsHtml = spaces.length
         ? spaces.map((sp) => {
+          const linkedBatchId = Object.keys(batchLinks).find((id) => batchLinks[id].space_id === sp.id);
           const stLabel = SPACE_STATUS_LABELS[sp.status] || sp.status;
           const badges = [
             `<span class="hub-stat">共 ${Number(sp.entry_count || 0)} 条</span>`,
@@ -293,11 +501,11 @@ const HubUI = (() => {
             </div>
             <div class="hub-space-actions">
               <button type="button" class="btn small" data-hub-view="${esc(sp.id)}">查看条目</button>
-              <button type="button" class="btn small primary" data-hub-pull="${esc(sp.id)}">拉取合并</button>
+              <button type="button" class="btn small primary" data-hub-batch="${esc(sp.id)}" data-local-batch="${esc(linkedBatchId || '')}">${linkedBatchId ? '打开批次' : '加入本机'}</button>
             </div>
           </div>`;
         }).join('')
-        : '<div class="hint">暂无共享空间。' + (isAdmin() ? '点下方「新建空间」创建一个报账周期。' : '请联系负责人创建空间。') + '</div>';
+        : '<div class="hint">暂无共享批次。' + (isAdmin() ? '可在下方新建，或右键本地批次共享。' : '请联系负责人创建。') + '</div>';
 
       body.innerHTML = `
         <div class="hub-identity-bar">
@@ -313,9 +521,9 @@ const HubUI = (() => {
         </div>
         <div class="hub-space-list">${rowsHtml}</div>
         ${isAdmin() ? `<div class="hub-quick-create">
-          <input id="hubNewSpaceName" placeholder="新空间名称（如：2026年11月报账）"/>
-          <input id="hubNewSpaceDesc" placeholder="说明（可选）"/>
-          <button type="button" class="btn small" id="hubCreateSpaceBtn">新建空间</button>
+          <input id="hubNewSpaceName" aria-label="共享批次名称" placeholder="共享批次名称"/>
+          <input id="hubNewSpaceDesc" aria-label="共享批次说明" placeholder="说明（可选）"/>
+          <button type="button" class="btn small" id="hubCreateSpaceBtn">新建批次</button>
         </div>` : ''}`;
 
       body.querySelector('#hubShowArchived').onchange = (ev) => {
@@ -330,12 +538,14 @@ const HubUI = (() => {
           if (space) openSpaceEntries(space);
         };
       });
-      body.querySelectorAll('[data-hub-pull]').forEach((btn) => {
-        btn.onclick = () => {
-          const sp = spaces.find((item) => item.id === btn.dataset.hubPull);
+      body.querySelectorAll('[data-hub-batch]').forEach((btn) => {
+        btn.onclick = async () => {
+          const sp = spaces.find((item) => item.id === btn.dataset.hubBatch);
           if (!sp) return;
           modalHandle?.close();
-          openPullPreview(sp);
+          if (btn.dataset.localBatch) {
+            if (State.batchFilter !== btn.dataset.localBatch) await focusBatch(btn.dataset.localBatch);
+          } else await openBatchSharing(null, { space: sp });
         };
       });
       const createBtn = body.querySelector('#hubCreateSpaceBtn');
@@ -343,11 +553,11 @@ const HubUI = (() => {
         createBtn.onclick = async () => {
           const name = body.querySelector('#hubNewSpaceName').value.trim();
           const desc = body.querySelector('#hubNewSpaceDesc').value.trim();
-          if (!name) { toast('请填写空间名称', 'err'); return; }
+          if (!name) { toast('请填写共享批次名称', 'err'); return; }
           createBtn.disabled = true;
           try {
             await Api.hubCreateSpace(name, desc);
-            toast(`已创建空间「${name}」`, 'ok');
+            toast(`已创建共享批次「${name}」`, 'ok');
             await loadSpaces();
           } catch (e) { toast(e.message, 'err'); }
           finally { createBtn.disabled = false; }
@@ -356,7 +566,7 @@ const HubUI = (() => {
     };
 
     const loadSpaces = async () => {
-      body.innerHTML = '<div class="hint">正在读取共享区空间列表…</div>';
+      body.innerHTML = '<div class="hint">正在读取共享批次…</div>';
       try {
         const res = await Api.hubListSpaces(includeArchived);
         spaces = res.spaces || [];
@@ -368,7 +578,7 @@ const HubUI = (() => {
     };
 
     modalHandle = modal({
-      title: '团队协同共享区',
+      title: '共享批次',
       wide: true,
       body,
       footer: [mkBtn('关闭', 'ghost', () => modalHandle.close())],
@@ -384,7 +594,7 @@ const HubUI = (() => {
       await openSettings();
       return;
     }
-    const progress = taskProgress('正在读取共享空间…');
+    const progress = taskProgress('正在读取共享批次…');
     let spaces = [];
     try {
       const res = await Api.hubListSpaces(false);
@@ -397,7 +607,7 @@ const HubUI = (() => {
     }
     progress.close();
     if (!spaces.length) {
-      toast('共享区暂无可上传的空间，请联系负责人新建空间', 'err');
+      toast('暂无可上传的共享批次，请联系负责人新建', 'err');
       return;
     }
 
@@ -411,7 +621,7 @@ const HubUI = (() => {
     const body = el('div', 'hub-push-dialog');
     body.innerHTML = `
       <div class="form-row">
-        <label for="hubPushSpace">上传到哪个空间</label>
+        <label for="hubPushSpace">上传到哪个共享批次</label>
         <select id="hubPushSpace">
           ${spaces.map((sp) => `<option value="${esc(sp.id)}" ${sp.id === defaultSpaceId ? 'selected' : ''}>${esc(sp.name)}${sp.status === 'closed' ? '（已截止）' : ''}</option>`).join('')}
         </select>
@@ -631,7 +841,7 @@ const HubUI = (() => {
 
     const renderDisconnected = () => {
       body.innerHTML = `
-        <p class="hint">连接团队共享区后，队员可直接上传报账条目，审核人统一拉取、退回修改或回推补充材料。未操作时不产生后台联网；个人收款信息与本机密钥绝不会上传。</p>
+        <p class="hint">连接后，可共享本地报账批次，或加入已有共享批次。队员同步本人条目，管理员统一核对。近实时同步需按批次开启；个人收款信息和本机密钥留在本机。</p>
         <div class="bindle-segments" role="radiogroup" aria-label="连接方式" style="margin:10px 0">
           <label><input type="radio" name="hubJoinMode" value="invite" checked/><span>凭邀请码加入</span></label>
           <label><input type="radio" name="hubJoinMode" value="token"/><span>凭管理员令牌接入</span></label>
@@ -697,6 +907,8 @@ const HubUI = (() => {
           }
           if (res.hub) state = { ...state, ...res.hub };
           applyVisibility();
+          await refreshState();
+          await refreshEntries();
           toast(res.message || '已连接共享区', 'ok');
           renderConnected();
         } catch (e) {
@@ -723,7 +935,8 @@ const HubUI = (() => {
             </div>
           </div>
         </div>
-        ${isAdmin() ? '<div id="hubAdminPanel" class="hub-admin-panel"><div class="hint">正在加载管理信息…</div></div>' : '<p class="hint">仅在你点击「共享区」或「上传到共享区」时联网。需要更改角色或停用设备请联系管理员。</p>'}`;
+        <p class="hint">近实时同步按批次开启，可在批次右键的「共享设置」暂停。未开启的批次只在你操作时联网。</p>
+        ${isAdmin() ? '<div id="hubAdminPanel" class="hub-admin-panel"><div class="hint">正在加载管理信息…</div></div>' : '<p class="hint">需要更改角色或停用设备请联系管理员。</p>'}`;
 
       body.querySelector('#hubVerifyBtn').onclick = async (ev) => {
         ev.target.disabled = true;
@@ -741,6 +954,8 @@ const HubUI = (() => {
         const res = await Api.hubDisconnect();
         if (res.hub) state = { ...state, ...res.hub };
         applyVisibility();
+        await refreshState();
+        await refreshEntries();
         toast(res.message || '已断开', 'ok');
         renderDisconnected();
       };
@@ -764,9 +979,9 @@ const HubUI = (() => {
 
         container.innerHTML = `
           <details class="detail-section minor-section" open>
-            <summary>共享空间（${spaces.length}）</summary>
+            <summary>共享批次（${spaces.length}）</summary>
             <div class="hub-quick-create" style="margin-bottom:8px">
-              <input id="hubAdmSpaceName" placeholder="新建空间名称（如：2026年12月报账）"/>
+              <input id="hubAdmSpaceName" placeholder="新建共享批次名称"/>
               <input id="hubAdmSpaceDesc" placeholder="说明（可选）"/>
               <button type="button" class="btn small" id="hubAdmCreateSpace">新建</button>
             </div>
@@ -780,7 +995,7 @@ const HubUI = (() => {
                   ${sp.status !== 'archived'
                     ? `<button type="button" class="btn small ghost" data-space-status="${esc(sp.id)}" data-next="archived">归档</button>` : ''}
                 </div>
-              </div>`).join('') || '<div class="hint">暂无空间</div>'}
+              </div>`).join('') || '<div class="hint">暂无共享批次</div>'}
             </div>
           </details>
           <details class="detail-section minor-section" open>
@@ -819,10 +1034,10 @@ const HubUI = (() => {
         container.querySelector('#hubAdmCreateSpace').onclick = async () => {
           const name = container.querySelector('#hubAdmSpaceName').value.trim();
           const desc = container.querySelector('#hubAdmSpaceDesc').value.trim();
-          if (!name) { toast('请填写空间名称', 'err'); return; }
+          if (!name) { toast('请填写共享批次名称', 'err'); return; }
           try {
             await Api.hubCreateSpace(name, desc);
-            toast(`已创建空间「${name}」`, 'ok');
+            toast(`已创建共享批次「${name}」`, 'ok');
             await renderAdminPanel(container);
           } catch (e) { toast(e.message, 'err'); }
         };
@@ -890,6 +1105,11 @@ const HubUI = (() => {
 
   return {
     isConnected,
+    batchInfo,
+    batchIndicatorHtml,
+    openBatchSharing,
+    syncBatch,
+    openBatchChanges,
     isAdmin,
     matchesCurrentHub,
     refreshState,

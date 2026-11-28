@@ -117,19 +117,23 @@ class HubClient:
         else:
             self._hub_connection = HTTPConnection(endpoint.hostname, endpoint.port)
         self._hub_connection_lock = threading.Lock()
+        self._active_sock: socket.socket | None = None
         self._closed = threading.Event()
 
     def close(self) -> None:
         # Disconnect is a UI action: do not wait behind a stalled HTTP response. Interrupt
-        # the socket now; the request owner closes its connection when it releases the lock.
+        # the active socket now (including after HTTPConnection hands it off to HTTPResponse
+        # for HTTP/1.0 or Connection: close); the request owner closes its connection on exit.
         self._closed.set()
         connection = self._hub_connection
-        sock = connection.sock
-        if sock is not None:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+        seen: set[int] = set()
+        for sock in (self._active_sock, connection.sock):
+            if sock is not None and id(sock) not in seen:
+                seen.add(id(sock))
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
         if self._hub_connection_lock.acquire(blocking=False):
             try:
                 connection.close()
@@ -149,13 +153,20 @@ class HubClient:
                     if connection.sock is not None:
                         connection.sock.settimeout(timeout)
                     connection.request(method, route, body=data, headers=headers)
+                    self._active_sock = connection.sock
+                    if self._closed.is_set():
+                        raise OSError("共享区连接已关闭")
                     with connection.getresponse() as response:
-                        return response.status, response.read()
+                        body = response.read()
+                        if self._closed.is_set():
+                            raise OSError("共享区连接已关闭")
+                        return response.status, body
                 except (HTTPException, OSError):
                     connection.close()
                     if attempt or not reuse or method != "GET":
                         raise
                 finally:
+                    self._active_sock = None
                     if self._closed.is_set():
                         connection.close()
 

@@ -64,6 +64,18 @@ class SchemeApi:
         return self.adapters.set_default_scheme(scheme_id)
 
     @_guard
+    def bitfsae_scheme_recovery_status(self):
+        return self.adapters.bitfsae_scheme_recovery_status()
+
+    @_guard
+    def restore_default_bitfsae_scheme(self):
+        return self.adapters.restore_default_bitfsae_scheme()
+
+    @_guard
+    def dismiss_bitfsae_scheme_recovery(self, permanent=False):
+        return self.adapters.dismiss_bitfsae_scheme_recovery(permanent=bool(permanent))
+
+    @_guard
     def enable_scheme(self,scheme_id):
         return self.adapters.enable_scheme(scheme_id)
 

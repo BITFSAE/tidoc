@@ -391,3 +391,13 @@ console.log(JSON.stringify({
     assert out['hiddenRemembered']==['generic_pdf_physical_image']          # 暂时没有的材料沿用上次勾选
     assert out['noDuplicate']==['generic_pdf_invoice']                      # 已选中的材料不重复写入
     assert out['disabledPreserved']==['generic_pdf_payment_screenshot']     # 组件不可用时不清掉记忆
+
+
+def test_bitfsae_recovery_prompt_wiring_and_first_run_order():
+    adapter_ui = (WEB / 'adapter-ui.js').read_text('utf-8')
+    app_js = (WEB / 'app.js').read_text('utf-8')
+    assert "['org.bitfsae.reimbursement', 'org.tidoc.generic']" in adapter_ui
+    assert 'async function maybePromptBitfsaeRecovery(' in adapter_ui
+    assert 'Api.restoreDefaultBitfsaeScheme()' in adapter_ui
+    assert 'Api.dismissBitfsaeSchemeRecovery(' in adapter_ui
+    assert 'AdapterUI.maybePromptBitfsaeRecovery(data.scheme_recovery)' in app_js

@@ -60,7 +60,9 @@ const AdapterUI = (() => {
       const body = el('div'); body.innerHTML = '<p class="hint">选择日常使用的报账方案。之后可在「设置 › 开发者选项」中切换，已有材料保留原规则。</p>';
       let finished = false, m;
       const choose = async id => { try { await Api.completeAdapterSetup(id); await refresh(); finished = true; m.close(); resolve(); } catch (error) { toast(error.message, 'err'); } };
-      for (const scheme of schemes.filter(s => ['org.tidoc.generic','org.bitfsae.reimbursement'].includes(s.package_id))) {
+      for (const packageId of ['org.bitfsae.reimbursement', 'org.tidoc.generic']) {
+        const scheme = schemes.find(s => s.package_id === packageId);
+        if (!scheme) continue;
         const choice = mkBtn('', 'adapter-choice', () => choose(scheme.id));
         const name = el('b'); name.textContent = scheme.name;
         const about = el('span', 'adapter-choice-about'); about.textContent = scheme.definition.manifest.description || '';
@@ -68,6 +70,72 @@ const AdapterUI = (() => {
       }
       body.append(mkBtn('导入报账方案', 'ghost', async () => { const installed = await importPackage(); if (installed) await choose(installed.id || installed.scheme_id); }));
       m = modal({ title: '选择报账方案', body, footer: [], onClose: () => { if (!finished) setTimeout(async () => { await setup(); resolve(); }, 0); } });
+    });
+  }
+  async function maybePromptBitfsaeRecovery(recovery = null) {
+    if (!recovery?.should_prompt) return;
+    if ($('#modalRoot')?.lastChild) return;
+    const body = el('div');
+    const summaryParts = [];
+    if (!recovery.is_default_bitfsae) {
+      summaryParts.push(`当前默认报账方案为「${recovery.current_scheme_name || '其他方案'}」。`);
+    } else {
+      summaryParts.push('检测到仍有历史方案或未关联方案的在办条目。');
+    }
+    const items = [];
+    if (!recovery.is_default_bitfsae) items.push(`将「${recovery.target_scheme_name || 'BITFSAE 车队报账'}」设为默认报账方案，后续新建与同步条目统一按该方案处理。`);
+    if (Number(recovery.active_entry_count || 0) > 0 || Number(recovery.active_batch_count || 0) > 0) {
+      const counts = [];
+      if (Number(recovery.active_entry_count || 0) > 0) counts.push(`${recovery.active_entry_count} 条在办条目`);
+      if (Number(recovery.active_batch_count || 0) > 0) counts.push(`${recovery.active_batch_count} 个在办批次`);
+      items.push(`将 ${counts.join('和 ')}同步切换到默认 BITFSAE 方案（已归档批次保持原样不受影响）。`);
+    }
+    items.push('保留并迁移已填写的收款信息。');
+    if (recovery.is_legacy_default) items.push('原升级生成的「原有报账方案」将停用保留，可在方案管理中随时查看。');
+    body.innerHTML = `
+      <p>${esc(summaryParts.join(''))}</p>
+      <ul class="diagnostic-list">${items.map(text => `<li>${esc(text)}</li>`).join('')}</ul>
+      <p class="hint">车队日常报账建议统一使用默认的「BITFSAE 车队报账」，避免协同同步时出现规则不一致。非车队用户可保持当前方案。</p>
+      <label class="hub-inline-check"><input type="checkbox" id="bitfsaeRecoveryOptOut"/> 保持当前方案，后续更新不再提醒</label>`;
+    const optOut = $('#bitfsaeRecoveryOptOut', body);
+    let handled = false, m;
+    const dismiss = async () => {
+      if (handled) return;
+      handled = true;
+      try { await Api.dismissBitfsaeSchemeRecovery(!!optOut?.checked); } catch (_) {}
+    };
+    const skipBtn = mkBtn('暂不切换', 'ghost', async () => {
+      skipBtn.disabled = true;
+      await dismiss();
+      m.close();
+    });
+    const confirmBtn = mkBtn('回到 BITFSAE 方案', 'primary', async () => {
+      confirmBtn.disabled = true;
+      skipBtn.disabled = true;
+      confirmBtn.textContent = '切换中…';
+      try {
+        const res = await Api.restoreDefaultBitfsaeScheme();
+        handled = true;
+        await refresh();
+        await refreshTitleOptions();
+        await loadBatches();
+        await refreshEntries();
+        m.close();
+        const detail = res?.rebound_entries ? `，已更新 ${res.rebound_entries} 条在办条目` : '';
+        toast(`已切换回「${res?.target_scheme_name || 'BITFSAE 车队报账'}」${detail}`, 'ok');
+      } catch (e) {
+        showErrors(body, e);
+        confirmBtn.disabled = false;
+        skipBtn.disabled = false;
+        confirmBtn.textContent = '回到 BITFSAE 方案';
+      }
+    });
+    m = modal({
+      title: '回到默认 BITFSAE 报账方案？',
+      compact: true,
+      body,
+      footer: [skipBtn, confirmBtn],
+      onClose: () => { if (!handled) dismiss(); },
     });
   }
   async function initializeViewPreference() {
@@ -1482,5 +1550,5 @@ const AdapterUI = (() => {
     m = modal({ title: '导出记录', key: 'export-jobs', replace: pending.mask, wide: true, body, footer: [mkBtn('完成', 'primary', () => m.close())] });
     $('.is-focus', body)?.scrollIntoView({ block: 'nearest' });
   }
-  return {setup,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,usesPayee,payeeModes,settingApplies,defaultSelected,exportOutputRows,outputDescription,exportRowState,runStep,afterCheck,splitDiagnostics,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs,materialSplitOutputs,mergeMaterialMemory};
+  return {setup,maybePromptBitfsaeRecovery,initializeViewPreference,refresh,openSettings,importPackage,reviewerRequired,reviewerControl,settings,usesPayee,payeeModes,settingApplies,defaultSelected,exportOutputRows,outputDescription,exportRowState,runStep,afterCheck,splitDiagnostics,editFields,payees,decorateEntry,chooser,print,rebind,batchFields,batchFill,cardActions,bindCardActions,attachRole,roleAttachments,jobs,materialSplitOutputs,mergeMaterialMemory};
 })();

@@ -720,7 +720,11 @@ function showCompletedUpdateWhenFree(data) {
       setTimeout(show, 600);
       return;
     }
-    openReleaseHighlights('completed', data);
+    openReleaseHighlights('completed', data, () => {
+      if (data?.scheme_recovery?.should_prompt) {
+        setTimeout(() => AdapterUI.maybePromptBitfsaeRecovery(data.scheme_recovery), 0);
+      }
+    });
   };
   show();
 }
@@ -732,14 +736,18 @@ function changelogUrl(version) {
   return `${DOCS_SITE_URL}/update/changelog.html${clean && !isPrerelease(clean) ? `#v${clean}` : ''}`;
 }
 
-function openReleaseHighlights(mode, data) {
+function openReleaseHighlights(mode, data, onClosed = null) {
   const available = mode === 'available';
   const version = available ? data.latest_version : data.current_version;
   const rawNotes = data.notes || [];
   const notes = Array.isArray(rawNotes) ? rawNotes : [rawNotes];
   const hiddenNotes = Math.max(0, notes.length - RELEASE_NOTES_SHOWN);
-  const seen = () => {
+  let closed = false;
+  const finish = () => {
+    if (closed) return;
+    closed = true;
     if (data.seen_key) Api.setAppPreference(data.seen_key, '1').catch(() => {});
+    if (typeof onClosed === 'function') onClosed();
   };
   const body = el('div', 'release-highlights');
   const previousVersion = available ? data.current_version : data.previous_version;
@@ -764,18 +772,18 @@ function openReleaseHighlights(mode, data) {
     </details>`;
   body.querySelector('.release-changelog-link').onclick = () => Api.openExternalUrl(changelogUrl(version)).catch((e) => toast(e.message, 'err'));
   let m;
-  const close = () => { seen(); m.close(); };
+  const close = () => { m.close(); };
   const footer = available
     ? [
         mkBtn('稍后', 'ghost', close),
-        mkBtn('前往更新', 'primary', () => { seen(); m.close(); openUpdateDialog(); }),
+        mkBtn('前往更新', 'primary', () => { m.close(); openUpdateDialog(); }),
       ]
     : [mkBtn('继续使用', 'primary', close)];
   m = modal({
     title: available ? '发现新版本' : '更新完成',
     body, wide: true,
     footer,
-    onClose: seen,
+    onClose: finish,
   });
 }
 

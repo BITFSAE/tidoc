@@ -217,12 +217,16 @@ class UpdateApi:
                 UPDATE_LAST_RESULT_KEY,
                 json.dumps(self._normalize_cached_update_result(cached), ensure_ascii=False),
             )
+        scheme_recovery = self.adapters.bitfsae_scheme_recovery_status(
+            current_version=__version__, upgraded=upgraded
+        )
         return {
             "upgraded": upgraded,
             "first_launch": not previous,
             "previous_version": previous,
             "current_version": __version__,
             "notes": notes,
+            "scheme_recovery": scheme_recovery,
         }
 
     @_bridge

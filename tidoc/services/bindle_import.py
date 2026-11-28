@@ -53,19 +53,31 @@ class _EntryRestorer:
         exchange_revision_id = storage._external_revision_id(self.entries_repo, source_adapter)
         target_scheme_id = ""
         target_revision_id = ""
+        target_title_profile_id = ""
+        target_definition = None
         if self.requested_scheme_id and self.adapter_service:
             target_scheme = self.adapter_service.get_scheme(self.requested_scheme_id)
             target_scheme_id = target_scheme.get("id") or target_scheme.get("scheme_id") or ""
             target_revision_id = target_scheme.get("current_revision_id") or target_scheme.get("revision_id") or ""
+            target_definition = target_scheme.get("definition")
         elif not source_adapter and self.adapter_service:
             try:
                 target_scheme_id, target_revision_id = self.adapter_service.default_binding()
+                target_definition = self.adapter_service.get_revision(target_revision_id)
             except ValueError:
                 pass
+        if target_definition and self.adapter_service:
+            target_title_profile_id = self.adapter_service._match_title(e, target_definition)
+            cleaned_lines = [
+                part for part in (p.strip() for p in str(check_message or "").split("；") if p.strip())
+                if part not in {"来自其他报账方案的材料", "本机尚未绑定该方案规则。", "本机尚未绑定该方案规则"}
+            ]
+            if len(cleaned_lines) != len([p for p in str(check_message or "").split("；") if p.strip()]):
+                check_message = "；".join(cleaned_lines)
+                if check_status == "warning" and not check_message:
+                    check_status = "pass"
         if source_adapter and not target_revision_id:
             status = "partial" if status == "complete" else status
-            check_status = "warning" if check_status not in {"blocked", "fail"} else check_status
-            check_message = storage._merge_text(check_message, "来自其他报账方案的材料；本机尚未绑定该方案规则。")
         if self.inspected["tampered"]:
             check_status = "blocked"
             status = "partial"
@@ -77,8 +89,8 @@ class _EntryRestorer:
             """INSERT INTO entries(id, profile_id, title, invoice_no, invoice_date,
                seller, total, buyer_name, buyer_tax_id, category, tags, status,
                check_status, check_message, source, created_at, updated_at,scheme_id,scheme_revision_id,
-               seller_tax_id,recognition_data)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               title_profile_id,seller_tax_id,recognition_data)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (new_id, destination_profile_id, e.get("title", ""), invoice_no,
              e.get("invoice_date", ""), e.get("seller", ""), e.get("total", ""),
              e.get("buyer_name", ""), e.get("buyer_tax_id", ""), e.get("category", ""),
@@ -91,7 +103,8 @@ class _EntryRestorer:
              ), status,
              check_status, check_message, e.get("source", "imported"),
              e.get("created_at") or self.now, self.now, target_scheme_id or None, target_revision_id or None,
-             e.get("seller_tax_id", ""), storage._validated_recognition_data(e.get("recognition_data"))),
+             target_title_profile_id or None, e.get("seller_tax_id", ""),
+             storage._validated_recognition_data(e.get("recognition_data"))),
         )
         for field, fv in e.get("fields", {}).items():
             self.conn.execute(

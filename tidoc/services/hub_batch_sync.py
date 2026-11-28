@@ -37,6 +37,23 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _resolve_pull_scheme_id(adapters: AdapterService, batch_scheme_id: str = "") -> str:
+    """Resolve the local scheme bound to newly pulled entries in a shared batch."""
+    candidate = str(batch_scheme_id or "").strip()
+    if candidate:
+        try:
+            scheme = adapters.get_scheme(candidate)
+            if not scheme.get("disabled"):
+                return str(scheme.get("id") or "")
+        except ValueError:
+            pass
+    try:
+        scheme_id, _revision_id = adapters.default_binding()
+        return str(scheme_id or "")
+    except ValueError:
+        return ""
+
+
 class _WorkerDatabase:
     """Short-lived SQLite connection wrapper for background sync steps."""
 
@@ -1546,13 +1563,22 @@ class HubBatchSyncManager:
 
             # Plan pull using short worker DB read.
             auto_apply_indexes: list[int] = []
+            pull_scheme_id = ""
             worker_db, adapters, entries_repo, attachments_repo, _ = self._open_worker_repos()
             try:
+                batch_scheme_row = worker_db.conn.execute(
+                    "SELECT default_scheme_id FROM batches WHERE id = ?", (batch_id,)
+                ).fetchone()
+                pull_scheme_id = _resolve_pull_scheme_id(
+                    adapters,
+                    str(batch_scheme_row["default_scheme_id"] or "") if batch_scheme_row else "",
+                )
                 preview = hub_sync.preview_pull(
                     client,
                     entries_repo,
                     space_id,
                     adapter_service=adapters,
+                    target_scheme_id=pull_scheme_id or None,
                     listing=listing,
                 )
                 conn = worker_db.conn
@@ -1604,6 +1630,8 @@ class HubBatchSyncManager:
                         "move_existing_entries": False,
                         "selected_entry_indexes": auto_apply_indexes,
                     }
+                    if pull_scheme_id:
+                        apply_opts["scheme_id"] = pull_scheme_id
                     pull_res = hub_sync.apply_pull(
                         client,
                         entries_repo,

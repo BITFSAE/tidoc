@@ -39,6 +39,15 @@ PREF_SETTINGS = {
     'tidoc.print.amountBasis':'print.amount_basis',
     'tidoc.print.defaultOutputs':'print.default_outputs',
 }
+BITFSAE_PACKAGE_ID = 'org.bitfsae.reimbursement'
+BITFSAE_RECOVERY_MAX_VERSION = '0.1.45'
+BITFSAE_RECOVERY_SEEN_KEY = 'tidoc.scheme.bitfsaeRecoverySeenVersion'
+BITFSAE_RECOVERY_OPTOUT_KEY = 'tidoc.scheme.bitfsaeRecoveryOptOut'
+LEGACY_UNBOUND_SCHEME_CHECK_LINES = frozenset({
+    '来自其他报账方案的材料',
+    '本机尚未绑定该方案规则。',
+    '本机尚未绑定该方案规则',
+})
 
 
 def _digest(value):
@@ -1365,6 +1374,7 @@ class AdapterService:
 
     def _mapped_entry(self,entry,scheme_id,revision_id,mappings):
         from .policy import evaluate_policy,validate_field_value
+        from .transfer import builtin_material_mapping
         target=self.get_revision(revision_id)
         source=self.context_for_entry(entry)
         material_maps=mappings.get('materials',{})
@@ -1417,7 +1427,13 @@ class AdapterService:
                     source_role=None
             same_definition=bool(source_role and role and source_role==role)
             same_revision=bool(source_role_revision and source_role_revision==revision_id)
-            compatible=bool(role) and (same_revision or same_definition)
+            builtin_compatible=bool(
+                not explicit
+                and role
+                and builtin_material_mapping(attachment, target) == new_role
+                and (role.get('max_count') is None or counts.get(new_role, 0) < role['max_count'])
+            )
+            compatible=bool(role) and (same_revision or same_definition or builtin_compatible)
             if role and explicit:
                 if old_role=='invoice' and new_role!='invoice' or old_role!='invoice' and new_role=='invoice':
                     raise ValueError('自定义或其他材料不能替代发票。')
@@ -1448,8 +1464,10 @@ class AdapterService:
         removed_payment_screenshots=[a for a in entry['attachments'] if a['type']=='payment_screenshot']
         has_payment_after=any(a['type']=='payment_screenshot' for a in attachments)
         core_fields={r['field']:r['current'] for r in entry['entry_fields']}
+        eval_fields={f['id']:deepcopy(f.get('default')) for f in fields.values() if 'default' in f}
+        eval_fields.update(values)
         context={'invoice':{'total':entry['total'],'paid_amount':core_fields.get('paid_amount'),'title_id':title_id},
-            'entry':{**entry,'fields':values,'paid_amount':core_fields.get('paid_amount'),'title_id':title_id,'claimant':entry['profile']},'title':{'id':title_id}}
+            'entry':{**entry,'fields':eval_fields,'paid_amount':core_fields.get('paid_amount'),'title_id':title_id,'claimant':entry['profile']},'title':{'id':title_id}}
         diagnostics.extend(evaluate_policy(target,context,counts))
         for role in roles.values():
             if role.get('max_count') is not None and counts.get(role['id'],0)>role['max_count']:
@@ -1498,6 +1516,116 @@ class AdapterService:
             'target_head':scheme['current_revision_id'],'mappings':deepcopy(mappings),'result':result}
         return deepcopy(result)
 
+    def _clean_rebind_check_message(self, entry_id: str, title_profile_id: str) -> None:
+        """Clear stale unbound-scheme notices (and resolved title-list warnings) on rebind."""
+        from ..engine.check_lines import check_lines, reviewed_texts, split_message, strip_prefix
+        row = self.db.conn.execute(
+            'SELECT check_status, check_message, check_reviewed, buyer_name FROM entries WHERE id=?',
+            (entry_id,),
+        ).fetchone()
+        if not row or not row['check_message']:
+            return
+        buyer_name = str(row['buyer_name'] or '').strip()
+        resolved_title_msg = (
+            f'购买方抬头「{buyer_name}」不在已配置的抬头内。'
+            if (title_profile_id and buyer_name) else ''
+        )
+        parts = split_message(row['check_message'])
+        kept = []
+        for part in parts:
+            plain = strip_prefix(part)
+            if plain in LEGACY_UNBOUND_SCHEME_CHECK_LINES:
+                continue
+            if resolved_title_msg and plain == resolved_title_msg:
+                continue
+            kept.append(part)
+        if len(kept) == len(parts):
+            return
+        new_message = '；'.join(kept)
+        new_status = row['check_status']
+        if new_status == 'warning' and not new_message:
+            new_status = 'pass'
+        current_texts = {line['text'] for line in check_lines(new_message)}
+        kept_reviewed = [t for t in reviewed_texts(row['check_reviewed']) if t in current_texts]
+        self.db.conn.execute(
+            'UPDATE entries SET check_status=?, check_message=?, check_reviewed=? WHERE id=?',
+            (new_status, new_message, json.dumps(kept_reviewed, ensure_ascii=False), entry_id),
+        )
+
+    def _apply_rebind_entries(self, mapped_entries, mappings, operation_id=None):
+        from ..db.entries import EntryRepo
+        from ..services import bindle as bindle_service
+        entries_repo = EntryRepo(self.db)
+        total = len(mapped_entries)
+        for index, entry in enumerate(mapped_entries, 1):
+            self._operation_checkpoint(operation_id, 'rebind_entries', index - 1, total)
+            entry_id = entry['entry_id']
+            self.db.conn.execute(
+                'UPDATE entries SET scheme_id=?,scheme_revision_id=?,title_profile_id=?,status_engine_version=?,updated_at=? WHERE id=?',
+                (entry['scheme_id'], entry['revision_id'], entry['title_profile_id'], '', now(), entry_id),
+            )
+            self.extensions.record_history(
+                'entry', entry_id, entry['scheme_id'], '',
+                {'scheme_id': entry['old_scheme_id'], 'revision_id': entry['old_revision_id']},
+                {'scheme_id': entry['scheme_id'], 'revision_id': entry['revision_id'], 'mappings': mappings},
+                entry['revision_id'], self.get_revision(entry['revision_id'])['manifest']['package_id'],
+                kind='rebind',
+            )
+            for attachment in entry['attachments']:
+                old = self.db.conn.execute(
+                    'SELECT type,role_id,role_definition_revision_id,added_at FROM attachments WHERE id=?',
+                    (attachment['id'],),
+                ).fetchone()
+                if (old['type'], old['role_id'], old['role_definition_revision_id']) != (
+                    attachment['type'], attachment['role_id'], attachment['role_definition_revision_id']
+                ):
+                    self.extensions.record_history(
+                        'entry', entry_id, entry['scheme_id'], attachment['id'],
+                        {'type': old['type'], 'role_id': old['role_id'], 'definition_revision_id': old['role_definition_revision_id']},
+                        {'type': attachment['type'], 'role_id': attachment['role_id'], 'definition_revision_id': attachment['role_definition_revision_id']},
+                        entry['revision_id'], kind='material',
+                    )
+                self.db.conn.execute(
+                    '''UPDATE attachments SET type=?,role_id=?,role_definition_revision_id=?,
+                       recognition_version=?,recognition_status=?,recognized_value=?,recognition_message=? WHERE id=?''',
+                    (attachment['type'], attachment['role_id'], attachment['role_definition_revision_id'],
+                     attachment.get('recognition_version', ''), attachment.get('recognition_status', ''),
+                     attachment.get('recognized_value', ''), attachment.get('recognition_message', ''), attachment['id']),
+                )
+            for old_value in entry.get('history_values', []):
+                source_revision = old_value.get('definition_revision_id')
+                if not source_revision:
+                    continue
+                try:
+                    source_definition = self.get_revision(source_revision)
+                except ValueError:
+                    continue
+                self.extensions.record_history(
+                    'entry', entry_id, entry['scheme_id'], old_value['field_id'],
+                    None, old_value.get('value'), source_revision,
+                    source_definition.get('manifest', {}).get('package_id', ''), kind='rebind',
+                )
+            if entry['values']:
+                self.extensions.save_values('entry', entry_id, entry['scheme_id'], entry['revision_id'], entry['values'], commit=False)
+            if not entry.get('old_scheme_id'):
+                source_rows = self.db.conn.execute(
+                    'SELECT payload_json FROM entry_adapter_sources WHERE entry_id=? ORDER BY received_at,source_digest',
+                    (entry_id,),
+                ).fetchall()
+                for srow in source_rows:
+                    try:
+                        payload = json.loads(srow['payload_json'])
+                    except (TypeError, ValueError):
+                        continue
+                    bindle_service._merge_extension_data(entries_repo, entry_id, payload)
+            if entry.get('restore_paid_amount'):
+                entries_repo.restore_paid_amount_after_last_payment(entry_id, commit=False)
+            if entry.get('payment_materials_changed'):
+                entries_repo.refresh_payment_check(entry_id, commit=False)
+            self._clean_rebind_check_message(entry_id, entry.get('title_profile_id') or '')
+            entries_repo.recompute_status(entry_id, commit=False)
+            self._operation_checkpoint(operation_id, 'rebind_entries', index, total)
+
     @_tracked_operation('validate_rebind')
     def apply_rebind(self,preview_id,operation_id=None):
         saved=self._rebind_previews.get(preview_id)
@@ -1509,8 +1637,6 @@ class AdapterService:
         scheme=self.get_scheme(result['scheme_id'])
         if scheme['disabled'] or scheme['current_revision_id']!=saved['target_head']:
             raise ValueError('目标方案已变化，请重新预览。')
-        from ..db.entries import EntryRepo
-        total=len(result['entries'])
         with self.db.transaction():
             total=len(saved['snapshots'])
             for index,(entry_id,digest) in enumerate(saved['snapshots'].items(),1):
@@ -1518,49 +1644,191 @@ class AdapterService:
                 if _digest(self._entry_snapshot(entry_id))!=digest:
                     raise ValueError('预览后条目、材料或字段已变化，请重新预览。')
                 self._operation_checkpoint(operation_id,'validate_rebind',index,total)
-            for index,entry in enumerate(result['entries'],1):
-                self._operation_checkpoint(operation_id,'rebind_entries',index-1,total)
-                entry_id=entry['entry_id']
-                self.db.conn.execute('UPDATE entries SET scheme_id=?,scheme_revision_id=?,title_profile_id=?,status_engine_version=?,updated_at=? WHERE id=?',
-                    (entry['scheme_id'],entry['revision_id'],entry['title_profile_id'],'',now(),entry_id))
-                self.extensions.record_history('entry',entry_id,entry['scheme_id'],'',
-                    {'scheme_id':entry['old_scheme_id'],'revision_id':entry['old_revision_id']},
-                    {'scheme_id':entry['scheme_id'],'revision_id':entry['revision_id'],'mappings':saved['mappings']},
-                    entry['revision_id'],self.get_revision(entry['revision_id'])['manifest']['package_id'],kind='rebind')
-                for attachment in entry['attachments']:
-                    old=self.db.conn.execute('SELECT type,role_id,role_definition_revision_id,added_at FROM attachments WHERE id=?',(attachment['id'],)).fetchone()
-                    if (old['type'],old['role_id'],old['role_definition_revision_id'])!=(attachment['type'],attachment['role_id'],attachment['role_definition_revision_id']):
-                        self.extensions.record_history('entry',entry_id,entry['scheme_id'],attachment['id'],
-                            {'type':old['type'],'role_id':old['role_id'],'definition_revision_id':old['role_definition_revision_id']},
-                            {'type':attachment['type'],'role_id':attachment['role_id'],'definition_revision_id':attachment['role_definition_revision_id']},
-                            entry['revision_id'],kind='material')
-                    self.db.conn.execute('''UPDATE attachments SET type=?,role_id=?,role_definition_revision_id=?,
-                        recognition_version=?,recognition_status=?,recognized_value=?,recognition_message=? WHERE id=?''',
-                        (attachment['type'],attachment['role_id'],attachment['role_definition_revision_id'],
-                         attachment.get('recognition_version',''),attachment.get('recognition_status',''),
-                         attachment.get('recognized_value',''),attachment.get('recognition_message',''),attachment['id']))
-                for old_value in entry.get('history_values',[]):
-                    source_revision=old_value.get('definition_revision_id')
-                    if not source_revision:
-                        continue
-                    try:
-                        source_definition=self.get_revision(source_revision)
-                    except ValueError:
-                        continue
-                    self.extensions.record_history('entry',entry_id,entry['scheme_id'],old_value['field_id'],
-                        None,old_value.get('value'),source_revision,
-                        source_definition.get('manifest',{}).get('package_id',''),kind='rebind')
-                if entry['values']:
-                    self.extensions.save_values('entry',entry_id,entry['scheme_id'],entry['revision_id'],entry['values'],commit=False)
-                if entry.get('restore_paid_amount'):
-                    EntryRepo(self.db).restore_paid_amount_after_last_payment(entry_id,commit=False)
-                if entry.get('payment_materials_changed'):
-                    EntryRepo(self.db).refresh_payment_check(entry_id,commit=False)
-                EntryRepo(self.db).recompute_status(entry_id,commit=False)
-                self._operation_checkpoint(operation_id,'rebind_entries',index,total)
+            self._apply_rebind_entries(result['entries'], saved['mappings'], operation_id=operation_id)
         self._rebind_previews.pop(preview_id,None)
         return {'changed':len(result['entries']),'entry_ids':[e['entry_id'] for e in result['entries']],
             'scheme_id':result['scheme_id'],'revision_id':result['revision_id']}
+
+    def _find_builtin_bitfsae_scheme(self):
+        legacy_id = self._meta('adapter.legacy.scheme_id', '') or ''
+        candidates = [
+            scheme for scheme in self.packages.list_schemes(include_disabled=True)
+            if scheme['package_id'] == BITFSAE_PACKAGE_ID and scheme['id'] != legacy_id
+        ]
+        if not candidates:
+            return None
+        preferred = [s for s in candidates if s['name'] == 'BITFSAE 车队报账']
+        return preferred[0] if preferred else candidates[0]
+
+    def _active_entries_for_bitfsae_recovery(self, bitfsae_id: str, source_scheme_ids: set[str]) -> list[str]:
+        active_clause = (
+            "(NOT EXISTS (SELECT 1 FROM batch_entries be WHERE be.entry_id = e.id) "
+            "OR EXISTS (SELECT 1 FROM batch_entries be JOIN batches b ON b.id = be.batch_id "
+            "WHERE be.entry_id = e.id AND COALESCE(b.archived, 0) = 0))"
+        )
+        source_ids = sorted(sid for sid in source_scheme_ids if sid and sid != bitfsae_id)
+        conds = ['e.scheme_id IS NULL', 'e.scheme_revision_id IS NULL']
+        params: list[str] = []
+        if source_ids:
+            placeholders = ','.join('?' for _ in source_ids)
+            conds.append(f'e.scheme_id IN ({placeholders})')
+            params.extend(source_ids)
+        sql = f"SELECT e.id FROM entries e WHERE {active_clause} AND ({' OR '.join(conds)}) ORDER BY e.created_at, e.id"
+        return [str(r['id']) for r in self.db.conn.execute(sql, params).fetchall()]
+
+    def _active_batches_for_bitfsae_recovery(self, bitfsae_id: str, source_scheme_ids: set[str]) -> list[str]:
+        source_ids = sorted(sid for sid in source_scheme_ids if sid and sid != bitfsae_id)
+        conds = ['default_scheme_id IS NULL']
+        params: list[str] = []
+        if source_ids:
+            placeholders = ','.join('?' for _ in source_ids)
+            conds.append(f'default_scheme_id IN ({placeholders})')
+            params.extend(source_ids)
+        sql = f"SELECT id FROM batches WHERE COALESCE(archived, 0) = 0 AND ({' OR '.join(conds)}) ORDER BY created_at, id"
+        return [str(r['id']) for r in self.db.conn.execute(sql, params).fetchall()]
+
+    def bitfsae_scheme_recovery_status(self, *, current_version: str | None = None, upgraded: bool = False) -> dict:
+        from .. import __version__ as app_version
+        from ..services.updater import version_gt
+        version = str(current_version or app_version)
+        in_window = not version_gt(version, BITFSAE_RECOVERY_MAX_VERSION)
+        setup = self.setup_state()
+        opt_out = self._meta(BITFSAE_RECOVERY_OPTOUT_KEY) == '1'
+        seen_version = self._meta(BITFSAE_RECOVERY_SEEN_KEY, '') or ''
+        legacy_id = self._meta('adapter.legacy.scheme_id', '') or ''
+        bitfsae = self._find_builtin_bitfsae_scheme()
+        current = self.packages.get_scheme()
+        source_ids = {sid for sid in (current['id'], legacy_id) if sid and (not bitfsae or sid != bitfsae['id'])}
+        active_entry_ids = self._active_entries_for_bitfsae_recovery(bitfsae['id'], source_ids) if bitfsae else []
+        active_batch_ids = self._active_batches_for_bitfsae_recovery(bitfsae['id'], source_ids) if bitfsae else []
+        is_default_bitfsae = bool(bitfsae and current['id'] == bitfsae['id'])
+        needed = bool(bitfsae and (not is_default_bitfsae or active_entry_ids or active_batch_ids))
+        should_prompt = bool(
+            upgraded
+            and in_window
+            and setup.get('ready')
+            and needed
+            and not opt_out
+            and seen_version != version
+        )
+        return {
+            'should_prompt': should_prompt,
+            'needed': needed,
+            'in_window': in_window,
+            'opted_out': opt_out,
+            'seen_version': seen_version,
+            'current_version': version,
+            'max_version': BITFSAE_RECOVERY_MAX_VERSION,
+            'current_scheme_id': current['id'],
+            'current_scheme_name': current['name'],
+            'current_package_id': current['package_id'],
+            'is_default_bitfsae': is_default_bitfsae,
+            'is_legacy_default': bool(legacy_id and current['id'] == legacy_id),
+            'target_scheme_id': bitfsae['id'] if bitfsae else '',
+            'target_scheme_name': bitfsae['name'] if bitfsae else '',
+            'legacy_scheme_id': legacy_id,
+            'active_entry_count': len(active_entry_ids),
+            'active_batch_count': len(active_batch_ids),
+        }
+
+    def dismiss_bitfsae_scheme_recovery(self, *, permanent: bool = False, current_version: str | None = None) -> dict:
+        from .. import __version__ as app_version
+        version = str(current_version or app_version)
+        with self.db.transaction():
+            self._set_meta(BITFSAE_RECOVERY_SEEN_KEY, version)
+            if permanent:
+                self._set_meta(BITFSAE_RECOVERY_OPTOUT_KEY, '1')
+        return self.bitfsae_scheme_recovery_status(current_version=version, upgraded=False)
+
+    def restore_default_bitfsae_scheme(self, *, current_version: str | None = None) -> dict:
+        from .. import __version__ as app_version
+        version = str(current_version or app_version)
+        bitfsae = self._find_builtin_bitfsae_scheme()
+        if not bitfsae:
+            raise ValueError('未找到内置的 BITFSAE 车队报账方案。')
+        current = self.packages.get_scheme()
+        legacy_id = self._meta('adapter.legacy.scheme_id', '') or ''
+        source_scheme_ids = [
+            sid for sid in dict.fromkeys([current['id'], legacy_id])
+            if sid and sid != bitfsae['id']
+        ]
+        migrated_payees = 0
+        disabled_legacy = False
+        with self.db.transaction():
+            if bitfsae['disabled']:
+                self.packages.enable(bitfsae['id'], commit=False)
+            self.packages.set_default(bitfsae['id'], commit=False)
+            bitfsae = self.packages.get_scheme(bitfsae['id'])
+            target_id = bitfsae['id']
+            target_rev = bitfsae['current_revision_id']
+
+            # Migrate scheme-level & per-profile payee links without overwriting existing BITFSAE mappings.
+            for src_id in source_scheme_ids:
+                rows = self.db.conn.execute(
+                    'SELECT profile_id, payee_id FROM scheme_payee_links WHERE scheme_id=?',
+                    (src_id,),
+                ).fetchall()
+                for row in rows:
+                    existing = self.db.conn.execute(
+                        'SELECT 1 FROM scheme_payee_links WHERE scheme_id=? AND profile_id IS ?',
+                        (target_id, row['profile_id']),
+                    ).fetchone()
+                    if existing:
+                        continue
+                    self.payees.set_mapping(target_id, row['profile_id'], row['payee_id'], commit=False)
+                    migrated_payees += 1
+
+            active_batch_ids = self._active_batches_for_bitfsae_recovery(target_id, set(source_scheme_ids))
+            stamp = now()
+            for bid in active_batch_ids:
+                for src_id in source_scheme_ids:
+                    brow = self.db.conn.execute(
+                        'SELECT payee_id FROM batch_payee_links WHERE batch_id=? AND scheme_id=?',
+                        (bid, src_id),
+                    ).fetchone()
+                    if not brow:
+                        continue
+                    has_target = self.db.conn.execute(
+                        'SELECT 1 FROM batch_payee_links WHERE batch_id=? AND scheme_id=?',
+                        (bid, target_id),
+                    ).fetchone()
+                    if not has_target:
+                        self.payees.set_batch(bid, target_id, brow['payee_id'], commit=False)
+                        migrated_payees += 1
+                self.db.conn.execute(
+                    'UPDATE batches SET default_scheme_id=?, default_revision_id=?, updated_at=? WHERE id=?',
+                    (target_id, target_rev, stamp, bid),
+                )
+
+            active_entry_ids = self._active_entries_for_bitfsae_recovery(target_id, set(source_scheme_ids))
+            mapped_entries = [
+                self._mapped_entry(self._entry_snapshot(eid), target_id, target_rev, {})
+                for eid in active_entry_ids
+            ]
+            if mapped_entries:
+                self._apply_rebind_entries(mapped_entries, {})
+
+            if legacy_id and legacy_id != target_id:
+                try:
+                    legacy_scheme = self.packages.get_scheme(legacy_id)
+                    if not legacy_scheme['disabled']:
+                        self.packages.disable(legacy_id, commit=False)
+                        disabled_legacy = True
+                except ValueError:
+                    pass
+
+            self._set_meta(BITFSAE_RECOVERY_SEEN_KEY, version)
+            self._set_meta(BITFSAE_RECOVERY_OPTOUT_KEY, '0')
+        return {
+            'target_scheme_id': bitfsae['id'],
+            'target_scheme_name': bitfsae['name'],
+            'previous_scheme_id': current['id'],
+            'previous_scheme_name': current['name'],
+            'rebound_entries': len(active_entry_ids),
+            'updated_batches': len(active_batch_ids),
+            'migrated_payees': migrated_payees,
+            'disabled_legacy': disabled_legacy,
+        }
 
     def update_legacy_preference(self,key,value):
         """Forward old business writers to one authoritative current model."""

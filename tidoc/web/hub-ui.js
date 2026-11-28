@@ -1,4 +1,4 @@
-/* hub-ui.js — 共享批次；近实时同步按批次开启，默认手动同步。 */
+/* hub-ui.js — 共享批次；自动同步按批次开启，默认手动同步。 */
 const HubUI = (() => {
   const REVIEW_LABELS = {
     submitted: '已提交',
@@ -30,9 +30,29 @@ const HubUI = (() => {
   let manualSyncPending = false;
   let sessionEpoch = 0;
   let syncIdentity = '';
+  let expandedReportBatchId = '';
+  const cachedReports = new Map();
+  const reportLoading = new Set();
   const SYNC_LABELS = {
-    manual: '手动同步', idle: '待同步', syncing: '同步中', synced: '已同步',
+    manual: '手动同步', idle: '待同步', syncing: '同步中', synced: '已同步', stopped: '已停止',
     conflict: '待核对', partial: '部分未上传', error: '同步失败', paused: '已暂停', offline: '等待连接',
+  };
+  const REPORT_STATUS_META = {
+    error: { label: '失败', tone: 'error' },
+    pull_conflict: { label: '待拉取核对', tone: 'warn' },
+    conflict: { label: '版本冲突', tone: 'warn' },
+    locked: { label: '已锁定', tone: 'warn' },
+    duplicate: { label: '重复发票', tone: 'error' },
+    other_space: { label: '关联其他批次', tone: 'warn' },
+    space_closed: { label: '批次已截止', tone: 'muted' },
+    stopped: { label: '已停止', tone: 'warn' },
+    pending: { label: '未处理', tone: 'muted' },
+    uploading: { label: '上传中', tone: 'ok' },
+    pushed: { label: '已上传', tone: 'ok' },
+    pulled_new: { label: '已新增', tone: 'ok' },
+    pulled_merged: { label: '已合并', tone: 'ok' },
+    status_updated: { label: '审核更新', tone: 'ok' },
+    withdrawn: { label: '已撤回', tone: 'muted' },
   };
 
   function isConnected() {
@@ -64,6 +84,8 @@ const HubUI = (() => {
       syncIdentity = identity;
       syncGeneration = 0;
       batchLinks = {};
+      cachedReports.clear();
+      expandedReportBatchId = '';
       manualSyncPending = false;
       clearTimeout(syncTimer);
       syncTimer = null;
@@ -71,6 +93,8 @@ const HubUI = (() => {
     if (!state.connected) {
       sessionEpoch++;
       batchLinks = {};
+      cachedReports.clear();
+      expandedReportBatchId = '';
       manualSyncPending = false;
       clearTimeout(syncTimer);
       syncTimer = null;
@@ -85,6 +109,7 @@ const HubUI = (() => {
         syncTimer = null;
       }
     }
+    renderBatchBar();
     return state;
   }
 
@@ -98,19 +123,238 @@ const HubUI = (() => {
     if (!shared) return '';
     const status = shared.state || (shared.auto_sync ? 'idle' : 'manual');
     const label = SYNC_LABELS[status] || '待同步';
-    const attention = ['conflict', 'partial', 'error', 'offline', 'paused'].includes(status);
+    const attention = ['syncing', 'stopped', 'conflict', 'partial', 'error', 'offline', 'paused'].includes(status);
+    const countSuffix = status === 'conflict' && Number(shared.conflict_count || 0) > 0
+      ? ` ${Number(shared.conflict_count)}`
+      : (status === 'partial' && Number(shared.other_space_count || 0) > 0 ? ` ${Number(shared.other_space_count)}` : '');
     const title = `共享批次 · ${shared.space_name || batch.name} · ${label}${shared.message ? `：${shared.message}` : ''}`;
-    return `<span class="batch-shared-mark is-${esc(status)}" data-hub-batch-mark="${esc(batch.id)}" title="${esc(title)}" aria-label="${esc(title)}">${uiIcon('cloud', 12)}${attention ? `<span>${esc(label)}</span>` : ''}</span>`;
+    return `<span class="batch-shared-mark is-${esc(status)}" data-hub-batch-mark="${esc(batch.id)}" title="${esc(title)}" aria-label="${esc(title)}">${uiIcon('cloud', 12)}${attention ? `<span>${esc(label)}${esc(countSuffix)}</span>` : ''}</span>`;
+  }
+
+  function formatSyncTime(iso) {
+    if (!iso) return '';
+    const s = String(iso);
+    const m = s.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+    if (!m) return '';
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    return m[1] === today ? m[2] : `${m[1].slice(5)} ${m[2]}`;
+  }
+
+  function activeBatchObject() {
+    const bid = typeof actualBatchId === 'function'
+      ? actualBatchId()
+      : (State.batchFilter && !String(State.batchFilter).startsWith('__') ? State.batchFilter : '');
+    if (!bid) return null;
+    return (State.batches || []).find((item) => item.id === bid) || (State.currentBatch?.id === bid ? State.currentBatch : null);
+  }
+
+  function formatReportMoney(val) {
+    if (val === '' || val === null || val === undefined) return '';
+    return typeof fmtMoney === 'function' ? fmtMoney(val) : String(val);
+  }
+
+  async function loadBatchReport(batchId) {
+    if (!batchId || typeof Api.hubBatchSyncReport !== 'function' || reportLoading.has(batchId)) return;
+    reportLoading.add(batchId);
+    try {
+      const res = await Api.hubBatchSyncReport(batchId);
+      if (res && res.report) {
+        cachedReports.set(batchId, res.report);
+        if (res.shared && batchLinks[batchId]) batchLinks[batchId] = res.shared;
+      }
+    } catch (e) {
+      cachedReports.set(batchId, { error: true, message: e?.message || '读取同步明细失败' });
+    } finally {
+      reportLoading.delete(batchId);
+      renderBatchBar();
+    }
+  }
+
+  function renderBatchBar() {
+    const bar = typeof $ === 'function' ? $('#hubBatchBar') : null;
+    if (!bar) return;
+    const ds = bar.dataset || (bar.dataset = {});
+    const batch = activeBatchObject();
+    const shared = batch ? batchInfo(batch) : null;
+    if (!batch || !shared) {
+      ds.renderKey = '';
+      bar.classList.add('hidden');
+      bar.innerHTML = '';
+      return;
+    }
+    const status = shared.state || (shared.auto_sync ? 'idle' : 'manual');
+    const label = SYNC_LABELS[status] || '待同步';
+    const toneClass = status === 'syncing'
+      ? 'is-syncing'
+      : (status === 'error' ? 'is-error' : (['conflict', 'partial', 'stopped'].includes(status) ? 'is-warn' : 'is-calm'));
+    bar.className = `hub-batch-bar ${toneClass}`;
+
+    const modeText = (status === 'paused' || status === 'manual') ? '' : (shared.auto_sync ? '自动同步' : '手动同步');
+    const timeText = status === 'syncing' ? '' : formatSyncTime(shared.last_sync);
+    const spaceLabel = shared.space_name && shared.space_name !== batch.name ? `共享「${shared.space_name}」` : '';
+    const metaParts = [spaceLabel, modeText, timeText ? `上次 ${timeText}` : ''].filter(Boolean);
+    let rawMsg = (shared.message || '').trim();
+    if (status === 'stopped' && rawMsg.startsWith('已停止')) {
+      const inner = rawMsg.match(/^已停止（(.+)）$/);
+      rawMsg = inner ? inner[1] : rawMsg.replace(/^已停止[，,：:\s]*/, '');
+    } else if (status === 'paused' && rawMsg === '批次已归档，同步已暂停') {
+      rawMsg = '批次已归档';
+    }
+    const msgText = (status === 'synced' && rawMsg === '已是最新') || rawMsg === label ? '' : rawMsg;
+    const isExpanded = expandedReportBatchId === batch.id;
+    const issueCount = Number(shared.issue_count || 0) || (Number(shared.conflict_count || 0) + Number(shared.other_space_count || 0));
+    const showDetailBtn = issueCount > 0 || !!shared.last_sync || ['syncing', 'stopped', 'error'].includes(status);
+    const cachedReport = isExpanded ? cachedReports.get(batch.id) : null;
+    const isLoadingReport = isExpanded && !cachedReport && reportLoading.has(batch.id);
+    const renderKey = JSON.stringify([
+      batch.id, status, msgText, metaParts,
+      !!shared.can_stop, !!shared.can_resume, !!shared.stopping,
+      issueCount, isExpanded, isLoadingReport, cachedReport || null,
+    ]);
+    if (ds.renderKey === renderKey && bar.innerHTML) return;
+    ds.renderKey = renderKey;
+
+    let primaryActions = '';
+    if (shared.can_stop) {
+      primaryActions += `<button type="button" class="btn small ghost" data-hub-bar-stop ${shared.stopping ? 'disabled' : ''}>${shared.stopping ? '停止中…' : '停止'}</button>`;
+    } else if (shared.can_resume) {
+      primaryActions += '<button type="button" class="btn small primary" data-hub-bar-resume>继续同步</button>';
+    } else if (status !== 'paused') {
+      primaryActions += `<button type="button" class="btn small ghost" data-hub-bar-sync>${status === 'error' ? '重试同步' : '立即同步'}</button>`;
+    }
+    if (status === 'conflict' || Number(shared.conflict_count || 0) > 0) {
+      primaryActions += '<button type="button" class="btn small ghost" data-hub-bar-changes>核对变化</button>';
+    }
+    if (showDetailBtn) {
+      const detailLabel = isExpanded ? '收起明细' : (issueCount > 0 ? `查看明细 (${issueCount})` : '同步明细');
+      primaryActions += `<button type="button" class="btn small ghost" data-hub-bar-detail aria-expanded="${isExpanded ? 'true' : 'false'}">${esc(detailLabel)}</button>`;
+    }
+    primaryActions += '<button type="button" class="btn small ghost" data-hub-bar-settings>共享设置</button>';
+
+    let detailHtml = '';
+    if (isExpanded) {
+      const report = cachedReport;
+      if (!report && typeof Api.hubBatchSyncReport === 'function') {
+        if (!reportLoading.has(batch.id)) loadBatchReport(batch.id);
+        detailHtml = '<div class="hub-batch-detail"><span class="hub-batch-detail-empty">正在读取明细…</span></div>';
+      } else if (report && report.error) {
+        detailHtml = `<div class="hub-batch-detail"><span class="hub-batch-detail-empty">${esc(report.message || '读取同步明细失败')} <button type="button" class="link-btn" data-hub-report-retry>重试</button></span></div>`;
+      } else if (report) {
+        const counts = report.counts || {};
+        const items = report.items || [];
+        const chips = items.length ? [
+          counts.pushed ? `<span class="hub-batch-detail-chip is-ok">已上传 ${counts.pushed}</span>` : '',
+          counts.pulled ? `<span class="hub-batch-detail-chip is-ok">拉取 ${counts.pulled}</span>` : '',
+          counts.status_updated ? `<span class="hub-batch-detail-chip is-ok">审核状态 ${counts.status_updated}</span>` : '',
+          counts.unchanged ? `<span class="hub-batch-detail-chip">已是最新 ${counts.unchanged}</span>` : '',
+          counts.conflict ? `<span class="hub-batch-detail-chip is-warn">冲突 ${counts.conflict}</span>` : '',
+          counts.locked ? `<span class="hub-batch-detail-chip is-warn">已锁定 ${counts.locked}</span>` : '',
+          counts.duplicate ? `<span class="hub-batch-detail-chip is-error">重复发票 ${counts.duplicate}</span>` : '',
+          counts.other_space ? `<span class="hub-batch-detail-chip is-warn">关联其他批次 ${counts.other_space}</span>` : '',
+          counts.stopped ? `<span class="hub-batch-detail-chip is-warn">已停止 ${counts.stopped}</span>` : '',
+          counts.pending ? `<span class="hub-batch-detail-chip">未处理 ${counts.pending}</span>` : '',
+          counts.error ? `<span class="hub-batch-detail-chip is-error">失败 ${counts.error}</span>` : '',
+        ].filter(Boolean).join('') : '';
+        const rowsHtml = items.length
+          ? `<div class="hub-batch-detail-list">${items.map((item) => {
+              const meta = REPORT_STATUS_META[item.status] || { label: item.status || '提示', tone: 'muted' };
+              const titleText = item.seller || item.title || '未命名条目';
+              const subParts = [item.invoice_no, formatReportMoney(item.total)].filter(Boolean).join(' · ');
+              let rowActions = '';
+              if (item.entry_id && typeof openEntryDetail === 'function') {
+                rowActions += `<button type="button" class="link-btn" data-hub-report-open="${esc(item.entry_id)}">查看条目</button>`;
+              }
+              if (item.status === 'pull_conflict') {
+                rowActions += '<button type="button" class="link-btn" data-hub-report-changes>核对合并</button>';
+              } else if (item.status === 'other_space') {
+                rowActions += '<button type="button" class="link-btn" data-hub-report-settings>解除旧关联</button>';
+              } else if (['conflict', 'error', 'stopped', 'pending'].includes(item.status) && item.entry_id) {
+                rowActions += `<button type="button" class="link-btn" data-hub-report-push="${esc(item.entry_id)}">单独重传</button>`;
+              }
+              return `<div class="hub-batch-detail-row">
+                <div class="hub-batch-detail-entry">
+                  <b title="${esc(titleText)}">${esc(titleText)}</b>
+                  ${subParts ? `<span title="${esc(subParts)}">${esc(subParts)}</span>` : ''}
+                </div>
+                <div class="hub-batch-detail-reason">
+                  <span class="badge hub-report-${esc(meta.tone)}">${esc(meta.label)}</span>
+                  <span class="hub-batch-detail-reason-text">${esc(item.message || '')}</span>
+                </div>
+                <div class="hub-batch-detail-row-actions">${rowActions}</div>
+              </div>`;
+            }).join('')}</div>`
+          : `<div class="hub-batch-detail-empty">${report.unchanged_count ? `共 ${report.unchanged_count} 条，均已是最新` : '暂无变动记录'}</div>`;
+        detailHtml = `<div class="hub-batch-detail">${chips ? `<div class="hub-batch-detail-summary">${chips}</div>` : ''}${rowsHtml}</div>`;
+      }
+    }
+
+    bar.innerHTML = `<div class="hub-batch-bar-row">
+      <div class="hub-batch-bar-status">
+        <span class="hub-batch-pill is-${esc(status)}">${uiIcon('cloud', 11)}<span>${esc(label)}</span></span>
+        ${msgText ? `<span class="hub-batch-bar-msg">${esc(msgText)}</span>` : ''}
+        ${metaParts.length ? `<span class="hub-batch-bar-meta">${esc(metaParts.join(' · '))}</span>` : ''}
+      </div>
+      <div class="hub-batch-bar-actions">${primaryActions}</div>
+    </div>${detailHtml}`;
+
+    bar.querySelector('[data-hub-bar-stop]')?.addEventListener('click', () => stopBatchSync(batch));
+    bar.querySelector('[data-hub-bar-resume]')?.addEventListener('click', () => syncBatch(batch));
+    bar.querySelector('[data-hub-bar-sync]')?.addEventListener('click', () => syncBatch(batch));
+    bar.querySelector('[data-hub-bar-changes]')?.addEventListener('click', () => openBatchChanges(batch));
+    bar.querySelector('[data-hub-bar-settings]')?.addEventListener('click', () => openBatchSharing(batch));
+    bar.querySelector('[data-hub-bar-detail]')?.addEventListener('click', () => {
+      expandedReportBatchId = expandedReportBatchId === batch.id ? '' : batch.id;
+      renderBatchBar();
+      if (expandedReportBatchId === batch.id) loadBatchReport(batch.id);
+    });
+    bar.querySelector('[data-hub-report-retry]')?.addEventListener('click', () => {
+      cachedReports.delete(batch.id);
+      renderBatchBar();
+      loadBatchReport(batch.id);
+    });
+    bar.querySelectorAll('[data-hub-report-open]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (typeof openEntryDetail === 'function') openEntryDetail(btn.dataset.hubReportOpen);
+      });
+    });
+    bar.querySelectorAll('[data-hub-report-changes]').forEach((btn) => {
+      btn.addEventListener('click', () => openBatchChanges(batch));
+    });
+    bar.querySelectorAll('[data-hub-report-settings]').forEach((btn) => {
+      btn.addEventListener('click', () => openBatchSharing(batch));
+    });
+    bar.querySelectorAll('[data-hub-report-push]').forEach((btn) => {
+      btn.addEventListener('click', () => openPushDialog([btn.dataset.hubReportPush], {
+        preferredSpaceId: shared.space_id || '',
+        onDone: async () => { await refreshState(); await loadBatchReport(batch.id); },
+      }));
+    });
+  }
+
+  function syncFromBatches(batches) {
+    if (!state.connected || !Array.isArray(batches)) return;
+    batches.forEach((batch) => {
+      if (!batch?.id) return;
+      if (batch.shared_batch) {
+        if (!batchLinks[batch.id]?.checking) batchLinks[batch.id] = batch.shared_batch;
+      } else {
+        delete batchLinks[batch.id];
+      }
+    });
+    renderBatchBar();
   }
 
   function paintBatchStates() {
-    if (typeof document.querySelectorAll !== 'function') return;
-    document.querySelectorAll('[data-hub-batch-mark]').forEach((node) => {
-      const batch = State.batches.find((item) => item.id === node.dataset.hubBatchMark);
-      if (!batch) return;
-      const html = batchIndicatorHtml(batch);
-      if (node.outerHTML !== html) node.outerHTML = html;
-    });
+    if (typeof document.querySelectorAll === 'function') {
+      document.querySelectorAll('[data-hub-batch-mark]').forEach((node) => {
+        const batch = State.batches.find((item) => item.id === node.dataset.hubBatchMark);
+        if (!batch) return;
+        const html = batchIndicatorHtml(batch);
+        if (node.outerHTML !== html) node.outerHTML = html;
+      });
+    }
+    renderBatchBar();
   }
 
   function scheduleSync(delay = 2000) {
@@ -127,10 +371,25 @@ const HubUI = (() => {
     syncInFlight = true;
     let delay = 2000;
     try {
+      const prevExpanded = expandedReportBatchId ? batchLinks[expandedReportBatchId] : null;
       const result = await Api.hubSyncTick();
       if (epoch !== sessionEpoch || !state.connected) return;
       batchLinks = result.batches || {};
       manualSyncPending = Object.values(batchLinks).some((link) => link.state === 'syncing');
+      if (expandedReportBatchId) {
+        const curExpanded = batchLinks[expandedReportBatchId];
+        if (!curExpanded) {
+          expandedReportBatchId = '';
+        } else if (
+          !prevExpanded
+          || prevExpanded.state !== curExpanded.state
+          || prevExpanded.last_sync !== curExpanded.last_sync
+          || prevExpanded.message !== curExpanded.message
+          || (prevExpanded.progress?.done ?? -1) !== (curExpanded.progress?.done ?? -1)
+        ) {
+          loadBatchReport(expandedReportBatchId);
+        }
+      }
       paintBatchStates();
       if (Number(result.generation || 0) !== syncGeneration) {
         syncGeneration = Number(result.generation || 0);
@@ -147,14 +406,39 @@ const HubUI = (() => {
   async function syncBatch(batch) {
     const epoch = sessionEpoch;
     try {
-      await Api.hubSyncBatch(batch.id);
+      const res = await Api.hubSyncBatch(batch.id);
       if (epoch !== sessionEpoch || !state.connected) return;
-      if (batchLinks[batch.id]) batchLinks[batch.id] = { ...batchLinks[batch.id], state: 'syncing' };
+      if (res && res.shared) batchLinks[batch.id] = res.shared;
+      else if (batchLinks[batch.id]) batchLinks[batch.id] = { ...batchLinks[batch.id], state: 'syncing', can_stop: true, can_resume: false };
       manualSyncPending = true;
       paintBatchStates();
       await pollSync();
       scheduleSync(500);
     } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function stopBatchSync(batch) {
+    if (typeof Api.hubStopBatchSync !== 'function') return;
+    try {
+      const res = await Api.hubStopBatchSync(batch.id);
+      if (res && res.shared) batchLinks[batch.id] = res.shared;
+      manualSyncPending = Object.values(batchLinks).some((link) => link.state === 'syncing');
+      paintBatchStates();
+      if (expandedReportBatchId === batch.id) await loadBatchReport(batch.id);
+      await pollSync();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+
+  async function openBatchReport(batch) {
+    if (!batch?.id) return;
+    expandedReportBatchId = batch.id;
+    const curId = typeof actualBatchId === 'function' ? actualBatchId() : State.batchFilter;
+    if (curId !== batch.id && typeof focusBatch === 'function') {
+      await focusBatch(batch.id);
+    } else {
+      renderBatchBar();
+    }
+    await loadBatchReport(batch.id);
   }
 
   async function openBatchChanges(batch) {
@@ -179,11 +463,11 @@ const HubUI = (() => {
       const otherNames = Array.isArray(shared.other_space_names) && shared.other_space_names.length
         ? `（${shared.other_space_names.slice(0, 2).join('、')}${shared.other_space_names.length > 2 ? '等' : ''}）`
         : '';
-      body.innerHTML = `<div class="hub-batch-summary"><b>${esc(shared.space_name || batch.name)}</b><span class="hint" role="status">${esc(shared.message || SYNC_LABELS[shared.state] || '手动同步')}</span></div>
-        <label class="hub-inline-check"><input id="hubBatchAutoSync" type="checkbox" ${shared.auto_sync ? 'checked' : ''}/>近实时同步</label>
-        <p class="hint">开启后，Tidoc 打开时自动同步这批条目和材料。关闭软件后暂停；冲突需要核对。</p>
+      body.innerHTML = `<div class="hub-batch-summary"><b>${esc(shared.space_name || batch.name)}</b><span class="hub-inline-note" role="status">${esc(shared.message || SYNC_LABELS[shared.state] || '手动同步')}</span></div>
+        <label class="hub-inline-check"><input id="hubBatchAutoSync" type="checkbox" ${shared.auto_sync ? 'checked' : ''}/>自动同步</label>
+        <p class="hub-inline-note">打开软件时自动同步；冲突需核对。</p>
         ${otherCount > 0 ? `<div class="hub-batch-other-space">
-          <span class="hint">有 ${otherCount} 条仍关联其他共享批次${esc(otherNames)}，不会自动上传到当前批次。</span>
+          <span class="hub-inline-note">有 ${otherCount} 条仍关联其他共享批次${esc(otherNames)}，不会自动上传到当前批次。</span>
           <button type="button" class="btn small ghost" id="hubDetachOtherSpaceBtn">解除旧关联并同步</button>
         </div>` : ''}`;
       const toggle = body.querySelector('#hubBatchAutoSync');
@@ -194,7 +478,7 @@ const HubUI = (() => {
           await Api.hubSetBatchAutoSync(batch.id, enabled);
           await refreshState();
           paintBatchStates();
-          body.querySelector('[role="status"]').textContent = enabled ? '近实时同步已开启' : '已切换为手动同步';
+          body.querySelector('[role="status"]').textContent = enabled ? '自动同步已开启' : '已切换为手动同步';
         } catch (e) { toggle.checked = !enabled; toast(e.message, 'err'); }
         finally { toggle.disabled = false; }
       };
@@ -210,7 +494,7 @@ const HubUI = (() => {
           } catch (e) { detachBtn.disabled = false; toast(e.message, 'err'); }
         };
       }
-      const unlink = mkBtn('取消关联', 'ghost', async () => {
+      const unlink = mkBtn('取消关联', 'ghost danger push-left', async () => {
         if (!confirm('取消关联后停止同步，本机和共享批次中的条目都会保留。继续吗？')) return;
         unlink.disabled = true;
         try {
@@ -234,9 +518,8 @@ const HubUI = (() => {
       ${isAdmin() && batch && !space ? '<option value="">新建同名共享批次</option>' : ''}
       ${choices.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}${item.status === 'closed' ? '（已截止）' : ''}</option>`).join('')}
       </select></div>
-      <label class="hub-inline-check"><input type="checkbox" id="hubBatchAutoSync"/>近实时同步</label>
-      <p class="hint">开启后，Tidoc 打开时自动同步这批条目和材料。关闭软件后暂停；冲突需要核对。</p>
-      <p class="hint">${isAdmin() ? '管理员可汇总全部成员条目。' : '队员仅同步自己的条目。'}</p>`;
+      <label class="hub-inline-check"><input type="checkbox" id="hubBatchAutoSync"/>自动同步</label>
+      <p class="hub-inline-note">${isAdmin() ? '打开软件时自动同步；管理员可汇总全部成员条目。' : '打开软件时自动同步；队员仅同步本人条目。'}</p>`;
     const confirmBtn = mkBtn(batch ? '共享并同步' : '加入并同步', 'primary', async () => {
       confirmBtn.disabled = true;
       try {
@@ -250,7 +533,7 @@ const HubUI = (() => {
       } catch (e) { confirmBtn.disabled = false; toast(e.message, 'err'); }
     });
     confirmBtn.disabled = !choices.length && !(isAdmin() && batch && !space);
-    if (confirmBtn.disabled) body.appendChild(el('p', 'hint', '暂无共享批次，请联系管理员创建。'));
+    if (confirmBtn.disabled) body.appendChild(el('p', 'hub-inline-note', '暂无共享批次，请联系管理员创建。'));
     dialog = modal({ title: batch ? `共享「${batch.name}」` : '加入共享批次', compact: true, body,
       footer: [mkBtn('取消', 'ghost', () => dialog.close()), confirmBtn] });
   }
@@ -437,7 +720,7 @@ const HubUI = (() => {
                 ${entry.review_note ? `<div class="hub-entry-meta">${esc(entry.review_note)}</div>` : ''}
               </td>
             </tr>`).join('')}</tbody>
-        </table>` : (entries.length ? '<p class="hint">没有匹配的条目。</p>' : '');
+        </table>` : (entries.length ? '<p class="hub-inline-note">没有匹配的条目。</p>' : '');
     };
     const load = async () => {
       refreshBtn.disabled = true;
@@ -505,13 +788,13 @@ const HubUI = (() => {
             </div>
           </div>`;
         }).join('')
-        : '<div class="hint">暂无共享批次。' + (isAdmin() ? '可在下方新建，或右键本地批次共享。' : '请联系负责人创建。') + '</div>';
+        : '<div class="hub-inline-note">暂无共享批次。' + (isAdmin() ? '可在下方新建，或右键本地批次共享。' : '请联系负责人创建。') + '</div>';
 
       body.innerHTML = `
         <div class="hub-identity-bar">
           <div>
             <b>${esc(state.name || '已连接')}</b>
-            <span class="hint">${esc(roleLabel)} · ${esc(state.server_url)}</span>
+            <span class="hub-inline-note">${esc(roleLabel)} · ${esc(state.server_url)}</span>
           </div>
           <div class="hub-identity-actions">
             <label class="hub-inline-check"><input type="checkbox" id="hubShowArchived" ${includeArchived ? 'checked' : ''}/> 显示已归档</label>
@@ -626,7 +909,7 @@ const HubUI = (() => {
           ${spaces.map((sp) => `<option value="${esc(sp.id)}" ${sp.id === defaultSpaceId ? 'selected' : ''}>${esc(sp.name)}${sp.status === 'closed' ? '（已截止）' : ''}</option>`).join('')}
         </select>
       </div>
-      <p class="hint">已选 <b>${ids.length}</b> 条。共享区已有的相同材料会跳过。本机收款账号和密钥留在本机。</p>
+      <p class="hub-inline-note">已选 <b>${ids.length}</b> 条 · 相同材料自动跳过，收款账号与密钥仅留本机</p>
       <div id="hubPushStatus" role="status"></div>
       <div id="hubPushResult"></div>`;
 
@@ -841,10 +1124,9 @@ const HubUI = (() => {
 
     const renderDisconnected = () => {
       body.innerHTML = `
-        <p class="hint">连接后，可共享本地报账批次，或加入已有共享批次。队员同步本人条目，管理员统一核对。近实时同步需按批次开启；个人收款信息和本机密钥留在本机。</p>
-        <div class="bindle-segments" role="radiogroup" aria-label="连接方式" style="margin:10px 0">
-          <label><input type="radio" name="hubJoinMode" value="invite" checked/><span>凭邀请码加入</span></label>
-          <label><input type="radio" name="hubJoinMode" value="token"/><span>凭管理员令牌接入</span></label>
+        <div class="bindle-segments" role="radiogroup" aria-label="连接方式">
+          <label><input type="radio" name="hubJoinMode" value="invite" checked/><span>邀请码加入</span></label>
+          <label><input type="radio" name="hubJoinMode" value="token"/><span>管理员令牌</span></label>
         </div>
         <div class="form-row">
           <label for="hubServerUrl">服务器地址</label>
@@ -868,11 +1150,12 @@ const HubUI = (() => {
         </div>
         <div id="hubTokenFields" class="hidden">
           <div class="form-row">
-            <label for="hubAccessToken">访问令牌（init-admin 生成）</label>
+            <label for="hubAccessToken">访问令牌</label>
             <input id="hubAccessToken" type="password" placeholder="th_..." autocomplete="off"/>
           </div>
         </div>
         <div class="hub-settings-actions">
+          <span class="hub-inline-note">收款账号与密钥仅存本机</span>
           <button type="button" class="btn primary" id="hubConnectBtn">连接共享区</button>
         </div>`;
 
@@ -935,8 +1218,7 @@ const HubUI = (() => {
             </div>
           </div>
         </div>
-        <p class="hint">近实时同步按批次开启，可在批次右键的「共享设置」暂停。未开启的批次只在你操作时联网。</p>
-        ${isAdmin() ? '<div id="hubAdminPanel" class="hub-admin-panel"><div class="hint">正在加载管理信息…</div></div>' : '<p class="hint">需要更改角色或停用设备请联系管理员。</p>'}`;
+        ${isAdmin() ? '<div id="hubAdminPanel" class="hub-admin-panel"><div class="hint">正在加载管理信息…</div></div>' : ''}`;
 
       body.querySelector('#hubVerifyBtn').onclick = async (ev) => {
         ev.target.disabled = true;
@@ -987,7 +1269,7 @@ const HubUI = (() => {
             </div>
             <div class="hub-admin-list">
               ${spaces.map((sp) => `<div class="hub-admin-row">
-                <div><b>${esc(sp.name)}</b> <span class="hint">${esc(SPACE_STATUS_LABELS[sp.status] || sp.status)} · ${Number(sp.entry_count || 0)} 条</span></div>
+                <div><b>${esc(sp.name)}</b> <span class="hub-inline-note">${esc(SPACE_STATUS_LABELS[sp.status] || sp.status)} · ${Number(sp.entry_count || 0)} 条</span></div>
                 <div class="hub-inline-btns">
                   ${sp.status === 'active'
                     ? `<button type="button" class="btn small ghost" data-space-status="${esc(sp.id)}" data-next="closed">截止</button>`
@@ -995,10 +1277,10 @@ const HubUI = (() => {
                   ${sp.status !== 'archived'
                     ? `<button type="button" class="btn small ghost" data-space-status="${esc(sp.id)}" data-next="archived">归档</button>` : ''}
                 </div>
-              </div>`).join('') || '<div class="hint">暂无共享批次</div>'}
+              </div>`).join('') || '<div class="hub-inline-note">暂无共享批次</div>'}
             </div>
           </details>
-          <details class="detail-section minor-section" open>
+          <details class="detail-section minor-section">
             <summary>邀请码（${invites.length}）</summary>
             <div class="hub-quick-create" style="margin-bottom:8px">
               <select id="hubAdmInvRole">
@@ -1011,21 +1293,21 @@ const HubUI = (() => {
             </div>
             <div class="hub-admin-list">
               ${invites.map((inv) => `<div class="hub-admin-row">
-                <div><code class="mono">${esc(inv.code)}</code> <span class="hint">${inv.role === 'admin' ? '管理员' : '队员'} · 已用 ${Number(inv.uses || 0)}/${Number(inv.max_uses || 0)}${inv.revoked ? ' · 已撤销' : ''}${inv.note ? ` · ${esc(inv.note)}` : ''}</span></div>
+                <div><code class="mono">${esc(inv.code)}</code> <span class="hub-inline-note">${inv.role === 'admin' ? '管理员' : '队员'} · 已用 ${Number(inv.uses || 0)}/${Number(inv.max_uses || 0)}${inv.revoked ? ' · 已撤销' : ''}${inv.note ? ` · ${esc(inv.note)}` : ''}</span></div>
                 <div class="hub-inline-btns">
                   <button type="button" class="btn small ghost" data-copy-invite="${esc(inv.code)}">复制</button>
                   ${inv.revoked ? '' : `<button type="button" class="btn small danger" data-revoke-invite="${esc(inv.code)}">撤销</button>`}
                 </div>
-              </div>`).join('') || '<div class="hint">暂无邀请码</div>'}
+              </div>`).join('') || '<div class="hub-inline-note">暂无邀请码</div>'}
             </div>
           </details>
           <details class="detail-section minor-section">
             <summary>已加入成员（${users.length}）</summary>
             <div class="hub-admin-list">
               ${users.map((u) => `<div class="hub-admin-row">
-                <div><b>${esc(u.name)}</b> <span class="hint">${u.role === 'admin' ? '管理员' : '队员'}${u.disabled ? ' · 已停用' : ''}${u.device_name ? ` · ${esc(u.device_name)}` : ''}</span></div>
+                <div><b>${esc(u.name)}</b> <span class="hub-inline-note">${u.role === 'admin' ? '管理员' : '队员'}${u.disabled ? ' · 已停用' : ''}${u.device_name ? ` · ${esc(u.device_name)}` : ''}</span></div>
                 <div class="hub-inline-btns">
-                  ${u.id !== state.user_id ? `<button type="button" class="btn small ghost" data-toggle-user="${esc(u.id)}" data-disabled="${u.disabled ? '0' : '1'}">${u.disabled ? '启用' : '停用'}</button>` : '<span class="hint">当前账号</span>'}
+                  ${u.id !== state.user_id ? `<button type="button" class="btn small ghost" data-toggle-user="${esc(u.id)}" data-disabled="${u.disabled ? '0' : '1'}">${u.disabled ? '启用' : '停用'}</button>` : '<span class="hub-inline-note">当前账号</span>'}
                 </div>
               </div>`).join('')}
             </div>
@@ -1107,8 +1389,12 @@ const HubUI = (() => {
     isConnected,
     batchInfo,
     batchIndicatorHtml,
+    renderBatchBar,
+    syncFromBatches,
     openBatchSharing,
     syncBatch,
+    stopBatchSync,
+    openBatchReport,
     openBatchChanges,
     isAdmin,
     matchesCurrentHub,

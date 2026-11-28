@@ -93,8 +93,8 @@ function qrProgressText(done, total, seconds) {
 // 没有当成取票二维码、却值得让用户知道的两种图片。其余不是二维码的图片不提示。
 function qrFallbackNotice({ faceQr = 0, unsupported = 0 } = {}) {
   const notes = [];
-  if (faceQr) notes.push(`有 ${faceQr} 张图片是发票票面上的二维码（只含发票信息，没有取票地址），已按普通材料处理。取票请用商家给的取票二维码。`);
-  if (unsupported) notes.push(`有 ${unsupported} 张图片是 HEIC 格式，识别不了二维码，已按普通材料处理。要取票请转存为 JPG / PNG，或截图后再试。`);
+  if (faceQr) notes.push(`有 ${faceQr} 张图片是发票票面上的二维码（无取票地址），已按普通材料处理；取票请用商家给的取票二维码。`);
+  if (unsupported) notes.push(`有 ${unsupported} 张图片是 HEIC 格式，无法识别二维码，已按普通材料处理；请转存 JPG / PNG 后再试。`);
   return notes.join('');
 }
 
@@ -203,10 +203,11 @@ function qrReportHtml(report, { standalone = false } = {}) {
       <b>${qrTicketLabel(item)}</b>
       <span>${item.warnings.map(esc).join('；')}</span>
     </div>`).join('');
+  const openable = failed.filter((item) => item.open_url).length;
   const failRows = failed.map((item, index) => {
     const tip = [QR_STAGE_LABEL[item.stage], item.detail].filter(Boolean).join('：');
     const guide = item.open_url
-      ? `<div class="qr-report-actions"><button type="button" class="btn small" data-qr-retry="${index}">重试</button><button type="button" class="btn small" data-qr-open="${index}">在浏览器中打开</button><small>下载 PDF / XML 后，把文件拖进软件即可。</small></div>`
+      ? `<div class="qr-report-actions"><button type="button" class="btn small" data-qr-retry="${index}">重试</button><button type="button" class="btn small" data-qr-open="${index}">在浏览器中打开</button></div>`
       : item.code === 'platform_changed'
         ? '<small>软件没能读出取票链接，可以用手机扫描这张二维码，在浏览器里下载发票文件后拖进软件。</small>' : '';
     return `
@@ -219,7 +220,10 @@ function qrReportHtml(report, { standalone = false } = {}) {
   if (!failed.length && !warned.length) {
     return `<div class="hint ok qr-report-head">已从税务平台取回 ${fetched.length} 张发票的文件。${duplicates}</div>`;
   }
-  const head = standalone ? '' : `<div class="qr-report-head">二维码取票：${fetched.length ? `取回 ${fetched.length} 张` : ''}${fetched.length && failed.length ? '，' : ''}${failed.length ? `${failed.length} 张没有成功` : ''}${duplicates}</div>`;
+  const dragTip = openable ? '<small>下载 PDF / XML 后，把文件拖进软件即可。</small>' : '';
+  const head = standalone
+    ? (dragTip ? `<div class="qr-report-head">${dragTip}</div>` : '')
+    : `<div class="qr-report-head">二维码取票：${fetched.length ? `取回 ${fetched.length} 张` : ''}${fetched.length && failed.length ? '，' : ''}${failed.length ? `${failed.length} 张没有成功` : ''}${duplicates}${dragTip}</div>`;
   return `<div class="qr-report${failed.length ? ' has-error' : ''}">${head}${failRows}${warnRows}</div>`;
 }
 

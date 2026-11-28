@@ -341,6 +341,129 @@ def _bundle_sync_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
+_REPORT_STATUS_PRIORITY = {
+    "error": 0,
+    "pull_conflict": 1,
+    "conflict": 2,
+    "locked": 3,
+    "duplicate": 4,
+    "other_space": 5,
+    "space_closed": 6,
+    "stopped": 7,
+    "pending": 8,
+    "uploading": 9,
+    "pushed": 10,
+    "pulled_new": 11,
+    "pulled_merged": 12,
+    "status_updated": 13,
+    "withdrawn": 14,
+}
+_ATTENTION_REPORT_STATUSES = {
+    "error",
+    "pull_conflict",
+    "conflict",
+    "locked",
+    "duplicate",
+    "other_space",
+    "space_closed",
+    "stopped",
+    "pending",
+}
+
+
+def _entry_display_fields(source: dict | None) -> dict[str, str]:
+    data = source or {}
+    seller = str(data.get("seller") or "").strip()
+    invoice_no = str(data.get("invoice_no") or "").strip()
+    title = str(data.get("title") or "").strip()
+    total_raw = data.get("total")
+    total = "" if total_raw is None else str(total_raw).strip()
+    head = seller or title
+    label = " · ".join(p for p in (head, invoice_no) if p) or "未命名条目"
+    return {
+        "seller": seller,
+        "invoice_no": invoice_no,
+        "title": title,
+        "total": total,
+        "label": label,
+    }
+
+
+def _load_entry_meta_map(conn: sqlite3.Connection, entry_ids: list[str]) -> dict[str, dict[str, str]]:
+    ids = list(dict.fromkeys(str(eid or "").strip() for eid in entry_ids if str(eid or "").strip()))
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT id, seller, invoice_no, title, total FROM entries WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    return {str(r["id"]): _entry_display_fields(dict(r)) for r in rows}
+
+
+def _map_suppressed_reason(reason: str) -> str:
+    r = str(reason or "").strip()
+    if r in ("locked", "entry_locked"):
+        return "locked"
+    if r == "duplicate_invoice":
+        return "duplicate"
+    if r == "other_space":
+        return "other_space"
+    return "conflict"
+
+
+def _build_report_payload(
+    items: list[dict[str, Any]],
+    unchanged_count: int,
+    *,
+    updated_at: str = "",
+) -> dict[str, Any]:
+    counts: dict[str, int] = {
+        "pushed": 0,
+        "pulled": 0,
+        "status_updated": 0,
+        "unchanged": max(0, int(unchanged_count or 0)),
+        "conflict": 0,
+        "locked": 0,
+        "duplicate": 0,
+        "other_space": 0,
+        "space_closed": 0,
+        "stopped": 0,
+        "pending": 0,
+        "error": 0,
+        "withdrawn": 0,
+    }
+    deduped: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str, str]] = set()
+    for raw in items:
+        item = dict(raw)
+        st = str(item.get("status") or "error")
+        key = (str(item.get("entry_id") or ""), str(item.get("remote_entry_id") or ""), st)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(item)
+        if st == "pushed":
+            counts["pushed"] += 1
+        elif st in ("pulled_new", "pulled_merged"):
+            counts["pulled"] += 1
+        elif st == "status_updated":
+            counts["status_updated"] += 1
+        elif st in ("pull_conflict", "conflict"):
+            counts["conflict"] += 1
+        elif st in counts:
+            counts[st] += 1
+    deduped.sort(key=lambda it: _REPORT_STATUS_PRIORITY.get(str(it.get("status") or ""), 99))
+    issue_count = sum(1 for it in deduped if str(it.get("status") or "") in _ATTENTION_REPORT_STATUSES)
+    return {
+        "counts": counts,
+        "issue_count": issue_count,
+        "unchanged_count": counts["unchanged"],
+        "items": deduped,
+        "updated_at": updated_at or _now_iso(),
+    }
+
+
 def _build_shared_info(
     record: dict,
     *,
@@ -360,6 +483,8 @@ def _build_shared_info(
     other_space_count = int(rt.get("other_space_count", record.get("other_space_count") or 0))
     other_space_names = list(rt.get("other_space_names", record.get("other_space_names") or []))
     needs_upgrade = bool(rt.get("needs_upgrade", record.get("needs_upgrade") or False))
+    checking = bool(rt.get("queued") or rt.get("running"))
+    stopping = bool(rt.get("stopping"))
 
     if not connected:
         state = "paused"
@@ -372,14 +497,33 @@ def _build_shared_info(
     elif archived:
         state = "paused"
         message = "批次已归档，同步已暂停"
-    elif rt.get("queued") or rt.get("running"):
+    elif checking and rt.get("visible_syncing"):
         state = "syncing"
         message = str(rt.get("message") or "正在同步…")
+    elif rt.get("user_stopped"):
+        state = "stopped"
+        message = str(rt.get("message") or "已停止同步")
     else:
         state = str(rt.get("state") or record.get("last_state") or ("synced" if last_sync else "manual"))
         if state == "syncing":
             state = "synced" if last_sync else "manual"
         message = str(rt.get("message") if "message" in rt else (record.get("last_message") or ""))
+
+    report_src = rt.get("report") if isinstance(rt.get("report"), dict) else (record.get("last_report") or {})
+    report_counts = dict((report_src or {}).get("counts") or {})
+    issue_count = int(
+        (report_src or {}).get("issue_count")
+        if (report_src or {}).get("issue_count") is not None
+        else (conflict_count + other_space_count)
+    )
+    can_stop = bool(connected and account_active and not archived and checking and rt.get("visible_syncing"))
+    can_resume = bool(
+        connected
+        and account_active
+        and not archived
+        and not checking
+        and (state == "stopped" or rt.get("user_stopped") or (state == "error" and report_counts.get("pending", 0) > 0))
+    )
 
     return {
         "space_id": str(record.get("space_id") or ""),
@@ -394,6 +538,13 @@ def _build_shared_info(
         "other_space_count": other_space_count,
         "other_space_names": other_space_names,
         "needs_upgrade": needs_upgrade,
+        "checking": checking,
+        "stopping": stopping,
+        "can_stop": can_stop,
+        "can_resume": can_resume,
+        "progress": copy.deepcopy(rt.get("progress")) if (checking and rt.get("visible_syncing") and rt.get("progress")) else None,
+        "issue_count": issue_count,
+        "report_counts": report_counts,
     }
 
 
@@ -471,6 +622,7 @@ class HubBatchSyncManager:
         self._queued_manual: dict[str, bool] = {}
         self._running_batch: str = ""
         self._rerun_manual: dict[str, bool] = {}
+        self._user_stop_requested: set[str] = set()
         self._runtime: dict[str, dict[str, Any]] = {}
 
     @property
@@ -534,6 +686,7 @@ class HubBatchSyncManager:
         self._worker.start()
 
     def _enqueue_locked(self, batch_id: str, *, manual: bool) -> None:
+        self._user_stop_requested.discard(batch_id)
         if self._running_batch == batch_id:
             prev = self._rerun_manual.get(batch_id, False)
             self._rerun_manual[batch_id] = prev or manual
@@ -544,9 +697,12 @@ class HubBatchSyncManager:
             self._queue.append((batch_id, manual))
         rt = self._runtime.setdefault(batch_id, {})
         rt["queued"] = True
-        rt["state"] = "syncing"
-        rt["message"] = "正在同步…"
+        rt["user_stopped"] = False
+        rt["stopping"] = False
         if manual:
+            rt["visible_syncing"] = True
+            rt["state"] = "syncing"
+            rt["message"] = "正在同步…"
             rt["error_count"] = 0
             rt["next_due_at"] = 0.0
         self._ensure_worker_locked()
@@ -570,6 +726,7 @@ class HubBatchSyncManager:
             self._queue.clear()
             self._queued_manual.clear()
             self._rerun_manual.clear()
+            self._user_stop_requested.clear()
             self._runtime.clear()
             old_client = self._worker_client
             self._worker_client = None
@@ -592,6 +749,7 @@ class HubBatchSyncManager:
             self._queue.clear()
             self._queued_manual.clear()
             self._rerun_manual.clear()
+            self._user_stop_requested.clear()
             self._runtime.clear()
             old_client = self._worker_client
             self._worker_client = None
@@ -706,6 +864,7 @@ class HubBatchSyncManager:
             rec["deleted_remote_entries"] = deleted_remote
             rec["last_remote_version"] = ""
             rec["last_sync"] = now
+            rec.pop("last_report", None)
             other_sup = [s for s in suppressed.values() if (s or {}).get("reason") == "other_space"]
             real_sup = [s for s in suppressed.values() if (s or {}).get("reason") != "other_space"]
             remaining = len(pull_conflicts) + len(real_sup)
@@ -724,6 +883,7 @@ class HubBatchSyncManager:
             updated_meta = True
             with self._lock:
                 rt = self._runtime.setdefault(bid, {})
+                rt.pop("report", None)
                 if not (rt.get("queued") or rt.get("running")):
                     rt["state"] = rec["last_state"]
                     rt["message"] = rec["last_message"]
@@ -771,6 +931,7 @@ class HubBatchSyncManager:
             rec["pull_conflicts"] = pull_conflicts
             rec["suppressed_conflicts"] = suppressed
             rec["last_remote_version"] = ""
+            rec.pop("last_report", None)
             other_sup = [s for s in suppressed.values() if (s or {}).get("reason") == "other_space"]
             real_sup = [s for s in suppressed.values() if (s or {}).get("reason") != "other_space"]
             remaining = len(pull_conflicts) + len(real_sup)
@@ -785,6 +946,7 @@ class HubBatchSyncManager:
             updated_meta = True
             with self._lock:
                 rt = self._runtime.setdefault(bid, {})
+                rt.pop("report", None)
                 if not (rt.get("queued") or rt.get("running")):
                     rt["conflict_count"] = remaining
                     rt["other_space_count"] = other_cnt
@@ -837,6 +999,7 @@ class HubBatchSyncManager:
             _write_batch_links(conn, links, commit=True)
         with self._lock:
             self._bump_batch_epoch_locked(bid)
+            self._user_stop_requested.discard(bid)
             if bid in self._queued_manual:
                 del self._queued_manual[bid]
                 self._queue = deque((b, m) for b, m in self._queue if b != bid)
@@ -867,16 +1030,19 @@ class HubBatchSyncManager:
                 raise ValueError("已归档的批次已暂停同步，请先恢复批次后再开启自动同步。")
             rec["auto_sync"] = True
             rec["needs_upgrade"] = False
-            if rec.get("last_state") == "error":
+            if rec.get("last_state") in ("error", "stopped"):
                 rec["last_state"] = "synced" if rec.get("last_sync") else "manual"
                 rec["last_message"] = ""
             _write_batch_links(conn, links, commit=True)
             with self._lock:
+                self._user_stop_requested.discard(bid)
                 rt = self._runtime.setdefault(bid, {})
                 rt["error_count"] = 0
                 rt["needs_upgrade"] = False
+                rt["user_stopped"] = False
+                rt["stopping"] = False
                 rt["next_due_at"] = 0.0
-                if rt.get("state") == "error":
+                if rt.get("state") in ("error", "stopped"):
                     rt["state"] = rec["last_state"]
                     rt["message"] = ""
         else:
@@ -887,6 +1053,7 @@ class HubBatchSyncManager:
             _write_batch_links(conn, links, commit=True)
             with self._lock:
                 self._bump_batch_epoch_locked(bid)
+                self._user_stop_requested.discard(bid)
                 if bid in self._queued_manual and not self._queued_manual[bid]:
                     del self._queued_manual[bid]
                     self._queue = deque((b, m) for b, m in self._queue if b != bid)
@@ -896,6 +1063,9 @@ class HubBatchSyncManager:
                 if rt is not None:
                     if not self._queued_manual.get(bid) and self._running_batch != bid:
                         rt["queued"] = False
+                        rt["visible_syncing"] = False
+                        rt["stopping"] = False
+                        rt["progress"] = None
                         if rt.get("state") in ("syncing", "error"):
                             rt["state"] = rec["last_state"]
                             rt["message"] = rec["last_message"]
@@ -940,6 +1110,7 @@ class HubBatchSyncManager:
             rt = self._runtime.setdefault(bid, {})
             rt["needs_upgrade"] = False
             rt["error_count"] = 0
+            rt["user_stopped"] = False
             self._enqueue_locked(bid, manual=True)
             info = _build_shared_info(
                 rec,
@@ -950,6 +1121,185 @@ class HubBatchSyncManager:
                 runtime=self._runtime.get(bid),
             )
         return {"batch_id": bid, "shared": info}
+
+    def stop_batch_sync(self, conn: sqlite3.Connection, batch_id: str) -> dict:
+        bid = str(batch_id or "").strip()
+        if not bid:
+            raise ValueError("请指定要停止的批次。")
+        existing = _existing_batches_map(conn)
+        batch_info = existing.get(bid)
+        if not batch_info:
+            raise ValueError("报账批次不存在。")
+        connected, cur_url, cur_uid, _tok, _role = _read_hub_credentials(conn)
+        links, pruned = _read_batch_links(conn)
+        rec = links.get(bid)
+        if not rec:
+            if pruned:
+                _write_batch_links(conn, links, commit=True)
+            raise ValueError("该批次尚未关联共享批次。")
+
+        persist_stopped = False
+        with self._lock:
+            rt = self._runtime.setdefault(bid, {})
+            if self._running_batch == bid:
+                self._user_stop_requested.add(bid)
+                self._rerun_manual.pop(bid, None)
+                rt["stopping"] = True
+                rt["message"] = "正在完成当前条目，随后停止…"
+            elif bid in self._queued_manual or rt.get("queued"):
+                self._queued_manual.pop(bid, None)
+                self._queue = deque((b, m) for b, m in self._queue if b != bid)
+                self._rerun_manual.pop(bid, None)
+                self._user_stop_requested.discard(bid)
+                rt["queued"] = False
+                rt["visible_syncing"] = False
+                rt["stopping"] = False
+                rt["user_stopped"] = True
+                rt["progress"] = None
+                rt["state"] = "stopped"
+                rt["message"] = "已停止同步"
+                persist_stopped = True
+            info = _build_shared_info(
+                rec,
+                archived=batch_info["archived"],
+                connected=connected,
+                cur_server_url=cur_url,
+                cur_user_id=cur_uid,
+                runtime=rt,
+            )
+        if persist_stopped:
+            rec["last_state"] = "stopped"
+            rec["last_message"] = "已停止同步"
+            links[bid] = rec
+            _write_batch_links(conn, links, commit=True)
+        return {"batch_id": bid, "shared": info}
+
+    def batch_sync_report(self, conn: sqlite3.Connection, batch_id: str) -> dict:
+        bid = str(batch_id or "").strip()
+        if not bid:
+            raise ValueError("请指定要查看的批次。")
+        existing = _existing_batches_map(conn)
+        batch_info = existing.get(bid)
+        if not batch_info:
+            raise ValueError("报账批次不存在。")
+        connected, cur_url, cur_uid, _tok, _role = _read_hub_credentials(conn)
+        links, pruned = _read_batch_links(conn)
+        rec = links.get(bid)
+        if not rec:
+            if pruned:
+                _write_batch_links(conn, links, commit=True)
+            raise ValueError("该批次尚未关联共享批次。")
+
+        total_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM batch_entries WHERE batch_id = ?", (bid,)
+        ).fetchone()
+        total_entries = int(total_row["c"] or 0) if total_row else 0
+
+        with self._lock:
+            rt = self._runtime.get(bid)
+            rt_report = copy.deepcopy(rt.get("report")) if (rt and isinstance(rt.get("report"), dict)) else None
+            shared = _build_shared_info(
+                rec,
+                archived=batch_info["archived"],
+                connected=connected,
+                cur_server_url=cur_url,
+                cur_user_id=cur_uid,
+                runtime=rt,
+            )
+
+        if rt_report is not None:
+            report = rt_report
+        else:
+            stored = rec.get("last_report") if isinstance(rec.get("last_report"), dict) else None
+            items: list[dict[str, Any]] = []
+            seen_eids: set[str] = set()
+            pull_conflicts = dict(rec.get("pull_conflicts") or {})
+            suppressed = dict(rec.get("suppressed_conflicts") or {})
+            conflict_eids = [str(pc.get("local_entry_id") or "") for pc in pull_conflicts.values() if pc]
+            sup_eids = list(suppressed.keys())
+            stored_items = list((stored or {}).get("items") or [])
+            stored_eids = [str(it.get("entry_id") or "") for it in stored_items if it.get("entry_id")]
+            meta_map = _load_entry_meta_map(conn, conflict_eids + sup_eids + stored_eids)
+
+            if stored_items:
+                for it in stored_items:
+                    eid = str(it.get("entry_id") or "")
+                    if eid and eid not in meta_map:
+                        continue
+                    item = dict(it)
+                    if eid and eid in meta_map:
+                        item.update(meta_map[eid])
+                    items.append(item)
+                    if eid:
+                        seen_eids.add(eid)
+            for rid, pc in pull_conflicts.items():
+                eid = str((pc or {}).get("local_entry_id") or "")
+                if eid and eid in seen_eids:
+                    continue
+                if eid and eid not in meta_map:
+                    continue
+                disp = meta_map.get(eid) or _entry_display_fields({})
+                items.append({
+                    "entry_id": eid,
+                    "remote_entry_id": str(rid),
+                    **disp,
+                    "status": "pull_conflict",
+                    "message": "双方均有修改，需核对共享变化",
+                })
+                if eid:
+                    seen_eids.add(eid)
+            for eid, sup in suppressed.items():
+                if eid in seen_eids or eid not in meta_map:
+                    continue
+                sup_dict = sup or {}
+                items.append({
+                    "entry_id": eid,
+                    "remote_entry_id": "",
+                    **meta_map[eid],
+                    "status": _map_suppressed_reason(str(sup_dict.get("reason") or "")),
+                    "message": str(sup_dict.get("message") or "未上传"),
+                })
+                seen_eids.add(eid)
+
+            if not items and _has_hub_entry_links_table(conn):
+                space_id = str(rec.get("space_id") or "")
+                other_rows = conn.execute(
+                    """SELECT h.entry_id, h.space_name
+                         FROM batch_entries be
+                         JOIN hub_entry_links h ON h.entry_id = be.entry_id
+                        WHERE be.batch_id = ?
+                          AND h.server_url = ?
+                          AND h.space_id <> ''
+                          AND h.space_id <> ?
+                          AND COALESCE(h.review_state, '') <> 'withdrawn'""",
+                    (bid, cur_url, space_id),
+                ).fetchall()
+                if other_rows:
+                    o_meta = _load_entry_meta_map(conn, [str(r["entry_id"]) for r in other_rows])
+                    for r in other_rows:
+                        eid = str(r["entry_id"])
+                        if eid not in o_meta:
+                            continue
+                        sname = str(r["space_name"] or "").strip()
+                        items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": "",
+                            **o_meta[eid],
+                            "status": "other_space",
+                            "message": f"该条目仍关联到其他共享批次「{sname}」" if sname else "该条目仍关联到其他共享批次",
+                        })
+
+            unchanged_cnt = int((stored or {}).get("unchanged_count") or 0)
+            if stored is None and shared["last_sync"] and total_entries >= len(items):
+                unchanged_cnt = total_entries - len(items)
+            report = _build_report_payload(
+                items,
+                unchanged_cnt,
+                updated_at=str((stored or {}).get("updated_at") or shared["last_sync"] or ""),
+            )
+
+        report["total_entries"] = total_entries
+        return {"batch_id": bid, "shared": shared, "report": report}
 
     def detach_other_space_entries(self, conn: sqlite3.Connection, batch_id: str) -> dict:
         """Remove stale hub_entry_links pointing to other shared batches for entries in this batch."""
@@ -1005,6 +1355,7 @@ class HubBatchSyncManager:
         rec["entry_sync_states"] = entry_states
         rec["other_space_count"] = 0
         rec["other_space_names"] = []
+        rec.pop("last_report", None)
         pull_conflicts = dict(rec.get("pull_conflicts") or {})
         remaining_conflicts = len(pull_conflicts) + len(suppressed)
         rec["conflict_count"] = remaining_conflicts
@@ -1017,6 +1368,7 @@ class HubBatchSyncManager:
         with self._lock:
             self._bump_batch_epoch_locked(bid)
             rt = self._runtime.setdefault(bid, {})
+            rt.pop("report", None)
             rt["other_space_count"] = 0
             rt["other_space_names"] = []
             rt["conflict_count"] = remaining_conflicts
@@ -1059,7 +1411,7 @@ class HubBatchSyncManager:
                     if bid in self._queued_manual or self._running_batch == bid:
                         continue
                     rt = self._runtime.get(bid) or {}
-                    if rt.get("needs_upgrade"):
+                    if rt.get("needs_upgrade") or rt.get("user_stopped") or rec.get("last_state") == "stopped":
                         continue
                     if now_mono >= float(rt.get("next_due_at") or 0.0):
                         self._enqueue_locked(bid, manual=False)
@@ -1266,8 +1618,10 @@ class HubBatchSyncManager:
                 rt = self._runtime.setdefault(batch_id, {})
                 rt["queued"] = False
                 rt["running"] = True
-                rt["state"] = "syncing"
-                rt["message"] = "正在同步…"
+                if force_manual:
+                    rt["visible_syncing"] = True
+                    rt["state"] = "syncing"
+                    rt["message"] = "正在同步…"
 
             try:
                 self._run_sync_task(batch_id, force_manual=force_manual)
@@ -1276,10 +1630,15 @@ class HubBatchSyncManager:
             finally:
                 with self._lock:
                     self._running_batch = ""
+                    self._user_stop_requested.discard(batch_id)
                     rerun = self._rerun_manual.pop(batch_id, None)
                     rt = self._runtime.get(batch_id)
                     if rt is not None:
                         rt["running"] = False
+                        rt["stopping"] = False
+                        rt["progress"] = None
+                        if rerun is None:
+                            rt["visible_syncing"] = False
                     if rerun is not None and not self._stop_event.is_set():
                         self._enqueue_locked(batch_id, manual=rerun)
 
@@ -1294,6 +1653,7 @@ class HubBatchSyncManager:
 
     def _record_worker_error(self, batch_id: str, message: str, *, needs_upgrade: bool = False) -> None:
         with self._lock:
+            self._user_stop_requested.discard(batch_id)
             rt = self._runtime.get(batch_id)
             if rt is None:
                 return
@@ -1304,6 +1664,10 @@ class HubBatchSyncManager:
             )
             rt["error_count"] = err_count
             rt["next_due_at"] = time.monotonic() + backoff
+            rt["visible_syncing"] = False
+            rt["stopping"] = False
+            rt["user_stopped"] = False
+            rt["progress"] = None
             rt["state"] = "error"
             rt["message"] = message
             rt["needs_upgrade"] = needs_upgrade
@@ -1358,6 +1722,32 @@ class HubBatchSyncManager:
         def cancel_check() -> bool:
             return self._is_cancelled(batch_id, account_epoch, batch_epoch, force_manual=force_manual)
 
+        def user_stop_check() -> bool:
+            with self._lock:
+                return batch_id in self._user_stop_requested
+
+        def enter_active_sync(msg: str, progress: dict[str, Any] | None = None) -> None:
+            with self._lock:
+                if cancel_check():
+                    return
+                rt = self._runtime.setdefault(batch_id, {})
+                rt["visible_syncing"] = True
+                rt["state"] = "syncing"
+                if not rt.get("stopping"):
+                    rt["message"] = msg
+                rt["progress"] = progress
+
+        report_items: list[dict[str, Any]] = []
+        unchanged_count = 0
+        stopped_early = False
+
+        def publish_live_report() -> None:
+            payload_rep = _build_report_payload(report_items, unchanged_count)
+            with self._lock:
+                if not cancel_check():
+                    rt = self._runtime.setdefault(batch_id, {})
+                    rt["report"] = payload_rep
+
         def make_commit_guard(*, require_auto_sync: bool):
             def guard(tx_conn: sqlite3.Connection) -> None:
                 if cancel_check():
@@ -1402,7 +1792,7 @@ class HubBatchSyncManager:
                 self._record_worker_error(batch_id, msg, needs_upgrade=True)
                 return
             if exc.status == 404 and exc.code == "space_not_found":
-                msg = "远端共享批次不存在或已被移除，请核对或解除关联。"
+                msg = "共享区中找不到该批次，请核对或取消关联。"
                 self._commit_batch_meta(
                     batch_id, server_url, user_id, space_id,
                     account_epoch=account_epoch, batch_epoch=batch_epoch,
@@ -1435,7 +1825,7 @@ class HubBatchSyncManager:
         remote_meta_by_id = {str(r["id"]): r for r in remote_entries_meta if r.get("id")}
 
         if remote_space_status == "archived":
-            msg = "远端共享批次已归档，同步已暂停。"
+            msg = "该共享批次已归档，同步已暂停。"
             self._commit_batch_meta(
                 batch_id, server_url, user_id, space_id,
                 account_epoch=account_epoch, batch_epoch=batch_epoch,
@@ -1582,11 +1972,14 @@ class HubBatchSyncManager:
                     listing=listing,
                 )
                 conn = worker_db.conn
+                preview_meta_by_rid: dict[str, dict[str, str]] = {}
                 for idx, p_entry in enumerate(preview.get("entries") or []):
                     action = p_entry.get("import_action")
                     matched_id = str(p_entry.get("existing_entry_id") or "")
                     rid = str((p_entry.get("hub_meta") or {}).get("remote_entry_id") or "")
                     r_rev = int((p_entry.get("hub_meta") or {}).get("revision") or 0)
+                    if rid:
+                        preview_meta_by_rid[rid] = _entry_display_fields(p_entry)
                     if action == "unchanged" and not p_entry.get("hub_review_changed"):
                         continue
                     if action == "conflict":
@@ -1623,74 +2016,115 @@ class HubBatchSyncManager:
             if auto_apply_indexes or has_withdrawn:
                 if cancel_check():
                     return
-                worker_db, adapters, entries_repo, attachments_repo, _ = self._open_worker_repos()
-                try:
-                    apply_opts = {
-                        "batch_id": batch_id,
-                        "move_existing_entries": False,
-                        "selected_entry_indexes": auto_apply_indexes,
-                    }
-                    if pull_scheme_id:
-                        apply_opts["scheme_id"] = pull_scheme_id
-                    pull_res = hub_sync.apply_pull(
-                        client,
-                        entries_repo,
-                        attachments_repo,
-                        space_id,
-                        default_pid,
-                        options=apply_opts,
-                        preview=preview,
-                        adapter_service=adapters,
-                        cancel_check=cancel_check,
-                        on_before_commit=make_commit_guard(require_auto_sync=not force_manual),
+                if user_stop_check():
+                    stopped_early = True
+                else:
+                    enter_active_sync(
+                        f"正在拉取 {len(auto_apply_indexes)} 条共享区更新…" if auto_apply_indexes else "正在同步共享区状态…",
+                        {"phase": "pull", "done": 0, "total": len(auto_apply_indexes), "current_label": ""},
                     )
-                    pulled_summary["imported"] = int(pull_res.get("imported") or 0)
-                    pulled_summary["updated"] = int(pull_res.get("updated") or 0)
-                    pulled_summary["status_updated"] = int(pull_res.get("status_updated") or 0)
-                    pulled_summary["withdrawn_updated"] = int(pull_res.get("withdrawn_updated") or 0)
-                    applied_imported_entry_ids = list(dict.fromkeys(pull_res.get("entry_ids") or []))
-                    applied_updated_entry_ids = list(dict.fromkeys(pull_res.get("updated_entry_ids") or []))
-                    applied_status_entry_ids = list(
-                        dict.fromkeys(pull_res.get("status_updated_entry_ids") or [])
-                    )
-                    applied_remote_snap_digests = dict(pull_res.get("remote_snapshot_digests") or {})
-                    applied_all = list(
-                        dict.fromkeys(
-                            applied_imported_entry_ids + applied_updated_entry_ids + applied_status_entry_ids
+                    worker_db, adapters, entries_repo, attachments_repo, _ = self._open_worker_repos()
+                    try:
+                        apply_opts = {
+                            "batch_id": batch_id,
+                            "move_existing_entries": False,
+                            "selected_entry_indexes": auto_apply_indexes,
+                        }
+                        if pull_scheme_id:
+                            apply_opts["scheme_id"] = pull_scheme_id
+                        pull_res = hub_sync.apply_pull(
+                            client,
+                            entries_repo,
+                            attachments_repo,
+                            space_id,
+                            default_pid,
+                            options=apply_opts,
+                            preview=preview,
+                            adapter_service=adapters,
+                            cancel_check=cancel_check,
+                            on_before_commit=make_commit_guard(require_auto_sync=not force_manual),
                         )
-                    )
-                    # Refresh payment AI check using main app flags inside short worker tx if needed,
-                    # and read post-pull sync states.
-                    if self._payment_ai_flags_getter is not None and applied_all:
-                        avail, enabled = self._payment_ai_flags_getter()
+                        pulled_summary["imported"] = int(pull_res.get("imported") or 0)
+                        pulled_summary["updated"] = int(pull_res.get("updated") or 0)
+                        pulled_summary["status_updated"] = int(pull_res.get("status_updated") or 0)
+                        pulled_summary["withdrawn_updated"] = int(pull_res.get("withdrawn_updated") or 0)
+                        applied_imported_entry_ids = list(dict.fromkeys(pull_res.get("entry_ids") or []))
+                        applied_updated_entry_ids = list(dict.fromkeys(pull_res.get("updated_entry_ids") or []))
+                        applied_status_entry_ids = list(
+                            dict.fromkeys(pull_res.get("status_updated_entry_ids") or [])
+                        )
+                        applied_remote_snap_digests = dict(pull_res.get("remote_snapshot_digests") or {})
+                        applied_all = list(
+                            dict.fromkeys(
+                                applied_imported_entry_ids + applied_updated_entry_ids + applied_status_entry_ids
+                            )
+                        )
+                        if self._payment_ai_flags_getter is not None and applied_all:
+                            avail, enabled = self._payment_ai_flags_getter()
+                            for eid in applied_all:
+                                if avail:
+                                    entries_repo.refresh_payment_check(eid, remind_pending=enabled)
+                                elif entries_repo.has_imported_payment_recognition(eid):
+                                    entries_repo.refresh_payment_check(eid, remind_pending=False, imported_only=True)
+                                else:
+                                    entries_repo.clear_payment_check(eid)
                         for eid in applied_all:
-                            if avail:
-                                entries_repo.refresh_payment_check(eid, remind_pending=enabled)
-                            elif entries_repo.has_imported_payment_recognition(eid):
-                                entries_repo.refresh_payment_check(eid, remind_pending=False, imported_only=True)
-                            else:
-                                entries_repo.clear_payment_check(eid)
-                    for eid in applied_all:
-                        lnk = hub_sync.get_hub_link(worker_db.conn, eid)
-                        rev = int(lnk["remote_revision"] or 0) if lnk else 0
-                        applied_pull_revisions[eid] = rev
-                        if lnk and lnk.get("remote_entry_id"):
-                            rid = str(lnk["remote_entry_id"])
-                            if rid in deleted_remote_entries:
-                                cleared_tombstones[rid] = int((deleted_remote_entries[rid] or {}).get("revision") or 0)
-                except hub_sync.HubError as exc:
-                    if exc.code == "cancelled" or cancel_check():
-                        return
-                    if exc.code == "local_changed":
-                        local_changed_retry = True
-                    else:
-                        self._record_worker_error(batch_id, str(exc))
-                        return
-                finally:
-                    worker_db.close()
+                            lnk = hub_sync.get_hub_link(worker_db.conn, eid)
+                            rev = int(lnk["remote_revision"] or 0) if lnk else 0
+                            applied_pull_revisions[eid] = rev
+                            if lnk and lnk.get("remote_entry_id"):
+                                rid = str(lnk["remote_entry_id"])
+                                if rid in deleted_remote_entries:
+                                    cleared_tombstones[rid] = int((deleted_remote_entries[rid] or {}).get("revision") or 0)
+                        pull_meta_map = _load_entry_meta_map(worker_db.conn, applied_all)
+                        for eid in applied_imported_entry_ids:
+                            report_items.append({
+                                "entry_id": eid,
+                                "remote_entry_id": "",
+                                **(pull_meta_map.get(eid) or _entry_display_fields({})),
+                                "status": "pulled_new",
+                                "message": "从共享区拉取新增",
+                            })
+                        for eid in applied_updated_entry_ids:
+                            report_items.append({
+                                "entry_id": eid,
+                                "remote_entry_id": "",
+                                **(pull_meta_map.get(eid) or _entry_display_fields({})),
+                                "status": "pulled_merged",
+                                "message": "已从共享区合并更新",
+                            })
+                        for eid in applied_status_entry_ids:
+                            if eid in applied_imported_entry_ids or eid in applied_updated_entry_ids:
+                                continue
+                            report_items.append({
+                                "entry_id": eid,
+                                "remote_entry_id": "",
+                                **(pull_meta_map.get(eid) or _entry_display_fields({})),
+                                "status": "status_updated",
+                                "message": "已同步审核状态",
+                            })
+                        for w in pull_res.get("withdrawn_local") or []:
+                            lid = str(w.get("local_entry_id") or "")
+                            report_items.append({
+                                "entry_id": lid,
+                                "remote_entry_id": str(w.get("remote_entry_id") or ""),
+                                **_entry_display_fields(w),
+                                "status": "withdrawn",
+                                "message": "共享区已撤回（本机保留）",
+                            })
+                    except hub_sync.HubError as exc:
+                        if exc.code == "cancelled" or cancel_check():
+                            return
+                        if exc.code == "local_changed":
+                            local_changed_retry = True
+                        else:
+                            self._record_worker_error(batch_id, str(exc))
+                            return
+                    finally:
+                        worker_db.close()
 
-                if any(pulled_summary.values()):
-                    self.bump_generation()
+                    if any(pulled_summary.values()):
+                        self.bump_generation()
 
         if cancel_check():
             return
@@ -1739,10 +2173,24 @@ class HubBatchSyncManager:
                 suppressed_conflicts.pop(eid, None)
 
             links_by_remote_now = hub_sync._hub_link_by_remote(conn, server_url, space_id)
-            for conflict_rid in new_pull_conflicts:
+            pull_conflict_meta = _load_entry_meta_map(
+                conn,
+                [str((pc or {}).get("local_entry_id") or "") for pc in new_pull_conflicts.values()]
+                + [str((links_by_remote_now.get(rid) or {}).get("entry_id") or "") for rid in new_pull_conflicts],
+            )
+            for conflict_rid, pc_info in new_pull_conflicts.items():
                 lnk = links_by_remote_now.get(conflict_rid)
-                if lnk:
-                    pull_conflict_local_ids.add(lnk["entry_id"])
+                pc_eid = str(lnk["entry_id"]) if lnk else str((pc_info or {}).get("local_entry_id") or "")
+                if pc_eid:
+                    pull_conflict_local_ids.add(pc_eid)
+                disp = pull_conflict_meta.get(pc_eid) or _entry_display_fields({})
+                report_items.append({
+                    "entry_id": pc_eid,
+                    "remote_entry_id": str(conflict_rid),
+                    **disp,
+                    "status": "pull_conflict",
+                    "message": "双方均有修改，需核对共享变化",
+                })
 
             batch_entry_rows = conn.execute(
                 "SELECT entry_id FROM batch_entries WHERE batch_id = ? ORDER BY added_at, entry_id",
@@ -1764,8 +2212,17 @@ class HubBatchSyncManager:
                     payload, snap, blob_files, profile_dict, ancestors, invoice_sha256 = hub_sync._build_hub_entry_bundle(
                         entries_repo, attachments_repo, eid, adapter_service=adapters
                     )
-                except hub_sync.HubError:
+                except hub_sync.HubError as exc:
+                    disp_map = _load_entry_meta_map(conn, [eid])
+                    report_items.append({
+                        "entry_id": eid,
+                        "remote_entry_id": "",
+                        **(disp_map.get(eid) or _entry_display_fields({})),
+                        "status": "error",
+                        "message": str(exc),
+                    })
                     continue
+                disp = _entry_display_fields(payload)
                 local_digest = snapshot_digest(snap)
                 b_digest = _bundle_sync_digest(
                     payload, snap, profile_dict, str(payload.get("invoice_no") or ""), invoice_sha256
@@ -1787,6 +2244,13 @@ class HubBatchSyncManager:
                             "other_space_name": other_name,
                             "message": other_msg,
                         }
+                        report_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": "",
+                            **disp,
+                            "status": "other_space",
+                            "message": other_msg,
+                        })
                         continue
                 is_linked_here = bool(
                     lnk and lnk["server_url"] == server_url and lnk["space_id"] == space_id and lnk["remote_entry_id"]
@@ -1794,10 +2258,18 @@ class HubBatchSyncManager:
                 if is_linked_here:
                     if lnk["review_state"] == "withdrawn":
                         # Remote withdrawal preserves local entry and never auto-repushes.
+                        report_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": str(lnk.get("remote_entry_id") or ""),
+                            **disp,
+                            "status": "withdrawn",
+                            "message": "共享区已撤回（本机保留）",
+                        })
                         continue
                     rid = str(lnk["remote_entry_id"])
                     rmeta = remote_meta_by_id.get(rid)
                     if not rmeta:
+                        unchanged_count += 1
                         continue
                     r_rev = int(rmeta.get("revision") or 0)
                     remote_snap_digest = str(rmeta.get("snapshot_digest") or "")
@@ -1805,6 +2277,7 @@ class HubBatchSyncManager:
                     if local_digest == remote_snap_digest and (
                         prev is None or prev.get("bundle_digest") == b_digest
                     ):
+                        unchanged_count += 1
                         continue
                     if (
                         prev is not None
@@ -1812,6 +2285,7 @@ class HubBatchSyncManager:
                         and r_rev == int(lnk.get("remote_revision") or 0)
                         and (not remote_snap_digest or local_digest == remote_snap_digest or prev.get("imported_only"))
                     ):
+                        unchanged_count += 1
                         continue
                     if rmeta.get("review_state") == "locked" and user_role != "admin":
                         next_suppressed[eid] = {
@@ -1821,6 +2295,13 @@ class HubBatchSyncManager:
                             "message": "条目已被审核锁定，本地修改未上传",
                         }
                         locked_or_conflict_msgs.append("条目已被审核锁定")
+                        report_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": rid,
+                            **disp,
+                            "status": "locked",
+                            "message": "条目已被审核锁定，本地修改未上传",
+                        })
                         continue
                     prev_sup = suppressed_conflicts.get(eid)
                     if (
@@ -1830,7 +2311,15 @@ class HubBatchSyncManager:
                         and int(prev_sup.get("remote_revision") or 0) == r_rev
                     ):
                         next_suppressed[eid] = prev_sup
-                        locked_or_conflict_msgs.append(prev_sup.get("message") or "存在冲突")
+                        msg = prev_sup.get("message") or "存在冲突"
+                        locked_or_conflict_msgs.append(msg)
+                        report_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": rid,
+                            **disp,
+                            "status": _map_suppressed_reason(str(prev_sup.get("reason") or "")),
+                            "message": msg,
+                        })
                         continue
                     if r_rev != int(lnk.get("remote_revision") or 0):
                         # Remote moved since our link; don't push blindly over unseen revision.
@@ -1838,12 +2327,26 @@ class HubBatchSyncManager:
                             "bundle_digest": b_digest,
                             "remote_revision": r_rev,
                             "reason": "conflict",
-                            "message": "远端已有更新，请先拉取合并",
+                            "message": "共享区已有更新，请先拉取合并",
                         }
-                        locked_or_conflict_msgs.append("远端已有更新")
+                        locked_or_conflict_msgs.append("共享区已有更新")
+                        report_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": rid,
+                            **disp,
+                            "status": "conflict",
+                            "message": "共享区已有更新，请先拉取合并",
+                        })
                         continue
                     if remote_space_status != "active" and user_role != "admin":
                         closed_space_pending = True
+                        report_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": rid,
+                            **disp,
+                            "status": "space_closed",
+                            "message": "共享批次已截止，无法上传新修改",
+                        })
                         continue
                     to_push.append({
                         "entry_id": eid,
@@ -1857,6 +2360,7 @@ class HubBatchSyncManager:
                         "invoice_sha256": invoice_sha256,
                         "bundle_digest": b_digest,
                         "local_digest": local_digest,
+                        "display": disp,
                     })
                 else:
                     prev_sup = suppressed_conflicts.get(eid)
@@ -1867,10 +2371,25 @@ class HubBatchSyncManager:
                         and prev_sup.get("remote_version") == remote_version
                     ):
                         next_suppressed[eid] = prev_sup
-                        locked_or_conflict_msgs.append(prev_sup.get("message") or "存在冲突")
+                        msg = prev_sup.get("message") or "存在冲突"
+                        locked_or_conflict_msgs.append(msg)
+                        report_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": "",
+                            **disp,
+                            "status": _map_suppressed_reason(str(prev_sup.get("reason") or "")),
+                            "message": msg,
+                        })
                         continue
                     if remote_space_status != "active" and user_role != "admin":
                         closed_space_pending = True
+                        report_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": "",
+                            **disp,
+                            "status": "space_closed",
+                            "message": "共享批次已截止，无法上传新修改",
+                        })
                         continue
                     to_push.append({
                         "entry_id": eid,
@@ -1884,111 +2403,225 @@ class HubBatchSyncManager:
                         "invoice_sha256": invoice_sha256,
                         "bundle_digest": b_digest,
                         "local_digest": local_digest,
+                        "display": disp,
                     })
         finally:
             worker_db.close()
 
         # Phase 5: Upload changed entries (each entry commits with its original sent snapshot).
         pushed_count = 0
-        if to_push:
-            remote_ids_to_check = sorted({item["remote_entry_id"] for item in to_push if item["remote_entry_id"]})
-            try:
-                upload_states = (
-                    client.upload_state(space_id, remote_ids_to_check)
-                    if remote_ids_to_check
-                    else None
+        if to_push and not stopped_early:
+            if user_stop_check():
+                stopped_early = True
+                for rem in to_push:
+                    report_items.append({
+                        "entry_id": rem["entry_id"],
+                        "remote_entry_id": rem["remote_entry_id"],
+                        **rem["display"],
+                        "status": "stopped",
+                        "message": "已停止，等待继续同步",
+                    })
+            else:
+                enter_active_sync(
+                    f"正在准备上传 {len(to_push)} 条…",
+                    {"phase": "push", "done": 0, "total": len(to_push), "current_label": ""},
                 )
-            except hub_sync.HubError as exc:
-                if not cancel_check():
-                    self._record_worker_error(batch_id, str(exc))
-                return
-
-            confirmed_shas: set[str] = set()
-            for item in to_push:
-                if cancel_check():
-                    return
-                eid = item["entry_id"]
-                rid = item["remote_entry_id"]
-                bound_shas: set[str] = set()
-                if upload_states is not None and rid:
-                    r_state_item = upload_states.get(rid)
-                    if r_state_item:
-                        bound_shas = set(r_state_item.get("blob_shas") or [])
+                publish_live_report()
+                remote_ids_to_check = sorted({item["remote_entry_id"] for item in to_push if item["remote_entry_id"]})
                 try:
-                    blob_shas = hub_sync._upload_entry_blobs(
-                        client, item["blob_files"], confirmed_shas, bound_shas=bound_shas
+                    upload_states = (
+                        client.upload_state(space_id, remote_ids_to_check)
+                        if remote_ids_to_check
+                        else None
                     )
+                except hub_sync.HubError as exc:
+                    if not cancel_check():
+                        err_items = list(report_items)
+                        for rem in to_push:
+                            err_items.append({
+                                "entry_id": rem["entry_id"],
+                                "remote_entry_id": rem["remote_entry_id"],
+                                **rem["display"],
+                                "status": "pending",
+                                "message": f"准备上传失败（{exc}），可重试",
+                            })
+                        err_report = _build_report_payload(err_items, unchanged_count)
+                        with self._lock:
+                            rt = self._runtime.get(batch_id)
+                            if rt is not None:
+                                rt["report"] = err_report
+                        self._record_worker_error(batch_id, str(exc))
+                    return
+
+                confirmed_shas: set[str] = set()
+                for idx, item in enumerate(to_push):
                     if cancel_check():
                         return
-                    payload = item["payload"]
-                    push_body = {
-                        "remote_entry_id": rid,
-                        "base_revision": item["base_revision"],
-                        "invoice_no": str(payload.get("invoice_no") or "").strip(),
-                        "invoice_sha256": item["invoice_sha256"],
-                        "snapshot_digest": item["local_digest"],
-                        "ancestors": item["ancestors"],
-                        "profile": item["profile_dict"],
-                        "payload": payload,
-                        "blob_shas": blob_shas,
-                    }
+                    if user_stop_check():
+                        stopped_early = True
+                        for rem in to_push[idx:]:
+                            report_items.append({
+                                "entry_id": rem["entry_id"],
+                                "remote_entry_id": rem["remote_entry_id"],
+                                **rem["display"],
+                                "status": "stopped",
+                                "message": "已停止，等待继续同步",
+                            })
+                        break
+                    eid = item["entry_id"]
+                    rid = item["remote_entry_id"]
+                    disp = item["display"]
+                    enter_active_sync(
+                        f"正在上传第 {idx + 1} / {len(to_push)} 条 · {disp['label']}",
+                        {"phase": "push", "done": idx, "total": len(to_push), "current_label": disp["label"]},
+                    )
+                    bound_shas: set[str] = set()
                     if upload_states is not None and rid:
-                        push_body["skip_unchanged"] = True
-                    push_body["submission_id"] = snapshot_digest(push_body)
-                    res = client.push_entry(space_id, push_body)
-                except hub_sync.HubError as exc:
-                    if cancel_check():
-                        return
-                    if exc.code in ("revision_conflict", "duplicate_invoice", "entry_locked"):
-                        srv_rev = int((exc.payload or {}).get("server_revision") or item["base_revision"] or 0)
-                        next_suppressed[eid] = {
-                            "bundle_digest": item["bundle_digest"],
-                            "remote_revision": srv_rev,
-                            "remote_version": remote_version,
-                            "reason": exc.code,
-                            "message": str(exc),
+                        r_state_item = upload_states.get(rid)
+                        if r_state_item:
+                            bound_shas = set(r_state_item.get("blob_shas") or [])
+                    try:
+                        blob_shas = hub_sync._upload_entry_blobs(
+                            client, item["blob_files"], confirmed_shas, bound_shas=bound_shas
+                        )
+                        if cancel_check():
+                            return
+                        payload = item["payload"]
+                        push_body = {
+                            "remote_entry_id": rid,
+                            "base_revision": item["base_revision"],
+                            "invoice_no": str(payload.get("invoice_no") or "").strip(),
+                            "invoice_sha256": item["invoice_sha256"],
+                            "snapshot_digest": item["local_digest"],
+                            "ancestors": item["ancestors"],
+                            "profile": item["profile_dict"],
+                            "payload": payload,
+                            "blob_shas": blob_shas,
                         }
-                        locked_or_conflict_msgs.append(str(exc))
-                        continue
-                    self._record_worker_error(batch_id, str(exc))
-                    return
-
-                remote_entry = res["entry"]
-                now = _now_iso()
-                if not res.get("unchanged"):
-                    pushed_count += 1
-                new_rev = int(remote_entry.get("revision") or 0)
-
-                # Short BEGIN IMMEDIATE transaction recording original sent snapshot & link.
-                worker_db, _adapters, _entries, _att, _batches = self._open_worker_repos()
-                try:
-                    conn = worker_db.conn
-                    conn.execute("BEGIN IMMEDIATE")
-                    make_commit_guard(require_auto_sync=not force_manual)(conn)
-                    record_exchange_base(conn, eid, item["snap"], "export", now)
-                    hub_sync.upsert_hub_link(
-                        conn,
-                        eid,
-                        server_url=server_url,
-                        space_id=space_id,
-                        space_name=remote_space_name,
-                        remote_entry=remote_entry,
-                        synced_at=now,
-                    )
-                    conn.commit()
-                except hub_sync.HubError as exc:
-                    worker_db.conn.rollback()
-                    if exc.code == "cancelled" or cancel_check():
+                        if upload_states is not None and rid:
+                            push_body["skip_unchanged"] = True
+                        push_body["submission_id"] = snapshot_digest(push_body)
+                        res = client.push_entry(space_id, push_body)
+                    except hub_sync.HubError as exc:
+                        if cancel_check():
+                            return
+                        if exc.code in ("revision_conflict", "duplicate_invoice", "entry_locked"):
+                            srv_rev = int((exc.payload or {}).get("server_revision") or item["base_revision"] or 0)
+                            next_suppressed[eid] = {
+                                "bundle_digest": item["bundle_digest"],
+                                "remote_revision": srv_rev,
+                                "remote_version": remote_version,
+                                "reason": exc.code,
+                                "message": str(exc),
+                            }
+                            locked_or_conflict_msgs.append(str(exc))
+                            report_items.append({
+                                "entry_id": eid,
+                                "remote_entry_id": rid,
+                                **disp,
+                                "status": _map_suppressed_reason(exc.code),
+                                "message": str(exc),
+                            })
+                            publish_live_report()
+                            continue
+                        err_items = list(report_items)
+                        err_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": rid,
+                            **disp,
+                            "status": "error",
+                            "message": str(exc),
+                        })
+                        for rem in to_push[idx + 1:]:
+                            err_items.append({
+                                "entry_id": rem["entry_id"],
+                                "remote_entry_id": rem["remote_entry_id"],
+                                **rem["display"],
+                                "status": "pending",
+                                "message": "因前面条目上传失败而中止，可重试",
+                            })
+                        err_report = _build_report_payload(err_items, unchanged_count)
+                        rem_count = len(to_push) - idx - 1
+                        summary_parts = []
+                        if pushed_count:
+                            summary_parts.append(f"已上传 {pushed_count} 条")
+                        summary_parts.append(f"1 条失败（{exc}）")
+                        if rem_count:
+                            summary_parts.append(f"{rem_count} 条未处理")
+                        err_msg = "；".join(summary_parts) if (pushed_count or rem_count) else str(exc)
+                        self._commit_batch_meta(
+                            batch_id,
+                            server_url,
+                            user_id,
+                            space_id,
+                            account_epoch=account_epoch,
+                            batch_epoch=batch_epoch,
+                            force_manual=force_manual,
+                            clear_deleted_remote=cleared_tombstones,
+                            updates={
+                                "space_name": remote_space_name,
+                                "last_state": "error",
+                                "last_message": err_msg,
+                                "last_remote_version": "",
+                                "entry_sync_states": entry_sync_states,
+                                "pull_conflicts": new_pull_conflicts,
+                                "suppressed_conflicts": next_suppressed,
+                                "last_report": err_report,
+                            },
+                        )
+                        with self._lock:
+                            rt = self._runtime.get(batch_id)
+                            if rt is not None:
+                                rt["report"] = err_report
+                        self._record_worker_error(batch_id, err_msg)
                         return
-                    raise
-                finally:
-                    worker_db.close()
 
-                entry_sync_states[eid] = {
-                    "bundle_digest": item["bundle_digest"],
-                    "remote_revision": new_rev,
-                }
-                next_suppressed.pop(eid, None)
+                    remote_entry = res["entry"]
+                    now = _now_iso()
+                    if res.get("unchanged"):
+                        unchanged_count += 1
+                    else:
+                        pushed_count += 1
+                        report_items.append({
+                            "entry_id": eid,
+                            "remote_entry_id": str(remote_entry.get("id") or rid),
+                            **disp,
+                            "status": "pushed",
+                            "message": "已上传到共享区",
+                        })
+                    new_rev = int(remote_entry.get("revision") or 0)
+
+                    # Short BEGIN IMMEDIATE transaction recording original sent snapshot & link.
+                    worker_db, _adapters, _entries, _att, _batches = self._open_worker_repos()
+                    try:
+                        conn = worker_db.conn
+                        conn.execute("BEGIN IMMEDIATE")
+                        make_commit_guard(require_auto_sync=not force_manual)(conn)
+                        record_exchange_base(conn, eid, item["snap"], "export", now)
+                        hub_sync.upsert_hub_link(
+                            conn,
+                            eid,
+                            server_url=server_url,
+                            space_id=space_id,
+                            space_name=remote_space_name,
+                            remote_entry=remote_entry,
+                            synced_at=now,
+                        )
+                        conn.commit()
+                    except hub_sync.HubError as exc:
+                        worker_db.conn.rollback()
+                        if exc.code == "cancelled" or cancel_check():
+                            return
+                        raise
+                    finally:
+                        worker_db.close()
+
+                    entry_sync_states[eid] = {
+                        "bundle_digest": item["bundle_digest"],
+                        "remote_revision": new_rev,
+                    }
+                    next_suppressed.pop(eid, None)
+                    publish_live_report()
 
         if cancel_check():
             return
@@ -2010,6 +2643,7 @@ class HubBatchSyncManager:
             }
         )
         now = _now_iso()
+        report_payload = _build_report_payload(report_items, unchanged_count, updated_at=now)
         parts: list[str] = []
         if pushed_count:
             parts.append(f"上传 {pushed_count} 条")
@@ -2022,7 +2656,18 @@ class HubBatchSyncManager:
         if pulled_summary["withdrawn_updated"]:
             parts.append(f"撤回状态 {pulled_summary['withdrawn_updated']} 条")
 
-        if conflict_count > 0:
+        if stopped_early:
+            final_state = "stopped"
+            stopped_pending = report_payload["counts"].get("stopped", 0)
+            stop_parts = list(parts)
+            if stopped_pending:
+                stop_parts.append(f"剩余 {stopped_pending} 条未处理")
+            if new_pull_conflicts:
+                stop_parts.append(f"{len(new_pull_conflicts)} 条待拉取核对")
+            if real_suppressed:
+                stop_parts.append(f"{len(real_suppressed)} 条未上传（锁定或冲突）")
+            final_msg = f"已停止（{'；'.join(stop_parts)}）" if stop_parts else "已停止同步"
+        elif conflict_count > 0:
             final_state = "conflict"
             conflict_parts = []
             if new_pull_conflicts:
@@ -2037,13 +2682,13 @@ class HubBatchSyncManager:
             final_msg = "；".join(parts + [_format_other_space_message(other_space_count, other_space_names)])
         elif closed_space_pending:
             final_state = "paused"
-            final_msg = "远端共享批次已截止，无法上传新修改（已接收状态更新）"
+            final_msg = "共享批次已截止，无法上传新修改（已更新审核状态）"
         else:
             final_state = "synced"
             final_msg = "；".join(parts) if parts else "已是最新"
 
         # If local_changed interrupted pull, don't cache remote_version so next tick retries pull cleanly.
-        cached_version = "" if (local_changed_retry or pushed_count) else remote_version
+        cached_version = "" if (local_changed_retry or pushed_count or stopped_early) else remote_version
 
         self._commit_batch_meta(
             batch_id,
@@ -2067,12 +2712,18 @@ class HubBatchSyncManager:
                 "entry_sync_states": entry_sync_states,
                 "pull_conflicts": new_pull_conflicts,
                 "suppressed_conflicts": next_suppressed,
+                "last_report": report_payload,
             },
         )
         with self._lock:
+            self._user_stop_requested.discard(batch_id)
             if not cancel_check():
                 rt = self._runtime.get(batch_id)
                 if rt is not None:
+                    rt["visible_syncing"] = False
+                    rt["stopping"] = False
+                    rt["user_stopped"] = stopped_early
+                    rt["progress"] = None
                     rt["state"] = final_state
                     rt["message"] = final_msg
                     rt["conflict_count"] = conflict_count
@@ -2080,6 +2731,7 @@ class HubBatchSyncManager:
                     rt["other_space_names"] = other_space_names
                     rt["needs_upgrade"] = False
                     rt["error_count"] = 0
+                    rt["report"] = report_payload
                     rt["next_due_at"] = (
                         time.monotonic() + 0.2
                         if local_changed_retry

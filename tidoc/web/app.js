@@ -1485,6 +1485,7 @@ function updateListSummary() {
   $('#stats').querySelectorAll('[data-stats-profile]').forEach((button) => {
     button.onclick = () => toggleStatsProfile(button.dataset.statsProfile);
   });
+  if (typeof HubUI !== 'undefined' && typeof HubUI.renderBatchBar === 'function') HubUI.renderBatchBar();
   syncHorizontalScrollers();
 }
 
@@ -2390,6 +2391,7 @@ function applyBatchListing(result) {
   State.unbatchedCount = Array.isArray(result) ? 0 : Number(result?.unbatched_count || 0);
   const current = State.batches.find((batch) => batch.id === State.currentBatch?.id);
   if (current) State.currentBatch = { ...State.currentBatch, ...current };
+  if (typeof HubUI !== 'undefined' && typeof HubUI.syncFromBatches === 'function') HubUI.syncFromBatches(State.batches);
   renderBatchFolders();
 }
 
@@ -2632,7 +2634,16 @@ function openBatchMenu(x, y, b, options) {
   if (typeof HubUI !== 'undefined' && HubUI.isConnected()) {
     const shared = HubUI.batchInfo(b);
     if (shared) {
-      item('立即同步', () => HubUI.syncBatch(b), { icon: 'rotateCcw' });
+      if (shared.can_stop && typeof HubUI.stopBatchSync === 'function') {
+        item(shared.stopping ? '正在停止…' : '停止同步', () => HubUI.stopBatchSync(b), { icon: 'stop' });
+      } else if (shared.can_resume) {
+        item('继续同步', () => HubUI.syncBatch(b), { icon: 'rotateCcw' });
+      } else {
+        item('立即同步', () => HubUI.syncBatch(b), { icon: 'rotateCcw' });
+      }
+      if (typeof HubUI.openBatchReport === 'function') {
+        item('同步明细', () => HubUI.openBatchReport(b), { icon: 'list' });
+      }
       item('核对共享变化', () => HubUI.openBatchChanges(b), { icon: 'cloud' });
       item('共享设置', () => HubUI.openBatchSharing(b), { icon: 'pencil' });
     } else {
@@ -3452,8 +3463,8 @@ async function openBatchVerification(ids) {
   const aiReady = !!State.paymentAiAvailable;
   body.innerHTML = `
     <div class="hint">${aiReady
-      ? '用 AI 识别验证码后自动提交，每个条目最多尝试 10 次，查验单自动保存到对应条目。验证码图片会上传到 AI 服务商，按量计费。'
-      : '还没有保存 AI 识别的 Key，请先在「设置 → 开发者选项 → 付款截图 AI 识别」里填写。'}</div>
+      ? 'AI 自动识别验证码，每条最多 10 次；验证码图片会上传到 AI 服务商，按量计费。'
+      : '尚未保存 AI 识别 Key，请先在「设置 → 开发者选项 → 付款截图 AI 识别」填写。 <button type="button" class="link-btn" data-open-dev-settings>打开设置</button>'}</div>
     <div class="verification-batch-head">
       <label>同时查验
         <select data-batch-concurrency>
@@ -3468,7 +3479,7 @@ async function openBatchVerification(ids) {
     ${reverifiable ? `<label class="verification-batch-replace">
       <input type="checkbox" data-batch-replace/>
       <span>已有查验单的 ${reverifiable} 条也重新查验${reverifiableFlagged ? `（${reverifiableFlagged} 条的查验单有提醒）` : ''}，成功后替换原查验单</span>
-      <small>同一天内重新查验，查验单上会是第 2 次或以后，条目的「识别提醒」会写明次数，核对后标为已核对即可。没查验成功的条目保留原来的查验单；每个条目都会再产生一次验证码识别费用</small>
+      <small>同日重验会增加查验次数并记入「识别提醒」，且需再付验证码费用；未成功条目保留原查验单。</small>
     </label>` : ''}
     <div class="verification-batch-list" data-batch-list>
       ${entries.map((entry) => `<div class="verification-batch-row" data-batch-row="${esc(entry.id)}">
@@ -3588,7 +3599,6 @@ async function openBatchVerification(ids) {
   const closeBtn = mkBtn('关闭', 'ghost', () => m.requestClose());
   const m = modal({
     title: '批量查验',
-    subhead: 'AI 自动填写验证码；已有查验单的条目默认跳过，可勾选重新查验',
     body,
     wide: true,
     footer: [closeBtn, stopBtn, startBtn],
@@ -3603,6 +3613,12 @@ async function openBatchVerification(ids) {
       if (timer) clearTimeout(timer);
       if (jobId && !done) Api.cancelInvoiceVerificationBatch(jobId).catch(() => {});
     },
+  });
+  body.querySelector('[data-open-dev-settings]')?.addEventListener('click', () => {
+    // 没配 Key 时从这里直接进设置，省去自己找开发者选项。
+    try { localStorage.setItem('tidoc.settings.devOptionsOpen', '1'); } catch (_) { /* 忽略 */ }
+    m.close();
+    openSettings();
   });
 }
 
@@ -4712,7 +4728,7 @@ async function buildSettings(options = {}) {
           <div class="settings-row">
             <div class="settings-row-copy">
               <b>用 AI 自动填写验证码</b>
-              <span>在线查验和批量查验时由 AI 识别并提交验证码。使用上面「付款截图 AI 识别」的服务商和 Key，验证码图片会上传到该服务商，按量计费${verificationPrefs.captcha_calls
+              <span>查验时由 AI 识别并提交验证码，使用上方服务商和 Key；验证码图片会上传到该服务商，按量计费${verificationPrefs.captcha_calls
                 ? `；已识别 ${verificationPrefs.captcha_calls} 次${verificationPrefs.captcha_cost > 0 ? `，约 ${PaymentAiUI.money(verificationPrefs.captcha_cost)}` : ''}`
                 : ''}</span>
             </div>
@@ -4743,12 +4759,7 @@ async function buildSettings(options = {}) {
               <button class="btn small ghost" id="setOcrClearKey" ${ocrStatus.credentials_configured ? '' : 'disabled'}>清除</button>
             </div>
           </div>
-          <div class="settings-row">
-            <div class="settings-row-copy">
-              <b>密钥说明</b>
-              <span>密钥仅保存在本机数据里，不随导出、绑定包外传；调用只在点击「云识别」时发生 <button class="link-btn" id="setOcrConsole">阿里云 OCR 控制台</button></span>
-            </div>
-          </div>
+          <div class="settings-note">密钥仅存本机，不随导出或绑定包外传；仅在点击「云识别」时调用。 <button class="link-btn" id="setOcrConsole">阿里云 OCR 控制台</button></div>
         </section>
       </details>
 
@@ -5730,7 +5741,6 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
     const pendingRows = pendingMaterialInfos.length ? `
       <div class="detail-section" style="margin-top:16px">
         <h3>可自动绑定材料<span class="h3-line"></span></h3>
-        <div class="hint" style="margin-bottom:10px">创建条目后，将按发票号自动绑定查验单；未匹配的材料会再让你选择条目。</div>
         <div class="bi-muted-list">${pendingMaterialInfos.map((f) => `
           <div class="bi-file">
             <span class="attach-type">${esc(f.type_label || attachTypeLabel(f.type))}</span>
@@ -5743,7 +5753,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
     const ignoredRows = ignored.length ? `
       <div class="detail-section" style="margin-top:16px">
         <h3>未参与批量<span class="h3-line"></span></h3>
-        <div class="hint" style="margin-bottom:10px">付款截图、查验单需要绑定到具体条目，请在条目详情里添加，或拖到主界面后选择条目。</div>
+        <div class="bindle-inline-note" style="margin-bottom:8px">拖到主界面或条目详情中绑定到具体条目</div>
         <div class="bi-muted-list">${ignored.map((f) => `
           <div class="bi-file">
             <span class="attach-type">${esc(f.type_label || '跳过')}</span>
@@ -5752,6 +5762,8 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
           </div>`).join('')}</div>
       </div>` : '';
 
+    const countText = `共 ${scan.total_files} 个文件`;
+    const sourceText = sourceLabel && sourceLabel !== `${scan.total_files} 个文件` ? `${esc(sourceLabel)} · ${countText}` : countText;
     body.innerHTML = `
       ${AdapterUI.chooser()}
       <div class="batch-import-summary">
@@ -5759,7 +5771,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
         <div><span>XML</span><b>${scan.matched_xml_count || 0}</b></div>
         <div><span>跳过</span><b>${ignored.length + ungrouped.length}</b></div>
       </div>
-      <div class="hint" style="margin-top:12px">从 <b>${esc(sourceLabel)}</b> 扫描到 <b>${scan.total_files}</b> 个候选文件。每个发票 PDF 创建一条；XML 只在能匹配到 PDF 时一起带入。</div>
+      <div class="bindle-inline-note" style="margin-top:10px">${sourceText}（按发票 PDF 建条并带入同组 XML）</div>
       ${qrReportHtml(options.qrReport)}
       <div class="import-assignment-grid">
         ${claimantConfirmHtml(selectedImportProfileId)}
@@ -5925,9 +5937,7 @@ function openBatchImportPreview(scan, sourceLabel, options = {}) {
 
 function batchGroupSummary(g) {
   const count = (type) => g.files.filter((f) => f.type === type).length;
-  const parts = [`${g.files.length} 个文件`, 'PDF'];
-  if (count('invoice_xml')) parts.push('XML');
-  return parts.join(' · ');
+  return count('invoice_xml') ? `${g.files.length} 个文件 · 含 XML` : `${g.files.length} 个文件`;
 }
 
 // ------------------------------------------------------------------ 条目详情
@@ -7236,7 +7246,7 @@ async function doExport(ids) {
       </div>`).join('')}
     </div>
     ${(transferPreview.ask_fields||[]).map(field=>`<label class="chk"><input type="checkbox" data-transfer-field="${esc(field.key||field.field_key)}"/>包含 ${esc(field.label)}（${field.record_count||field.count||0} 条）</label>`).join('')}
-    <p class="hint export-note">当前选择 <b>${ids.length}</b> 个条目，导出的文件会放在设置里的“导出目录”。<br/>绑定包版本 5 需要接收方使用支持报账方案的新版本。</p>`;
+    <p class="export-note">共 <b>${ids.length}</b> 条，导出到设置中的「导出目录」；新版绑定包需接收方使用新版软件。</p>`;
   // 文件名只在勾选后出现，未勾选的格式保持一行高。
   const syncNameRow = id => {
     const input = body.querySelector(`[data-export-name="${id}"]`);
@@ -7305,7 +7315,7 @@ function showExportResult(outputs) {
       <button class="btn small ghost" data-open-export="${esc(o.path)}">打开</button>
       <button class="btn small ghost" data-open-export-dir="${esc(dirName(o.path))}">文件夹</button>
     </div>`).join('');
-  body.innerHTML = `<div class="hint">已生成以下文件。</div><div class="attach-list" style="margin-top:12px">${rows}</div>`;
+  body.innerHTML = `<div class="attach-list">${rows}</div>`;
   body.querySelectorAll('[data-open-export]').forEach((btn) => {
     btn.onclick = async () => {
       try { await Api.openPath(btn.dataset.openExport); }
@@ -7409,7 +7419,7 @@ async function openOcrDialog(ids) {
       <div>发票：识别 <b id="ocrInvoiceCount">0</b> 张，调用 <b id="ocrCallCount">0</b> 次 · 阿里云每月有免费额度，超出按量计费 <button class="link-btn" id="ocrQuotaLink">查看额度</button></div>
       ${canSkipExisting ? `<label class="chk"><input type="checkbox" id="ocrSkipExisting" checked/> 跳过已识别过的 ${existingCount} 条</label>` : ''}
       ${xmlCount ? `<label class="chk"><input type="checkbox" id="ocrIncludeXml"/> 包含已有 XML 的 ${xmlCount} 条（仅作比对，同样计费）</label>` : ''}
-      ${noPdfCount ? `<div class="hint">${noPdfCount} 条没有发票 PDF，自动跳过。</div>` : ''}
+      ${noPdfCount ? `<div class="bindle-inline-note">${noPdfCount} 条无发票 PDF，将自动跳过</div>` : ''}
     </div>
     <div class="cloud-estimate" id="cloudPaymentEstimate" hidden></div>
     <div class="cloud-settings-line">Key 和费用在「设置 › 开发者选项」 <button class="link-btn" id="cloudSettings">打开设置</button></div>`;
@@ -7781,7 +7791,7 @@ async function batchDelete() {
 // 「重新识别」只在本机重新读发票文件，不联网、不计费；付款截图 AI 识别在「云识别」里。
 function openReparseFailures(failures, labels) {
   const body = el('div', '', `
-    <p class="hint">以下条目未能完成重新识别。打开详情核对原发票材料，处理后可以重试。</p>
+    <p class="bindle-inline-note" style="margin-bottom:10px">核对原发票材料后可重试。</p>
     <div class="diagnostic-section is-blocked" role="alert">
       <b class="diagnostic-title">${failures.length} 张发票识别失败</b>
       <ul class="diagnostic-list">${failures.map((row, index) => `

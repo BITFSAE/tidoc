@@ -109,8 +109,10 @@ vm.runInContext(fs.readFileSync(process.argv[1], 'utf8') + ';this.preview = Bind
 const entries = ['older', 'newer', 'newer', 'unknown', 'changed', 'current', 'missing']
   .map(invoice_recognition_state => ({invoice_recognition_state}));
 assert.equal(sandbox.preview.recognitionSummary(entries),
-  '1 张可用本机方法重新识别；2 张来自更新的识别方法；1 张未记录可比的识别版本；1 张的材料或识别设置已变化');
+  '1 张可用本机方法重新识别；2 张来自更新的识别方法；1 张的材料或识别设置已变化');
+assert.equal(sandbox.preview.recognitionSummary([{invoice_recognition_state: 'unknown'}]), '');
 assert.equal(sandbox.preview.recognitionSummary([{invoice_recognition_state: 'current'}]), '');
+assert.equal(sandbox.preview.recognitionLabel(entries[3]), '');
 assert.equal(sandbox.preview.recognitionLabel(entries[5]), '');
 assert.equal(sandbox.preview.recognitionLabel(entries[6]), '');
 """

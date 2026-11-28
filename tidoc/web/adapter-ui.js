@@ -57,7 +57,7 @@ const AdapterUI = (() => {
     await refresh();
     if (!status.needs_selection) return;
     await new Promise(resolve => {
-      const body = el('div'); body.innerHTML = '<p class="hint">选择日常使用的报账方案。之后可在「设置 › 开发者选项」中切换，已有材料保留原规则。</p>';
+      const body = el('div'); body.innerHTML = '<p class="hint">之后可在「设置 › 开发者选项」切换，已有条目保留原规则。</p>';
       let finished = false, m;
       const choose = async id => { try { await Api.completeAdapterSetup(id); await refresh(); finished = true; m.close(); resolve(); } catch (error) { toast(error.message, 'err'); } };
       for (const packageId of ['org.bitfsae.reimbursement', 'org.tidoc.generic']) {
@@ -83,19 +83,19 @@ const AdapterUI = (() => {
       summaryParts.push('检测到仍有历史方案或未关联方案的在办条目。');
     }
     const items = [];
-    if (!recovery.is_default_bitfsae) items.push(`将「${recovery.target_scheme_name || 'BITFSAE 车队报账'}」设为默认报账方案，后续新建与同步条目统一按该方案处理。`);
+    if (!recovery.is_default_bitfsae) items.push(`将「${recovery.target_scheme_name || 'BITFSAE 车队报账'}」设为默认方案。`);
     if (Number(recovery.active_entry_count || 0) > 0 || Number(recovery.active_batch_count || 0) > 0) {
       const counts = [];
       if (Number(recovery.active_entry_count || 0) > 0) counts.push(`${recovery.active_entry_count} 条在办条目`);
       if (Number(recovery.active_batch_count || 0) > 0) counts.push(`${recovery.active_batch_count} 个在办批次`);
-      items.push(`将 ${counts.join('和 ')}同步切换到默认 BITFSAE 方案（已归档批次保持原样不受影响）。`);
+      items.push(`将 ${counts.join('、')} 切换到该方案（已归档批次不变）。`);
     }
-    items.push('保留并迁移已填写的收款信息。');
-    if (recovery.is_legacy_default) items.push('原升级生成的「原有报账方案」将停用保留，可在方案管理中随时查看。');
+    items.push('保留已填收款信息。');
+    if (recovery.is_legacy_default) items.push('原「原有报账方案」停用保留，可在方案管理中查看。');
     body.innerHTML = `
       <p>${esc(summaryParts.join(''))}</p>
       <ul class="diagnostic-list">${items.map(text => `<li>${esc(text)}</li>`).join('')}</ul>
-      <p class="hint">车队日常报账建议统一使用默认的「BITFSAE 车队报账」，避免协同同步时出现规则不一致。非车队用户可保持当前方案。</p>
+      <p class="hint">车队报账建议切换；非车队用户可保持当前方案。</p>
       <label class="hub-inline-check"><input type="checkbox" id="bitfsaeRecoveryOptOut"/> 保持当前方案，后续更新不再提醒</label>`;
     const optOut = $('#bitfsaeRecoveryOptOut', body);
     let handled = false, m;
@@ -381,7 +381,7 @@ const AdapterUI = (() => {
     if (locked) title.append(el('small', 'setting-flag', '方案固定'));
     title.append(custom, reset);
     const helpNode = el('span');
-    helpNode.textContent = help + (locked ? (help ? ' ' : '') + '此项由当前方案固定，不能修改。' : '');
+    helpNode.textContent = help || '';
     copy.append(title, helpNode);
     const holder = el('div', 'settings-row-control');
     const control = makeControl(() => { paint(); onChange(); });
@@ -1245,7 +1245,7 @@ const AdapterUI = (() => {
           for (const batch of batches.values()) fieldsBlock.append(mkBtn('填写「' + batch.name + '」的批次信息', 'ghost small', () => editFields('batch', batch.id, schemeId, revision)));
           if (inScheme.some(e => !e.batches?.length)) {
             const form = SchemaForm.create({ fields: batchFields, values: Object.fromEntries(batchFields.map(f => [f.id, f.default ?? null])) });
-            const holder = el('div'); holder.innerHTML = '<p class="hint">未进批次的条目，仅用于本次导出。</p>'; holder.append(form.root); fieldsBlock.append(holder);
+            const holder = el('div'); holder.innerHTML = '<p class="bindle-inline-note">未进批次条目（仅用于本次导出）</p>'; holder.append(form.root); fieldsBlock.append(holder);
             bindForm(form, 'batch', schemeId, revision); batchForms.push({ binding, form });
           }
         }

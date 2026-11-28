@@ -479,6 +479,14 @@ class HubApi:
         return self._hub_sync_manager().sync_batch(self.db.conn, batch_id)
 
     @_guard
+    def hub_stop_batch_sync(self, batch_id: str):
+        return self._hub_sync_manager().stop_batch_sync(self.db.conn, batch_id)
+
+    @_guard
+    def hub_batch_sync_report(self, batch_id: str):
+        return self._hub_sync_manager().batch_sync_report(self.db.conn, batch_id)
+
+    @_guard
     def hub_detach_other_space_entries(self, batch_id: str):
         return self._hub_sync_manager().detach_other_space_entries(self.db.conn, batch_id)
 

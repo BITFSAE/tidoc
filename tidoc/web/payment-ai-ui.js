@@ -12,7 +12,7 @@ const PaymentAiUI = (() => {
   function markup(cfg) {
     return `<section class="dev-subsection payment-ai-settings" aria-label="付款截图 AI 识别">
       <div class="dev-subsection-title">付款截图 AI 识别 <small>实验性</small></div>
-      <div class="settings-note">在线查验的「用 AI 自动填写验证码」和批量查验也使用这里的服务商与 Key，开关在下方「在线查验验证码 AI 识别」。</div>
+      <div class="settings-note">查验验证码的 AI 识别共用此处的服务商和 Key。</div>
       <div class="settings-row"><label class="settings-row-copy" for="paymentAiProvider"><b>服务商</b>
         <span>每个服务商的 Key 分开保存，切换后自动换用</span></label>
         <div class="settings-row-control"><select id="paymentAiProvider" class="settings-select" data-ai-provider>${Object.entries(presets)
@@ -91,7 +91,10 @@ const PaymentAiUI = (() => {
       if (p.known && !custom) notes.push(`当前单价：输入 ¥${p.input} / 输出 ¥${p.output}，每百万 Token，${esc(p.updated)} 核对。`);
       if (p.period === '高峰' || p.period === '低谷') notes.push('DeepSeek 高峰为北京时间周一至周五 9–12 时、14–18 时，节假日除外；低谷半价。'
         + (p.calendar_known ? '' : '本年度节假日未更新，按工作日估算。'));
-      notes.push(`${cfg.estimate_basis === 'recent' ? `估算按本机已识别 ${cfg.estimate_count} 张的平均用量` : `还没有识别记录，估算按每张约 ${cfg.budget_tokens[0]} 输入、${cfg.budget_tokens[1]} 输出 Token`}，命中服务商缓存的部分按缓存价计；以服务商账单为准。Key 只保存在本机，不随绑定包、报账方案导出。`);
+      if (cfg.estimated_per_100 != null) {
+        notes.push(`${cfg.estimate_basis === 'recent' ? `估算按本机已识别 ${cfg.estimate_count} 张的平均用量` : `还没有识别记录，估算按每张约 ${cfg.budget_tokens[0]} 输入、${cfg.budget_tokens[1]} 输出 Token`}，命中服务商缓存的部分按缓存价计；以服务商账单为准。`);
+      }
+      notes.push('Key 只保存在本机，不随绑定包、报账方案导出。');
       field('pricing').innerHTML = notes.join('<br>');
     }
     function showError(message) {

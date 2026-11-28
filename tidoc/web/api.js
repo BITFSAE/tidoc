@@ -243,6 +243,8 @@ const Api = (() => {
     hubUnlinkBatch: (batchId) => call('hub_unlink_batch', batchId),
     hubSetBatchAutoSync: (batchId, enabled) => call('hub_set_batch_auto_sync', batchId, !!enabled),
     hubSyncBatch: (batchId) => call('hub_sync_batch', batchId),
+    hubStopBatchSync: (batchId) => call('hub_stop_batch_sync', batchId),
+    hubBatchSyncReport: (batchId) => call('hub_batch_sync_report', batchId),
     hubDetachOtherSpaceEntries: (batchId) => call('hub_detach_other_space_entries', batchId),
     hubSyncTick: () => call('hub_sync_tick'),
     hubJoin: (serverUrl, inviteCode, name, reviewer) => call('hub_join', serverUrl, inviteCode, name || '', reviewer || ''),

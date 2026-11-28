@@ -21,7 +21,6 @@ const BindlePreview = {
     return {
       older: '可用本机方法重新识别',
       newer: '来自更新的识别方法',
-      unknown: '识别版本未知',
       changed: '材料或识别设置已变化',
     }[entry.invoice_recognition_state] || '';
   },
@@ -34,7 +33,6 @@ const BindlePreview = {
     return [
       counts.older ? `${counts.older} 张可用本机方法重新识别` : '',
       counts.newer ? `${counts.newer} 张来自更新的识别方法` : '',
-      counts.unknown ? `${counts.unknown} 张未记录可比的识别版本` : '',
       counts.changed ? `${counts.changed} 张的材料或识别设置已变化` : '',
     ].filter(Boolean).join('；');
   },
@@ -295,7 +293,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
       </div>
     </div>
     ${sourceBanner}
-    ${recognitionSummary ? `<p class="hint">${esc(recognitionSummary)}。导入时保留现有结果，需要时再重新识别。${entries.some((entry) => entry.invoice_recognition_state === 'newer') ? ' <button type="button" class="link-btn" id="bindleRecognitionUpdate">检查更新</button>' : ''}</p>` : ''}
+    ${recognitionSummary ? `<p class="bindle-inline-note" style="margin:0">${esc(recognitionSummary)}；导入保留原结果。${entries.some((entry) => entry.invoice_recognition_state === 'newer') ? ' <button type="button" class="link-btn" id="bindleRecognitionUpdate">检查更新</button>' : ''}</p>` : ''}
     ${insp.verified !== false ? '' : `<div class="bindle-integrity-warning">
       <b>完整性校验未通过</b><span>${esc((insp.tampered || []).join('、'))}</span>
       <label><input type="checkbox" id="bindleAllowTampered"/> 我确认继续，导入后标记为严重问题</label>
@@ -303,7 +301,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
     <div class="bindle-review hidden" id="bindleReview" role="status" aria-live="polite"></div>
     <details class="bindle-import-section bindle-profiles" data-bindle-review-target ${packageProfiles.length ? '' : 'hidden'}>
       <summary>报账人 <span id="bindleProfileSummary"></span></summary>
-      ${entries.some((entry) => !BindlePreview.isExisting(entry)) ? '<p class="bindle-profile-note">仅新增条目可修改姓名</p>' : ''}
+      ${entries.some((entry) => !BindlePreview.isExisting(entry)) && entries.some(BindlePreview.isExisting) ? '<p class="bindle-profile-note">仅新增条目可修改姓名</p>' : ''}
       <div class="bindle-profile-list">
         <div class="bindle-profile-labels"><input type="checkbox" id="bindleSelectAll" aria-label="全选报账人" title="全选报账人" checked/><span>报账人</span><span>审核人</span><span>条目</span></div>
         ${profileRows}
@@ -321,6 +319,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
             </div>
             <select id="bindleBatchSelect" class="${defaultBatchMode === 'existing' ? '' : 'hidden'}" aria-label="选择已有批次">${existingBatchOptions}</select>
             <input id="bindleNewBatch" class="${defaultBatchMode === 'new' ? '' : 'hidden'}" aria-label="新批次名称" placeholder="输入新批次名称" value="${esc(suggestedBatchName)}"/>
+            <span class="bindle-batch-none-hint ${defaultBatchMode === 'none' ? '' : 'hidden'}" id="bindleSingleBatchNoneHint">${entries.some(BindlePreview.isExisting) ? '新增条目暂不进批次，已有条目保留原批次' : '新增条目暂不进批次'}</span>
           </div>
           ${entries.some(BindlePreview.isExisting) ? `<label class="bindle-move-option" ${defaultBatchMode === 'none' ? 'hidden ' : ''}title="只处理本次勾选的条目，包含无变化的条目；单条设置优先"><input type="checkbox" id="bindleMoveExisting" ${initialMoveExisting ? 'checked' : ''}/> 已有条目也移入此批次</label>` : ''}
         </div>
@@ -336,7 +335,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
         const conflictEntries = entries.filter((e) => e.import_action === 'conflict').length;
         return conflictEntries
           ? `<div class="bindle-conflict-banner">
-              <span><b>${conflictEntries}</b> 条存在与本机不同的材料或信息，可点每行「对比」逐项选择替换或保留。</span>
+              <span><b>${conflictEntries}</b> 条材料或信息与本机不同</span>
               <div class="bindle-conflict-actions">
                 <button type="button" class="btn small ghost" id="bindleConflictsUseIncoming">待确认项全用包内</button>
                 <button type="button" class="btn small ghost" id="bindleConflictsKeepLocal">待确认项全留本机</button>
@@ -402,7 +401,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
     if (!row) continue;
     const mapping = entry.role_mapping_preview;
     if (mapping?.requires_explicit_mapping?.length) {
-      const panel=el('details','bindle-entry-material-map'); panel.innerHTML='<summary>材料角色对应</summary><p class="hint">保留外部材料时不会计入本机方案的必需材料。明确选择对应角色后才参与计算。</p>';
+      const panel=el('details','bindle-entry-material-map'); panel.innerHTML='<summary>材料角色对应</summary><p class="bindle-inline-note">不对应则保留为外部材料，不计入必需材料。</p>';
       let roles=targetScheme.definition.materials;
       if(entry.existing_entry_id){const existing=await Api.getEntry(entry.existing_entry_id);roles=existing.material_roles||roles;}
       for(const role of mapping.requires_explicit_mapping){const label=el('label','form-row');const roleName=el('span');roleName.textContent=attachTypeLabel(role);label.append(roleName);const select=el('select');select.dataset.bindRoleSource=role;select.innerHTML='<option value="">保留为外部材料</option>'+roles.filter(r=>r.id!=='invoice').map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('');label.append(select);panel.append(label);}row.append(panel);
@@ -410,12 +409,13 @@ async function openBindleImportPreview(path, insp, options = {}) {
     const notes=[];
     if(entry.adapter_compatibility?.missing_capabilities?.length)notes.push('来源方案有未支持的规则，请保留原资料并核对本机要求。');
     if(entry.extension_merge_preview?.skipped)notes.push('部分附加信息无法对应，保留本机值及外部历史信息。');
-    if(notes.length){const hint=el('p','hint bindle-entry-note');hint.textContent=notes.join(' ');row.append(hint);}
+    if(notes.length){const hint=el('p','bindle-entry-note');hint.textContent=notes.join(' ');row.append(hint);}
   }
 
   const tagInput = body.querySelector('#bindleTagInput');
   const batchSelect = body.querySelector('#bindleBatchSelect');
   const newBatch = body.querySelector('#bindleNewBatch');
+  const singleNoneHint = body.querySelector('#bindleSingleBatchNoneHint');
   const moveExisting = body.querySelector('#bindleMoveExisting');
   const profileRowElements = [...body.querySelectorAll('[data-bind-profile]')];
   const entryRowElements = [...body.querySelectorAll('[data-bind-entry-index]')];
@@ -571,6 +571,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
       const mode = batchMode();
       batchSelect.classList.toggle('hidden', mode !== 'existing');
       newBatch.classList.toggle('hidden', mode !== 'new');
+      singleNoneHint?.classList.toggle('hidden', mode !== 'none');
       if (moveExisting) {
         moveExisting.closest('label').hidden = mode === 'none';
         if (mode === 'none') moveExisting.checked = false;
@@ -1058,7 +1059,7 @@ function openBindleBatch(initialPaths, onCloseOrOptions) {
             <span class="bindle-batch-none-hint" id="bindleBatchNoneHint">新增条目暂不进批次，已有条目保留原批次</span>
           </div>
           <label class="bindle-move-option" id="bindleBatchMoveRow" hidden title="只处理勾选包中的已有条目，包含无变化的条目"><input type="checkbox" id="bindleBatchMoveExisting"/> 已有条目也移入此批次</label>
-          <p class="bindle-batch-archived-warn hidden" id="bindleBatchArchivedWarn">所选批次已归档，导入后请到「已归档」查看。</p>
+          <p class="bindle-batch-archived-warn hidden" id="bindleBatchArchivedWarn">所选批次已归档，可在「已归档」查看。</p>
         </div>
         <div class="form-row bindle-tag-option">
           <label for="bindleBatchTag">统一标签</label>
@@ -1305,7 +1306,7 @@ function openBindleBatch(initialPaths, onCloseOrOptions) {
         <b>${esc(lastReport.stopped ? '已停止批量导入' : '本轮导入完成')}</b>
         <span>${esc(summaryParts.join('；') || '未执行导入')}。</span>
       </div>
-      ${lastReport.intoArchived ? '<p class="bindle-review-warn">已导入到归档批次，关闭后请到「已归档」查看。</p>' : ''}`;
+      ${lastReport.intoArchived ? '<p class="bindle-review-warn">已导入到归档批次</p>' : ''}`;
   }
 
   function renderRowDom(row) {
@@ -1436,9 +1437,6 @@ function openBindleBatch(initialPaths, onCloseOrOptions) {
       if (doneCount) notes.push(`已导入 ${doneCount} 个`);
       if (reviewCount) notes.push(`${reviewCount} 个需单包预览`);
       if (errorCount) notes.push(`${errorCount} 个异常`);
-      if (!notes.length && rows.length) {
-        notes.push('已有条目默认保留原批次，个别包可点「单包预览」调整');
-      }
       footNote.textContent = notes.join(' · ');
     }
 

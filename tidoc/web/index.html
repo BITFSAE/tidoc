@@ -22,7 +22,7 @@
       document.documentElement.dataset.engine = /\b(Edg|Chrome)\//.test(navigator.userAgent) ? 'blink' : 'webkit';
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=0.1.44-beta.4" />
+  <link rel="stylesheet" href="styles.css?v=0.1.44-beta.5" />
 </head>
 <body>
   <div id="app" class="app">
@@ -260,7 +260,7 @@
             <button class="btn small ghost hidden" id="batchOcrBtn" data-ocr-ui title="用阿里云 OCR 识别发票，或用 AI 识别付款截图金额；按量计费">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg><span>云识别</span>
             </button>
-            <button class="btn small ghost hidden" id="batchVerificationBtn" data-verification-auto-ui title="用 AI 识别验证码，批量在线查验并自动保存查验单；已有查验单的条目默认跳过，可在窗口里选择重新查验。验证码图片会上传到 AI 服务商，按量计费">
+            <button class="btn small ghost hidden" id="batchVerificationBtn" data-verification-auto-ui title="AI 识别验证码并批量在线查验（按量计费）">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="m8.5 11 1.7 1.7 3.3-3.4"/></svg><span>查验</span>
             </button>
             <span class="selection-divider"></span>
@@ -282,6 +282,8 @@
             </button>
           </div>
         </div>
+
+        <div class="hub-batch-bar hidden" id="hubBatchBar"></div>
 
         <div class="check-category-bar hidden" id="checkCategoryBar" role="group" aria-label="提醒类别"></div>
 
@@ -306,15 +308,15 @@
   <div id="modalRoot"></div>
   <div id="toastRoot" class="toast-root" aria-live="polite"></div>
 
-  <script src="api.js?v=0.1.44-beta.4"></script>
-  <script src="ui-primitives.js?v=0.1.44-beta.4"></script>
-  <script src="select.js?v=0.1.44-beta.4"></script>
-  <script src="schema-form.js?v=0.1.44-beta.4"></script>
-  <script src="adapter-ui.js?v=0.1.44-beta.4"></script>
-  <script src="qr-ticket.js?v=0.1.44-beta.4"></script>
-  <script src="bindle-ui.js?v=0.1.44-beta.4"></script>
-  <script src="hub-ui.js?v=0.1.44-beta.4"></script>
-  <script src="payment-ai-ui.js?v=0.1.44-beta.4"></script>
-  <script src="app.js?v=0.1.44-beta.4"></script>
+  <script src="api.js?v=0.1.44-beta.5"></script>
+  <script src="ui-primitives.js?v=0.1.44-beta.5"></script>
+  <script src="select.js?v=0.1.44-beta.5"></script>
+  <script src="schema-form.js?v=0.1.44-beta.5"></script>
+  <script src="adapter-ui.js?v=0.1.44-beta.5"></script>
+  <script src="qr-ticket.js?v=0.1.44-beta.5"></script>
+  <script src="bindle-ui.js?v=0.1.44-beta.5"></script>
+  <script src="hub-ui.js?v=0.1.44-beta.5"></script>
+  <script src="payment-ai-ui.js?v=0.1.44-beta.5"></script>
+  <script src="app.js?v=0.1.44-beta.5"></script>
 </body>
 </html>

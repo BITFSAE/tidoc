@@ -71,14 +71,14 @@ class _TrackedHubServer:
 
 
 def _wait_batch_settled(api: Api, batch_id: str, *, timeout: float = 8.0) -> tuple[dict, dict]:
-    """Poll hub_sync_tick until the given batch leaves 'syncing' state."""
+    """Poll hub_sync_tick until the given batch finishes any active or background check."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         res = api.hub_sync_tick()
         assert res["ok"], res
         data = res["data"]
         info = data["batches"].get(batch_id)
-        if info and info["state"] != "syncing":
+        if info and info["state"] != "syncing" and not info.get("checking"):
             return info, data
         time.sleep(0.03)
     raise AssertionError(f"Batch {batch_id} remained syncing after {timeout}s")
@@ -897,3 +897,115 @@ def test_relink_batch_to_another_space_separates_other_space_and_allows_detach(e
     assert info2["state"] == "synced"
     assert info2["other_space_count"] == 0
     assert admin_api.entries.get(eid)["hub"]["space_id"] == space_2
+
+
+def test_suppressed_conflict_does_not_flicker_syncing_and_exposes_report(env):
+    base = env["base_url"]
+    admin_api: Api = env["admin_api"]
+    member_api: Api = env["member_a_api"]
+
+    assert admin_api.hub_connect_token(base, env["admin_token"])["ok"]
+    inv = admin_api.hub_create_invite("member", 5, 30)["data"]["invite"]["code"]
+    assert member_api.hub_join(base, inv, "张队员", "李汇总")["ok"]
+
+    admin_batch = admin_api.create_batch("稳态测试")["data"]["id"]
+    space_id = admin_api.hub_link_batch(batch_id=admin_batch, space_id="", auto_sync=False)["data"]["shared"]["space_id"]
+    member_batch = member_api.hub_link_batch(batch_id="", space_id=space_id, auto_sync=False)["data"]["batch_id"]
+
+    m_eid = member_api.entries.create(
+        env["member_a_pid"],
+        parsed=ParsedInvoice(invoice_no="26112000000099112233", seller="稳态器件店", total="66.00"),
+    )
+    member_api.add_entries_to_batch(member_batch, [m_eid])
+    assert member_api.hub_sync_batch(member_batch)["ok"]
+    _wait_batch_settled(member_api, member_batch)
+
+    assert admin_api.hub_sync_batch(admin_batch)["ok"]
+    _wait_batch_settled(admin_api, admin_batch)
+    a_eid = admin_api.get_batch(admin_batch)["data"]["entry_ids"][0]
+    assert admin_api.hub_review_entry(a_eid, "locked", "已锁定", push_local=False)["ok"]
+
+    # Member pulls locked state then edits locally -> settles into 'conflict'
+    assert member_api.hub_sync_batch(member_batch)["ok"]
+    _wait_batch_settled(member_api, member_batch)
+    member_api.entries.update_field(m_eid, "notes", "锁后修改", env["member_a_pid"])
+    assert member_api.hub_set_batch_auto_sync(member_batch, True)["ok"]
+    info_c, _ = _wait_sync_state(member_api, member_batch, {"conflict"})
+    assert info_c["state"] == "conflict"
+
+    # Subsequent auto-sync ticks while nothing changes must NEVER flicker back to 'syncing'
+    observed_states = []
+    for _ in range(12):
+        time.sleep(0.025)
+        tick_info = member_api.hub_sync_tick()["data"]["batches"][member_batch]
+        observed_states.append(tick_info["state"])
+    assert observed_states and all(s == "conflict" for s in observed_states), observed_states
+
+    # Per-entry report explains the exact entry and reason
+    rep_res = member_api.hub_batch_sync_report(member_batch)
+    assert rep_res["ok"]
+    items = rep_res["data"]["report"]["items"]
+    assert len(items) == 1
+    assert items[0]["entry_id"] == m_eid
+    assert items[0]["seller"] == "稳态器件店"
+    assert items[0]["status"] == "locked"
+    assert "锁定" in items[0]["message"]
+
+
+def test_stop_and_resume_batch_sync_preserves_progress(env, monkeypatch):
+    base = env["base_url"]
+    admin_api: Api = env["admin_api"]
+    tmp = env["tmp_path"]
+
+    assert admin_api.hub_connect_token(base, env["admin_token"])["ok"]
+    local_batch = admin_api.create_batch("断点续传批次")["data"]["id"]
+    space_id = admin_api.hub_link_batch(batch_id=local_batch, space_id="", auto_sync=True)["data"]["shared"]["space_id"]
+    _wait_batch_settled(admin_api, local_batch)
+
+    eids = []
+    for idx in range(3):
+        eid = admin_api.entries.create(
+            env["admin_pid"],
+            parsed=ParsedInvoice(invoice_no=f"2611200000004400000{idx}", seller=f"供应商{idx}", total="10.00"),
+        )
+        admin_api.attachments.add(eid, _write_file(tmp, f"stop_{idx}.pdf", f"%PDF-1.4 {idx}".encode()), "invoice_pdf")
+        eids.append(eid)
+    admin_api.add_entries_to_batch(local_batch, eids)
+
+    mgr = admin_api._hub_sync_manager()
+    client = mgr._get_worker_client(base, env["admin_token"])
+    orig_push = client.push_entry
+    first_pushed = threading.Event()
+
+    def push_and_stop(sid, body):
+        res = orig_push(sid, body)
+        first_pushed.set()
+        time.sleep(0.05)
+        return res
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "push_entry", push_and_stop)
+        assert admin_api.hub_sync_batch(local_batch)["ok"]
+        assert first_pushed.wait(timeout=5.0)
+        stop_res = admin_api.hub_stop_batch_sync(local_batch)
+        assert stop_res["ok"]
+
+    info_stopped, _ = _wait_batch_settled(admin_api, local_batch)
+    assert info_stopped["state"] == "stopped"
+    assert info_stopped["can_resume"] is True
+
+    # Auto-sync tick must stay stopped and NOT auto-restart until user resumes
+    time.sleep(0.08)
+    tick_after = admin_api.hub_sync_tick()["data"]["batches"][local_batch]
+    assert tick_after["state"] == "stopped"
+
+    rep = admin_api.hub_batch_sync_report(local_batch)["data"]["report"]
+    statuses = [it["status"] for it in rep["items"]]
+    assert "pushed" in statuses
+    assert "stopped" in statuses
+
+    # Resume with hub_sync_batch -> pushes remaining entries and settles to 'synced'
+    assert admin_api.hub_sync_batch(local_batch)["ok"]
+    info_done, _ = _wait_batch_settled(admin_api, local_batch)
+    assert info_done["state"] == "synced"
+    assert all(admin_api.entries.get(eid)["hub"]["remote_entry_id"] for eid in eids)

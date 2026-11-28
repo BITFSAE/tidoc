@@ -272,6 +272,43 @@ def test_reparse_failures_show_reasons_and_retry_only_failed_entries():
 """)
 
 
+def test_reparse_newer_results_require_explicit_selection():
+    run_selection(r"""
+(async () => {
+  let dialog, forceNewer = false;
+  const calls = [], messages = [];
+  document.createElement = () => {
+    const node = makeNode();
+    node.querySelector = selector => ({checked: selector === '#recognizeInvoice' || forceNewer});
+    return node;
+  };
+  mkBtn = (text, cls, onclick) => ({textContent: text, onclick});
+  modal = options => {dialog = {...options, close() {}}; return dialog;};
+  taskProgress = () => ({update() {}, close() {}});
+  toast = message => messages.push(message);
+  refreshEntries = async () => {};
+  globalThis.Api = {
+    recognitionPreview: async () => ({invoice: {total: 1, pending: 0, current: 0, newer: 1}}),
+    rerecognizeMaterials: async (ids, kinds, force) => {
+      calls.push(force);
+      return {invoice: {processed: force ? 1 : 0, skipped_newer: force ? 0 : 1, failed: []}};
+    },
+  };
+  await batchReparse(['newer']);
+  assert.ok(dialog.body.innerHTML.includes('默认跳过'));
+  assert.ok(dialog.body.innerHTML.includes('仍用本机方法重新识别'));
+  assert.ok(!/id="recognizeNewer"[^>]*checked/.test(dialog.body.innerHTML));
+  await dialog.footer[1].onclick();
+  assert.equal(messages.at(-1), '保留 1 张更新方法的结果');
+  forceNewer = true;
+  await batchReparse(['newer']);
+  await dialog.footer[1].onclick();
+  assert.equal(messages.at(-1), '成功 1 张');
+  assert.deepEqual(calls, [false, true]);
+})().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
 def test_list_refresh_updates_batch_counts_without_using_filtered_entry_count():
     run_selection(r"""
 (async () => {

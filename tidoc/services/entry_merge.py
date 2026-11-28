@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from difflib import SequenceMatcher
+from itertools import zip_longest
 from typing import Any
 
 from ..db.entries import PAYMENT_AI_RECOGNITION_VERSION
-from ..db.manual_changes import _number as _norm_number, item_values, same_value
+from ..db.manual_changes import ITEM_FIELDS, _number as _norm_number, item_values, same_value
 from ..engine.check_lines import (
     INSPECTION_CHECK_PREFIX,
     PAYMENT_CHECK_PREFIX,
@@ -72,6 +74,16 @@ EDITABLE_FIELD_LABELS = {
     "paid_amount": "实付金额",
     "actual_item_name": "实际物资名称",
     "notes": "条目备注",
+}
+
+LINE_ITEM_LABELS = {
+    "name": "票面名称",
+    "actual_name": "实际物资名称",
+    "unit": "单位",
+    "quantity": "数量",
+    "unit_price": "单价",
+    "total": "金额",
+    "spec": "规格",
 }
 
 ATTACHMENT_GROUP_ORDER = (
@@ -463,6 +475,35 @@ def _items_summary(items: list[dict]) -> str:
     if len(items) == 1:
         return f"1 项（{first or '未命名'}）"
     return f"{len(items)} 项（{first or '未命名'} 等）"
+
+
+def _line_item_differences(local: list[dict], incoming: list[dict]) -> list[dict]:
+    """Align unchanged rows first, then compare the fields between those anchors."""
+    local_keys = [tuple(row[field] for field in ITEM_FIELDS) for row in local]
+    incoming_keys = [tuple(row[field] for field in ITEM_FIELDS) for row in incoming]
+    differences = []
+    for op, start, end, other_start, other_end in SequenceMatcher(None, local_keys, incoming_keys).get_opcodes():
+        if op == "equal":
+            continue
+        for left_index, right_index in zip_longest(range(start, end), range(other_start, other_end)):
+            left = local[left_index] if left_index is not None else {}
+            right = incoming[right_index] if right_index is not None else {}
+            fields = [
+                {"field": key, "label": label, "local": left.get(key, ""), "incoming": right.get(key, "")}
+                for key, label in LINE_ITEM_LABELS.items() if left.get(key, "") != right.get(key, "")
+            ]
+            # All-empty rows can still account for a change in row count or order.
+            if not fields and left_index is not None and right_index is not None:
+                continue
+            left_name = left.get("actual_name") or left.get("name") or ""
+            right_name = right.get("actual_name") or right.get("name") or ""
+            differences.append({
+                "local_row": left_index + 1 if left_index is not None else None,
+                "incoming_row": right_index + 1 if right_index is not None else None,
+                "name": left_name if left_name == right_name else "",
+                "fields": fields,
+            })
+    return differences
 
 
 def _field_source_hint(field_data: dict | None) -> str:
@@ -1106,6 +1147,11 @@ def plan_entry_merge(
         if loc_items_norm != inc_items_norm:
             loc_summary = _items_summary(local_entry.get("items") or [])
             inc_summary = _items_summary(incoming_entry.get("items") or [])
+            line_comparison = {
+                "local_value": loc_summary,
+                "incoming_value": inc_summary,
+                "line_differences": _line_item_differences(loc_items_norm, inc_items_norm),
+            }
             if base_snapshot is not None:
                 base_items_norm = base_snapshot.get("items") or []
                 if inc_items_norm != base_items_norm:
@@ -1121,8 +1167,7 @@ def plan_entry_merge(
                                     _choice_option("use_incoming", "补齐明细"),
                                     _choice_option("keep_local", "保留本机"),
                                 ],
-                                "local_value": loc_summary,
-                                "incoming_value": inc_summary,
+                                **line_comparison,
                                 "change_summary": f"补齐 {len(inc_items_norm)} 项明细",
                                 "archived_protected": False,
                             })
@@ -1139,8 +1184,7 @@ def plan_entry_merge(
                                     _choice_option("use_incoming", "采用包内明细"),
                                     _choice_option("keep_local", "保留本机明细"),
                                 ],
-                                "local_value": loc_summary,
-                                "incoming_value": inc_summary,
+                                **line_comparison,
                                 "change_summary": "对方已更新明细",
                                 "archived_protected": archived,
                             })
@@ -1155,8 +1199,7 @@ def plan_entry_merge(
                                 _choice_option("keep_local", "保留本机明细"),
                                 _choice_option("use_incoming", "采用包内明细"),
                             ],
-                            "local_value": loc_summary,
-                            "incoming_value": inc_summary,
+                            **line_comparison,
                             "change_summary": "双方均修改了明细",
                             "archived_protected": archived,
                         })
@@ -1172,8 +1215,7 @@ def plan_entry_merge(
                             _choice_option("use_incoming", "补齐明细"),
                             _choice_option("keep_local", "保留本机"),
                         ],
-                        "local_value": loc_summary,
-                        "incoming_value": inc_summary,
+                        **line_comparison,
                         "change_summary": f"补齐 {len(inc_items_norm)} 项明细",
                         "archived_protected": False,
                     })
@@ -1188,8 +1230,7 @@ def plan_entry_merge(
                             _choice_option("keep_local", "保留本机明细"),
                             _choice_option("use_incoming", "采用包内明细"),
                         ],
-                        "local_value": loc_summary,
-                        "incoming_value": inc_summary,
+                        **line_comparison,
                         "change_summary": "与本机明细不同",
                         "archived_protected": archived,
                     })

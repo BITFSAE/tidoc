@@ -677,7 +677,10 @@ def test_local_recognition_skips_current_rules_and_warns_on_payment_mismatch(
     assert refreshed["check_status"] == "warning"
 
     preview = api.recognition_preview([entry["id"]])["data"]
-    assert preview["invoice"] == {"total": 1, "pending": 0, "current": 1}
+    assert preview["invoice"] == {
+        "total": 1, "pending": 0, "current": 1,
+        "older": 0, "newer": 0, "unknown": 0, "changed": 0, "pending_ids": [],
+    }
     assert preview["payment"]["pending"] == 0
     assert preview["payment"]["current"] == 2
 

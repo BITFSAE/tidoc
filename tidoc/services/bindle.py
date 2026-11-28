@@ -24,7 +24,8 @@ from datetime import datetime
 from pathlib import Path
 
 from ..db.attachments import AttachmentRepo
-from ..db.entries import EntryRepo
+from ..db.entries import EntryRepo, invoice_recognition_state_for
+from ..engine.models import RecognitionContext
 from ..db.manual_changes import item_snapshot
 from ..engine.check_lines import INSPECTION_CHECK_PREFIX, PAYMENT_CHECK_PREFIX, split_message
 from .entry_merge import (
@@ -57,6 +58,25 @@ SUMMARY_NAME = "summary.json"
 
 PAYMENT_RECOGNITION_KEYS = ("recognition_version", "recognition_status", "recognized_value", "recognition_message")
 _PAYMENT_RECOGNITION_STATUSES = {"recognized", "review", "unrecognized", "error"}
+
+
+def _invoice_recognition_metadata(entry: dict) -> tuple[str, str]:
+    """Only carry recognition markers that describe this entry's invoice files."""
+    version = entry.get("recognition_version") or ""
+    fingerprint = entry.get("recognition_fingerprint") or ""
+    if not isinstance(version, str) or not isinstance(fingerprint, str):
+        return "", ""
+    version, fingerprint = version.strip(), fingerprint.strip()
+    if not version or len(version) > 80 or len(fingerprint) > 8192:
+        return "", ""
+    context = fingerprint.split("|", 1)[0]
+    if not re.fullmatch(r"[0-9a-f]{64}", context):
+        return "", ""
+    invoices = [a for a in entry.get("attachments", []) if a.get("type") in {"invoice_pdf", "invoice_xml"}]
+    if not invoices or any(not re.fullmatch(r"[0-9a-f]{64}", str(a.get("sha256") or "")) for a in invoices):
+        return "", ""
+    expected = context + "|" + "|".join(sorted(f"{a['type']}:{a['sha256']}" for a in invoices))
+    return (version, fingerprint) if fingerprint == expected else ("", "")
 
 
 def _imported_payment_recognition(attachment: dict, att_type: str) -> tuple[str, str, str, str]:
@@ -123,6 +143,9 @@ def _serialize_entry(
         "seller": entry.get("seller", ""),
         "seller_tax_id": entry.get("seller_tax_id", ""),
         "recognition_data": entry.get("recognition_data", ""),
+        # 实际识别版本与指纹随包转发，接收方在原件摘要校验通过后可沿用，不冒充导出方软件版本。
+        "recognition_version": entry.get("recognition_version", "") or "",
+        "recognition_fingerprint": entry.get("recognition_fingerprint", "") or "",
         "total": entry.get("total", ""),
         "buyer_name": entry.get("buyer_name", ""),
         "buyer_tax_id": entry.get("buyer_tax_id", ""),
@@ -304,18 +327,19 @@ def _sanitize_exchange_entry(entry: dict, depth=0) -> None:
         if nested.get('adapter'):entry['adapter']['sources'].append(nested['adapter'])
 
 
-def _local_preview_version(entries_repo: EntryRepo, entry_ids: set[str]) -> str:
-    snapshots = _import_preview_snapshots(entries_repo, entry_ids)
+def _local_preview_version(
+    entries_repo: EntryRepo, entry_ids: set[str], *, snapshots: dict[str, dict] | None = None,
+) -> str:
+    if snapshots is None:
+        snapshots = _import_preview_snapshots(entries_repo, entry_ids)
     material = []
     for entry_id in sorted(entry_ids):
         entry = snapshots.get(entry_id)
         if entry is None:
             material.append((entry_id, None))
             continue
-        row = entries_repo.db.conn.execute(
-            "SELECT updated_at, scheme_id, scheme_revision_id FROM entries WHERE id = ?", (entry_id,)
-        ).fetchone()
-        material.append((entry_id, dict(row) if row else None, entry))
+        entry_version = {key: entry[key] for key in ("updated_at", "scheme_id", "scheme_revision_id")}
+        material.append((entry_id, entry_version, entry))
     from ..adapters.transfer import content_hash
     return content_hash(material)
 
@@ -542,8 +566,20 @@ def inspect_bindle(path: str | Path, entries_repo: EntryRepo | None = None, *, a
             entries_bytes = zf.read(ENTRIES_NAME)
         entries_payload = json.loads(entries_bytes)
         package_version = int(entries_payload.get("bindle_version", manifest.get("bindle_version", 1)))
-        if package_version < 1 or package_version > BINDLE_VERSION:
+        if package_version < 1:
             raise ValueError(f"不支持的绑定包版本：{package_version}")
+        if package_version > BINDLE_VERSION:
+            raise ValueError(
+                f"这个绑定包来自更新的 Tidoc（格式版本 {package_version}），"
+                f"当前版本最高支持 {BINDLE_VERSION}。请先升级 Tidoc 再导入。"
+            )
+        required_capability = manifest.get("minimum_receiver_capability", "")
+        if not isinstance(required_capability, str):
+            raise ValueError("绑定包中的兼容要求无效，请联系发送方重新导出。")
+        if required_capability and required_capability not in {
+            f"bindle.v{version}" for version in range(1, BINDLE_VERSION + 1)
+        }:
+            raise ValueError("这个绑定包需要当前版本尚未支持的功能，请先升级 Tidoc 再导入。")
         if int(manifest.get("bindle_version", package_version)) != package_version:
             tampered.append("bindle_version")
         if package_version >= 5:
@@ -840,6 +876,19 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapte
         # A merge keeps the existing entry's rules, regardless of the new-entry scheme.
         revision_id = (snapshots.get(existing_id) or {}).get("scheme_revision_id") if existing_id else target_revision_id
         entry["role_mapping_preview"] = _role_mapping_preview(entries_repo, entry, revision_id)
+        supports_recognition = int(inspected.get("bindle_version") or BINDLE_VERSION) >= 5
+        version, fingerprint = (_invoice_recognition_metadata(entry)
+                                if supports_recognition and not inspected.get("tampered") else ("", ""))
+        context = entries_repo.recognition_context_for_revision(revision_id)
+        if not revision_id and source_adapter.get("definition"):
+            context = RecognitionContext.from_definition(source_adapter["definition"])
+        invoices = [a for a in entry.get("attachments", []) if a.get("type") in {"invoice_pdf", "invoice_xml"}]
+        current_fingerprint = context.fingerprint + "|" + "|".join(sorted(
+            f"{a['type']}:{a.get('sha256') or ''}" for a in invoices
+        ))
+        entry["invoice_recognition_state"] = invoice_recognition_state_for(
+            version, fingerprint, has_invoice=bool(invoices), current_fingerprint=current_fingerprint,
+        )
         if not existing_id:
             entry["import_action"] = "new"
             counts["new"] += 1
@@ -1229,6 +1278,7 @@ def _merge_existing_entry(
     merge_decisions: dict[str, str] | None = None,
     removed_files: list[Path] | None = None,
     package_options: dict | None = None,
+    package_version: int = 5,
 ) -> tuple[list[str], dict[str, str]]:
     """Apply a planned three-way / two-way merge inside the caller's transaction.
 
@@ -1395,6 +1445,7 @@ def _merge_existing_entry(
     attachment_added = 0
     attachment_replaced = 0
     attachment_removed = 0
+    invoice_materials_changed = False
 
     # First handle same-sha256 metadata upgrades (payment AI recognition & notes) on surviving local attachments
     def _upgrade_duplicate(duplicate: dict, inc_att: dict) -> None:
@@ -1513,6 +1564,7 @@ def _merge_existing_entry(
             )
             if group_key in {"invoice_pdf", "invoice_xml"}:
                 invoice_core_updated = True
+                invoice_materials_changed = True
         elif removed_names:
             attachment_removed += len(removed_names)
             conn.execute(
@@ -1520,10 +1572,13 @@ def _merge_existing_entry(
                    VALUES(?,?,?,?,?,?)""",
                 (entry_id, f"{MERGE_HISTORY_PREFIX}{item['label']}", "、".join(removed_names), "", "", now),
             )
+            if group_key in {"invoice_pdf", "invoice_xml"}:
+                invoice_materials_changed = True
         elif added_names:
             attachment_added += len(added_names)
             if group_key in {"invoice_pdf", "invoice_xml"}:
                 invoice_core_updated = True
+                invoice_materials_changed = True
 
     if attachment_replaced:
         changes.append(f"替换材料 {attachment_replaced}")
@@ -1572,6 +1627,32 @@ def _merge_existing_entry(
         else:
             changes.append("发票明细")
         invoice_core_updated = True
+
+    # --- 6b. Invoice recognition handoff ---
+    # 合并出来的条目可能是本机材料的组合，不能把包内的识别版本直接挂上去。
+    # 发票信息或原件发生变化时，旧的识别结论失效；本机尚无结论且发票原件
+    # 一致时，才沿用来源真实的版本与指纹。
+    if invoice_core_updated or invoice_materials_changed or tampered:
+        if str(existing.get("recognition_version") or "").strip():
+            conn.execute(
+                "UPDATE entries SET recognition_version = '', recognition_fingerprint = '' WHERE id = ?",
+                (entry_id,),
+            )
+            changes.append("识别状态待更新")
+    elif not str(existing.get("recognition_version") or "").strip() and package_version >= 5:
+        version, fingerprint = _invoice_recognition_metadata(incoming)
+        local_snapshot, incoming_snapshot = build_entry_snapshot(existing), build_entry_snapshot(incoming)
+        same_invoice = all(local_snapshot.get(key) == incoming_snapshot.get(key) for key in ("base_fields", "items"))
+        same_evidence = (existing.get("recognition_data") or "") == (incoming.get("recognition_data") or "")
+        same_files = sorted((a.get("type"), a.get("sha256")) for a in existing.get("attachments", [])
+                            if a.get("type") in {"invoice_pdf", "invoice_xml"}) == sorted(
+            (a.get("type"), a.get("sha256")) for a in incoming.get("attachments", [])
+            if a.get("type") in {"invoice_pdf", "invoice_xml"})
+        if version and same_invoice and same_evidence and same_files:
+            conn.execute(
+                "UPDATE entries SET recognition_version = ?, recognition_fingerprint = ? WHERE id = ?",
+                (version, fingerprint, entry_id),
+            )
 
     # --- 7. OCR results (union) ---
     existing_ocr = {

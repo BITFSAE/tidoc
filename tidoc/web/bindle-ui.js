@@ -17,11 +17,60 @@ const BindlePreview = {
       .filter((sourceId) => referenced.has(sourceId)).map((sourceId) => referenced.get(sourceId));
   },
   isExisting: (entry) => entry.import_action === 'merge' || entry.import_action === 'conflict' || entry.import_action === 'unchanged',
+  recognitionLabel(entry) {
+    return {
+      older: '可用本机方法重新识别',
+      newer: '来自更新的识别方法',
+      unknown: '识别版本未知',
+      changed: '材料或识别设置已变化',
+    }[entry.invoice_recognition_state] || '';
+  },
+  recognitionSummary(entries) {
+    const counts = {};
+    for (const entry of entries) {
+      const state = entry.invoice_recognition_state;
+      counts[state] = (counts[state] || 0) + 1;
+    }
+    return [
+      counts.older ? `${counts.older} 张可用本机方法重新识别` : '',
+      counts.newer ? `${counts.newer} 张来自更新的识别方法` : '',
+      counts.unknown ? `${counts.unknown} 张未记录可比的识别版本` : '',
+      counts.changed ? `${counts.changed} 张的材料或识别设置已变化` : '',
+    ].filter(Boolean).join('；');
+  },
   actionLabel(entry) {
     if (entry.import_action === 'conflict') return '已有·待确认';
-    if (entry.import_action === 'merge') return entry.merge_preview?.has_replacements ? '已有·可更新' : '已有·待补充';
+    if (entry.import_action === 'merge') {
+      if (entry.hub_review_changed && !entry.merge_preview?.has_changes && !entry.merge_preview?.items?.length) {
+        return '审核有更新';
+      }
+      return entry.merge_preview?.has_replacements ? '已有·可更新' : '已有·待补充';
+    }
     if (entry.import_action === 'unchanged') return '已有·无变化';
     return '新增';
+  },
+  renderLineDifferences(differences, incomingLabel) {
+    const valueText = (field, value) => {
+      if (!value) return '空';
+      return field === 'total' || field === 'unit_price' ? fmtMoney(value) : value;
+    };
+    return `<table class="items-table bindle-line-diff" aria-label="发票明细差异">
+      <thead><tr><th scope="col">字段</th><th scope="col">本机</th><th scope="col">${esc(incomingLabel)}</th></tr></thead>
+      ${differences.map((row) => {
+        const rows = row.local_row === row.incoming_row ? `第 ${row.local_row} 行` : [
+          row.local_row ? `本机第 ${row.local_row} 行` : '',
+          row.incoming_row ? `${incomingLabel}第 ${row.incoming_row} 行` : '',
+        ].filter(Boolean).join(' / ');
+        const title = row.name ? `${rows} · ${row.name}` : rows;
+        return `<tbody><tr class="bindle-line-diff-heading"><th scope="rowgroup" colspan="3">${esc(title)}</th></tr>
+          ${row.fields.map((change) => `<tr>
+            <th scope="row">${esc(change.label)}</th>
+            <td>${row.local_row ? esc(valueText(change.field, change.local)) : '无此行'}</td>
+            <td>${row.incoming_row ? esc(valueText(change.field, change.incoming)) : '无此行'}</td>
+          </tr>`).join('')}
+        </tbody>`;
+      }).join('')}
+    </table>`;
   },
   defaultDecisions(entry) {
     const out = {};
@@ -133,9 +182,10 @@ async function openBindleImportPreview(path, insp, options = {}) {
     const plan = entry.merge_preview;
     if (!plan?.items?.length) return '';
     const decisions = mergeDecisionsByEntry.get(entryIndex) || {};
+    const incomingLabel = options.comparisonLabel || '包内';
     const modeHint = plan.mode === 'three_way'
-      ? '已关联上次交接基线，可自动识别对方更换的材料与修改'
-      : '未找到共同交接基线，存在差异的项目默认保留本机，可逐项选择替换或合并';
+      ? '已找到上次交接记录，可自动识别对方更换的材料与修改'
+      : '未找到共同交接记录，存在差异的项目默认保留本机，可逐项选择替换或合并';
     const archivedBanner = plan.archived
       ? `<div class="bindle-merge-archived">该条目位于已归档批次（${esc((plan.archived_batches || []).join('、'))}），已默认保留本机内容，修改前请确认。</div>`
       : '';
@@ -148,14 +198,16 @@ async function openBindleImportPreview(path, insp, options = {}) {
              <div class="bindle-diff-side"><em>本机现有</em>${renderFileList(item.local_files)}</div>
              <div class="bindle-diff-side"><em>包内提供</em>${renderFileList(item.incoming_files)}</div>
            </div>`
-        : `<div class="bindle-diff-cols">
+        : item.kind === 'items' && item.line_differences?.length
+          ? BindlePreview.renderLineDifferences(item.line_differences, incomingLabel)
+          : `<div class="bindle-diff-cols">
              <div class="bindle-diff-side"><em>本机${item.local_hint ? ` · ${esc(item.local_hint)}` : ''}</em><div class="bindle-diff-val">${esc(item.local_value || '空')}</div></div>
              <div class="bindle-diff-side"><em>包内${item.incoming_hint ? ` · ${esc(item.incoming_hint)}` : ''}</em><div class="bindle-diff-val">${esc(item.incoming_value || '空')}</div></div>
            </div>`;
       const choicesHtml = (item.choices || []).map((choice) => `
         <label class="bindle-merge-choice">
           <input type="radio" name="bm_${entryIndex}_${esc(item.key)}" value="${esc(choice.value)}" data-merge-entry="${entryIndex}" data-merge-key="${esc(item.key)}" ${selectedChoice === choice.value ? 'checked' : ''}/>
-          <span>${esc(choice.label)}</span>
+          <span>${esc(item.kind === 'items' ? choice.label.replace('包内', incomingLabel) : choice.label)}</span>
         </label>`).join('');
       return `<div class="bindle-merge-item ${badgeCls}" data-merge-item-key="${esc(item.key)}">
         <div class="bindle-merge-item-head">
@@ -177,11 +229,13 @@ async function openBindleImportPreview(path, insp, options = {}) {
     const profile = packageProfiles.find((item) => item.sourceId === (entry.profile_id || '__fallback__'));
     const isExisting = BindlePreview.isExisting(entry);
     const action = BindlePreview.actionLabel(entry);
-    const actionDetail = (entry.import_action === 'merge' || entry.import_action === 'conflict')
-      ? (entry.merge_preview?.labels || []).join('、')
+    const reviewLabel = entry.hub_review_changed && options.entryReviewLabel?.(entry);
+    const changeDetail = (entry.import_action === 'merge' || entry.import_action === 'conflict')
+      ? [...(entry.merge_preview?.labels || []), reviewLabel].filter(Boolean).join('、')
       : entry.import_action === 'unchanged'
         ? ''
         : `材料 ${(entry.attachments || []).length} 份`;
+    const actionDetail = [changeDetail, BindlePreview.recognitionLabel(entry)].filter(Boolean).join(' · ');
     const owner = isExisting && entry.existing_profile?.id ? entry.existing_profile : profile;
     const ownerText = `${owner?.name || entry.profile_name || '未填写'} · ${owner?.reviewer || entry.reviewer || '未填写'}`;
     const hasMergeItems = !!(isExisting && entry.merge_preview?.items?.length);
@@ -225,11 +279,12 @@ async function openBindleImportPreview(path, insp, options = {}) {
         : (activeBatches.length ? 'existing' : 'new');
   const initialBatchTarget = presetBatchValid ? preset.batchId : defaultBatchTarget;
   const suggestedBatchName = (preset?.batchMode === 'new' && String(preset.batchName || '').trim())
-    || baseName(path).replace(/\.tidoc$/i, '').trim();
+    || options.suggestedBatchName || baseName(path).replace(/\.tidoc$/i, '').trim();
   const initialMoveExisting = !!(preset?.moveExisting && defaultBatchMode !== 'none');
   const initialTag = String(preset?.tag || '').trim();
   const sourceLabel = options.sourceLabel || baseName(path);
   const sourceBanner = options.sourceBanner || '';
+  const recognitionSummary = BindlePreview.recognitionSummary(entries);
   body.innerHTML = `
     <div class="bindle-import-bar">
       <strong data-tooltip-overflow="${esc(sourceLabel)}">${esc(sourceLabel)}</strong>
@@ -240,6 +295,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
       </div>
     </div>
     ${sourceBanner}
+    ${recognitionSummary ? `<p class="hint">${esc(recognitionSummary)}。导入时保留现有结果，需要时再重新识别。${entries.some((entry) => entry.invoice_recognition_state === 'newer') ? ' <button type="button" class="link-btn" id="bindleRecognitionUpdate">检查更新</button>' : ''}</p>` : ''}
     ${insp.verified !== false ? '' : `<div class="bindle-integrity-warning">
       <b>完整性校验未通过</b><span>${esc((insp.tampered || []).join('、'))}</span>
       <label><input type="checkbox" id="bindleAllowTampered"/> 我确认继续，导入后标记为严重问题</label>
@@ -306,6 +362,8 @@ async function openBindleImportPreview(path, insp, options = {}) {
         <div class="bindle-empty hidden" id="bindleEmpty">${entries.length ? '没有符合条件的条目' : '包内没有条目'}</div>
       </div>
     </section>`;
+
+  body.querySelector('#bindleRecognitionUpdate')?.addEventListener('click', () => openUpdateDialog());
 
   const identities = insp.profile_mapping_preview || {};
   for (const row of body.querySelectorAll('[data-bind-profile]')) {

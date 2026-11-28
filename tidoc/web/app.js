@@ -1354,7 +1354,7 @@ function renderInvoiceRecognitionNotice() {
   const ids = State.entries.filter((entry) => entry.invoice_recognition_outdated).map((entry) => entry.id);
   node.classList.toggle('hidden', !ids.length || !notice || notice.dismissed);
   if (!ids.length || !notice || notice.dismissed) return;
-  $('#invoiceRecognitionNoticeText').textContent = `发票识别方法已更新，当前列表有 ${ids.length} 张可重新识别。本机处理，无需再次云识别。`;
+  $('#invoiceRecognitionNoticeText').textContent = `当前列表有 ${ids.length} 张发票可在本机重新识别，不联网、不计费。`;
   $('#invoiceRecognitionNoticeRun').onclick = () => batchReparse(ids, true);
   const dismiss = $('#invoiceRecognitionNoticeDismiss');
   dismiss.onclick = async () => {
@@ -7792,14 +7792,18 @@ async function batchReparse(entryIds, fromNotice = false) {
 
   const invoice = preview.invoice || {};
   const payment = preview.payment || {};
+  const newer = Number(invoice.newer || 0);
+  const pending = Array.isArray(invoice.pending_ids) ? invoice.pending_ids.length : Number(invoice.pending || 0);
   const body = el('div');
   body.innerHTML = `
     <div class="recognition-choice-list">
       <label class="recognition-choice${invoice.total ? '' : ' disabled'}">
-        <input type="checkbox" id="recognizeInvoice" ${invoice.pending ? 'checked' : ''} ${invoice.total ? '' : 'disabled'}/>
-        <span><b>发票</b><small>${invoice.total ? `${invoice.pending || 0} 张待识别${invoice.current ? `，${invoice.current} 张已处理` : ''}` : '所选条目没有发票文件'}</small></span>
+        <input type="checkbox" id="recognizeInvoice" ${pending || newer ? 'checked' : ''} ${invoice.total ? '' : 'disabled'}/>
+        <span><b>发票</b><small>${invoice.total ? `${pending} 张待识别${invoice.current ? `，${invoice.current} 张已处理` : ''}${newer ? `，${newer} 张由更新方法处理，默认跳过` : ''}` : '所选条目没有发票文件'}</small></span>
       </label>
     </div>
+    ${newer ? `<p class="hint">部分结果来自更新的识别方法，建议先检查软件更新。</p>
+      <label class="recognition-choice"><input type="checkbox" id="recognizeNewer"/><span>仍用本机方法重新识别这 ${newer} 张发票</span></label>` : ''}
     <div class="cloud-settings-line">在本机重新读取发票文件，不联网、不计费。${payment.total && cloudRecognitionVisible() ? '付款截图请用「云识别」识别。' : ''}</div>`;
 
   const runBtn = mkBtn('开始识别', 'primary', async () => {
@@ -7808,13 +7812,14 @@ async function batchReparse(entryIds, fromNotice = false) {
     runBtn.textContent = '识别中…';
     const progress = taskProgress(`本机重新识别发票 0/${ids.length} 条`);
     try {
-      const result = { processed: 0, resolved: 0, remaining: 0, failed: [], results: [], skipped_current: 0 };
+      const result = { processed: 0, resolved: 0, remaining: 0, failed: [], results: [], skipped_current: 0, skipped_newer: 0 };
+      const forceNewer = !!body.querySelector('#recognizeNewer')?.checked;
       for (let index = 0; index < ids.length; index++) {
         progress.update(`本机重新识别发票 ${index + 1}/${ids.length} 条`);
         await new Promise((resolve) => setTimeout(resolve, 0));
-        const part = await Api.rerecognizeMaterials([ids[index]], ['invoice']);
+        const part = await Api.rerecognizeMaterials([ids[index]], ['invoice'], forceNewer);
         if (part.invoice) {
-          ['processed', 'resolved', 'remaining', 'skipped_current'].forEach((key) => {
+          ['processed', 'resolved', 'remaining', 'skipped_current', 'skipped_newer'].forEach((key) => {
             result[key] += Number(part.invoice[key] || 0);
           });
           result.failed.push(...(part.invoice.failed || []));
@@ -7828,6 +7833,7 @@ async function batchReparse(entryIds, fromNotice = false) {
       const succeeded = Math.max(0, result.processed - result.failed.length);
       if (succeeded) parts.push(`成功 ${succeeded} 张`);
       if (result.skipped_current) parts.push(`跳过 ${result.skipped_current} 张已是最新`);
+      if (result.skipped_newer) parts.push(`保留 ${result.skipped_newer} 张更新方法的结果`);
       if (result.failed.length) parts.push(`${result.failed.length} 张失败`);
       toast(parts.join('，') || '当前规则已处理，无需重复识别', result.failed.length ? 'err' : 'ok');
       if (result.failed.length) openReparseFailures(result.failed, labels);

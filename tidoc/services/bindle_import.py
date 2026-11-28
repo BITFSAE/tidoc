@@ -161,9 +161,13 @@ class _EntryRestorer:
         # 附件：从包里解出到新条目目录，重建记录
         dest_dir = self.attachments_repo.data_root.entry_dir(new_id)
         self.created_dirs.append(dest_dir)
+        invoice_digests_ok = True
+        has_invoice_attachment = False
         for att in e.get("attachments", []):
             arcname = f"attachments/{att['stored_path']}"
             if not storage._has_archive_member(zf, arcname):
+                if str(att.get("type") or "") in {"invoice_pdf", "invoice_xml"}:
+                    invoice_digests_ok = False
                 continue
             stored_name = Path(att["stored_path"]).name
             dest = dest_dir / stored_name
@@ -182,6 +186,10 @@ class _EntryRestorer:
             stored_role, role_revision, mapped_type = storage._import_material_mapping(
                 self.entries_repo, new_id, target_revision_id, att,
                 mapping if isinstance(mapping, dict) else {}, exchange_revision_id)
+            if mapped_type in {"invoice_pdf", "invoice_xml"}:
+                has_invoice_attachment = True
+                if not expected_digest or actual_digest != expected_digest:
+                    invoice_digests_ok = False
             # 识别结论只在文件没被改过时沿用。
             recognition = (storage._imported_payment_recognition(att, mapped_type)
                            if actual_digest == expected_digest else ("", "", "", ""))
@@ -195,6 +203,17 @@ class _EntryRestorer:
                  actual_digest, att.get("note", ""), att.get("added_at", self.now), stored_role, role_revision,
                  *recognition),
             )
+        # 发票原件逐字节一致时沿用来源的真实识别版本与指纹；文件改过或缺失就不认领。
+        if has_invoice_attachment and invoice_digests_ok and not self.inspected["tampered"]:
+            # 共享区没有包版本号，按当前格式处理。
+            package_version = int(
+                self.inspected.get("bindle_version") or storage.BINDLE_VERSION
+            )
+            version, fingerprint = storage._invoice_recognition_metadata(e)
+            if package_version >= 5 and version:
+                self.entries_repo.adopt_invoice_recognition(
+                    new_id, version, fingerprint, commit=False
+                )
         storage._retain_adapter_source(self.entries_repo, new_id, source_adapter)
         storage._merge_extension_data(self.entries_repo, new_id, source_adapter)
         return new_id
@@ -555,6 +574,7 @@ def import_bindle(
                         merge_decisions=entry_merge_decisions.get(entry_index),
                         removed_files=removed_files,
                         package_options=package_options,
+                        package_version=int(inspected.get("bindle_version") or 0),
                     )
                     inc_notes, _inc_tags = storage._entry_transfer_flags(package_options, e)
                     incoming_batch_note = str(e.get("batch_note") or "").strip() if inc_notes is not False else ""

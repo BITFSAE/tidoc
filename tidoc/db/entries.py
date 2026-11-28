@@ -34,6 +34,75 @@ VALUE_SOURCE_MANUAL = "manual"
 # local recognition logic or result contract changes.
 LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-11-28-3"
 PAYMENT_AI_RECOGNITION_VERSION = "payment-ai-2026-10-24"
+INVOICE_RECOGNITION_STATE_CURRENT = "current"
+INVOICE_RECOGNITION_STATE_OLDER = "older"
+INVOICE_RECOGNITION_STATE_NEWER = "newer"
+INVOICE_RECOGNITION_STATE_UNKNOWN = "unknown"
+INVOICE_RECOGNITION_STATE_CHANGED = "changed"
+INVOICE_RECOGNITION_STATE_MISSING = "missing"
+OUTDATED_INVOICE_RECOGNITION_STATES = frozenset({
+    INVOICE_RECOGNITION_STATE_OLDER,
+    INVOICE_RECOGNITION_STATE_UNKNOWN,
+    INVOICE_RECOGNITION_STATE_CHANGED,
+})
+_INVOICE_RECOGNITION_VERSION_PATTERN = re.compile(
+    r"^invoice-local-(\d{4})-(\d{2})-(\d{2})(?:-(\d+))?$"
+)
+
+
+def invoice_recognition_version_key(version: str) -> tuple[int, int, int, int] | None:
+    """日期 + 序号的可比较键；无法判断时返回 None，不把未知版本当作过期。"""
+    match = _INVOICE_RECOGNITION_VERSION_PATTERN.fullmatch(str(version or "").strip())
+    if not match:
+        return None
+    year, month, day, sequence = match.groups()
+    month_value, day_value = int(month), int(day)
+    try:
+        datetime(int(year), month_value, day_value)
+    except ValueError:
+        return None
+    return (int(year), month_value, day_value, int(sequence or 0))
+
+
+def compare_invoice_recognition_versions(
+    version: str, current: str | None = None
+) -> int | None:
+    """返回 -1 较旧 / 0 同版 / 1 较新；任一版本无法比较时返回 None。"""
+    left = invoice_recognition_version_key(version)
+    right = invoice_recognition_version_key(current if current is not None else LOCAL_INVOICE_RECOGNITION_VERSION)
+    if left is None or right is None:
+        return None
+    return (left > right) - (left < right)
+
+
+def invoice_recognition_state_for(
+    version: str,
+    fingerprint: str,
+    *,
+    has_invoice: bool,
+    current_fingerprint: str | None = None,
+    current_version: str | None = None,
+) -> str:
+    """按文件、版本和识别上下文判定条目的发票识别状态。
+
+    current_fingerprint 只在版本与当前规则同版时使用；调用方拿不到时按已变化处理，
+    宁可提示重新识别也不把来源不明的结果当成最新。
+    """
+    if not has_invoice:
+        return INVOICE_RECOGNITION_STATE_MISSING
+    value = str(version or "").strip()
+    if not value:
+        return INVOICE_RECOGNITION_STATE_UNKNOWN
+    comparison = compare_invoice_recognition_versions(value, current_version)
+    if comparison is None:
+        return INVOICE_RECOGNITION_STATE_UNKNOWN
+    if comparison < 0:
+        return INVOICE_RECOGNITION_STATE_OLDER
+    if comparison > 0:
+        return INVOICE_RECOGNITION_STATE_NEWER
+    if current_fingerprint is None or str(fingerprint or "") != current_fingerprint:
+        return INVOICE_RECOGNITION_STATE_CHANGED
+    return INVOICE_RECOGNITION_STATE_CURRENT
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
 LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "seller_tax_id", "invoice_date")
 # 阿里云 OCR 采用值写入关键信息时的留痕前缀（区别于人工修正）
@@ -293,9 +362,12 @@ class EntryRepo:
         return self._revision_cache[revision_id]
 
     def policy_context(self, entry_id):
-        from ..engine.models import PolicyContext
         row = self.db.conn.execute("SELECT scheme_revision_id FROM entries WHERE id=?", (entry_id,)).fetchone()
-        definition = self._definition(row[0]) if row and row[0] else None
+        return self._policy_context_for_revision(row[0] if row else "")
+
+    def _policy_context_for_revision(self, revision_id):
+        from ..engine.models import PolicyContext
+        definition = self._definition(revision_id) if revision_id else None
         if definition is None:
             from ..engine.validator import title_profiles
             return PolicyContext(tuple({"name":name,"tax_id":tax} for name,tax in title_profiles()))
@@ -304,6 +376,10 @@ class EntryRepo:
     def recognition_context(self, entry_id):
         from ..engine.models import RecognitionContext
         return RecognitionContext(self.policy_context(entry_id).titles)
+
+    def recognition_context_for_revision(self, revision_id):
+        from ..engine.models import RecognitionContext
+        return RecognitionContext(self._policy_context_for_revision(revision_id).titles)
 
     @staticmethod
     def _material_roles(definition):
@@ -650,6 +726,7 @@ class EntryRepo:
         modified_by_entry = self._modified_fields_map(entry_ids)
         attachments_by_entry = {entry_id: {} for entry_id in entry_ids}
         inspections_by_entry = {entry_id: [] for entry_id in entry_ids}
+        invoice_digests_by_entry = {entry_id: [] for entry_id in entry_ids}
         fields_by_entry = {entry_id: {} for entry_id in entry_ids}
         batches_by_entry = {entry_id: [] for entry_id in entry_ids}
         role_counts_by_entry = {entry_id: {} for entry_id in entry_ids}
@@ -665,8 +742,9 @@ class EntryRepo:
             for source in self.db.conn.execute(f'SELECT entry_id,payload_json FROM entry_adapter_sources WHERE entry_id IN ({placeholders})',batch_ids):
                 sources_by_entry[source['entry_id']].append(json.loads(source['payload_json']))
             attachment_rows = self.db.conn.execute(
-                f"SELECT entry_id, type, role_id,role_definition_revision_id, COUNT(*) c FROM attachments "
-                f"WHERE entry_id IN ({placeholders}) GROUP BY entry_id,type,role_id,role_definition_revision_id",
+                f"SELECT entry_id, type, role_id,role_definition_revision_id, sha256, COUNT(*) c FROM attachments "
+                f"WHERE entry_id IN ({placeholders}) "
+                f"GROUP BY entry_id,type,role_id,role_definition_revision_id, sha256",
                 batch_ids,
             ).fetchall()
             for row in self.db.conn.execute(
@@ -680,6 +758,10 @@ class EntryRepo:
                 by_type[row["type"]] = by_type.get(row["type"], 0) + row["c"]
                 key = (row["role_id"] or ("invoice" if row["type"] in ("invoice_pdf","invoice_xml") else row["type"]),row["role_definition_revision_id"])
                 role_counts_by_entry[row["entry_id"]][key] = role_counts_by_entry[row["entry_id"]].get(key,0) + row["c"]
+                if row["type"] in ("invoice_pdf", "invoice_xml"):
+                    invoice_digests_by_entry[row["entry_id"]].append(
+                        (row["type"], row["sha256"] or "")
+                    )
             for value_row in self.db.conn.execute(f"SELECT owner_id,scheme_id,package_id,field_id,value_json FROM extension_values WHERE scope='entry' AND owner_id IN ({placeholders})", batch_ids):
                 extensions_by_entry[value_row["owner_id"]][(value_row["scheme_id"],value_row["package_id"],value_row["field_id"])] = json.loads(value_row["value_json"])
 
@@ -723,9 +805,21 @@ class EntryRepo:
             entry["attachment_count"] = sum(by_type.values())
             entry["attachment_types"] = by_type
             entry["has_invoice"] = bool(by_type.get("invoice_pdf") or by_type.get("invoice_xml"))
-            entry["invoice_recognition_outdated"] = bool(
-                entry["has_invoice"]
-                and entry.get("recognition_version") != LOCAL_INVOICE_RECOGNITION_VERSION
+            invoice_digests = invoice_digests_by_entry[entry["id"]]
+            current_fingerprint = None
+            if invoice_digests:
+                current_fingerprint = (
+                    self.recognition_context_for_revision(entry.get("scheme_revision_id")).fingerprint
+                    + "|" + "|".join(f"{kind}:{digest}" for kind, digest in sorted(invoice_digests))
+                )
+            entry["invoice_recognition_state"] = invoice_recognition_state_for(
+                entry.get("recognition_version") or "",
+                entry.get("recognition_fingerprint") or "",
+                has_invoice=bool(invoice_digests),
+                current_fingerprint=current_fingerprint,
+            )
+            entry["invoice_recognition_outdated"] = (
+                entry["invoice_recognition_state"] in OUTDATED_INVOICE_RECOGNITION_STATES
             )
             entry["has_payment"] = bool(by_type.get("payment_screenshot"))
             entry["has_physical"] = bool(by_type.get("physical_image"))
@@ -997,7 +1091,9 @@ class EntryRepo:
             raise ValueError("不支持的税号字段。")
         return self.update_recognized_party_field(entry_id, field, value)
 
-    def update_recognized_party_field(self, entry_id: str, field: str, value: str) -> bool:
+    def update_recognized_party_field(
+        self, entry_id: str, field: str, value: str, *, commit: bool = True
+    ) -> bool:
         """Refresh locally recognized party data while preserving manual corrections."""
         if field not in {"buyer_name", "seller", "buyer_tax_id", "seller_tax_id"}:
             raise ValueError("不支持的购销方字段。")
@@ -1023,10 +1119,13 @@ class EntryRepo:
             "",
         )
         self._touch(entry_id)
-        self.db.conn.commit()
+        if commit:
+            self.db.conn.commit()
         return True
 
-    def fill_recognized_total(self, entry_id: str, value: Decimal) -> bool:
+    def fill_recognized_total(
+        self, entry_id: str, value: Decimal, *, commit: bool = True
+    ) -> bool:
         """Fill an unread total without replacing a saved or manually cleared value."""
         if "total" in self.human_modified_locked_fields(entry_id):
             return False
@@ -1039,10 +1138,13 @@ class EntryRepo:
         self.db.conn.execute("UPDATE entries SET total = ? WHERE id = ?", (new_value, entry_id))
         self._log_history(entry_id, f"{LOCAL_RECOGNITION_HISTORY_LABEL}total", row["total"] or "", new_value, "")
         self._touch(entry_id)
-        self.db.conn.commit()
+        if commit:
+            self.db.conn.commit()
         return True
 
-    def repair_recognized_title(self, entry_id: str, buyer_name: str) -> bool:
+    def repair_recognized_title(
+        self, entry_id: str, buyer_name: str, *, commit: bool = True
+    ) -> bool:
         """Repair product rows or detached punctuation copied into an old title."""
         entry = self.db.conn.execute(
             "SELECT title, title_profile_id, buyer_name, buyer_tax_id, scheme_revision_id "
@@ -1080,7 +1182,8 @@ class EntryRepo:
         )
         self._log_history(entry_id, f"{LOCAL_RECOGNITION_HISTORY_LABEL}title", title, buyer_name, "")
         self._touch(entry_id)
-        self.db.conn.commit()
+        if commit:
+            self.db.conn.commit()
         return True
 
     def human_modified_locked_fields(self, entry_id: str) -> set[str]:
@@ -1346,8 +1449,15 @@ class EntryRepo:
         source: str,
         check_status: str,
         check_message: str = "",
+        *,
+        commit: bool = True,
+        protect_manual_items: bool = False,
     ) -> None:
-        """用重新识别结果原子替换明细，同时保留用户修改过的条目级字段。"""
+        """用重新识别结果原子替换明细，同时保留用户修改过的条目级字段。
+
+        protect_manual_items=True 时，人工改过明细的条目保留现有明细，只更新
+        识别依据和校验结果，避免重新识别覆盖人工核对过的内容。
+        """
         exists = self.db.conn.execute(
             "SELECT check_message, EXISTS (SELECT 1 FROM field_history "
             "WHERE entry_id=entries.id AND field=?) AS manual_items "
@@ -1356,39 +1466,42 @@ class EntryRepo:
         if not exists:
             raise ValueError("条目不存在。")
 
-        with self.db.conn:
-            before_items = self._items(entry_id) if exists["manual_items"] else None
-            self.db.conn.execute("DELETE FROM items WHERE entry_id = ?", (entry_id,))
-            for ordinal, item in enumerate(items):
+        def apply() -> None:
+            manual_items = bool(exists["manual_items"])
+            keep_items = protect_manual_items and manual_items
+            before_items = self._items(entry_id) if manual_items and not keep_items else None
+            if not keep_items:
+                self.db.conn.execute("DELETE FROM items WHERE entry_id = ?", (entry_id,))
+                for ordinal, item in enumerate(items):
+                    self.db.conn.execute(
+                        """INSERT INTO items(entry_id, name, actual_name, unit, quantity,
+                           unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
+                        (
+                            entry_id,
+                            item.name,
+                            item.actual_name,
+                            item.unit,
+                            str(item.quantity) if item.quantity is not None else "",
+                            str(money(item.unit_price)),
+                            str(money(item.total)),
+                            item.spec,
+                            ordinal,
+                        ),
+                    )
+
+                if before_items is not None:
+                    self._log_history(entry_id, "[识别结果]items", item_snapshot(before_items),
+                                      item_snapshot(self._items(entry_id)), "")
+
+                # “实际物资名称”一旦被用户修改就不覆盖；仍为识别默认值时，
+                # 跟随新的第一条明细更新 origin/current。
+                first_name = items[0].actual_name if items else ""
                 self.db.conn.execute(
-                    """INSERT INTO items(entry_id, name, actual_name, unit, quantity,
-                       unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
-                    (
-                        entry_id,
-                        item.name,
-                        item.actual_name,
-                        item.unit,
-                        str(item.quantity) if item.quantity is not None else "",
-                        str(money(item.unit_price)),
-                        str(money(item.total)),
-                        item.spec,
-                        ordinal,
-                    ),
+                    """UPDATE entry_fields
+                          SET origin = ?, current = ?
+                        WHERE entry_id = ? AND field = 'actual_item_name' AND modified = 0""",
+                    (first_name, first_name, entry_id),
                 )
-
-            if before_items is not None:
-                self._log_history(entry_id, "[识别结果]items", item_snapshot(before_items),
-                                  item_snapshot(self._items(entry_id)), "")
-
-            # “实际物资名称”一旦被用户修改就不覆盖；仍为识别默认值时，
-            # 跟随新的第一条明细更新 origin/current。
-            first_name = items[0].actual_name if items else ""
-            self.db.conn.execute(
-                """UPDATE entry_fields
-                      SET origin = ?, current = ?
-                    WHERE entry_id = ? AND field = 'actual_item_name' AND modified = 0""",
-                (first_name, first_name, entry_id),
-            )
             payment_messages = self._payment_messages_from_text(exists["check_message"])
             combined_message = "；".join(filter(None, [check_message, *payment_messages]))
             combined_status = (
@@ -1400,7 +1513,13 @@ class EntryRepo:
                     WHERE id = ?""",
                 (source, combined_status, combined_message, _now(), entry_id),
             )
-        self.recompute_status(entry_id)
+
+        if commit:
+            with self.db.conn:
+                apply()
+        else:
+            apply()
+        self.recompute_status(entry_id, commit=commit)
 
     @staticmethod
     def _payment_messages_from_text(message: str) -> list[str]:
@@ -1415,13 +1534,16 @@ class EntryRepo:
         ).fetchone()
         return self._payment_messages_from_text(row["check_message"] if row else "")
 
-    def set_invoice_evidence(self, entry_id: str, parsed: ParsedInvoice) -> None:
+    def set_invoice_evidence(
+        self, entry_id: str, parsed: ParsedInvoice, *, commit: bool = True
+    ) -> None:
         """Replace evidence only after reading the original invoice again."""
         self.db.conn.execute(
             "UPDATE entries SET recognition_data = ? WHERE id = ?",
             (json.dumps(parsed.to_dict(), ensure_ascii=False), entry_id),
         )
-        self.db.conn.commit()
+        if commit:
+            self.db.conn.commit()
 
     def parsed_for_check(self, entry_id: str, *, items=None) -> ParsedInvoice:
         """Combine current authoritative values with the original parser evidence."""
@@ -1452,7 +1574,29 @@ class EntryRepo:
         ).fetchall()
         return self.recognition_context(entry_id).fingerprint + "|" + "|".join(f"{row['type']}:{row['sha256'] or ''}" for row in rows)
 
-    def mark_invoice_recognized(self, entry_id: str) -> None:
+    def invoice_recognition_state(self, entry_id: str) -> str:
+        """current / older / newer / unknown / changed / missing（没有发票原件）。"""
+        has_invoice = self.db.conn.execute(
+            "SELECT 1 FROM attachments WHERE entry_id = ? "
+            "AND type IN ('invoice_pdf', 'invoice_xml') LIMIT 1",
+            (entry_id,),
+        ).fetchone()
+        row = self.db.conn.execute(
+            "SELECT recognition_version, recognition_fingerprint FROM entries WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        if not row:
+            return INVOICE_RECOGNITION_STATE_MISSING
+        return invoice_recognition_state_for(
+            row["recognition_version"] or "",
+            row["recognition_fingerprint"] or "",
+            has_invoice=bool(has_invoice),
+            current_fingerprint=(
+                self.invoice_recognition_fingerprint(entry_id) if has_invoice else None
+            ),
+        )
+
+    def mark_invoice_recognized(self, entry_id: str, *, commit: bool = True) -> None:
         self.db.conn.execute(
             """UPDATE entries SET recognition_version = ?, recognition_fingerprint = ?
                 WHERE id = ?""",
@@ -1462,25 +1606,43 @@ class EntryRepo:
                 entry_id,
             ),
         )
-        self.db.conn.commit()
+        if commit:
+            self.db.conn.commit()
 
-    def clear_invoice_recognition(self, entry_id: str) -> None:
+    def clear_invoice_recognition(self, entry_id: str, *, commit: bool = True) -> None:
         self.db.conn.execute(
             "UPDATE entries SET recognition_version = '', recognition_fingerprint = '' WHERE id = ?",
             (entry_id,),
         )
-        self.db.conn.commit()
+        if commit:
+            self.db.conn.commit()
 
-    def invoice_recognition_current(self, entry_id: str) -> bool:
+    def adopt_invoice_recognition(
+        self, entry_id: str, version: str, fingerprint: str, *, commit: bool = True
+    ) -> bool:
+        """沿用来源的识别版本与指纹；只有值确实变化时才写入。"""
+        value = str(version or "").strip()
+        digest = str(fingerprint or "").strip()
+        if not value or not digest:
+            return False
         row = self.db.conn.execute(
             "SELECT recognition_version, recognition_fingerprint FROM entries WHERE id = ?",
             (entry_id,),
         ).fetchone()
-        return bool(
-            row
-            and row["recognition_version"] == LOCAL_INVOICE_RECOGNITION_VERSION
-            and row["recognition_fingerprint"] == self.invoice_recognition_fingerprint(entry_id)
+        if not row:
+            return False
+        if (row["recognition_version"] or "") == value and (row["recognition_fingerprint"] or "") == digest:
+            return False
+        self.db.conn.execute(
+            "UPDATE entries SET recognition_version = ?, recognition_fingerprint = ? WHERE id = ?",
+            (value, digest, entry_id),
         )
+        if commit:
+            self.db.conn.commit()
+        return True
+
+    def invoice_recognition_current(self, entry_id: str) -> bool:
+        return self.invoice_recognition_state(entry_id) == INVOICE_RECOGNITION_STATE_CURRENT
 
     def has_imported_payment_recognition(self, entry_id: str) -> bool:
         """条目是否带有随绑定包导入、且与当前规则一致的付款截图识别结论。"""

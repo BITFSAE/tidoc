@@ -90,7 +90,105 @@ SHIM = """<script>(function () {
     isolate(pickCard(title).cloneNode(true), 20, 756);
   }
 
+  var hubShot = %(hub_shot)s;
+  function hubReady(done) {
+    until(function () {
+      return HubUI.isConnected() && State.entries.some(function (entry) { return entry.id === hubShot.entryIds[0]; });
+    }, done);
+  }
+  function hubSpace(action, done) {
+    hubReady(function () {
+      document.getElementById("hubBtn").click();
+      until(function () {
+        return document.querySelector('[data-hub-' + action + '="' + hubShot.spaceId + '"]');
+      }, done);
+    });
+  }
+  function hubPull(done) {
+    hubSpace("pull", function (button) {
+      button.click();
+      until(function () { return document.querySelector(".bindle-entry-row"); }, done);
+    });
+  }
+  function hubDetail(reviewState) {
+    openEntryDetail(hubShot.entryIds[0]);
+    until(function () {
+      return document.querySelector(".hub-detail-bar.is-" + reviewState);
+    }, function () {
+      // 同步后等完成提示退场，再截本机详情。
+      settle(reviewState === "needs_fix" ? 3200 : 650);
+    });
+  }
+  function hubUpload(stop) {
+    hubReady(function () {
+      if (stop) {
+        // 第 3 条已经发出后点击「停止上传」，第 4 条留在队列。
+        var push = Api.hubPushEntries;
+        Api.hubPushEntries = function (spaceId, ids, name, planId) {
+          var request = push(spaceId, ids, name, planId);
+          if (ids[0] === hubShot.entryIds[2]) {
+            document.querySelector(".modal-foot .ghost").click();
+          }
+          return request;
+        };
+      }
+      hubShot.entryIds.forEach(function (id) { selectEntryFromCard(id, false); });
+      document.getElementById("batchHubPushBtn").click();
+      until(function () { return document.querySelector("#hubPushSpace"); }, function () {
+        document.querySelector(".modal-foot .primary").click();
+        until(function () { return document.querySelector(".hub-push-result"); }, settle);
+      });
+    });
+  }
+
   var scenes = {
+    "hub-workspace": function () { hubSpace("view", settle); },
+    "hub-entries": function () {
+      hubSpace("view", function (button) {
+        button.click();
+        until(function () { return document.querySelector(".hub-entry-table tbody tr"); }, settle);
+      });
+    },
+    "hub-before-pull": function () { hubReady(function () { hubDetail("submitted"); }); },
+    "hub-pull-preview": function () {
+      hubPull(function () {
+        until(function () {
+          return Array.from(document.querySelectorAll(".bindle-entry-row")).some(function (row) {
+            return row.textContent.includes("示例五金商行") && row.textContent.includes("审核有更新") &&
+              row.textContent.includes("待修改");
+          });
+        }, settle);
+      });
+    },
+    "hub-item-diff": function () {
+      hubPull(function (row) {
+        row.querySelector("[data-bind-entry-compare]").click();
+        until(function () {
+          var diff = row.querySelector(".bindle-entry-merge:not(.hidden) .bindle-line-diff");
+          return diff?.textContent.includes("数量") && diff.textContent.includes("¥3.60") ? diff : null;
+        }, function (diff) {
+          isolate(diff.closest(".bindle-merge-item").cloneNode(true), 20, 740);
+          settle();
+        });
+      });
+    },
+    "hub-after-pull": function () {
+      hubPull(function (row) {
+        var modal = row.closest(".modal");
+        var button = modal.querySelector(".modal-foot .primary");
+        button.click();
+        until(function () { return button.textContent.indexOf("确认") === 0 && !button.disabled; }, function () {
+          button.click();
+          until(function () {
+            return State.entries.some(function (entry) {
+              return entry.id === hubShot.entryIds[0] && entry.hub?.review_state === "needs_fix";
+            });
+          }, function () { hubDetail("needs_fix"); });
+        });
+      });
+    },
+    "hub-upload-stopped": function () { hubUpload(true); },
+    "hub-upload-retry": function () { hubUpload(false); },
     "check-menu": function () {
       until(function () { return pickCard("锂电池组"); }, function (card) {
         var entry = State.entries.find(function (item) { return item.id === card.dataset.entryId; });
@@ -365,7 +463,7 @@ def _update_status(core_version: str, print_version: str, ocr_version: str) -> d
     }
 
 
-def make_server(api, sprite_titles, sprite_heights, sprite_width, *, bindle_path="", bindle_batch_paths=(), import_paths=()) -> ThreadingHTTPServer:
+def make_server(api, sprite_titles, sprite_heights, sprite_width, *, bindle_path="", bindle_batch_paths=(), import_paths=(), hub_shot=None) -> ThreadingHTTPServer:
     from tidoc import __version__
     from tidoc_ocr import __version__ as ocr_version
     from tidoc_print import __version__ as print_version
@@ -382,6 +480,7 @@ def make_server(api, sprite_titles, sprite_heights, sprite_width, *, bindle_path
         "bindle_batch_paths": json.dumps([str(path) for path in bindle_batch_paths], ensure_ascii=False),
         "import_paths": json.dumps([str(path) for path in import_paths], ensure_ascii=False),
         "import_label": json.dumps(f"{len(import_paths)} 个文件", ensure_ascii=False),
+        "hub_shot": json.dumps(hub_shot),
     }
 
     class Handler(BaseHTTPRequestHandler):

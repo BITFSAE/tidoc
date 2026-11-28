@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -110,6 +111,19 @@ CREATE TABLE IF NOT EXISTS entry_revisions (
 
 CREATE INDEX IF NOT EXISTS idx_entry_revisions_entry ON entry_revisions(entry_id);
 
+CREATE TABLE IF NOT EXISTS push_receipts (
+    actor_user_id   TEXT NOT NULL REFERENCES users(id),
+    space_id        TEXT NOT NULL REFERENCES spaces(id),
+    submission_id   TEXT NOT NULL,
+    source_entry_id TEXT NOT NULL,
+    entry_id        TEXT NOT NULL REFERENCES space_entries(id) ON DELETE CASCADE,
+    result_json     TEXT NOT NULL,
+    created_entry   INTEGER NOT NULL,
+    PRIMARY KEY (actor_user_id, space_id, submission_id)
+);
+CREATE INDEX IF NOT EXISTS idx_push_receipts_source
+    ON push_receipts(actor_user_id, space_id, source_entry_id);
+
 CREATE TABLE IF NOT EXISTS invoice_registry (
     dedup_key     TEXT PRIMARY KEY,
     space_id      TEXT NOT NULL REFERENCES spaces(id),
@@ -152,6 +166,16 @@ def _sanitize_payload(payload: Any) -> dict:
     cleaned = dict(payload)
     cleaned.pop("payees", None)
     return cleaned
+
+
+def _content_fingerprint(profile: dict, payload: dict, blob_shas: list[str]) -> str:
+    content = {
+        "profile": profile,
+        "payload": {key: value for key, value in payload.items() if key != "updated_at"},
+        "blob_shas": blob_shas,
+    }
+    encoded = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class HubDB:
@@ -561,7 +585,22 @@ class HubDB:
             "updated_at": row["updated_at"],
         }
 
-    def list_space_entries(self, user: dict, space_id: str, *, include_withdrawn: bool = True) -> tuple[dict, list[dict]]:
+    @staticmethod
+    def _entry_summary(row) -> dict:
+        payload = json.loads(row["payload_json"])
+        return {
+            "invoice_no": row["invoice_no"] or payload.get("invoice_no") or "",
+            "seller": payload.get("seller") or "",
+            "title": payload.get("title") or "",
+            "total": payload.get("total", ""),
+            "owner_name": row["owner_name"] or "",
+            "review_state": row["review_state"] or "",
+            "review_note": row["review_note"] or "",
+        }
+
+    def list_space_entries(
+        self, user: dict, space_id: str, *, include_withdrawn: bool = True, summary: bool = False,
+    ) -> tuple[dict, list[dict]]:
         with self._lock:
             space = self.conn.execute("SELECT * FROM spaces WHERE id = ?", (space_id,)).fetchone()
             if not space:
@@ -573,11 +612,13 @@ class HubDB:
                 params.append(user["id"])
             if not include_withdrawn:
                 where.append("review_state <> 'withdrawn'")
+            columns = "invoice_no, owner_name, review_state, review_note, payload_json" if summary else "*"
             rows = self.conn.execute(
-                f"SELECT * FROM space_entries WHERE {' AND '.join(where)} ORDER BY updated_at DESC",
+                f"SELECT {columns} FROM space_entries WHERE {' AND '.join(where)} ORDER BY updated_at DESC",
                 params,
             ).fetchall()
-            return self._space_dict(space, None), [self._entry_dict(r) for r in rows]
+            serialize = self._entry_summary if summary else self._entry_dict
+            return self._space_dict(space, None), [serialize(r) for r in rows]
 
     def get_space_entry(self, user: dict, space_id: str, entry_id: str) -> dict:
         with self._lock:
@@ -591,8 +632,46 @@ class HubDB:
                 raise HubDbError("无权查看其他成员的条目。", status=403, code="forbidden")
             return self._entry_dict(row)
 
+    def upload_state(self, user: dict, space_id: str, entry_ids: list[str]) -> dict:
+        with self._lock:
+            space = self.conn.execute("SELECT status FROM spaces WHERE id = ?", (space_id,)).fetchone()
+            if not space:
+                raise HubDbError("共享空间不存在。", status=404, code="space_not_found")
+            admin = user["role"] == "admin"
+            if not admin and space["status"] != "active":
+                raise HubDbError("该共享空间已截止或归档，无法继续上传。", status=423, code="space_closed")
+            order = ",".join("?" for _ in entry_ids)
+            owner = "" if admin else " AND owner_user_id = ?"
+            params = [space_id, *entry_ids]
+            if not admin:
+                params.append(user["id"])
+            rows = self.conn.execute(
+                f"""SELECT id, revision, review_state, profile_json, payload_json, blob_shas_json
+                      FROM space_entries WHERE space_id = ? AND id IN ({order}){owner}""",
+                params,
+            ).fetchall()
+        states = {}
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            shas = json.loads(row["blob_shas_json"])
+            states[row["id"]] = {
+                "revision": row["revision"], "review_state": row["review_state"],
+                "fingerprint": _content_fingerprint(json.loads(row["profile_json"]), payload, shas),
+                "blob_shas": shas,
+            }
+        return {"entries": states}
+
     def push_entry(self, user: dict, space_id: str, body: dict) -> tuple[dict, bool]:
+        submission_id = str(body.get("submission_id") or "")
+        if submission_id:
+            request = {key: value for key, value in body.items() if key != "submission_id"}
+            encoded = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if submission_id != hashlib.sha256(encoded).hexdigest():
+                raise HubDbError("提交标识与条目内容不匹配。", status=400, code="invalid_submission")
         payload = _sanitize_payload(body.get("payload"))
+        source_entry_id = str(payload.get("id") or "") if submission_id else ""
+        if not re.fullmatch(r"[0-9a-f]{32}", source_entry_id):
+            source_entry_id = ""
         snapshot_digest = str(body.get("snapshot_digest") or "").strip().lower()
         if not snapshot_digest or len(snapshot_digest) > 128:
             raise HubDbError("缺少有效的条目快照摘要。", status=400, code="invalid_digest")
@@ -618,10 +697,35 @@ class HubDB:
         now = _now_iso()
         dedup = _dedup_key(invoice_no, invoice_sha256)
 
-        with self._lock:
+        with self._lock, self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
             space = self.conn.execute("SELECT * FROM spaces WHERE id = ?", (space_id,)).fetchone()
             if not space:
                 raise HubDbError("共享空间不存在。", status=404, code="not_found")
+            if submission_id:
+                receipt = self.conn.execute(
+                    """SELECT result_json, created_entry FROM push_receipts
+                        WHERE actor_user_id = ? AND space_id = ? AND submission_id = ?""",
+                    (user["id"], space_id, submission_id),
+                ).fetchone()
+                if receipt:
+                    entry = json.loads(receipt["result_json"])
+                    if user["role"] != "admin" and entry["owner_user_id"] != user["id"]:
+                        raise HubDbError("无权查看其他成员的条目。", status=403, code="forbidden")
+                    live = self.conn.execute(
+                        "SELECT * FROM space_entries WHERE id = ? AND space_id = ?", (entry["id"], space_id)
+                    ).fetchone()
+                    if live is None:
+                        raise HubDbError("共享区中未找到对应条目。", status=404, code="not_found")
+                    if user["role"] != "admin" and live["owner_user_id"] != user["id"]:
+                        raise HubDbError("无权查看其他成员的条目。", status=403, code="forbidden")
+                    if any(live[key] != entry[key] for key in ("revision", "review_state", "review_note")):
+                        raise HubDbError(
+                            "共享区在上次提交后已有更新，请先拉取合并后再上传。",
+                            status=409, code="revision_conflict",
+                            extra={"server_revision": live["revision"], "server_entry": self._entry_dict(live)},
+                        )
+                    return entry, bool(receipt["created_entry"])
             if user["role"] != "admin" and space["status"] != "active":
                 raise HubDbError("该共享空间已截止或归档，无法继续上传。", status=423, code="space_closed")
 
@@ -633,6 +737,34 @@ class HubDB:
                 ).fetchone()
                 if not existing:
                     raise HubDbError("共享区中未找到对应条目。", status=404, code="not_found")
+            elif source_entry_id:
+                existing = self.conn.execute(
+                    """SELECT entry.* FROM push_receipts receipt
+                         JOIN space_entries entry ON entry.id = receipt.entry_id
+                        WHERE receipt.actor_user_id = ? AND receipt.space_id = ? AND receipt.source_entry_id = ?
+                        ORDER BY receipt.rowid DESC LIMIT 1""",
+                    (user["id"], space_id, source_entry_id),
+                ).fetchone()
+
+            def record_result(entry_id: str, created: bool, *, unchanged: bool = False) -> tuple[dict, bool]:
+                if not submission_id:
+                    row = self.conn.execute("SELECT * FROM space_entries WHERE id = ?", (entry_id,)).fetchone()
+                    return self._entry_dict(row), created
+                row = self.conn.execute(
+                    """SELECT id, revision, owner_user_id, owner_name, review_state, review_note
+                         FROM space_entries WHERE id = ?""",
+                    (entry_id,),
+                ).fetchone()
+                result = dict(row)
+                if unchanged:
+                    result["_unchanged"] = True
+                self.conn.execute(
+                    """INSERT INTO push_receipts(actor_user_id, space_id, submission_id, source_entry_id,
+                                                  entry_id, result_json, created_entry) VALUES(?,?,?,?,?,?,?)""",
+                    (user["id"], space_id, submission_id, source_entry_id,
+                     entry_id, json.dumps(result, ensure_ascii=False), int(created)),
+                )
+                return result, created
 
             # Check global invoice registry for duplicates across all spaces / members
             if dedup:
@@ -667,6 +799,23 @@ class HubDB:
                         )
                         raise HubDbError(msg, status=409, code="duplicate_invoice")
 
+            if existing is not None:
+                if user["role"] != "admin":
+                    if existing["owner_user_id"] != user["id"]:
+                        raise HubDbError("无权修改其他成员的条目。", status=403, code="forbidden")
+                    if existing["review_state"] == "locked":
+                        raise HubDbError("该条目已被审核锁定，无法修改；如需更改请联系审核人解锁。", status=423, code="entry_locked")
+
+                current_rev = int(existing["revision"])
+                if base_revision != current_rev:
+                    raise HubDbError(
+                        f"共享区已有更新（当前版本 v{current_rev}，你的基线为 v{base_revision}），请先拉取合并后再上传。",
+                        status=409,
+                        code="revision_conflict",
+                        extra={"server_revision": current_rev, "server_entry": self._entry_dict(existing)},
+                    )
+
+
             # Verify caller possesses every referenced blob (either uploaded by caller OR already bound to this entry)
             existing_blob_keys: dict[str, str] = (
                 json.loads(existing["blob_keys_json"] or "{}") if existing is not None else {}
@@ -697,20 +846,18 @@ class HubDB:
                     )
 
             if existing is not None:
-                if user["role"] != "admin":
-                    if existing["owner_user_id"] != user["id"]:
-                        raise HubDbError("无权修改其他成员的条目。", status=403, code="forbidden")
-                    if existing["review_state"] == "locked":
-                        raise HubDbError("该条目已被审核锁定，无法修改；如需更改请联系审核人解锁。", status=423, code="entry_locked")
-
-                current_rev = int(existing["revision"])
-                if base_revision != current_rev:
-                    raise HubDbError(
-                        f"共享区已有更新（当前版本 v{current_rev}，你的基线为 v{base_revision}），请先拉取合并后再上传。",
-                        status=409,
-                        code="revision_conflict",
-                        extra={"server_revision": current_rev, "server_entry": self._entry_dict(existing)},
-                    )
+                # Prepared upload state is only a hint. Decide no-op under the same
+                # write lock as revision checks so remote review/content changes stay visible.
+                if (submission_id and body.get("skip_unchanged") is True
+                        and req_review_state is None and req_review_note is None
+                        and existing["review_state"] not in ("needs_fix", "withdrawn")
+                        and invoice_no == existing["invoice_no"]
+                        and invoice_sha256 == existing["invoice_sha256"]
+                        and snapshot_digest == existing["snapshot_digest"]
+                        and _content_fingerprint(profile, payload, blob_shas) == _content_fingerprint(
+                            json.loads(existing["profile_json"]), json.loads(existing["payload_json"]),
+                            json.loads(existing["blob_shas_json"]))):
+                    return record_result(existing["id"], False, unchanged=True)
 
                 # Store ancestors NEWEST-FIRST so entry_merge.find_common_base picks the latest common base.
                 old_ancestors = json.loads(existing["ancestors_json"] or "[]")
@@ -769,9 +916,7 @@ class HubDB:
                      next_state, next_note, now),
                 )
                 self.conn.execute("UPDATE spaces SET updated_at = ? WHERE id = ?", (now, space_id))
-                self.conn.commit()
-                updated = self.conn.execute("SELECT * FROM space_entries WHERE id = ?", (existing["id"],)).fetchone()
-                return self._entry_dict(updated), False
+                return record_result(existing["id"], False)
 
             # Create new entry (ancestors newest-first)
             eid = uuid.uuid4().hex
@@ -808,9 +953,7 @@ class HubDB:
                 (eid, snapshot_digest, user["id"], user["name"], init_state, init_note, now),
             )
             self.conn.execute("UPDATE spaces SET updated_at = ? WHERE id = ?", (now, space_id))
-            self.conn.commit()
-            created = self.conn.execute("SELECT * FROM space_entries WHERE id = ?", (eid,)).fetchone()
-            return self._entry_dict(created), True
+            return record_result(eid, True)
 
     def review_entry(
         self,

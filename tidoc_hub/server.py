@@ -19,6 +19,7 @@ from .storage import BlobStore, CosBlobStore, LocalBlobStore, validate_sha256
 
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_BLOB_BYTES = 50 * 1024 * 1024
+MAX_BLOB_BATCH = 8
 JOIN_RATE_WINDOW = 600
 JOIN_RATE_LIMIT = 20
 
@@ -26,6 +27,7 @@ RE_SPACE = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)$")
 RE_SPACE_ENTRIES = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/entries$")
 RE_SPACE_ENTRY = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/entries/([a-zA-Z0-9_-]+)$")
 RE_SPACE_PUSH = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/entries/push$")
+RE_SPACE_UPLOAD_STATE = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/entries/upload-state$")
 RE_SPACE_REVIEW = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/entries/([a-zA-Z0-9_-]+)/review$")
 RE_SPACE_WITHDRAW = re.compile(r"^/api/v1/spaces/([a-zA-Z0-9_-]+)/entries/([a-zA-Z0-9_-]+)/withdraw$")
 RE_INVITE_REVOKE = re.compile(r"^/api/v1/admin/invites/([a-zA-Z0-9_-]+)/revoke$")
@@ -104,6 +106,8 @@ class HubServer(ThreadingHTTPServer):
 
 class _HubHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    disable_nagle_algorithm = True
+    timeout = 120
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return
@@ -130,11 +134,15 @@ class _HubHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Robots-Tag", "noindex, nofollow")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
     def _send_error(self, status: int, message: str, *, code: str = "", extra: dict | None = None) -> None:
+        # Rejected POSTs may still have an unread body; do not reuse that connection.
+        self.close_connection = True
         payload: dict[str, Any] = {"ok": False, "error": message}
         if code:
             payload["code"] = code
@@ -187,6 +195,51 @@ class _HubHandler(BaseHTTPRequestHandler):
             raise HubDbError("需要管理员权限。", status=403, code="forbidden")
         return user
 
+    def _presign_upload(self, user: dict, item: dict) -> dict:
+        sha = validate_sha256(item.get("sha256", ""))
+        size_bytes = int(item.get("size_bytes") or 0)
+        if size_bytes <= 0 or size_bytes > self.server.config.max_blob_bytes:
+            raise HubDbError("附件大小超出限制。", status=413, code="blob_too_large")
+        ctype = str(item.get("content_type") or "application/octet-stream").strip()
+        name = str(item.get("original_name") or "").strip()
+        db, store = self.server.db, self.server.store
+        storage_key = store.storage_key(user["id"], sha)
+        existing = db.get_blob(user["id"], sha)
+        if existing and int(existing["size_bytes"]) == size_bytes:
+            ready = existing["status"] == "ready"
+            if ready and store.mode == "cos":
+                return {"exists": True, "sha256": sha}
+            exists, actual_size, _etag = store.head_object(existing["storage_key"])
+            if exists and actual_size == size_bytes:
+                if not ready:
+                    db.mark_blob_ready(user["id"], sha, actual_size)
+                return {"exists": True, "sha256": sha}
+        db.upsert_pending_blob(user["id"], sha, size_bytes, ctype, name, storage_key)
+        signed = store.presign_put(storage_key, ctype, size_bytes=size_bytes, expires=300)
+        return {"exists": False, "sha256": sha, **signed}
+
+    def _confirm_upload(self, user: dict, item: dict) -> dict:
+        sha = validate_sha256(item.get("sha256", ""))
+        db = self.server.db
+        pending = db.get_blob(user["id"], sha)
+        if not pending:
+            raise HubDbError("未找到待确认的附件上传记录。", status=404, code="blob_not_found")
+        exists, size_bytes, _etag = self.server.store.head_object(pending["storage_key"])
+        if not exists:
+            raise HubDbError("存储中未找到已上传的文件，请重试上传。", status=400, code="blob_not_uploaded")
+        if size_bytes != pending["size_bytes"] or not 0 < size_bytes <= self.server.config.max_blob_bytes:
+            raise HubDbError("上传的文件大小与申请时不符。", status=400, code="blob_invalid_size")
+        rec = db.mark_blob_ready(user["id"], sha, size_bytes)
+        return {"sha256": sha, "size_bytes": rec["size_bytes"]}
+
+    def _upload_batch(self, user: dict, handler) -> None:
+        items = self._read_json().get("blobs")
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_BLOB_BATCH:
+            raise HubDbError("本次处理的附件数量超出限制。", status=400, code="invalid_blob_batch")
+        if not all(isinstance(item, dict) for item in items):
+            raise HubDbError("附件信息格式无效。", status=400, code="invalid_blob_batch")
+        self._send_json(200, {"ok": True, "blobs": [handler(user, item) for item in items]})
+
     def _dispatch(self, method: str) -> None:
         acquired = self.server.semaphore.acquire(blocking=True, timeout=15)
         if not acquired:
@@ -215,6 +268,7 @@ class _HubHandler(BaseHTTPRequestHandler):
                     "api_version": 1,
                     "storage": self.server.store.mode,
                     "max_blob_bytes": self.server.config.max_blob_bytes,
+                    "features": ["batch_blob_upload", "incremental_push"],
                 })
                 return
 
@@ -242,7 +296,7 @@ class _HubHandler(BaseHTTPRequestHandler):
                 user = self._require_auth()
                 include_archived = (qs.get("include_archived", ["0"])[0] == "1")
                 spaces = self.server.db.list_spaces(user, include_archived=include_archived)
-                self._send_json(200, {"ok": True, "spaces": spaces})
+                self._send_json(200, {"ok": True, "spaces": spaces, "features": ["batch_blob_upload", "incremental_push"]})
                 return
 
             if method == "POST" and rel_path == "/api/v1/spaces":
@@ -315,46 +369,21 @@ class _HubHandler(BaseHTTPRequestHandler):
 
             # Blobs (scoped per-user under blobs/<user_id>/<sha256>)
             if method == "POST" and rel_path == "/api/v1/blobs/presign-upload":
-                user = self._require_auth()
-                body = self._read_json()
-                sha = validate_sha256(body.get("sha256", ""))
-                size_bytes = int(body.get("size_bytes") or 0)
-                if size_bytes <= 0 or size_bytes > self.server.config.max_blob_bytes:
-                    raise HubDbError("附件大小超出限制。", status=413, code="blob_too_large")
-                ctype = str(body.get("content_type") or "application/octet-stream").strip()
-                orig_name = str(body.get("original_name") or "").strip()
-                storage_key = self.server.store.storage_key(user["id"], sha)
-                existing = self.server.db.get_blob(user["id"], sha)
-                if existing and existing["status"] == "ready" and int(existing["size_bytes"]) == size_bytes:
-                    exists_in_store = True
-                    if self.server.store.mode == "local":
-                        exists_in_store, _, _ = self.server.store.head_object(existing["storage_key"])
-                    if exists_in_store:
-                        self._send_json(200, {"ok": True, "exists": True, "sha256": sha})
-                        return
-                self.server.db.upsert_pending_blob(
-                    user["id"], sha, size_bytes, ctype, orig_name, storage_key
-                )
-                presigned = self.server.store.presign_put(
-                    storage_key, ctype, size_bytes=size_bytes, expires=300
-                )
-                self._send_json(200, {"ok": True, "exists": False, "sha256": sha, **presigned})
+                result = self._presign_upload(self._require_auth(), self._read_json())
+                self._send_json(200, {"ok": True, **result})
                 return
 
             if method == "POST" and rel_path == "/api/v1/blobs/confirm":
-                user = self._require_auth()
-                body = self._read_json()
-                sha = validate_sha256(body.get("sha256", ""))
-                pending = self.server.db.get_blob(user["id"], sha)
-                if not pending:
-                    raise HubDbError("未找到待确认的附件上传记录。", status=404, code="blob_not_found")
-                exists, size_bytes, _etag = self.server.store.head_object(pending["storage_key"])
-                if not exists:
-                    raise HubDbError("存储中未找到已上传的文件，请重试上传。", status=400, code="blob_not_uploaded")
-                if size_bytes <= 0 or size_bytes > self.server.config.max_blob_bytes:
-                    raise HubDbError("上传的文件大小不合法。", status=400, code="blob_invalid_size")
-                rec = self.server.db.mark_blob_ready(user["id"], sha, size_bytes)
-                self._send_json(200, {"ok": True, "sha256": sha, "size_bytes": rec["size_bytes"]})
+                result = self._confirm_upload(self._require_auth(), self._read_json())
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if method == "POST" and rel_path == "/api/v1/blobs/presign-upload-batch":
+                self._upload_batch(self._require_auth(), self._presign_upload)
+                return
+
+            if method == "POST" and rel_path == "/api/v1/blobs/confirm-batch":
+                self._upload_batch(self._require_auth(), self._confirm_upload)
                 return
 
             if method == "POST" and rel_path == "/api/v1/blobs/presign-download":
@@ -378,10 +407,22 @@ class _HubHandler(BaseHTTPRequestHandler):
             if m and method == "GET":
                 user = self._require_auth()
                 include_withdrawn = (qs.get("include_withdrawn", ["1"])[0] != "0")
+                summary = (qs.get("view", [""])[0] == "summary")
                 space, entries = self.server.db.list_space_entries(
-                    user, m.group(1), include_withdrawn=include_withdrawn
+                    user, m.group(1), include_withdrawn=include_withdrawn, summary=summary,
                 )
                 self._send_json(200, {"ok": True, "space": space, "entries": entries})
+                return
+
+            m = RE_SPACE_UPLOAD_STATE.match(rel_path)
+            if m and method == "POST":
+                user = self._require_auth()
+                ids = self._read_json().get("entry_ids")
+                if not isinstance(ids, list) or not 1 <= len(ids) <= 500 or not all(
+                    isinstance(eid, str) and re.fullmatch(r"[0-9a-f]{32}", eid) for eid in ids
+                ):
+                    raise HubDbError("待检查的条目标识无效。", status=400, code="invalid_entry_ids")
+                self._send_json(200, {"ok": True, **self.server.db.upload_state(user, m.group(1), ids)})
                 return
 
             m = RE_SPACE_PUSH.match(rel_path)
@@ -389,7 +430,8 @@ class _HubHandler(BaseHTTPRequestHandler):
                 user = self._require_auth()
                 body = self._read_json()
                 entry, created = self.server.db.push_entry(user, m.group(1), body)
-                self._send_json(200, {"ok": True, "entry": entry, "created": created})
+                unchanged = bool(entry.pop("_unchanged", False))
+                self._send_json(200, {"ok": True, "entry": entry, "created": created, "unchanged": unchanged})
                 return
 
             m = RE_SPACE_REVIEW.match(rel_path)

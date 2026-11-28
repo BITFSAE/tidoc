@@ -2,11 +2,12 @@
 
 用法（在仓库根目录）：
     python -m scripts.docs_screenshots [--out docs/public/images] [--chrome <浏览器路径>] [--only 名称 ...] [--no-og]
+    python -m scripts.docs_screenshots --out output/hub-review --no-og --only hub-workspace hub-entries hub-before-pull hub-pull-preview hub-after-pull hub-upload-stopped hub-upload-retry
 
 做法：在临时目录里建一份全新的数据，写入虚构条目（见 data.py），用本机 HTTP 服务把真实的
 tidoc/web 前端接到真实的 Api 上，再用无界面的 Chrome 或 Edge 按固定窗口大小截图。需要交互的
-窗口由 bridge.py 里的场景脚本打开并隔离。全程不读写真实的数据目录，也不联网（更新检查返回
-固定的离线结果，自动检查已关闭）。
+窗口由 bridge.py 里的场景脚本打开并隔离。全程不读写真实的数据目录，也不访问外部网络（更新检查返回
+固定的离线结果，自动检查已关闭；共享区场景只连接本机测试服务）。
 
 产物（--out 目录下）：
 - main-overview.png / main-overview-dark.png   主界面，浅色与深色，2400×1724（2x 无损）
@@ -29,6 +30,8 @@ tidoc/web 前端接到真实的 Api 上，再用无界面的 Chrome 或 Edge 按
 - status-views.png                            工具条、批次、状态视图和统计条
 - grouped-entries.png                         按报账人分组的通栏标题与批次统计
 - import-preview.png                          批量导入预览，含 XML+PDF、只有 PDF、付款截图和查验单
+- hub-entries.png / hub-pull-preview.png       共享条目列表与拉取预览
+- hub-upload-stopped.png                      停止上传后的进度与继续操作
 
 另生成 docs/public/og-image.png（1200×630，见 og.py），内容取自本次的深色主界面图。
 
@@ -44,6 +47,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -127,6 +131,17 @@ SHOTS = [
     Shot("status-views", scene="status-views", kind="isolate", full_width=True),
     Shot("grouped-entries", scene="grouped-entries", lossless=True),
     Shot("import-preview", scene="import-preview", kind="dialog", expect_width=880, size=(1200, 1600)),
+]
+
+HUB_SHOTS = [
+    Shot("hub-workspace", scene="hub-workspace", kind="dialog", expect_width=880),
+    Shot("hub-entries", scene="hub-entries", kind="dialog", expect_width=880),
+    Shot("hub-before-pull", scene="hub-before-pull", kind="dialog", expect_width=880, size=(1200, 700)),
+    Shot("hub-pull-preview", scene="hub-pull-preview", kind="dialog", expect_width=880),
+    Shot("hub-item-diff", scene="hub-item-diff", kind="isolate"),
+    Shot("hub-after-pull", scene="hub-after-pull", kind="dialog", expect_width=880, size=(1200, 700)),
+    Shot("hub-upload-stopped", scene="hub-upload-stopped", kind="dialog", expect_width=680),
+    Shot("hub-upload-retry", scene="hub-upload-retry", kind="dialog", expect_width=680),
 ]
 
 
@@ -214,11 +229,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="重新生成文档站界面截图和分享图")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="输出目录，默认 docs/public/images")
     parser.add_argument("--chrome", help="Chrome 或 Edge 可执行文件路径")
-    parser.add_argument("--only", nargs="+", choices=[shot.name for shot in SHOTS], help="只生成指定的图")
+    parser.add_argument("--only", nargs="+", choices=[shot.name for shot in SHOTS + HUB_SHOTS], help="只生成指定的图")
     parser.add_argument("--no-og", action="store_true", help="不重新生成 docs/public/og-image.png")
     args = parser.parse_args(argv)
     chrome = find_chrome(args.chrome)
-    shots = [shot for shot in SHOTS if not args.only or shot.name in args.only]
+    shots = [shot for shot in SHOTS + HUB_SHOTS if shot.name in args.only] if args.only else SHOTS + [
+        shot for shot in HUB_SHOTS if shot.name in {"hub-entries", "hub-pull-preview", "hub-upload-stopped"}
+    ]
 
     with tempfile.TemporaryDirectory(prefix="tidoc-shots-") as temp:
         temp = Path(temp)
@@ -234,46 +251,53 @@ def main(argv: list[str] | None = None) -> None:
         from . import data
         from .bridge import make_server
 
-        api = Api(str(temp / "data"))
-        # 关闭自动检查更新，截图过程不联网。
-        api.set_app_preference("tidoc.update.autoCheck", "0")
         print("写入虚构数据…")
-        data.seed(api, temp / "files")
-        bindle_path = data.seed_bindle_preview(api, temp / "files") if any(shot.scene == "bindle" for shot in shots) else ""
-        bindle_batch_paths = data.seed_bindle_batch(api, temp / "batch-bindles") if any(shot.scene == "bindle-batch" for shot in shots) else []
-        import_paths = data.seed_import_preview(temp / "import") if any(shot.scene == "import-preview" for shot in shots) else []
-        server = make_server(api, SPRITE_TITLES, SPRITE_HEIGHTS, SPRITE_WIDTH,
-                             bindle_path=bindle_path, bindle_batch_paths=bindle_batch_paths, import_paths=import_paths)
-        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        server = None
+        if any(shot not in HUB_SHOTS for shot in shots):
+            api = Api(str(temp / "data"))
+            # 关闭自动检查更新，截图过程不联网。
+            api.set_app_preference("tidoc.update.autoCheck", "0")
+            data.seed(api, temp / "files")
+            bindle_path = data.seed_bindle_preview(api, temp / "files") if any(shot.scene == "bindle" for shot in shots) else ""
+            bindle_batch_paths = data.seed_bindle_batch(api, temp / "batch-bindles") if any(shot.scene == "bindle-batch" for shot in shots) else []
+            import_paths = data.seed_import_preview(temp / "import") if any(shot.scene == "import-preview" for shot in shots) else []
+            server = make_server(api, SPRITE_TITLES, SPRITE_HEIGHTS, SPRITE_WIDTH,
+                                 bindle_path=bindle_path, bindle_batch_paths=bindle_batch_paths, import_paths=import_paths)
         # 首次使用：另一个空数据目录，前端会自己打开「选择报账方案」。
-        first_run_url = ""
         first_run_server = None
         if any(shot.scene == "first-run" for shot in shots):
             first_run_server = make_server(
                 Api(str(temp / "first-run-data")), SPRITE_TITLES, SPRITE_HEIGHTS, SPRITE_WIDTH
             )
-            first_run_url = f"http://127.0.0.1:{first_run_server.server_address[1]}/"
         args.out.mkdir(parents=True, exist_ok=True)
         try:
             for shot in shots:
-                target_url = first_run_url if shot.scene == "first-run" else url
-                target_server = first_run_server if shot.scene == "first-run" else server
+                target = nullcontext(first_run_server if shot.scene == "first-run" else server)
+                if shot in HUB_SHOTS:
+                    from . import hub_scenes
+
+                    target = hub_scenes.make_server(
+                        temp / shot.name, shot.scene, SPRITE_TITLES, SPRITE_HEIGHTS, SPRITE_WIDTH,
+                    )
                 final = args.out / f"{shot.name}.png"
-                for attempt in range(3):
-                    raw = temp / f"{shot.name}-{attempt}.png"
-                    target_server.scene_ready.clear()
-                    capture(chrome, target_url, shot, raw, browser_env, temp / f"chrome-{shot.name}-{attempt}")
-                    try:
-                        width, height = save(raw, final, shot)
-                    except CaptureRace as error:
-                        if attempt == 2:
-                            raise SystemExit(f"{shot.name}: {error}")
-                        print(f"  {shot.name} 未就绪，重新截图（{error}）")
-                        continue
-                    break
+                with target as target_server:
+                    url = f"http://127.0.0.1:{target_server.server_address[1]}/"
+                    for attempt in range(3):
+                        raw = temp / f"{shot.name}-{attempt}.png"
+                        target_server.scene_ready.clear()
+                        capture(chrome, url, shot, raw, browser_env, temp / f"chrome-{shot.name}-{attempt}")
+                        try:
+                            width, height = save(raw, final, shot)
+                        except CaptureRace as error:
+                            if attempt == 2:
+                                raise SystemExit(f"{shot.name}: {error}")
+                            print(f"  {shot.name} 未就绪，重新截图（{error}）")
+                            continue
+                        break
                 print(f"已生成 {final} {width}×{height}")
         finally:
-            server.shutdown()
+            if server is not None:
+                server.shutdown()
             if first_run_server is not None:
                 first_run_server.shutdown()
 

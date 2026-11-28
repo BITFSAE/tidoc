@@ -182,7 +182,10 @@ const HubUI = (() => {
       await openBindleImportPreview(`hub:${space.id}`, preview, {
         title: `从共享区拉取 · ${space.name}`,
         sourceLabel: `共享区 · ${space.name}`,
+        suggestedBatchName: space.name,
+        comparisonLabel: '共享区',
         sourceBanner: withdrawnBanner,
+        entryReviewLabel: (entry) => REVIEW_LABELS[entry.hub_meta?.review_state] || '审核意见已更新',
         confirmLabel: '同步到本机',
         progressText: '正在下载缺失材料并同步到本机…',
         busyText: '正在同步…',
@@ -194,6 +197,68 @@ const HubUI = (() => {
       progress.close();
       toast(e.message, 'err');
     }
+  }
+
+  async function openSpaceEntries(space) {
+    const body = el('div', '', `
+      <div class="form-row">
+        <label for="hubEntrySearch">搜索条目</label>
+        <input id="hubEntrySearch" type="search" placeholder="发票号码、销售方、抬头或提交人" disabled>
+      </div>
+      <div class="hub-entry-meta" role="status"></div>
+      <div class="hub-entry-results"></div>`);
+    const search = body.querySelector('input');
+    const status = body.querySelector('[role="status"]');
+    const results = body.querySelector('.hub-entry-results');
+    let entries = [];
+    const render = () => {
+      const query = search.value.trim().toLowerCase();
+      const rows = entries.filter((entry) => [entry.invoice_no, entry.seller, entry.title, entry.owner_name]
+        .some((value) => String(value || '').toLowerCase().includes(query)));
+      status.textContent = !entries.length ? '这个空间暂无可查看的条目。'
+        : query ? `显示 ${rows.length} / ${entries.length} 条` : `共 ${entries.length} 条`;
+      results.innerHTML = rows.length ? `
+        <table class="items-table hub-entry-table" aria-label="共享条目">
+          <thead><tr><th scope="col">发票</th><th scope="col">提交人</th><th scope="col">金额</th><th scope="col">状态</th></tr></thead>
+          <tbody>${rows.map((entry) => `
+            <tr>
+              <td><b>${esc(entry.seller || entry.title || '未命名条目')}</b>
+                ${entry.invoice_no ? `<div class="hub-entry-meta">${esc(entry.invoice_no)}</div>` : ''}
+              </td>
+              <td>${esc(entry.owner_name || '—')}</td>
+              <td class="num">${esc(fmtMoney(entry.total))}</td>
+              <td><span class="badge hub-${esc(entry.review_state?.replace('_', '-'))}">${esc(REVIEW_LABELS[entry.review_state] || '—')}</span>
+                ${entry.review_note ? `<div class="hub-entry-meta">${esc(entry.review_note)}</div>` : ''}
+              </td>
+            </tr>`).join('')}</tbody>
+        </table>` : (entries.length ? '<p class="hint">没有匹配的条目。</p>' : '');
+    };
+    const load = async () => {
+      refreshBtn.disabled = true;
+      search.disabled = true;
+      status.textContent = '正在读取共享条目…';
+      results.innerHTML = '';
+      try {
+        const res = await Api.hubListSpaceEntries(space.id);
+        entries = res.entries || [];
+        search.disabled = !entries.length;
+        render();
+      } catch (e) {
+        status.textContent = '读取共享条目失败。点击「刷新」重试。';
+        results.textContent = e.message;
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    };
+    search.oninput = render;
+    const refreshBtn = mkBtn('刷新', '', load);
+    const m = modal({
+      title: `共享条目 · ${space.name}`,
+      wide: true,
+      body,
+      footer: [mkBtn('返回空间列表', 'ghost', () => m.close()), refreshBtn],
+    });
+    await load();
   }
 
   async function openWorkspace() {
@@ -227,6 +292,7 @@ const HubUI = (() => {
               <div class="hub-space-stats">${badges}</div>
             </div>
             <div class="hub-space-actions">
+              <button type="button" class="btn small" data-hub-view="${esc(sp.id)}">查看条目</button>
               <button type="button" class="btn small primary" data-hub-pull="${esc(sp.id)}">拉取合并</button>
             </div>
           </div>`;
@@ -258,6 +324,12 @@ const HubUI = (() => {
       };
       body.querySelector('#hubRefreshSpaces').onclick = () => loadSpaces();
       body.querySelector('#hubOpenSettings').onclick = () => openSettings();
+      body.querySelectorAll('[data-hub-view]').forEach((btn) => {
+        btn.onclick = () => {
+          const space = spaces.find((item) => item.id === btn.dataset.hubView);
+          if (space) openSpaceEntries(space);
+        };
+      });
       body.querySelectorAll('[data-hub-pull]').forEach((btn) => {
         btn.onclick = () => {
           const sp = spaces.find((item) => item.id === btn.dataset.hubPull);
@@ -333,70 +405,139 @@ const HubUI = (() => {
       ? preferredSpaceId
       : (spaces.some((s) => s.id === state.last_space_id) ? state.last_space_id : spaces[0].id);
 
+    const labels = new Map(State.entries.map((entry) => [
+      entry.id, [entry.seller, entry.invoice_no].filter(Boolean).join(' · ') || entry.title,
+    ]));
     const body = el('div', 'hub-push-dialog');
     body.innerHTML = `
       <div class="form-row">
         <label for="hubPushSpace">上传到哪个空间</label>
         <select id="hubPushSpace">
-          ${spaces.map((sp) => `<option value="${esc(sp.id)}" ${sp.id === defaultSpaceId ? 'selected' : ''}>${esc(sp.name)}${sp.status === 'closed' ? '（已截止）' : ''}（当前 ${Number(sp.entry_count || 0)} 条）</option>`).join('')}
+          ${spaces.map((sp) => `<option value="${esc(sp.id)}" ${sp.id === defaultSpaceId ? 'selected' : ''}>${esc(sp.name)}${sp.status === 'closed' ? '（已截止）' : ''}</option>`).join('')}
         </select>
       </div>
-      <p class="hint">即将上传 <b>${ids.length}</b> 条报账条目及其材料（自动按文件摘要去重，仅上传服务器尚未保存的材料；本机收款账号和密钥不会上传）。</p>
+      <p class="hint">已选 <b>${ids.length}</b> 条。共享区已有的相同材料会跳过。本机收款账号和密钥留在本机。</p>
+      <div id="hubPushStatus" role="status"></div>
       <div id="hubPushResult"></div>`;
 
+    const select = body.querySelector('#hubPushSpace');
+    const status = body.querySelector('#hubPushStatus');
+    const box = body.querySelector('#hubPushResult');
+    const outcomes = new Map();
+    const groups = {
+      pushed: '已上传',
+      unchanged: '无需上传',
+      failed: '失败',
+      conflicts: '版本冲突',
+      duplicates: '重复发票',
+      locked: '已锁定',
+    };
+    let uploaded = 0;
+    let unchanged = 0;
     let busy = false;
-    let m;
+    let stopRequested = false;
+    let space;
+    const cancelBtn = mkBtn('取消', 'ghost', () => {
+      if (!busy) {
+        m.close();
+        return;
+      }
+      stopRequested = true;
+      cancelBtn.disabled = true;
+      status.textContent = '正在完成当前条目，随后停止。';
+    });
     const pushBtn = mkBtn('开始上传', 'primary', async () => {
       if (busy) return;
-      const select = body.querySelector('#hubPushSpace');
-      const spaceId = select.value;
-      const space = spaces.find((s) => s.id === spaceId);
+      space ||= spaces.find((s) => s.id === select.value);
+      if (!space) return;
+      const pending = ids.filter((id) => !outcomes.has(id) || outcomes.get(id).group === 'failed');
+      if (!pending.length) return;
+
       busy = true;
-      window.TidocUI?.setBusy(pushBtn, true, '上传中…');
-      const p = taskProgress(`正在上传 ${ids.length} 条到「${space?.name || ''}」…`);
+      stopRequested = false;
+      select.disabled = true;
+      closeBtn.disabled = true;
+      pushBtn.disabled = true;
+      pushBtn.textContent = '上传中…';
+      cancelBtn.textContent = '停止上传';
+      box.innerHTML = '';
+      status.textContent = '正在检查共享区中已有的条目…';
+      let prepared, prepareError = '';
       try {
-        const res = await Api.hubPushEntries(spaceId, ids, space?.name || '');
-        p.close();
-        await refreshEntries();
-        const hasIssues = (res.conflicts?.length || 0) + (res.duplicates?.length || 0) + (res.locked?.length || 0) + (res.failed?.length || 0);
-        if (!hasIssues) {
-          m.close();
-          onDone?.(res);
-          toast(res.message || '上传成功', 'ok');
-          return;
-        }
-        const issueItems = [
-          ...(res.conflicts || []).map((x) => `<li><b>版本冲突</b>：${esc(x.error)}</li>`),
-          ...(res.duplicates || []).map((x) => `<li><b>重复发票</b>：${esc(x.error)}</li>`),
-          ...(res.locked || []).map((x) => `<li><b>已锁定</b>：${esc(x.error)}</li>`),
-          ...(res.failed || []).map((x) => `<li><b>失败</b>：${esc(x.error)}</li>`),
-        ].join('');
-        const box = body.querySelector('#hubPushResult');
-        box.innerHTML = `<div class="diagnostic-section is-warning" style="margin-top:10px">
-          <b>${esc(res.message)}</b>
-          <ul class="diagnostic-list">${issueItems}</ul>
-          ${res.conflicts?.length && space ? '<button type="button" class="btn small primary" id="hubConflictPullNow" style="margin-top:6px">立即拉取合并</button>' : ''}
-        </div>`;
-        box.querySelector('#hubConflictPullNow')?.addEventListener('click', () => {
-          m.close();
-          openPullPreview(space);
-        });
-        toast(res.message, 'err');
+        prepared = await Api.hubPreparePush(space.id, pending);
       } catch (e) {
-        p.close();
-        toast(e.message, 'err');
-      } finally {
-        busy = false;
-        if (m.mask?.isConnected) window.TidocUI?.setBusy(pushBtn, false);
+        prepareError = e.message;
       }
+      // 停止请求截断后续提交，进行中的条目照常完成。
+      for (const [index, id] of pending.entries()) {
+        if (stopRequested || !prepared) break;
+        status.textContent = `正在处理本轮第 ${index + 1} / ${pending.length} 条 · 已上传 ${uploaded} / ${ids.length} 条${unchanged ? `，跳过 ${unchanged} 条` : ''}`;
+        try {
+          const res = await Api.hubPushEntries(space.id, [id], space.name, prepared.plan_id);
+          const group = Object.keys(groups).find((key) => res[key]?.length);
+          if (group === 'pushed') uploaded++;
+          if (group === 'unchanged') unchanged++;
+          outcomes.set(id, group
+            ? { ...res[group][0], group }
+            : { group: 'failed', error: '未收到这条记录的上传结果，请重试。' });
+        } catch (e) {
+          outcomes.set(id, { group: 'failed', error: e.message });
+          break;
+        }
+      }
+      const unprocessed = ids.length - outcomes.size;
+      const counts = { failed: 0, conflicts: 0, duplicates: 0, locked: 0 };
+      for (const { group } of outcomes.values()) {
+        if (group !== 'pushed' && group !== 'unchanged') counts[group]++;
+      }
+      const summary = [
+        uploaded || !unchanged ? `已上传 ${uploaded} 条` : '',
+        unchanged ? `无需上传 ${unchanged} 条` : '',
+        ...Object.keys(counts).filter((key) => counts[key]).map((key) => `${groups[key]} ${counts[key]} 条`),
+        unprocessed ? `未处理 ${unprocessed} 条` : '',
+      ].filter(Boolean).join('，');
+
+      cancelBtn.disabled = true;
+      status.textContent = '';
+      if (uploaded + unchanged === ids.length) {
+        m.close();
+        toast(summary, 'ok');
+      } else {
+        const issueItems = ids.map((id, i) => {
+          const item = outcomes.get(id);
+          if (!item || item.group === 'pushed' || item.group === 'unchanged') return '';
+          const label = labels.get(id) || `第 ${i + 1} 条`;
+          return `<li><b>${esc(label)} · ${groups[item.group]}</b><div>${esc(item.error)}</div></li>`;
+        }).join('');
+        box.innerHTML = `<div class="diagnostic-section is-warning hub-push-result">
+          <b role="status">${stopRequested && unprocessed ? '已停止。' : ''}${esc(summary)}。</b>
+          ${prepareError ? `<div>${esc(prepareError)}</div>` : ''}
+          ${issueItems ? `<ul class="diagnostic-list">${issueItems}</ul>` : ''}
+          ${counts.conflicts ? '<button type="button" class="btn small" id="hubConflictPullNow">立即拉取合并</button>' : ''}
+        </div>`;
+        box.querySelector('#hubConflictPullNow')?.addEventListener('click', () => openPullPreview(space));
+        const remaining = unprocessed + counts.failed;
+        pushBtn.classList.toggle('hidden', !remaining);
+        pushBtn.disabled = !remaining;
+        pushBtn.textContent = unprocessed ? `继续上传（${remaining} 条）` : `重试失败条目（${remaining} 条）`;
+        cancelBtn.textContent = '关闭';
+        cancelBtn.disabled = false;
+        closeBtn.disabled = false;
+        busy = false;
+        (remaining ? pushBtn : cancelBtn).focus();
+      }
+      try { await refreshEntries(); }
+      catch (e) { toast(e.message, 'err'); }
+      if (uploaded + unchanged === ids.length) onDone?.();
     });
 
-    m = modal({
+    const m = modal({
       title: '上传到共享区',
       guard: () => !busy,
       body,
-      footer: [mkBtn('取消', 'ghost', () => { if (!busy) m.close(); }), pushBtn],
+      footer: [cancelBtn, pushBtn],
     });
+    const closeBtn = m.mask.querySelector('.modal-close');
   }
 
   async function openReviewDialog(entry, { onDone } = {}) {

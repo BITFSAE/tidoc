@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import socket
+from uuid import uuid4
 
 from .api_shared import _bridge, _guard, mask_secret
 from .services import hub_sync
@@ -54,10 +55,13 @@ class HubApi:
         with self._api_lock:
             cfg = self._hub_config()
             token = self._hub_token()
-        url = str(cfg.get("server_url") or "").strip()
-        if not url or not token:
-            raise ValueError("尚未连接到团队共享区，请先在「设置 → 协同共享区」中填写服务器地址与邀请码。")
-        return hub_sync.HubClient(url, token)
+            url = str(cfg.get("server_url") or "").strip()
+            if not url or not token:
+                raise ValueError("尚未连接到团队共享区，请先在「设置 → 协同共享区」中填写服务器地址与邀请码。")
+            client = getattr(self, "_hub_transport", None)
+            if client is None or client.base_url != url or client.token != token:
+                client = self._hub_transport = hub_sync.HubClient(url, token)
+            return client
 
     def _hub_public_state(self) -> dict:
         with self._api_lock:
@@ -104,6 +108,7 @@ class HubApi:
         token = str(res["token"])
         with self._api_lock:
             self._hub_pull_cache = None
+            self._hub_push_plan = None
             self._save_hub_token(token)
             self._save_hub_config({
                 "server_url": url,
@@ -127,6 +132,7 @@ class HubApi:
         user = res["user"]
         with self._api_lock:
             self._hub_pull_cache = None
+            self._hub_push_plan = None
             self._save_hub_token(tok)
             self._save_hub_config({
                 "server_url": url,
@@ -157,6 +163,8 @@ class HubApi:
     @_guard
     def hub_disconnect(self):
         self._hub_pull_cache = None
+        self._hub_push_plan = None
+        self._hub_transport = None
         self._save_hub_token("")
         self._save_hub_config({})
         return {"hub": self._hub_public_state(), "message": "已断开共享区连接（本机数据不受影响）。"}
@@ -166,6 +174,24 @@ class HubApi:
         client = self._hub_client()
         spaces = client.list_spaces(include_archived=bool(include_archived))
         return {"spaces": spaces, "hub": self._hub_public_state()}
+
+    @_bridge
+    def hub_list_space_entries(self, space_id: str):
+        result = self._hub_client().list_space_entries(space_id, include_withdrawn=False, summary=True)
+        rows = []
+        for entry in result.get("entries", []):
+            # Older servers ignore the summary parameter and return the existing full shape.
+            payload = entry.get("payload") or entry
+            rows.append({
+                "invoice_no": entry.get("invoice_no") or payload.get("invoice_no") or "",
+                "seller": payload.get("seller") or "",
+                "title": payload.get("title") or "",
+                "total": payload.get("total", ""),
+                "owner_name": entry.get("owner_name") or "",
+                "review_state": entry.get("review_state") or "",
+                "review_note": entry.get("review_note") or "",
+            })
+        return {"entries": rows}
 
     @_bridge
     def hub_create_space(self, name: str, description: str = ""):
@@ -206,8 +232,27 @@ class HubApi:
         return {"user": client.update_user(user_id, **(fields or {}))}
 
     @_guard
-    def hub_push_entries(self, space_id: str, entry_ids: list[str], space_name: str = ""):
+    def hub_prepare_push(self, space_id: str, entry_ids: list[str]):
         client = self._hub_client()
+        remote_ids = set()
+        for entry_id in dict.fromkeys(entry_ids):
+            link = hub_sync.get_hub_link(self.db.conn, entry_id)
+            if link and link["server_url"] == client.base_url and link["space_id"] == space_id:
+                remote_ids.add(link["remote_entry_id"])
+        states = client.upload_state(space_id, sorted(remote_ids)) if remote_ids else None
+        plan_id = uuid4().hex
+        self._hub_push_plan = (plan_id, client, space_id, states)
+        return {"plan_id": plan_id}
+
+    @_guard
+    def hub_push_entries(self, space_id: str, entry_ids: list[str], space_name: str = "", plan_id: str = ""):
+        client = self._hub_client()
+        states = None
+        if plan_id:
+            plan = getattr(self, "_hub_push_plan", None)
+            if not plan or plan[:3] != (plan_id, client, space_id):
+                raise ValueError("上传检查已过期，请重试。")
+            states = plan[3]
         result = hub_sync.push_entries(
             client,
             self.entries,
@@ -216,6 +261,7 @@ class HubApi:
             entry_ids,
             space_name=space_name,
             adapter_service=self.adapters,
+            upload_state=states,
         )
         cfg = self._hub_config()
         if space_id and cfg.get("last_space_id") != space_id:

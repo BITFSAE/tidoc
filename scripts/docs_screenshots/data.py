@@ -188,6 +188,7 @@ def seed(api, work_dir: Path) -> None:
         if number in REVIEWED:
             api.entries.review_check_lines(entry_id, REVIEWED[number])
         api.entries.recompute_status(entry_id)
+        api.entries.mark_invoice_recognized(entry_id)
         time.sleep(1.1)  # 更新时间精确到秒，间隔一秒以上排序才稳定
 
 
@@ -207,11 +208,16 @@ def seed_bindle_preview(api, work_dir: Path) -> Path:
         xml_path = work_dir / f"preview-{n}.xml"
         _invoice_xml(xml_path, f"26999000000000000{n}", "2026-09-20", "示例办公用品商行", UNIVERSITY, name, amount)
         new_ids.append(backend.create_entry(profile_ids[person], title=UNIVERSITY, xml_path=str(xml_path))["id"])
+    # 模拟旧包未记录识别版本；另一张新增发票保留当前规则，展示两种来源状态。
+    api.entries.clear_invoice_recognition(new_ids[0])
     extra = work_dir / "补交查验单.pdf"
     _blank_pdf(extra, 600)
     attachment = api.attachments.add(existing_ids[0], str(extra), TYPE_INSPECTION)
     package = export_bindle(api.entries, api.attachments, existing_ids + new_ids,
                             work_dir / "9月补交材料.tidoc", profiles)
+    # 模拟接收方首次收到补交材料，避免把下面移除示例附件的操作当成接收方主动删除。
+    api.db.conn.execute("DELETE FROM entry_exchange_bases WHERE entry_id IN (?,?)", existing_ids)
+    api.db.conn.commit()
     api.attachments.delete(attachment["id"])
     api.entries.recompute_status(existing_ids[0])
     for entry_id in new_ids:
@@ -254,6 +260,8 @@ def seed_bindle_batch(api, work_dir: Path) -> list[Path]:
     _blank_pdf(extra, 610)
     attachment = api.attachments.add(existing_ids[0], str(extra), TYPE_INSPECTION)
     pkg2 = export_bindle(api.entries, api.attachments, existing_ids, work_dir / "加工费补充材料.tidoc", profiles)
+    api.db.conn.execute("DELETE FROM entry_exchange_bases WHERE entry_id IN (?,?)", existing_ids)
+    api.db.conn.commit()
     api.attachments.delete(attachment["id"])
     api.entries.recompute_status(existing_ids[0])
 

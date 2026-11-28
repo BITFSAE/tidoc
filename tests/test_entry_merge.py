@@ -22,7 +22,33 @@ from tidoc.db import (
 from tidoc.db.schema import SCHEMA_VERSION
 from tidoc.engine.models import ParsedInvoice, ParsedItem
 from tidoc.services.bindle import export_bindle, import_bindle, inspect_bindle
+from tidoc.services.entry_merge import plan_entry_merge
 from tidoc.services.inspection_pdf import INSPECTION_RECOGNITION_VERSION
+
+
+def test_line_comparison_shows_changed_values_for_identical_names():
+    local = {"name": "波纹管", "quantity": "4", "unit_price": "3.5", "total": "14", "unit": "米"}
+    incoming = {**local, "quantity": "5", "unit_price": "2.8", "total": "14.00"}
+    item = plan_entry_merge({"items": [local]}, {"items": [incoming]})["items"][0]
+    assert item["default_choice"] == "keep_local"
+    assert item["line_differences"] == [{
+        "name": "波纹管", "local_row": 1, "incoming_row": 1,
+        "fields": [
+            {"field": "quantity", "label": "数量", "local": "4", "incoming": "5"},
+            {"field": "unit_price", "label": "单价", "local": "3.5", "incoming": "2.8"},
+        ],
+    }]
+
+
+def test_line_comparison_aligns_unchanged_rows_around_an_insert():
+    first = {"name": "波纹管", "quantity": "1"}
+    last = {"name": "螺钉", "quantity": "1"}
+    inserted = {"name": "垫圈", "quantity": "2"}
+    item = plan_entry_merge({"items": [first, last]}, {"items": [first, inserted, last]})["items"][0]
+    [change] = item["line_differences"]
+    assert change["local_row"] is None
+    assert change["incoming_row"] == 2
+    assert change["fields"][0]["incoming"] == "垫圈"
 
 
 def _make_repo_bundle(tmp_path: Path, name: str):

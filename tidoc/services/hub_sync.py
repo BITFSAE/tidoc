@@ -13,8 +13,11 @@ import mimetypes
 import re
 import shutil
 import tempfile
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -40,6 +43,8 @@ from .payment_ai import NoRedirect, ssl_context
 MAX_HUB_BLOB_BYTES = 50 * 1024 * 1024
 DEFAULT_TIMEOUT = 25
 BLOB_TIMEOUT = 120
+HUB_BLOB_BATCH_SIZE = 8
+HUB_UPLOAD_WORKERS = 3
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -104,6 +109,30 @@ class HubClient:
         self.base_url = normalize_server_url(base_url)
         self.token = str(token or "").strip()
         self._opener = _http_only_opener()
+        self._supports_blob_batch = True
+        endpoint = urlsplit(self.base_url)
+        if endpoint.scheme == "https":
+            self._hub_connection = HTTPSConnection(endpoint.hostname, endpoint.port, context=ssl_context())
+        else:
+            self._hub_connection = HTTPConnection(endpoint.hostname, endpoint.port)
+        self._hub_connection_lock = threading.Lock()
+
+    def _hub_exchange(self, method: str, route: str, data: bytes | None, headers: dict, timeout: int):
+        with self._hub_connection_lock:
+            connection = self._hub_connection
+            reuse = connection.sock is not None
+            for attempt in range(2):
+                try:
+                    connection.timeout = timeout
+                    if connection.sock is not None:
+                        connection.sock.settimeout(timeout)
+                    connection.request(method, route, body=data, headers=headers)
+                    with connection.getresponse() as response:
+                        return response.status, response.read()
+                except (HTTPException, OSError):
+                    connection.close()
+                    if attempt or not reuse or method != "GET":
+                        raise
 
     def _request_json(
         self,
@@ -130,41 +159,35 @@ class HubClient:
             headers["Content-Type"] = "application/json; charset=utf-8"
         if auth and self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        req = Request(url, data=data, headers=headers, method=method.upper())
+        endpoint = urlsplit(url)
+        route = endpoint.path + ("?" + endpoint.query if endpoint.query else "")
         try:
-            with self._opener.open(req, timeout=timeout) as resp:
-                raw = resp.read()
-                payload = json.loads(raw.decode("utf-8")) if raw else {}
-        except HTTPError as exc:
-            raw = b""
-            try:
-                raw = exc.read()
-            except Exception:
-                pass
+            status, raw = self._hub_exchange(method.upper(), route, data, headers, timeout)
+        except (HTTPException, OSError) as exc:
+            raise HubError(f"无法连接共享区服务器：{exc}") from exc
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError as exc:
+            if 200 <= status < 300:
+                raise HubError("共享区服务器返回了无法解析的响应。") from exc
             payload = {}
-            try:
-                if raw:
-                    payload = json.loads(raw.decode("utf-8"))
-            except Exception:
+        if not 200 <= status < 300:
+            if not isinstance(payload, dict):
                 payload = {}
             msg = str(payload.get("error") or "").strip()
             code = str(payload.get("code") or "").strip()
             if not msg:
-                if exc.code == 401:
+                if status == 401:
                     msg = "共享区登录凭证已失效或被停用，请重新加入。"
-                elif exc.code == 403:
+                elif status == 403:
                     msg = "当前账号没有执行该操作的权限。"
-                elif exc.code == 404:
+                elif status == 404:
                     msg = "共享区中未找到对应记录或接口。"
-                elif exc.code == 429:
+                elif status == 429:
                     msg = "请求过于频繁，请稍后再试。"
                 else:
-                    msg = f"共享区服务返回错误（HTTP {exc.code}）。"
-            raise HubError(msg, status=exc.code, code=code, payload=payload) from exc
-        except (URLError, TimeoutError, OSError) as exc:
-            raise HubError(f"无法连接共享区服务器：{exc}") from exc
-        except ValueError as exc:
-            raise HubError("共享区服务器返回了无法解析的响应。") from exc
+                    msg = f"共享区服务返回错误（HTTP {status}）。"
+            raise HubError(msg, status=status, code=code, payload=payload)
 
         if not isinstance(payload, dict):
             raise HubError("共享区服务器返回格式异常。")
@@ -192,11 +215,11 @@ class HubClient:
         req_headers.setdefault("Content-Type", mimetypes.guess_type(file_path.name)[0] or "application/octet-stream")
         req_headers["Content-Length"] = str(size)
         # Never attach Hub Bearer token to COS/storage presigned PUT requests.
-        data = file_path.read_bytes()
-        req = Request(safe_url, data=data, headers=req_headers, method="PUT")
         try:
-            with self._opener.open(req, timeout=timeout) as resp:
-                resp.read()
+            with file_path.open("rb") as data:
+                req = Request(safe_url, data=data, headers=req_headers, method="PUT")
+                with self._opener.open(req, timeout=timeout) as resp:
+                    resp.read()
         except HTTPError as exc:
             raise HubError(f"上传附件 {file_path.name} 失败（HTTP {exc.code}）。", status=exc.code) from exc
         except (URLError, TimeoutError, OSError) as exc:
@@ -267,6 +290,7 @@ class HubClient:
             "/api/v1/spaces",
             query={"include_archived": "1"} if include_archived else None,
         )
+        self._supports_blob_batch = "batch_blob_upload" in (res.get("features") or [])
         return list(res.get("spaces") or [])
 
     def create_space(self, name: str, description: str = "") -> dict:
@@ -331,6 +355,30 @@ class HubClient:
     def confirm_blob(self, sha256: str) -> dict:
         return self._request_json("POST", "/api/v1/blobs/confirm", {"sha256": sha256.lower()})
 
+    def presign_upload_batch(self, blobs: list[dict]) -> dict[str, dict] | None:
+        if not self._supports_blob_batch:
+            return None
+        try:
+            res = self._request_json(
+                "POST", "/api/v1/blobs/presign-upload-batch", {"blobs": blobs}, timeout=BLOB_TIMEOUT,
+            )
+        except HubError as exc:
+            if exc.status not in (404, 405) or exc.code not in ("", "not_found", "method_not_allowed"):
+                raise
+            self._supports_blob_batch = False
+            return None
+        signed = {str(item.get("sha256")): item for item in (res.get("blobs") or []) if isinstance(item, dict)}
+        if signed.keys() != {blob["sha256"] for blob in blobs}:
+            raise HubError("共享区未返回完整的附件上传信息，请重试。")
+        return signed
+
+    def confirm_blob_batch(self, sha256s: list[str]) -> None:
+        blobs = [{"sha256": sha} for sha in sha256s]
+        res = self._request_json("POST", "/api/v1/blobs/confirm-batch", {"blobs": blobs}, timeout=BLOB_TIMEOUT)
+        confirmed = {item.get("sha256") for item in (res.get("blobs") or []) if isinstance(item, dict)}
+        if confirmed != set(sha256s):
+            raise HubError("共享区未返回完整的附件确认结果，请重试。")
+
     def presign_download(self, sha256: str, space_id: str, entry_id: str) -> dict:
         return self._request_json(
             "POST",
@@ -338,16 +386,31 @@ class HubClient:
             {"sha256": sha256.lower(), "space_id": space_id, "entry_id": entry_id},
         )
 
-    def list_space_entries(self, space_id: str, *, include_withdrawn: bool = True) -> dict:
+    def list_space_entries(self, space_id: str, *, include_withdrawn: bool = True, summary: bool = False) -> dict:
         return self._request_json(
             "GET",
             f"/api/v1/spaces/{space_id}/entries",
-            query={"include_withdrawn": "1" if include_withdrawn else "0"},
+            query={"include_withdrawn": "1" if include_withdrawn else "0", "view": "summary" if summary else ""},
         )
 
     def get_space_entry(self, space_id: str, entry_id: str) -> dict:
         res = self._request_json("GET", f"/api/v1/spaces/{space_id}/entries/{entry_id}")
         return res["entry"]
+
+    def upload_state(self, space_id: str, remote_ids: list[str]) -> dict | None:
+        states: dict = {}
+        for start in range(0, len(remote_ids), 500):
+            try:
+                result = self._request_json(
+                    "POST", f"/api/v1/spaces/{space_id}/entries/upload-state",
+                    {"entry_ids": remote_ids[start:start + 500]},
+                )
+            except HubError as exc:
+                if exc.status in (404, 405) and exc.code in ("", "not_found", "method_not_allowed"):
+                    return None
+                raise
+            states.update(result["entries"])
+        return states
 
     def push_entry(self, space_id: str, body: dict) -> dict:
         return self._request_json("POST", f"/api/v1/spaces/{space_id}/entries/push", body)
@@ -606,6 +669,71 @@ def _build_hub_entry_bundle(
 # ---------------------------------------------------------------------------
 
 
+def _upload_entry_blobs(
+    client: HubClient, blob_files: list[tuple[str, Path, str, int, str]], confirmed_shas: set[str],
+    *, bound_shas: set[str],
+) -> list[str]:
+    pending = [blob for blob in blob_files if blob[0] not in confirmed_shas and blob[0] not in bound_shas]
+
+    def upload(blob, signed):
+        _sha, path, _name, _size, ctype = blob
+        client.upload_blob(signed["upload_url"], path, headers=signed.get("headers") or {"Content-Type": ctype})
+
+    for start in range(0, len(pending), HUB_BLOB_BATCH_SIZE):
+        group = pending[start:start + HUB_BLOB_BATCH_SIZE]
+        signed_batch = None
+        if len(group) > 1:
+            signed_batch = client.presign_upload_batch([
+                {"sha256": sha, "size_bytes": size, "content_type": ctype, "original_name": name}
+                for sha, _path, name, size, ctype in group
+            ])
+        if signed_batch is None:
+            for blob in group:
+                sha, _path, name, size, ctype = blob
+                signed = client.presign_upload(sha, size, ctype, name)
+                if not signed.get("exists"):
+                    upload(blob, signed)
+                    client.confirm_blob(sha)
+                confirmed_shas.add(sha)
+            continue
+
+        missing = []
+        for blob in group:
+            sha = blob[0]
+            if signed_batch[sha].get("exists"):
+                confirmed_shas.add(sha)
+            else:
+                missing.append(blob)
+        if not missing:
+            continue
+
+        uploaded = []
+        first_error = None
+        with ThreadPoolExecutor(max_workers=min(HUB_UPLOAD_WORKERS, len(missing))) as executor:
+            futures = [(blob[0], executor.submit(upload, blob, signed_batch[blob[0]])) for blob in missing]
+            for sha, future in futures:
+                try:
+                    future.result()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    uploaded.append(sha)
+        if uploaded:
+            try:
+                if len(uploaded) == 1:
+                    client.confirm_blob(uploaded[0])
+                else:
+                    client.confirm_blob_batch(uploaded)
+                confirmed_shas.update(uploaded)
+            except HubError:
+                if first_error is None:
+                    raise
+        if first_error is not None:
+            raise first_error
+    return [blob[0] for blob in blob_files]
+
+
 def push_entries(
     client: HubClient,
     entries_repo: EntryRepo,
@@ -617,6 +745,7 @@ def push_entries(
     adapter_service=None,
     review_state: str | None = None,
     review_note: str | None = None,
+    upload_state: dict | None = None,
 ) -> dict:
     if not entry_ids:
         raise HubError("请先选择要上传到共享区的条目。")
@@ -625,6 +754,7 @@ def push_entries(
     confirmed_shas: set[str] = set()
 
     pushed: list[dict] = []
+    unchanged: list[dict] = []
     conflicts: list[dict] = []
     duplicates: list[dict] = []
     locked: list[dict] = []
@@ -635,21 +765,6 @@ def push_entries(
             payload, snap, blob_files, profile_dict, ancestors, invoice_sha256 = _build_hub_entry_bundle(
                 entries_repo, attachments_repo, entry_id, adapter_service=adapter_service
             )
-            blob_shas: list[str] = []
-            for sha, file_path, orig_name, size, ctype in blob_files:
-                blob_shas.append(sha)
-                if sha in confirmed_shas:
-                    continue
-                presigned = client.presign_upload(sha, size, ctype, orig_name)
-                if not presigned.get("exists"):
-                    client.upload_blob(
-                        presigned["upload_url"],
-                        file_path,
-                        headers=presigned.get("headers") or {"Content-Type": ctype},
-                    )
-                    client.confirm_blob(sha)
-                confirmed_shas.add(sha)
-
             existing_link = get_hub_link(conn, entry_id)
             remote_entry_id = ""
             base_revision = 0
@@ -661,6 +776,14 @@ def push_entries(
                 remote_entry_id = existing_link["remote_entry_id"]
                 base_revision = int(existing_link["remote_revision"] or 0)
 
+            bound_shas: set[str] = set()
+            if upload_state is not None and remote_entry_id:
+                remote = upload_state.get(remote_entry_id)
+                if not remote:
+                    raise HubError("共享区中未找到对应条目，请先核对当前空间。", status=404, code="not_found")
+                bound_shas = set(remote["blob_shas"])
+
+            blob_shas = _upload_entry_blobs(client, blob_files, confirmed_shas, bound_shas=bound_shas)
             digest = snapshot_digest(snap)
             push_body = {
                 "remote_entry_id": remote_entry_id,
@@ -677,6 +800,9 @@ def push_entries(
                 push_body["review_state"] = review_state
             if review_note is not None:
                 push_body["review_note"] = str(review_note)
+            if upload_state is not None:
+                push_body["skip_unchanged"] = True
+            push_body["submission_id"] = snapshot_digest(push_body)
 
             res = client.push_entry(space_id, push_body)
             remote_entry = res["entry"]
@@ -691,7 +817,8 @@ def push_entries(
                 synced_at=now,
             )
             conn.commit()
-            pushed.append({
+            outcome = unchanged if res.get("unchanged") else pushed
+            outcome.append({
                 "entry_id": entry_id,
                 "remote_entry_id": remote_entry["id"],
                 "revision": remote_entry["revision"],
@@ -722,6 +849,8 @@ def push_entries(
     parts = []
     if pushed:
         parts.append(f"已上传 {len(pushed)} 条")
+    if unchanged:
+        parts.append(f"无需上传 {len(unchanged)} 条")
     if conflicts:
         parts.append(f"{len(conflicts)} 条远端已有更新，请先拉取合并后再上传")
     if duplicates:
@@ -733,6 +862,7 @@ def push_entries(
     message = "；".join(parts) + "。" if parts else "没有条目被上传。"
     return {
         "pushed": pushed,
+        "unchanged": unchanged,
         "conflicts": conflicts,
         "duplicates": duplicates,
         "locked": locked,
@@ -876,13 +1006,12 @@ def preview_pull(
                 "is_default": False,
             }
 
-        link_changed = (
-            link is None
-            or int(link.get("remote_revision") or 0) != hub_meta["revision"]
-            or str(link.get("review_state") or "") != hub_meta["review_state"]
-            or str(link.get("review_note") or "") != hub_meta["review_note"]
+        local_review = link or {}
+        review_changed = (
+            str(local_review.get("review_state") or "") != hub_meta["review_state"]
+            or str(local_review.get("review_note") or "") != hub_meta["review_note"]
         )
-        entry["hub_status_changed"] = link_changed
+        entry["hub_review_changed"] = bool(matched_id and review_changed)
         source_adapter = entry.get("adapter") or {}
         entry["adapter_compatibility"] = {
             "available": bool(source_adapter.get("definition")),
@@ -928,7 +1057,7 @@ def preview_pull(
             entry["merge_changes"] = list(plan.get("summary") or [])
             if plan.get("has_conflicts"):
                 action = "conflict"
-            elif plan.get("items") or plan.get("has_changes"):
+            elif plan.get("items") or plan.get("has_changes") or review_changed:
                 action = "merge"
             else:
                 action = "unchanged"
@@ -970,7 +1099,7 @@ def preview_pull(
         "tampered": False,
         "tampered_files": [],
         "options": {"include_notes": True, "include_tags": True},
-        "preview_version": storage._local_preview_version(entries_repo, matched_ids),
+        "preview_version": storage._local_preview_version(entries_repo, matched_ids, snapshots=snapshots),
     }
 
 
@@ -1292,7 +1421,7 @@ def apply_pull(
                             "seller": entry.get("seller", ""),
                             "changes": changes,
                         })
-                    elif entry.get("hub_status_changed"):
+                    elif entry.get("hub_review_changed"):
                         status_updated_ids.append(matched_id)
                     else:
                         skipped.append({

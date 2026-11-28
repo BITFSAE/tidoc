@@ -434,47 +434,57 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                 # 条目中已锁定或人工修正的发票总额仍是校验权威值；重新识别
                 # 不静默覆盖实付、备注或人工修正过的关键字段。购销方名称经
                 # 两种读取方式一致或独立校验后可更新，税号沿用本地纠正并留痕。
-                self.entries.set_invoice_evidence(entry_id, parsed)
-                manual_fields = self.entries.human_modified_locked_fields(entry_id)
-                total_check = parsed.field_checks.get("total")
-                if (parsed.total_present and total_check
-                        and total_check.state in {FIELD_AGREE, FIELD_VERIFIED}
-                        and self.entries.fill_recognized_total(entry_id, parsed.total)):
-                    entry["total"] = str(parsed.total)
-                for field in ("seller", "buyer_name"):
-                    candidate = getattr(parsed, field)
-                    evidence = parsed.field_checks.get(field)
-                    if field in manual_fields:
-                        setattr(parsed, field, entry.get(field) or "")
-                    elif candidate and evidence and evidence.state in {FIELD_AGREE, FIELD_VERIFIED}:
-                        self.entries.update_recognized_party_field(entry_id, field, candidate)
-                parsed.total_present = bool(str(entry.get("total") or "").strip())
-                parsed.total = d(entry.get("total"))
-                for field in ("seller_tax_id", "buyer_tax_id"):
-                    if field in manual_fields:
-                        setattr(parsed, field, entry.get(field) or "")
-                    else:
-                        self.entries.update_recognized_party_field(entry_id, field, getattr(parsed, field))
-                buyer_check = parsed.field_checks.get("buyer_name")
-                if (buyer_check and buyer_check.state in {FIELD_AGREE, FIELD_VERIFIED}
-                        and self.entries.repair_recognized_title(entry_id, parsed.buyer_name)):
-                    entry["title"] = parsed.buyer_name
-                check = check_invoice(parsed, expected_title=entry.get("title", ""),context=self._policy_context(entry_id=entry_id))
-                self.entries.replace_recognized_items(
-                    entry_id,
-                    parsed.items,
-                    parsed.source,
-                    check.status,
-                    check.message,
-                )
-                self.entries.mark_invoice_recognized(entry_id)
+                # 单条发票的全部写入在同一事务内完成：任何一步失败都回滚，
+                # 不会留下半套明细或提前标成最新识别结果。
+                with self.db.transaction():
+                    self.entries.set_invoice_evidence(entry_id, parsed, commit=False)
+                    manual_fields = self.entries.human_modified_locked_fields(entry_id)
+                    total_check = parsed.field_checks.get("total")
+                    if (parsed.total_present and total_check
+                            and total_check.state in {FIELD_AGREE, FIELD_VERIFIED}
+                            and self.entries.fill_recognized_total(
+                                entry_id, parsed.total, commit=False)):
+                        entry["total"] = str(parsed.total)
+                    for field in ("seller", "buyer_name"):
+                        candidate = getattr(parsed, field)
+                        evidence = parsed.field_checks.get(field)
+                        if field in manual_fields:
+                            setattr(parsed, field, entry.get(field) or "")
+                        elif candidate and evidence and evidence.state in {FIELD_AGREE, FIELD_VERIFIED}:
+                            self.entries.update_recognized_party_field(
+                                entry_id, field, candidate, commit=False)
+                    parsed.total_present = bool(str(entry.get("total") or "").strip())
+                    parsed.total = d(entry.get("total"))
+                    for field in ("seller_tax_id", "buyer_tax_id"):
+                        if field in manual_fields:
+                            setattr(parsed, field, entry.get(field) or "")
+                        else:
+                            self.entries.update_recognized_party_field(
+                                entry_id, field, getattr(parsed, field), commit=False)
+                    buyer_check = parsed.field_checks.get("buyer_name")
+                    if (buyer_check and buyer_check.state in {FIELD_AGREE, FIELD_VERIFIED}
+                            and self.entries.repair_recognized_title(
+                                entry_id, parsed.buyer_name, commit=False)):
+                        entry["title"] = parsed.buyer_name
+                    check = check_invoice(parsed, expected_title=entry.get("title", ""),context=self._policy_context(entry_id=entry_id))
+                    from .db.manual_changes import current_manual_fields
+                    self.entries.replace_recognized_items(
+                        entry_id,
+                        parsed.items,
+                        parsed.source,
+                        check.status,
+                        check.message,
+                        commit=False,
+                        protect_manual_items="items" in current_manual_fields(entry, ["items"]),
+                    )
+                    self.entries.mark_invoice_recognized(entry_id, commit=False)
                 refreshed = self.entries.get(entry_id) or {}
                 results.append({
                     "entry_id": entry_id,
                     "ok": True,
                     "check_status": refreshed.get("check_status", check.status),
                     "check_message": refreshed.get("check_message", check.message),
-                    "item_count": len(parsed.items),
+                    "item_count": len(refreshed.get("items") or parsed.items),
                 })
             except Exception as exc:  # noqa: BLE001 — 单条失败不阻断其余批量任务
                 results.append({"entry_id": entry_id, "ok": False, "error": str(exc)})
@@ -1260,8 +1270,24 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
     def recognition_preview(self, entry_ids):
         """预览重新识别任务；已由当前规则处理的材料会自动跳过。"""
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML, TYPE_PAYMENT
+        from .db.entries import (
+            INVOICE_RECOGNITION_STATE_CHANGED,
+            INVOICE_RECOGNITION_STATE_CURRENT,
+            INVOICE_RECOGNITION_STATE_NEWER,
+            INVOICE_RECOGNITION_STATE_OLDER,
+            INVOICE_RECOGNITION_STATE_UNKNOWN,
+            OUTDATED_INVOICE_RECOGNITION_STATES,
+        )
 
-        invoice_total = invoice_pending = payment_total = payment_pending = 0
+        invoice_total = payment_total = payment_pending = 0
+        invoice_states = {state: 0 for state in (
+            INVOICE_RECOGNITION_STATE_CURRENT,
+            INVOICE_RECOGNITION_STATE_OLDER,
+            INVOICE_RECOGNITION_STATE_NEWER,
+            INVOICE_RECOGNITION_STATE_UNKNOWN,
+            INVOICE_RECOGNITION_STATE_CHANGED,
+        )}
+        pending_ids = []
         payment_enabled = self._payment_ai_available()
         payment_version = self._payment_ai_version()
         seen = set()
@@ -1275,13 +1301,25 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
             attachments = entry.get("attachments") or []
             if any(a["type"] in {TYPE_INVOICE_PDF, TYPE_INVOICE_XML} for a in attachments):
                 invoice_total += 1
-                if not self.entries.invoice_recognition_current(entry_id):
-                    invoice_pending += 1
+                state = self.entries.invoice_recognition_state(entry_id)
+                invoice_states[state] = invoice_states.get(state, 0) + 1
+                if state in OUTDATED_INVOICE_RECOGNITION_STATES:
+                    pending_ids.append(entry_id)
             payments = [a for a in attachments if a["type"] == TYPE_PAYMENT]
             payment_total += len(payments)
             payment_pending += sum(not payment_result_current(a, payment_version) for a in payments)
+        invoice_current = invoice_states[INVOICE_RECOGNITION_STATE_CURRENT]
         return {
-            "invoice": {"total": invoice_total, "pending": invoice_pending, "current": invoice_total - invoice_pending},
+            "invoice": {
+                "total": invoice_total,
+                "pending": len(pending_ids),
+                "current": invoice_current,
+                "older": invoice_states[INVOICE_RECOGNITION_STATE_OLDER],
+                "newer": invoice_states[INVOICE_RECOGNITION_STATE_NEWER],
+                "unknown": invoice_states[INVOICE_RECOGNITION_STATE_UNKNOWN],
+                "changed": invoice_states[INVOICE_RECOGNITION_STATE_CHANGED],
+                "pending_ids": pending_ids,
+            },
             "payment": {
                 "total": payment_total,
                 "pending": payment_pending,
@@ -1291,27 +1329,37 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         }
 
     @_guard
-    def rerecognize_materials(self, entry_ids, kinds=None):
+    def rerecognize_materials(self, entry_ids, kinds=None, force_newer=False):
         """按当前规则重新解析发票，同版且文件未变的条目自动跳过。
 
-        付款截图需要联网，走后台任务 start_payment_ai，不在这里处理。
+        较新的识别版本默认保留（可能来自更高版本的 Tidoc），force_newer=True 时
+        才用本机规则覆盖。付款截图需要联网，走后台任务 start_payment_ai，不在这里处理。
         """
+        from .db.entries import (
+            INVOICE_RECOGNITION_STATE_CURRENT,
+            INVOICE_RECOGNITION_STATE_NEWER,
+            OUTDATED_INVOICE_RECOGNITION_STATES,
+        )
+
         requested = set(kinds or []) & {"invoice"}
         ids = list(dict.fromkeys(entry_id for entry_id in (entry_ids or []) if entry_id))
         result = {"invoice": None, "payment": None}
         if "invoice" in requested:
-            candidates = [
-                entry_id for entry_id in ids
-                if self.entries.invoice_recognition_fingerprint(entry_id)
-            ]
-            targets = [
-                entry_id for entry_id in candidates
-                if not self.entries.invoice_recognition_current(entry_id)
-            ]
+            targets, skipped_current, skipped_newer = [], 0, 0
+            for entry_id in ids:
+                state = self.entries.invoice_recognition_state(entry_id)
+                if state == INVOICE_RECOGNITION_STATE_CURRENT:
+                    skipped_current += 1
+                elif state == INVOICE_RECOGNITION_STATE_NEWER and not force_newer:
+                    skipped_newer += 1
+                elif state in OUTDATED_INVOICE_RECOGNITION_STATES or (
+                        state == INVOICE_RECOGNITION_STATE_NEWER and force_newer):
+                    targets.append(entry_id)
             invoice_result = self.reparse_entries(targets)["data"] if targets else {
                 "processed": 0, "resolved": 0, "remaining": 0, "failed": [], "results": []
             }
-            invoice_result["skipped_current"] = len(candidates) - len(targets)
+            invoice_result["skipped_current"] = skipped_current
+            invoice_result["skipped_newer"] = skipped_newer
             result["invoice"] = invoice_result
         return result
 

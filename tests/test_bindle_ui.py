@@ -95,3 +95,25 @@ console.log(JSON.stringify({
     assert any('已归档' in r for r in data['reasons'])
     assert data['summary']['conflictCount'] == 1
     assert data['summary']['allUnchanged'] is False
+
+
+def test_recognition_summary_distinguishes_newer_and_unknown_results():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('需要 Node 执行前端预览检查')
+    source = Path(__file__).resolve().parents[1] / 'tidoc/web/bindle-ui.js'
+    script = r"""
+const assert = require('node:assert/strict'), fs = require('fs'), vm = require('vm');
+const sandbox = {}; vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8') + ';this.preview = BindlePreview;', sandbox);
+const entries = ['older', 'newer', 'newer', 'unknown', 'changed', 'current', 'missing']
+  .map(invoice_recognition_state => ({invoice_recognition_state}));
+assert.equal(sandbox.preview.recognitionSummary(entries),
+  '1 张可用本机方法重新识别；2 张来自更新的识别方法；1 张未记录可比的识别版本；1 张的材料或识别设置已变化');
+assert.equal(sandbox.preview.recognitionSummary([{invoice_recognition_state: 'current'}]), '');
+assert.equal(sandbox.preview.recognitionLabel(entries[5]), '');
+assert.equal(sandbox.preview.recognitionLabel(entries[6]), '');
+"""
+    result = subprocess.run([node, '-e', script, str(source)],
+                            capture_output=True, text=True, encoding='utf-8', timeout=10)
+    assert result.returncode == 0, result.stderr

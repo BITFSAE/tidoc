@@ -1432,9 +1432,9 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         finally:
             self._bindle_inspection_cache = None
         if result.get("imported") or result.get("updated"):
-            # 付款截图提醒按本机的识别设置重算，不沿用发送方电脑上的结论。
+            # 付款截图提醒按本机识别设置和导入结论重算（包括付款截图被替换或移除的情形）。
             for entry_id in [*(result.get("entry_ids") or []), *(result.get("updated_entry_ids") or [])]:
-                self._refresh_paid_comparison(entry_id)
+                self._refresh_payment_ai_check(entry_id)
             self._sync_entry_statuses()
         return result
 

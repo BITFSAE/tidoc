@@ -22,7 +22,7 @@ def _same_money(a, b) -> bool:
 
 
 # 付款截图提醒的生成规则；规则或本机识别设置变了，就给所有带付款截图的条目重算一次提醒。
-PAYMENT_CHECK_RULES = "payment-check-5"
+PAYMENT_CHECK_RULES = "payment-check-6"
 PAYMENT_CHECK_STATE_KEY = "tidoc.paymentAi.checkState"
 
 
@@ -78,10 +78,13 @@ class PaymentAiApi:
                     "UPDATE entries SET check_reviewed = ? WHERE id = ?",
                     (json.dumps(reviewed, ensure_ascii=False), entry_id),
                 )
-        # Without a key, screenshots are filled in by hand: no reminders at all. With automatic
-        # recognition off, keep the results already recognized but do not ask to re-run the rest.
+        # Without a key, locally added screenshots are handled by hand (no reminders),
+        # while imported AI conclusions carried by a bindle keep their reminders so a
+        # teammate without an AI key still sees flagged screenshots until fixed.
         if self._payment_ai_available():
             self.entries.refresh_payment_check(entry_id, remind_pending=self._payment_ai_enabled())
+        elif self.entries.has_imported_payment_recognition(entry_id):
+            self.entries.refresh_payment_check(entry_id, remind_pending=False, imported_only=True)
         else:
             self.entries.clear_payment_check(entry_id)
 
@@ -269,16 +272,18 @@ class PaymentAiApi:
     @_guard
     def payment_ai_result(self, entry_id):
         """详情页付款截图识别区块：逐张结果、识别合计与实付/发票金额比对。"""
-        overview = self.entries.payment_ai_overview(entry_id)
+        available = self._payment_ai_available()
+        overview = self.entries.payment_ai_overview(entry_id, imported_only=not available)
         overview["enabled"] = self._payment_ai_enabled()
-        overview["available"] = self._payment_ai_available()
+        overview["available"] = available
         return overview
 
     @_guard
     def apply_payment_ai_total(self, entry_id):
         """用户确认后把识别合计写入实付，留修改记录。"""
         from .db.entries import VALUE_SOURCE_PAYMENT_AI
-        overview = self.entries.payment_ai_overview(entry_id)
+        available = self._payment_ai_available()
+        overview = self.entries.payment_ai_overview(entry_id, imported_only=not available)
         if not overview.get("settled"):
             raise ValueError("还有付款截图没有识别出金额，无法采用合计。")
         self.entries.update_field(entry_id, "paid_amount", overview["recognized_total"], "",

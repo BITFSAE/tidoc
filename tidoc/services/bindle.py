@@ -25,16 +25,33 @@ from pathlib import Path
 
 from ..db.attachments import AttachmentRepo
 from ..db.entries import EntryRepo
+from ..db.manual_changes import item_snapshot
+from ..engine.check_lines import INSPECTION_CHECK_PREFIX, PAYMENT_CHECK_PREFIX, split_message
+from .entry_merge import (
+    BATCH_NOTE_PREFIX,
+    BASE_FIELDS,
+    COMPARABLE_BASE_FIELDS,
+    EXCLUSIVE_TAG_GROUPS,
+    MERGE_HISTORY_PREFIX,
+    attachment_group_key,
+    build_entry_snapshot,
+    known_ancestors,
+    load_exchange_bases,
+    merge_tags as _merge_tags,
+    merge_text as _merge_text,
+    plan_entry_merge,
+    record_exchange_base,
+    snapshot_digest,
+    validate_entry_decisions,
+    _payment_recognition_upgrades,
+)
+from .inspection_pdf import cached_inspection_info, inspection_summary, read_inspection_pdf
 from .signing import MANIFEST_NAME, sign_bytes, sign_file, verify, verify_stream
 from .summary import build_summary
 
 BINDLE_VERSION = 5
 ENTRIES_NAME = "entries.json"
 SUMMARY_NAME = "summary.json"
-EXCLUSIVE_TAG_GROUPS = (
-    frozenset({"已报销", "未报销"}),
-    frozenset({"已支付", "未支付"}),
-)
 
 
 
@@ -72,7 +89,7 @@ def _serialize_entry(
     history = [
         {k: h.get(k) for k in ("field", "old_value", "new_value", "profile_id", "changed_at")}
         for h in entry.get("history", [])
-        if include_notes or h.get("field") != "notes"
+        if include_notes or not (h.get("field") == "notes" or str(h.get("field") or "").endswith("]notes"))
     ]
     attachments = []
     for attachment in entry.get("attachments", []):
@@ -86,9 +103,18 @@ def _serialize_entry(
         if attachment.get("type") == "payment_screenshot" and attachment.get("recognition_status"):
             for key in PAYMENT_RECOGNITION_KEYS:
                 serialized_attachment[key] = attachment.get(key) or ""
+        # 查验单正文摘要随包走，便于接收方在冲突对比时直接看到第几次查验与查验时间。
+        if attachment.get("type") == "inspection_pdf":
+            info = cached_inspection_info(
+                attachment.get("recognition_version"),
+                attachment.get("recognized_value"),
+                attachment.get("sha256"),
+            )
+            if info is not None:
+                serialized_attachment["inspection"] = inspection_summary(info)
         attachments.append(serialized_attachment)
 
-    return {
+    payload = {
         "id": entry["id"],
         "profile_id": entry.get("profile_id", ""),
         "title": entry.get("title", ""),
@@ -130,6 +156,14 @@ def _serialize_entry(
         ],
         "adapter": entry.get("_adapter"),
     }
+    if include_notes and str(entry.get("_batch_note") or "").strip():
+        payload["batch_note"] = str(entry.get("_batch_note") or "").strip()
+    if not include_notes or not include_tags:
+        payload["transfer_options"] = {
+            "include_notes": bool(include_notes),
+            "include_tags": bool(include_tags),
+        }
+    return payload
 
 
 def _serialize_profile(profile: dict) -> dict:
@@ -308,6 +342,16 @@ def export_bindle(
     serialized, signatures = [], {}
     per_entry_transfer: dict[str,dict[str,bool]] = {}
     referenced_profile_ids: set[str] = set()
+    export_snapshots: list[tuple[str, dict]] = []
+    try:
+        batch_note_by_entry = {
+            row["entry_id"]: str(row["note"] or "").strip()
+            for row in entries_repo.db.conn.execute(
+                "SELECT entry_id, note FROM batch_entries WHERE TRIM(COALESCE(note, '')) <> ''"
+            ).fetchall()
+        }
+    except Exception:
+        batch_note_by_entry = {}
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for eid in entry_ids:
             entry = entries_repo.get(eid)
@@ -316,6 +360,7 @@ def export_bindle(
             prof = profile_lookup.get(entry.get("profile_id"), {})
             entry["_profile_name"] = prof.get("name", "")
             entry["_reviewer"] = prof.get("reviewer", "")
+            entry["_batch_note"] = batch_note_by_entry.get(eid, "")
             entry["_ocr_results"] = [
                 dict(row) for row in entries_repo.db.conn.execute(
                     "SELECT * FROM ocr_results WHERE entry_id = ? ORDER BY id",
@@ -375,13 +420,19 @@ def export_bindle(
                 h.get("profile_id", "") for h in entry.get("history", [])
                 if h.get("profile_id")
             )
-            serialized.append(
-                _serialize_entry(
-                    entry,
-                    include_notes=entry_include_notes,
-                    include_tags=entry_include_tags,
-                )
+            serialized_entry = _serialize_entry(
+                entry,
+                include_notes=entry_include_notes,
+                include_tags=entry_include_tags,
             )
+            snap = build_entry_snapshot(serialized_entry)
+            snap_hash = snapshot_digest(snap)
+            previous_ancestors = known_ancestors(entries_repo.db.conn, eid)
+            serialized_entry["exchange_ancestors"] = list(
+                dict.fromkeys([snap_hash, *previous_ancestors])
+            )[:20]
+            export_snapshots.append((eid, snap))
+            serialized.append(serialized_entry)
             # 写附件文件，并对每个文件签名
             for att in entry.get("attachments", []):
                 abs_path = attachments_repo.data_root.attachments_dir / att["stored_path"]
@@ -435,6 +486,18 @@ def export_bindle(
             "signatures": signatures,
         }
         zf.writestr(MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2))
+
+    if export_snapshots:
+        now = datetime.now().isoformat(timespec="seconds")
+        conn = entries_repo.db.conn
+        if hasattr(conn, "commit"):
+            try:
+                for eid, snap in export_snapshots:
+                    record_exchange_base(conn, eid, snap, "export", now)
+                conn.commit()
+            except Exception:
+                if hasattr(conn, "rollback"):
+                    conn.rollback()
 
     return out_path
 
@@ -522,7 +585,7 @@ def inspect_bindle(path: str | Path, entries_repo: EntryRepo | None = None, *, a
         result["target_scheme_id"] = target_scheme_id or ""
         result["mappings"] = copy.deepcopy(mappings or {})
         _annotate_import_actions(entries_repo, result, adapter_service=adapter_service,
-                                 target_scheme_id=target_scheme_id)
+                                 target_scheme_id=target_scheme_id, archive_path=path)
         matched = {e.get("existing_entry_id") for e in result["entries"] if e.get("existing_entry_id")}
         result["local_version"] = _local_preview_version(entries_repo, matched)
     return result
@@ -559,122 +622,70 @@ def _matching_entry_id(entry: dict, by_number: dict[str, str], by_hash: dict[str
     return ""
 
 
+def _entry_transfer_flags(inspected_options: dict | None, entry: dict) -> tuple[bool | None, bool | None]:
+    entry_opts = entry.get("transfer_options") if isinstance(entry.get("transfer_options"), dict) else {}
+    pkg_opts = inspected_options if isinstance(inspected_options, dict) else {}
+    include_notes = entry_opts["include_notes"] if "include_notes" in entry_opts else pkg_opts.get("include_notes")
+    include_tags = entry_opts["include_tags"] if "include_tags" in entry_opts else pkg_opts.get("include_tags")
+    return include_notes, include_tags
+
+
+def _fill_archive_inspection_hints(archive_path: Path | None, existing: dict, incoming: dict) -> None:
+    """Lazily read inspection PDF metadata from an older bindle when comparing differing files."""
+    if not archive_path:
+        return
+    local_insp = {
+        str(att.get("sha256") or "")
+        for att in existing.get("attachments") or []
+        if att.get("type") == "inspection_pdf" and str(att.get("sha256") or "")
+    }
+    missing = [
+        att for att in incoming.get("attachments") or []
+        if att.get("type") == "inspection_pdf"
+        and not isinstance(att.get("inspection"), dict)
+        and str(att.get("sha256") or "") not in local_insp
+        and str(att.get("stored_path") or "")
+    ]
+    if not missing or not local_insp:
+        return
+    import io
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            for att in missing:
+                arcname = f"attachments/{att['stored_path']}"
+                if not _has_archive_member(zf, arcname):
+                    continue
+                data = zf.read(arcname)
+                att["inspection"] = inspection_summary(read_inspection_pdf(io.BytesIO(data)))
+    except (OSError, zipfile.BadZipFile, ValueError):
+        pass
+
+
 def _merge_preview(
     entries_repo: EntryRepo,
     existing_id: str,
     incoming: dict,
     existing: dict | None = None,
+    *,
+    local_bases: dict[str, dict] | None = None,
+    extension_preview: dict | None = None,
+    include_notes: bool | None = True,
+    include_tags: bool | None = True,
 ) -> dict:
     if existing is None:
-        existing = entries_repo.get(existing_id) or {}
-        existing["_ocr_results"] = [
-            dict(row) for row in entries_repo.db.conn.execute(
-                "SELECT provider, file_sha256, created_at, normalized "
-                "FROM ocr_results WHERE entry_id = ?",
-                (existing_id,),
-            ).fetchall()
-        ]
-    local_by_hash = {
-        str(attachment.get("sha256") or ""): attachment
-        for attachment in existing.get("attachments") or []
-        if str(attachment.get("sha256") or "")
-    }
-    local_hashes = set(local_by_hash)
-    incoming_attachments = [
-        attachment for attachment in incoming.get("attachments") or []
-        if str(attachment.get("sha256") or "") not in local_hashes
-    ]
-    attachment_note_changes = sum(
-        1 for attachment in incoming.get("attachments") or []
-        if str(attachment.get("sha256") or "") in local_by_hash
-        and _merge_text(
-            str(local_by_hash[str(attachment.get("sha256") or "")].get("note") or ""),
-            str(attachment.get("note") or ""),
-        ) != str(local_by_hash[str(attachment.get("sha256") or "")].get("note") or "")
+        existing = _import_preview_snapshots(entries_repo, {existing_id}).get(existing_id) or {}
+    if local_bases is None:
+        local_bases = load_exchange_bases(entries_repo.db.conn, {existing_id}).get(existing_id, {})
+    return plan_entry_merge(
+        existing,
+        incoming,
+        local_bases=local_bases,
+        local_batch_note=str(existing.get("_batch_note") or ""),
+        local_extension_values=existing.get("_extension_values"),
+        extension_preview=extension_preview,
+        include_notes=include_notes,
+        include_tags=include_tags,
     )
-    local_tag_list = list(existing.get("tags") or [])
-    incoming_tag_list = [str(tag).strip() for tag in incoming.get("tags") or [] if str(tag).strip()]
-    preview_tags = _merge_tags(local_tag_list, incoming_tag_list)
-    added_tags = [tag for tag in incoming_tag_list if tag not in local_tag_list]
-    tags_changed = preview_tags != local_tag_list
-    local_fields = existing.get("fields") or {}
-    added_fields = []
-    for field, value in (incoming.get("fields") or {}).items():
-        incoming_value = str(value.get("current") or "")
-        local_value = str((local_fields.get(field) or {}).get("current") or "")
-        if incoming_value and (
-            not local_value or (field == "notes" and incoming_value not in local_value)
-        ):
-            added_fields.append(field)
-    added_base_fields = [
-        field for field in (
-            "title", "invoice_no", "invoice_date", "seller", "total",
-            "buyer_name", "buyer_tax_id", "seller_tax_id", "recognition_data",
-            "category", "source",
-        )
-        if str(incoming.get(field) or "") and not str(existing.get(field) or "")
-    ]
-    adds_items = bool(incoming.get("items") and not existing.get("items"))
-    existing_ocr = {
-        (
-            str(result.get("provider") or ""), str(result.get("file_sha256") or ""),
-            str(result.get("created_at") or ""), str(result.get("normalized") or ""),
-        )
-        for result in existing.get("_ocr_results") or []
-    }
-    added_ocr = sum(
-        1 for result in incoming.get("ocr_results") or []
-        if (
-            str(result.get("provider") or "aliyun"), str(result.get("file_sha256") or ""),
-            str(result.get("created_at") or ""), str(result.get("normalized") or ""),
-        ) not in existing_ocr
-    )
-    existing_history = {
-        (
-            str(row["field"] or ""), str(row["old_value"] or ""),
-            str(row["new_value"] or ""), str(row["changed_at"] or ""),
-        )
-        for row in existing.get("history") or []
-    }
-    added_history = sum(
-        1 for history in incoming.get("history") or []
-        if (
-            str(history.get("field") or ""), str(history.get("old_value") or ""),
-            str(history.get("new_value") or ""), str(history.get("changed_at") or ""),
-        ) not in existing_history
-    )
-    labels = []
-    if incoming_attachments:
-        labels.append(f"材料 {len(incoming_attachments)}")
-    if attachment_note_changes:
-        labels.append(f"附件备注 {attachment_note_changes}")
-    if "notes" in added_fields:
-        labels.append("备注")
-    ordinary_fields = [field for field in added_fields if field != "notes"]
-    if ordinary_fields:
-        labels.append(f"信息 {len(ordinary_fields)}")
-    if added_base_fields:
-        labels.append(f"基础信息 {len(added_base_fields)}")
-    if adds_items:
-        labels.append("发票明细")
-    if added_ocr:
-        labels.append(f"识别记录 {added_ocr}")
-    if tags_changed:
-        labels.append(f"标签 {max(1, len(added_tags))}")
-    if added_history:
-        labels.append(f"修改记录 {added_history}")
-    return {
-        "attachments": len(incoming_attachments),
-        "attachment_notes": attachment_note_changes,
-        "fields": added_fields,
-        "base_fields": added_base_fields,
-        "tags": added_tags,
-        "items": adds_items,
-        "ocr_results": added_ocr,
-        "history": added_history,
-        "labels": labels,
-        "has_changes": bool(labels),
-    }
 
 
 def _import_preview_snapshots(entries_repo: EntryRepo, entry_ids: set[str]) -> dict[str, dict]:
@@ -684,6 +695,9 @@ def _import_preview_snapshots(entries_repo: EntryRepo, entry_ids: set[str]) -> d
     conn = entries_repo.db.conn
     snapshots: dict[str, dict] = {}
     ordered_ids = sorted(entry_ids)
+    ext_table = bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='extension_values'"
+    ).fetchone())
     for offset in range(0, len(ordered_ids), 900):
         batch = ordered_ids[offset:offset + 900]
         placeholders = ",".join("?" for _ in batch)
@@ -696,6 +710,8 @@ def _import_preview_snapshots(entries_repo: EntryRepo, entry_ids: set[str]) -> d
             entry["items"] = []
             entry["attachments"] = []
             entry["batches"] = []
+            entry["_batch_note"] = ""
+            entry["_extension_values"] = []
             entry["history"] = []
             entry["_ocr_results"] = []
             snapshots[entry["id"]] = entry
@@ -714,21 +730,24 @@ def _import_preview_snapshots(entries_repo: EntryRepo, entry_ids: set[str]) -> d
                 }
 
         for row in conn.execute(
-            f"SELECT * FROM attachments WHERE entry_id IN ({placeholders})",
+            f"SELECT * FROM attachments WHERE entry_id IN ({placeholders}) ORDER BY added_at, id",
             batch,
         ).fetchall():
             if row["entry_id"] in snapshots:
                 snapshots[row["entry_id"]]["attachments"].append(dict(row))
 
         for row in conn.execute(
-            f"SELECT entry_id, id FROM items WHERE entry_id IN ({placeholders})",
+            f"""SELECT entry_id, id, name, actual_name, unit, quantity,
+                       unit_price, total, spec, ordinal
+                  FROM items WHERE entry_id IN ({placeholders})
+                 ORDER BY ordinal, id""",
             batch,
         ).fetchall():
             if row["entry_id"] in snapshots:
-                snapshots[row["entry_id"]]["items"].append({"id": row["id"]})
+                snapshots[row["entry_id"]]["items"].append(dict(row))
 
         for row in conn.execute(
-            f"""SELECT be.entry_id, b.id, b.name, b.archived
+            f"""SELECT be.entry_id, b.id, b.name, b.archived, be.note AS batch_note
                   FROM batch_entries be
                   JOIN batches b ON b.id = be.batch_id
                  WHERE be.entry_id IN ({placeholders})
@@ -741,6 +760,8 @@ def _import_preview_snapshots(entries_repo: EntryRepo, entry_ids: set[str]) -> d
                     "name": row["name"],
                     "archived": bool(row["archived"]),
                 })
+                if row["batch_note"] and not snapshots[row["entry_id"]]["_batch_note"]:
+                    snapshots[row["entry_id"]]["_batch_note"] = str(row["batch_note"])
 
         for row in conn.execute(
             f"SELECT * FROM field_history WHERE entry_id IN ({placeholders})",
@@ -756,27 +777,48 @@ def _import_preview_snapshots(entries_repo: EntryRepo, entry_ids: set[str]) -> d
         ).fetchall():
             if row["entry_id"] in snapshots:
                 snapshots[row["entry_id"]]["_ocr_results"].append(dict(row))
+
+        if ext_table:
+            for row in conn.execute(
+                f"""SELECT owner_id, scheme_id, package_id, field_id, value_json
+                      FROM extension_values
+                     WHERE scope = 'entry' AND owner_id IN ({placeholders})""",
+                batch,
+            ).fetchall():
+                snap = snapshots.get(row["owner_id"])
+                if snap and row["scheme_id"] == snap.get("scheme_id"):
+                    try:
+                        value = json.loads(row["value_json"])
+                    except (TypeError, ValueError):
+                        continue
+                    snap["_extension_values"].append({
+                        "scope": "entry",
+                        "package_id": row["package_id"],
+                        "field_id": row["field_id"],
+                        "value": value,
+                    })
     return snapshots
 
 
 def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapter_service=None,
-                             target_scheme_id: str | None = None) -> None:
+                             target_scheme_id: str | None = None, archive_path: Path | None = None) -> None:
     by_number, by_hash = _entry_identity_maps(entries_repo.db.conn)
-    counts = {"new": 0, "merge": 0, "unchanged": 0}
+    counts = {"new": 0, "merge": 0, "conflict": 0, "unchanged": 0}
     entries = inspected.get("entries") or []
     matches = [
         _matching_entry_id(entry, by_number, by_hash)
         for entry in entries
     ]
-    snapshots = _import_preview_snapshots(
-        entries_repo, {entry_id for entry_id in matches if entry_id}
-    )
+    matched_ids = {entry_id for entry_id in matches if entry_id}
+    snapshots = _import_preview_snapshots(entries_repo, matched_ids)
+    exchange_bases = load_exchange_bases(entries_repo.db.conn, matched_ids)
     target_revision_id = ""
     if target_scheme_id and adapter_service:
         target = adapter_service.get_scheme(target_scheme_id)
         target_revision_id = target.get("current_revision_id") or target.get("revision_id") or ""
     profiles = [dict(row) for row in entries_repo.db.conn.execute("SELECT id,name,reviewer FROM profiles").fetchall()]
     profile_by_id = {profile["id"]: profile for profile in profiles}
+    package_options = inspected.get("options") if isinstance(inspected.get("options"), dict) else {}
     for entry, existing_id in zip(entries, matches):
         source_adapter = entry.get("adapter") or {}
         entry["adapter_compatibility"] = {"available": bool(source_adapter.get("definition")),
@@ -803,12 +845,28 @@ def _annotate_import_actions(entries_repo: EntryRepo, inspected: dict, *, adapte
             counts["new"] += 1
             continue
         existing = snapshots.get(existing_id) or {}
-        preview = _merge_preview(entries_repo, existing_id, entry, existing)
+        _fill_archive_inspection_hints(archive_path, existing, entry)
+        inc_notes, inc_tags = _entry_transfer_flags(package_options, entry)
+        preview = _merge_preview(
+            entries_repo,
+            existing_id,
+            entry,
+            existing,
+            local_bases=exchange_bases.get(existing_id, {}),
+            extension_preview=entry.get("extension_merge_preview"),
+            include_notes=inc_notes,
+            include_tags=inc_tags,
+        )
         entry["existing_entry_id"] = existing_id
         entry["existing_batches"] = existing.get("batches") or []
         entry["existing_profile"] = profile_by_id.get(existing.get("profile_id")) or {}
         entry["merge_preview"] = preview
-        entry["import_action"] = "merge" if preview["has_changes"] else "unchanged"
+        if preview["has_conflicts"]:
+            entry["import_action"] = "conflict"
+        elif preview["has_changes"]:
+            entry["import_action"] = "merge"
+        else:
+            entry["import_action"] = "unchanged"
         counts[entry["import_action"]] += 1
     inspected["import_plan"] = counts
 
@@ -869,21 +927,41 @@ def _extension_merge_preview(entries_repo, existing_id, source_adapter, package_
         (existing_id, entry["scheme_id"]),
     ).fetchall() if r[0] == package_id}
     eligible = []
+    conflicts = []
+    same_count = 0
     for record in incoming:
         if record.get("scope", "entry") != "entry" or record.get("package_id", package_id) != package_id:
             continue
         field_id = record.get("field_id")
-        if (field_id in source_fields and field_id in target_fields
-                and source_fields[field_id].get("type") == target_fields[field_id].get("type")
-                and (field_id not in local or local[field_id] in (None, ""))):
+        if (field_id not in source_fields or field_id not in target_fields
+                or source_fields[field_id].get("type") != target_fields[field_id].get("type")):
+            continue
+        if field_id not in local or local[field_id] in (None, ""):
             eligible.append(field_id)
-    return {"eligible": sorted(set(eligible)), "skipped": max(0, len(incoming)-len(eligible))}
+        elif local[field_id] == record.get("value"):
+            same_count += 1
+        elif record.get("value") not in (None, ""):
+            conflicts.append({
+                "package_id": package_id,
+                "field_id": field_id,
+                "label": target_fields[field_id].get("label") or field_id,
+                "local_value": local[field_id],
+                "incoming_value": record.get("value"),
+            })
+    result = {
+        "eligible": sorted(set(eligible)),
+        "skipped": max(0, len(incoming) - len(eligible) - len(conflicts) - same_count),
+    }
+    if conflicts:
+        result["conflicts"] = conflicts
+    return result
 
 
-def _merge_extension_data(entries_repo, entry_id, source_adapter):
-    """Merge only same-package, same-id, same-type entry fields; local non-empty wins."""
+def _merge_extension_data(entries_repo, entry_id, source_adapter, *, overwrite_fields: set[tuple[str, str]] | None = None):
+    """Merge same-package, same-id, same-type entry fields; overwrite only approved fields."""
     if not source_adapter:
         return []
+    overwrite_fields = overwrite_fields or set()
     conn = entries_repo.db.conn
     row = conn.execute("SELECT scheme_id,scheme_revision_id FROM entries WHERE id=?", (entry_id,)).fetchone()
     if not row or not row["scheme_id"] or not row["scheme_revision_id"]:
@@ -917,9 +995,10 @@ def _merge_extension_data(entries_repo, entry_id, source_adapter):
         local = conn.execute("""SELECT value_json FROM extension_values
             WHERE scope='entry' AND owner_id=? AND scheme_id=? AND package_id=? AND field_id=?""",
             (entry_id, row["scheme_id"], package_id, field_id)).fetchone()
-        if local and json.loads(local[0]) not in (None, ""):
+        local_val = json.loads(local[0]) if local else None
+        if local and local_val not in (None, "") and (package_id, field_id) not in overwrite_fields:
             continue
-        if local and json.loads(local[0]) == value:
+        if local and local_val == value:
             continue
         changed_at = datetime.now().isoformat(timespec="microseconds")
         conn.execute("""INSERT INTO extension_values(scope,owner_id,scheme_id,package_id,field_id,
@@ -928,6 +1007,12 @@ def _merge_extension_data(entries_repo, entry_id, source_adapter):
             definition_revision_id=excluded.definition_revision_id,value_json=excluded.value_json,
             updated_at=excluded.updated_at""",
             (entry_id, row["scheme_id"], package_id, field_id, row["scheme_revision_id"], encode(value), changed_at))
+        if local_val not in (None, "") and (package_id, field_id) in overwrite_fields:
+            conn.execute("""INSERT INTO extension_history(scope,owner_id,scheme_id,package_id,field_id,
+                definition_revision_id,kind,old_value_json,new_value_json,actor_id,changed_at)
+                VALUES('entry',?,?,?,?,?,?,?,?,?,?)""",
+                (entry_id, row["scheme_id"], package_id, field_id, row["scheme_revision_id"],
+                 "value", encode(local_val), encode(value), MERGE_HISTORY_PREFIX, changed_at))
         changed.append(field_id)
     # Preserve each transferred event. Stable source event identity makes repeat imports idempotent.
     history = source_adapter.get("extension_history") or []
@@ -1096,25 +1181,35 @@ def _validated_recognition_data(value) -> str:
         raise ValueError("绑定包中的发票识别记录无法读取，请重新导出。") from exc
 
 
-def _merge_text(local: str, incoming: str) -> str:
-    local = str(local or "").strip()
-    incoming = str(incoming or "").strip()
-    if not incoming or incoming in local:
-        return local
-    return f"{local}\n{incoming}" if local else incoming
+def _sync_title_profile_id(entries_repo: EntryRepo, conn, entry_id: str, new_title: str, buyer_tax_id: str) -> None:
+    row = conn.execute("SELECT scheme_revision_id FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row or not row["scheme_revision_id"]:
+        return
+    try:
+        definition = entries_repo._definition(row["scheme_revision_id"]) or {}
+    except (ValueError, KeyError):
+        return
+    candidates = [
+        t for t in definition.get("scheme", {}).get("titles", [])
+        if t.get("name") == new_title
+        and (not t.get("tax_id") or not buyer_tax_id or t.get("tax_id") == buyer_tax_id)
+    ]
+    title_profile_id = candidates[0]["id"] if len(candidates) == 1 else ""
+    conn.execute("UPDATE entries SET title_profile_id = ? WHERE id = ?", (title_profile_id, entry_id))
 
 
-def _merge_tags(local_tags: list[str], incoming_tags: list[str]) -> list[str]:
-    """Union ordinary tags; a package status tag replaces its local opposite."""
-    result = list(local_tags)
-    for incoming in incoming_tags:
-        for group in EXCLUSIVE_TAG_GROUPS:
-            if incoming in group:
-                result = [tag for tag in result if tag not in group]
-                break
-        if incoming not in result:
-            result.append(incoming)
-    return result
+def _non_material_check_lines(message: str) -> list[str]:
+    return [
+        part for part in split_message(message)
+        if not part.startswith(PAYMENT_CHECK_PREFIX) and not part.startswith(INSPECTION_CHECK_PREFIX)
+    ]
+
+
+def _material_check_lines(message: str) -> list[str]:
+    return [
+        part for part in split_message(message)
+        if part.startswith(PAYMENT_CHECK_PREFIX) or part.startswith(INSPECTION_CHECK_PREFIX)
+    ]
 
 
 def _merge_existing_entry(
@@ -1128,156 +1223,335 @@ def _merge_existing_entry(
     now: str,
     created_files: list[Path],
     tampered: bool = False,
-    *, role_mappings: dict | None = None,
-) -> list[str]:
-    """Add package-only material and metadata without overwriting local work."""
+    *,
+    role_mappings: dict | None = None,
+    merge_plan: dict | None = None,
+    merge_decisions: dict[str, str] | None = None,
+    removed_files: list[Path] | None = None,
+    package_options: dict | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """Apply a planned three-way / two-way merge inside the caller's transaction.
+
+    Old attachment files removed during replacement are queued into `removed_files`
+    and must be unlinked by the caller ONLY after `conn.commit()` succeeds.
+    """
     changes: list[str] = []
-    existing = entries_repo.get(entry_id) or {}
+    if removed_files is None:
+        removed_files = []
+    existing = _import_preview_snapshots(entries_repo, {entry_id}).get(entry_id) or {}
+    inc_notes, inc_tags = _entry_transfer_flags(package_options, incoming)
+    if merge_plan is None:
+        ext_preview = None
+        source_adapter = incoming.get("adapter") or {}
+        if source_adapter:
+            pkg_id = source_adapter.get("definition", {}).get("manifest", {}).get("package_id", "")
+            ext_preview = _extension_merge_preview(entries_repo, entry_id, source_adapter, pkg_id)
+        merge_plan = _merge_preview(
+            entries_repo,
+            entry_id,
+            incoming,
+            existing,
+            extension_preview=ext_preview,
+            include_notes=inc_notes,
+            include_tags=inc_tags,
+        )
+    decisions = validate_entry_decisions(merge_plan, merge_decisions)
+    plan_items = {item["key"]: item for item in merge_plan.get("items") or []}
+    invoice_core_updated = False
 
-    filled_locked = []
-    for field in (
-        "title", "invoice_no", "invoice_date", "seller", "total",
-        "buyer_name", "buyer_tax_id", "seller_tax_id", "recognition_data",
-        "category", "source",
-    ):
-        incoming_value = (_validated_recognition_data(incoming.get(field)) if field == "recognition_data"
-                          else str(incoming.get(field) or ""))
-        if incoming_value and not str(existing.get(field) or ""):
+    # --- 1. Base / locked fields ---
+    base_filled = 0
+    base_replaced = 0
+    new_title = str(existing.get("title") or "")
+    new_buyer_tax = str(existing.get("buyer_tax_id") or "")
+    for field in COMPARABLE_BASE_FIELDS:
+        item = plan_items.get(f"base:{field}")
+        if not item:
+            continue
+        choice = decisions.get(item["key"], "keep_local")
+        if choice != "use_incoming":
+            continue
+        old_val = str(existing.get(field) or "")
+        inc_val = str(incoming.get(field) or "")
+        if inc_val == old_val:
+            continue
+        conn.execute(f"UPDATE entries SET {field} = ? WHERE id = ?", (inc_val, entry_id))
+        if old_val:
             conn.execute(
-                f"UPDATE entries SET {field} = ? WHERE id = ?",
-                (incoming_value, entry_id),
+                """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (entry_id, f"{MERGE_HISTORY_PREFIX}{field}", old_val, inc_val, "", now),
             )
-            filled_locked.append(field)
-    if filled_locked:
-        changes.append(f"基础信息 {len(filled_locked)}")
+            base_replaced += 1
+        else:
+            base_filled += 1
+        if field == "title":
+            new_title = inc_val
+        elif field == "buyer_tax_id":
+            new_buyer_tax = inc_val
+        if field in {"title", "invoice_no", "invoice_date", "seller", "seller_tax_id", "total", "buyer_name", "buyer_tax_id"}:
+            invoice_core_updated = True
+    if new_title != str(existing.get("title") or "") or new_buyer_tax != str(existing.get("buyer_tax_id") or ""):
+        _sync_title_profile_id(entries_repo, conn, entry_id, new_title, new_buyer_tax)
 
+    # Fill empty recognition_data / source (or refresh when invoice core is updated from incoming)
+    for meta_field in ("recognition_data", "source"):
+        inc_val = (
+            _validated_recognition_data(incoming.get(meta_field))
+            if meta_field == "recognition_data"
+            else str(incoming.get(meta_field) or "")
+        )
+        old_val = str(existing.get(meta_field) or "")
+        if inc_val and (not old_val or (invoice_core_updated and inc_val != old_val)):
+            conn.execute(f"UPDATE entries SET {meta_field} = ? WHERE id = ?", (inc_val, entry_id))
+            if not old_val:
+                base_filled += 1
+    if base_replaced:
+        changes.append(f"更新基础信息 {base_replaced}")
+    if base_filled:
+        changes.append(f"基础信息 {base_filled}")
+
+    # --- 2. Tags ---
     local_tags = list(existing.get("tags") or [])
-    merged_tags = _merge_tags(
-        local_tags,
-        [str(tag).strip() for tag in incoming.get("tags") or [] if str(tag).strip()]
-        + import_tags,
-    )
-    if merged_tags != local_tags:
+    inc_tag_list = [str(tag).strip() for tag in (incoming.get("tags") or []) if str(tag).strip()]
+    tags_item = plan_items.get("tags")
+    tags_choice = decisions.get("tags", "keep_local") if tags_item else "keep_local"
+    if tags_choice == "use_incoming":
+        next_tags = _merge_tags(inc_tag_list, import_tags)
+    elif tags_choice == "merge":
+        next_tags = _merge_tags(local_tags, inc_tag_list + import_tags)
+    else:
+        next_tags = _merge_tags(local_tags, import_tags)
+    if next_tags != local_tags:
         conn.execute(
             "UPDATE entries SET tags = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(merged_tags, ensure_ascii=False), now, entry_id),
+            (json.dumps(next_tags, ensure_ascii=False), now, entry_id),
         )
-        changes.append(f"标签 {max(1, len(set(merged_tags) - set(local_tags)))}")
+        changes.append(f"标签 {max(1, len(set(next_tags) - set(local_tags)))}")
 
+    # --- 3. Editable fields (paid_amount, actual_item_name, notes, ...) ---
     local_fields = existing.get("fields") or {}
-    for field, value in (incoming.get("fields") or {}).items():
-        incoming_value = str(value.get("current") or "")
-        if not incoming_value:
+    inc_fields = incoming.get("fields") or {}
+    for key, item in plan_items.items():
+        if item["kind"] not in {"field", "notes"}:
             continue
+        field = item["field"]
+        choice = decisions.get(key, "keep_local")
+        if choice == "keep_local":
+            continue
+        value = inc_fields.get(field) or {}
+        incoming_value = str(value.get("current") or "")
         local = local_fields.get(field)
+        local_value = str((local or {}).get("current") or "")
+        if choice == "merge" and field == "notes":
+            next_value = _merge_text(local_value, incoming_value)
+        else:
+            next_value = incoming_value
+        if next_value == local_value:
+            continue
         if local is None:
             conn.execute(
                 """INSERT INTO entry_fields(entry_id, field, origin, current, modified, value_source)
                    VALUES(?,?,?,?,?,?)""",
                 (
-                    entry_id, field, str(value.get("origin") or ""), incoming_value,
+                    entry_id, field, str(value.get("origin") or ""), next_value,
                     int(bool(value.get("modified"))), str(value.get("value_source") or ""),
                 ),
             )
             changes.append("备注" if field == "notes" else "条目信息")
             continue
-        local_value = str(local.get("current") or "")
-        next_value = _merge_text(local_value, incoming_value) if field == "notes" else (
-            incoming_value if not local_value else local_value
+        new_source = str(value.get("value_source") or "") if choice == "use_incoming" else (
+            str(local.get("value_source") or "") or str(value.get("value_source") or "")
         )
-        if next_value == local_value:
-            continue
+        new_modified = int(bool(local.get("modified")) or bool(value.get("modified")) or (bool(local_value) and choice == "use_incoming"))
         conn.execute(
             """UPDATE entry_fields
-                  SET current = ?, modified = MAX(modified, ?),
-                      value_source = CASE WHEN value_source = '' THEN ? ELSE value_source END
+                  SET current = ?, modified = ?, value_source = ?
                 WHERE entry_id = ? AND field = ?""",
-            (
-                next_value, int(bool(value.get("modified"))),
-                str(value.get("value_source") or ""), entry_id, field,
-            ),
+            (next_value, new_modified, new_source, entry_id, field),
         )
+        history_field = f"{MERGE_HISTORY_PREFIX}{field}" if (local_value and choice == "use_incoming") else field
         conn.execute(
             """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)
                VALUES(?,?,?,?,?,?)""",
-            (entry_id, field, local_value, next_value, "", now),
+            (entry_id, history_field, local_value, next_value, "", now),
         )
-        changes.append("备注" if field == "notes" else "条目信息")
+        changes.append("备注" if field == "notes" else ("更新条目信息" if local_value else "条目信息"))
 
+    # --- 4. Attachments (add / replace / three_way + same-sha notes & payment AI) ---
     local_attachments = existing.get("attachments") or []
     by_hash = {
         str(attachment.get("sha256") or ""): attachment
         for attachment in local_attachments if str(attachment.get("sha256") or "")
     }
+    local_by_group: dict[str, list[dict]] = defaultdict(list)
+    for att in local_attachments:
+        if str(att.get("sha256") or ""):
+            local_by_group[attachment_group_key(att)].append(att)
+    inc_by_group: dict[str, list[dict]] = defaultdict(list)
+    for att in incoming.get("attachments") or []:
+        inc_by_group[attachment_group_key(att)].append(att)
+
     attachment_added = 0
-    for attachment in incoming.get("attachments") or []:
-        digest = str(attachment.get("sha256") or "")
-        duplicate = by_hash.get(digest) if digest else None
-        incoming_note = str(attachment.get("note") or "")
-        if duplicate:
-            recognition = _imported_payment_recognition(attachment, str(duplicate.get("type") or ""))
-            if recognition[1] and not duplicate.get("recognition_status") and duplicate.get("id"):
+    attachment_replaced = 0
+    attachment_removed = 0
+
+    # First handle same-sha256 metadata upgrades (payment AI recognition & notes) on surviving local attachments
+    def _upgrade_duplicate(duplicate: dict, inc_att: dict) -> None:
+        if _payment_recognition_upgrades(duplicate, inc_att) and duplicate.get("id"):
+            recognition = _imported_payment_recognition(inc_att, str(duplicate.get("type") or ""))
+            if recognition[1]:
                 conn.execute(
                     """UPDATE attachments SET recognition_version = ?, recognition_status = ?,
                        recognized_value = ?, recognition_message = ? WHERE id = ?""",
                     (*recognition, duplicate["id"]),
                 )
                 changes.append("付款截图识别结果")
-            merged_note = _merge_text(str(duplicate.get("note") or ""), incoming_note)
+        if inc_notes is not False and duplicate.get("id"):
+            merged_note = _merge_text(str(duplicate.get("note") or ""), str(inc_att.get("note") or ""))
             if merged_note != str(duplicate.get("note") or ""):
-                conn.execute(
-                    "UPDATE attachments SET note = ? WHERE id = ?",
-                    (merged_note, duplicate["id"]),
-                )
+                conn.execute("UPDATE attachments SET note = ? WHERE id = ?", (merged_note, duplicate["id"]))
                 changes.append("附件备注")
+
+    if merge_plan.get("mode") != "ancestor":
+        for inc_att in incoming.get("attachments") or []:
+            digest = str(inc_att.get("sha256") or "")
+            if digest and digest in by_hash:
+                _upgrade_duplicate(by_hash[digest], inc_att)
+
+    for key, item in plan_items.items():
+        if item["kind"] != "attachment_group":
             continue
-        stored_path = str(attachment.get("stored_path") or "")
-        arcname = f"attachments/{stored_path}"
-        if not stored_path or not _has_archive_member(archive, arcname):
+        group_key = item["group_key"]
+        choice = decisions.get(key, "keep_local")
+        if choice == "keep_local":
             continue
-        suffix = Path(
-            str(attachment.get("original_name") or "") or stored_path
-        ).suffix
-        att_type = str(attachment.get("type") or "other")
-        final_role, role_revision, att_type = _import_material_mapping(
-            entries_repo, entry_id, existing.get("scheme_revision_id"), attachment,
-            role_mappings, _external_revision_id(entries_repo, incoming.get("adapter")))
-        dest_dir = attachments_repo.data_root.entry_dir(entry_id)
-        stored_name = attachments_repo._unique_name(dest_dir, entry_id, att_type, suffix)
-        dest = dest_dir / stored_name
-        created_files.append(dest)
-        actual_digest = _extract_archive_member(archive, arcname, dest)
-        if digest and actual_digest != digest and not tampered:
-            raise ValueError(f"附件 {attachment.get('original_name') or stored_name} 校验失败。")
-        recognition = _imported_payment_recognition(attachment, att_type) if actual_digest == digest else ("", "", "", "")
-        conn.execute(
-            """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
-               sha256, note, added_at, role_id, role_definition_revision_id,
-               recognition_version, recognition_status, recognized_value, recognition_message)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                uuid.uuid4().hex, entry_id, att_type,
-                str(attachment.get("original_name") or stored_name),
-                f"{entry_id}/{stored_name}", actual_digest, incoming_note,
-                str(attachment.get("added_at") or now), final_role, role_revision, *recognition,
-            ),
-        )
-        by_hash[actual_digest] = {"id": "", "sha256": actual_digest, "note": incoming_note}
-        attachment_added += 1
+        group_local = local_by_group.get(group_key, [])
+        group_inc = inc_by_group.get(group_key, [])
+        inc_shas = {str(att.get("sha256") or "") for att in group_inc if str(att.get("sha256") or "")}
+
+        if choice == "replace":
+            target_keep_shas = inc_shas
+        elif choice == "three_way":
+            target_keep_shas = set(item.get("three_way_shas") or [])
+        else:  # "merge"
+            target_keep_shas = {str(att.get("sha256") or "") for att in group_local} | inc_shas
+
+        # Validate all required replacement members exist in the archive BEFORE deleting any local row.
+        for attachment in group_inc:
+            digest = str(attachment.get("sha256") or "")
+            if digest and digest not in target_keep_shas:
+                continue
+            if digest and digest in by_hash:
+                continue
+            stored_path = str(attachment.get("stored_path") or "")
+            arcname = f"attachments/{stored_path}"
+            if not stored_path or not _has_archive_member(archive, arcname):
+                if choice in {"replace", "three_way"}:
+                    missing_name = str(attachment.get("original_name") or stored_path or item["label"])
+                    raise ValueError(f"绑定包缺少附件文件（{missing_name}），已取消替换以保护本机材料。")
+
+        # Delete local rows in this group that are not in target_keep_shas BEFORE extracting new ones
+        # so max_count constraints on replacement roles pass cleanly.
+        removed_names: list[str] = []
+        for loc_att in group_local:
+            loc_sha = str(loc_att.get("sha256") or "")
+            if loc_sha not in target_keep_shas and loc_att.get("id"):
+                conn.execute("DELETE FROM attachments WHERE id = ?", (loc_att["id"],))
+                stored = str(loc_att.get("stored_path") or "")
+                if stored:
+                    removed_files.append(attachments_repo.data_root.attachments_dir / stored)
+                removed_names.append(str(loc_att.get("original_name") or stored))
+                by_hash.pop(loc_sha, None)
+
+        added_names: list[str] = []
+        for attachment in group_inc:
+            digest = str(attachment.get("sha256") or "")
+            if digest and digest not in target_keep_shas:
+                continue
+            if digest and digest in by_hash:
+                continue
+            stored_path = str(attachment.get("stored_path") or "")
+            arcname = f"attachments/{stored_path}"
+            if not stored_path or not _has_archive_member(archive, arcname):
+                continue
+            suffix = Path(str(attachment.get("original_name") or "") or stored_path).suffix
+            att_type = str(attachment.get("type") or "other")
+            final_role, role_revision, att_type = _import_material_mapping(
+                entries_repo, entry_id, existing.get("scheme_revision_id"), attachment,
+                role_mappings, _external_revision_id(entries_repo, incoming.get("adapter")))
+            dest_dir = attachments_repo.data_root.entry_dir(entry_id)
+            stored_name = attachments_repo._unique_name(dest_dir, entry_id, att_type, suffix)
+            dest = dest_dir / stored_name
+            created_files.append(dest)
+            actual_digest = _extract_archive_member(archive, arcname, dest)
+            if digest and actual_digest != digest and not tampered:
+                raise ValueError(f"附件 {attachment.get('original_name') or stored_name} 校验失败。")
+            recognition = _imported_payment_recognition(attachment, att_type) if actual_digest == digest else ("", "", "", "")
+            incoming_note = str(attachment.get("note") or "") if inc_notes is not False else ""
+            conn.execute(
+                """INSERT INTO attachments(id, entry_id, type, original_name, stored_path,
+                   sha256, note, added_at, role_id, role_definition_revision_id,
+                   recognition_version, recognition_status, recognized_value, recognition_message)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    uuid.uuid4().hex, entry_id, att_type,
+                    str(attachment.get("original_name") or stored_name),
+                    f"{entry_id}/{stored_name}", actual_digest, incoming_note,
+                    str(attachment.get("added_at") or now), final_role, role_revision, *recognition,
+                ),
+            )
+            by_hash[actual_digest] = {"id": "", "sha256": actual_digest, "note": incoming_note}
+            added_names.append(str(attachment.get("original_name") or stored_name))
+
+        if removed_names and added_names:
+            attachment_replaced += len(added_names)
+            conn.execute(
+                """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (entry_id, f"{MERGE_HISTORY_PREFIX}{item['label']}", "、".join(removed_names), "、".join(added_names), "", now),
+            )
+            if group_key in {"invoice_pdf", "invoice_xml"}:
+                invoice_core_updated = True
+        elif removed_names:
+            attachment_removed += len(removed_names)
+            conn.execute(
+                """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (entry_id, f"{MERGE_HISTORY_PREFIX}{item['label']}", "、".join(removed_names), "", "", now),
+            )
+        elif added_names:
+            attachment_added += len(added_names)
+            if group_key in {"invoice_pdf", "invoice_xml"}:
+                invoice_core_updated = True
+
+    if attachment_replaced:
+        changes.append(f"替换材料 {attachment_replaced}")
+    if attachment_removed:
+        changes.append(f"移除材料 {attachment_removed}")
     if attachment_added:
         changes.append(f"材料 {attachment_added}")
 
-    extension_fields = _merge_extension_data(entries_repo, entry_id, incoming.get("adapter") or {})
+    # --- 5. Extension fields ---
+    overwrite_ext = {
+        (item["package_id"], item["field_id"])
+        for key, item in plan_items.items()
+        if item["kind"] == "extension" and decisions.get(key) == "use_incoming"
+    }
+    extension_fields = _merge_extension_data(
+        entries_repo, entry_id, incoming.get("adapter") or {}, overwrite_fields=overwrite_ext
+    )
     if extension_fields:
         changes.append(f"附加信息 {len(extension_fields)}")
     # 保留交接来源属于内部记录，不把材料和信息无变化的条目计作补充。
     _retain_adapter_source(entries_repo, entry_id, incoming.get('adapter'))
 
-    item_count = conn.execute(
-        "SELECT COUNT(*) FROM items WHERE entry_id = ?", (entry_id,)
-    ).fetchone()[0]
-    if not item_count and incoming.get("items"):
-        for item in incoming["items"]:
+    # --- 6. Line items ---
+    items_plan = plan_items.get("items")
+    if items_plan and decisions.get("items") == "use_incoming":
+        before_items = existing.get("items") or []
+        conn.execute("DELETE FROM items WHERE entry_id = ?", (entry_id,))
+        for ordinal, item in enumerate(incoming.get("items") or []):
             conn.execute(
                 """INSERT INTO items(entry_id, name, actual_name, unit, quantity,
                    unit_price, total, spec, ordinal) VALUES(?,?,?,?,?,?,?,?,?)""",
@@ -1285,11 +1559,21 @@ def _merge_existing_entry(
                     entry_id, item.get("name", ""), item.get("actual_name", ""),
                     item.get("unit", ""), item.get("quantity", ""),
                     item.get("unit_price", ""), item.get("total", ""),
-                    item.get("spec", ""), item.get("ordinal", 0),
+                    item.get("spec", ""), item.get("ordinal", ordinal),
                 ),
             )
-        changes.append("发票明细")
+        if before_items:
+            conn.execute(
+                """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (entry_id, f"{MERGE_HISTORY_PREFIX}items", item_snapshot(before_items), item_snapshot(incoming.get("items") or []), "", now),
+            )
+            changes.append("更新发票明细")
+        else:
+            changes.append("发票明细")
+        invoice_core_updated = True
 
+    # --- 7. OCR results (union) ---
     existing_ocr = {
         (
             str(row["provider"] or ""), str(row["file_sha256"] or ""),
@@ -1329,6 +1613,7 @@ def _merge_existing_entry(
     if ocr_added:
         changes.append(f"识别记录 {ocr_added}")
 
+    # --- 8. Field history (union) ---
     existing_history = {
         (
             str(row["field"] or ""), str(row["old_value"] or ""),
@@ -1357,9 +1642,50 @@ def _merge_existing_entry(
     if history_added:
         changes.append(f"修改记录 {history_added}")
 
+    # --- 9. Non-material check reminders (preserve/sync across machines) ---
+    if merge_plan.get("mode") != "ancestor":
+        cur_row = conn.execute(
+            "SELECT check_status, check_message FROM entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        cur_status = str(cur_row["check_status"] or "pass") if cur_row else "pass"
+        cur_message = str(cur_row["check_message"] or "") if cur_row else ""
+        material_lines = _material_check_lines(cur_message)
+        loc_non_mat = _non_material_check_lines(cur_message)
+        inc_non_mat = _non_material_check_lines(str(incoming.get("check_message") or ""))
+        if invoice_core_updated:
+            from ..engine import check_invoice
+            updated_row = conn.execute("SELECT title FROM entries WHERE id = ?", (entry_id,)).fetchone()
+            parsed = entries_repo.parsed_for_check(entry_id)
+            rechecked = check_invoice(
+                parsed,
+                expected_title=(updated_row["title"] if updated_row else "") or "",
+                context=entries_repo.policy_context(entry_id),
+            )
+            rechecked_non_mat = _non_material_check_lines(rechecked.message)
+            next_message = "；".join([*rechecked_non_mat, *material_lines])
+            next_status = "blocked" if (cur_status == "blocked" or rechecked.status == "blocked") else (
+                "warning" if next_message else "pass"
+            )
+            if next_message != cur_message or next_status != cur_status:
+                conn.execute(
+                    "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
+                    (next_status, next_message, entry_id),
+                )
+        else:
+            extra_lines = [line for line in inc_non_mat if line not in loc_non_mat]
+            if extra_lines:
+                next_message = "；".join([*loc_non_mat, *extra_lines, *material_lines])
+                next_status = "blocked" if cur_status == "blocked" else "warning"
+                conn.execute(
+                    "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
+                    (next_status, next_message, entry_id),
+                )
+                changes.append(f"识别提醒 {len(extra_lines)}")
+
     if tampered and changes:
         warning = "绑定包完整性校验未通过，补充内容已由用户确认"
-        check_message = _merge_text(str(existing.get("check_message") or ""), warning)
+        cur_msg = str(conn.execute("SELECT check_message FROM entries WHERE id = ?", (entry_id,)).fetchone()["check_message"] or "")
+        check_message = _merge_text(cur_msg, warning)
         conn.execute(
             """UPDATE entries SET check_status = 'blocked', status = 'partial',
                       check_message = ?, updated_at = ? WHERE id = ?""",
@@ -1369,7 +1695,7 @@ def _merge_existing_entry(
 
     if changes:
         conn.execute("UPDATE entries SET updated_at = ? WHERE id = ?", (now, entry_id))
-    return list(dict.fromkeys(changes))
+    return list(dict.fromkeys(changes)), decisions
 
 
 def import_bindle(entries_repo, attachments_repo, path, profile_id, allow_tampered=False,

@@ -1406,8 +1406,24 @@ class EntryRepo:
             and row["recognition_fingerprint"] == self.invoice_recognition_fingerprint(entry_id)
         )
 
-    def payment_ai_overview(self, entry_id: str) -> dict:
-        """当前付款截图识别结论：逐张状态、识别合计和与实付/发票金额的比对。"""
+    def has_imported_payment_recognition(self, entry_id: str) -> bool:
+        """条目是否带有随绑定包导入、且与当前规则一致的付款截图识别结论。"""
+        row = self.db.conn.execute(
+            """SELECT 1 FROM attachments
+                WHERE entry_id = ? AND type = 'payment_screenshot'
+                  AND recognition_version LIKE ? AND recognition_version LIKE '%:imported'
+                  AND COALESCE(recognition_status, '') <> ''
+                LIMIT 1""",
+            (entry_id, f"{PAYMENT_AI_RECOGNITION_VERSION}%"),
+        ).fetchone()
+        return row is not None
+
+    def payment_ai_overview(self, entry_id: str, *, imported_only: bool = False) -> dict:
+        """当前付款截图识别结论：逐张状态、识别合计和与实付/发票金额的比对。
+
+        imported_only=True 用于未配置本机 AI Key 的电脑：只采纳随绑定包带来的
+        `:imported` 识别结论，保留对方已发现的问题提醒，不为本机手录截图生成提醒。
+        """
         entry = self.db.conn.execute(
             "SELECT total FROM entries WHERE id = ?", (entry_id,)
         ).fetchone()
@@ -1426,14 +1442,20 @@ class EntryRepo:
             (entry_id,),
         ).fetchall()
         items = []
+        has_imported = False
         for row in rows:
-            current = row["recognition_version"].startswith(PAYMENT_AI_RECOGNITION_VERSION)
+            version = str(row["recognition_version"] or "")
+            is_imported = version.endswith(":imported")
+            current = version.startswith(PAYMENT_AI_RECOGNITION_VERSION) and (not imported_only or is_imported)
+            if current and is_imported and row["recognition_status"]:
+                has_imported = True
             items.append({
                 "attachment_id": row["id"],
                 "name": row["original_name"] or "付款截图",
-                "status": row["recognition_status"] if current else "pending",
-                "amount": row["recognized_value"] or "",
-                "message": row["recognition_message"] or "",
+                "status": row["recognition_status"] if current and row["recognition_status"] else "pending",
+                "amount": (row["recognized_value"] or "") if current else "",
+                "message": (row["recognition_message"] or "") if current else "",
+                "imported": bool(current and is_imported),
             })
         settled = bool(items) and all(
             item["status"] in {"recognized", "review"} and item["amount"] for item in items
@@ -1465,9 +1487,17 @@ class EntryRepo:
             "compare_to": compare_to,
             "mismatch": mismatch,
             "needs_review": any(item["status"] == "review" for item in items),
+            "has_imported": has_imported,
         }
 
-    def refresh_payment_check(self, entry_id: str, *, commit: bool = True, remind_pending: bool = True) -> None:
+    def refresh_payment_check(
+        self,
+        entry_id: str,
+        *,
+        commit: bool = True,
+        remind_pending: bool = True,
+        imported_only: bool = False,
+    ) -> None:
         """把当前规则的付款截图识别结果合并进条目识别提醒。
 
         每张截图的问题单独写明（不是付款凭证、退款、识别失败），全部识别出金额后
@@ -1479,7 +1509,7 @@ class EntryRepo:
         ).fetchone()
         if not entry:
             return
-        overview = self.payment_ai_overview(entry_id)
+        overview = self.payment_ai_overview(entry_id, imported_only=imported_only)
         items = overview.get("items") or []
         base_messages = [
             part for part in str(entry["check_message"] or "").split("；")
@@ -1537,7 +1567,7 @@ class EntryRepo:
             self.db.conn.commit()
         self.recompute_status(entry_id,commit=commit)
 
-    def clear_payment_check(self, entry_id: str) -> None:
+    def clear_payment_check(self, entry_id: str, *, commit: bool = True) -> None:
         """材料集合无法完整识别时移除旧的付款金额结论，保留发票校验结果。"""
         row = self.db.conn.execute(
             "SELECT check_status, check_message FROM entries WHERE id = ?", (entry_id,)
@@ -1556,8 +1586,9 @@ class EntryRepo:
             "UPDATE entries SET check_status = ?, check_message = ? WHERE id = ?",
             (status, "；".join(base_messages), entry_id),
         )
-        self.db.conn.commit()
-        self.recompute_status(entry_id)
+        if commit:
+            self.db.conn.commit()
+        self.recompute_status(entry_id, commit=commit)
 
     def set_meta(self, entry_id: str, category: str | None = None, tags: list | None = None) -> None:
         if category is not None:

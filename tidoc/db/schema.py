@@ -28,7 +28,8 @@ import sqlite3
 # v10：OCR 结果记录实际 API 调用页数，多页 PDF 不再按一张误计。
 # v11：报账批次改为单一归属，历史重复归属保留最后一次装入的批次。
 # v13：保存销售方税号和本地解析证据，关键值重算时保留票面核对提醒。
-SCHEMA_VERSION = 13
+# v14：新增条目交接基线表 entry_exchange_bases，支持绑定包与未来协同的三方合并。
+SCHEMA_VERSION = 14
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -206,6 +207,21 @@ CREATE TABLE IF NOT EXISTS ocr_results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ocr_results_entry ON ocr_results(entry_id);
+
+-- 条目交接基线快照：导出或导入绑定包（及后续协同同步）时记录规范内容快照与摘要，
+-- 用于查找共同祖先并执行三方合并，准确区分替换、删除与双端冲突。
+CREATE TABLE IF NOT EXISTS entry_exchange_bases (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id      TEXT NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    direction     TEXT NOT NULL DEFAULT 'import',
+    recorded_at   TEXT NOT NULL,
+    UNIQUE(entry_id, snapshot_hash),
+    FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_bases_entry ON entry_exchange_bases(entry_id);
 """
 
 

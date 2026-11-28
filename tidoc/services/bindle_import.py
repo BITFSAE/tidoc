@@ -14,6 +14,12 @@ from pathlib import Path
 from ..db.entries import EntryRepo
 from ..db.attachments import AttachmentRepo
 from . import bindle as storage
+from .entry_merge import (
+    BATCH_NOTE_PREFIX,
+    build_entry_snapshot,
+    merge_text,
+    record_exchange_base,
+)
 
 
 class _EntryRestorer:
@@ -305,6 +311,19 @@ def import_bindle(
     profile_overrides = options.get("profile_overrides") or {}
     profile_mappings = options.get("profile_mappings") or {}
     role_mappings_by_entry = options.get("role_mappings") or {}
+    raw_merge_decisions = options.get("entry_merge_decisions") or {}
+    if not isinstance(raw_merge_decisions, dict):
+        raise ValueError("条目合并选项格式无效，请重新打开导入预览。")
+    entry_merge_decisions: dict[int, dict[str, str]] = {}
+    for raw_index, decision_map in raw_merge_decisions.items():
+        try:
+            idx = int(raw_index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("条目合并选项索引无效，请重新打开导入预览。") from exc
+        if decision_map is not None and not isinstance(decision_map, dict):
+            raise ValueError("条目合并选项格式无效，请重新打开导入预览。")
+        if decision_map:
+            entry_merge_decisions[idx] = {str(k): str(v) for k, v in decision_map.items()}
     selection_supplied = "selected_profile_ids" in options
     selected_profile_ids = {
         str(value or "") for value in (options.get("selected_profile_ids") or [])
@@ -366,7 +385,8 @@ def import_bindle(
                         "adapter_compatibility", "extension_merge_preview", "role_mapping_preview"):
                 entry.pop(key, None)
         storage._annotate_import_actions(entries_repo, current, adapter_service=adapter_service,
-                                 target_scheme_id=inspected.get("target_scheme_id"))
+                                 target_scheme_id=inspected.get("target_scheme_id"),
+                                 archive_path=Path(path))
         matched = {e.get("existing_entry_id") for e in current["entries"] if e.get("existing_entry_id")}
         current_version = storage._local_preview_version(entries_repo, matched)
         if (inspected.get("local_version") is not None
@@ -394,6 +414,10 @@ def import_bindle(
     skipped: list[dict] = []
     created_dirs: list[Path] = []
     created_files: list[Path] = []
+    removed_files: list[Path] = []
+    pending_batch_notes: list[tuple[str, str, bool]] = []  # (entry_id, batch_note, is_new)
+    imported_exchange_records: list[tuple[str, dict]] = []
+    package_options = inspected.get("options") if isinstance(inspected.get("options"), dict) else {}
     conn = entries_repo.db.conn
     now = datetime.now().isoformat(timespec="seconds")
     existing_by_invoice_no, existing_by_invoice_hash = storage._entry_identity_maps(conn)
@@ -523,11 +547,20 @@ def import_bindle(
                     # 补材料和移动批次分别决定；无内容变化的条目也支持明确移动。
                     if move_existing_entries or existing_id in imported_ids:
                         default_batch_entry_indexes.add(entry_index)
-                    changes = storage._merge_existing_entry(
+                    changes, decisions = storage._merge_existing_entry(
                         conn, entries_repo, attachments_repo, zf, existing_id, e,
                         import_tags, now, created_files, bool(inspected["tampered"]),
                         role_mappings=role_mappings_by_entry.get(str(entry_index), role_mappings_by_entry),
+                        merge_plan=e.get("merge_preview"),
+                        merge_decisions=entry_merge_decisions.get(entry_index),
+                        removed_files=removed_files,
+                        package_options=package_options,
                     )
+                    inc_notes, _inc_tags = storage._entry_transfer_flags(package_options, e)
+                    incoming_batch_note = str(e.get("batch_note") or "").strip() if inc_notes is not False else ""
+                    if incoming_batch_note and decisions.get("batch_note", "merge") != "keep_local":
+                        pending_batch_notes.append((existing_id, incoming_batch_note, False))
+                    imported_exchange_records.append((existing_id, e))
                     if changes:
                         if existing_id not in updated_ids:
                             updated_ids.append(existing_id)
@@ -539,6 +572,7 @@ def import_bindle(
                         })
                     else:
                         skipped.append({
+                            "_entry_id": existing_id,
                             "invoice_no": invoice_no,
                             "seller": e.get("seller", ""),
                             "reason": "现有条目已包含包内材料和信息",
@@ -565,17 +599,85 @@ def import_bindle(
                 imported_ids.append(new_id)
                 destination_by_entry_index[entry_index] = new_id
                 default_batch_entry_indexes.add(entry_index)
+                inc_notes, _inc_tags = storage._entry_transfer_flags(package_options, e)
+                incoming_batch_note = str(e.get("batch_note") or "").strip() if inc_notes is not False else ""
+                if incoming_batch_note:
+                    pending_batch_notes.append((new_id, incoming_batch_note, True))
+                imported_exchange_records.append((new_id, e))
                 if invoice_no:
                     existing_by_invoice_no[invoice_no] = new_id
                 for digest in invoice_hashes:
                     existing_by_invoice_hash[digest] = new_id
 
-            affected_ids = list(dict.fromkeys(imported_ids + updated_ids))
             (target_batch_id, batch_created, global_batch_created,
              individually_assigned, globally_assigned) = _assign_batches(
                 conn, now, default_batch_entry_indexes, entry_batch_overrides,
                 destination_by_entry_index, target_batch_id, new_batch_name,
             )
+
+            # 批次催办批注：条目进入批次时写入批次催办备注，未进批次时合入条目备注避免丢失。
+            for note_entry_id, incoming_note, is_new in pending_batch_notes:
+                batch_row = conn.execute(
+                    "SELECT batch_id, note FROM batch_entries WHERE entry_id = ? LIMIT 1",
+                    (note_entry_id,),
+                ).fetchone()
+                note_applied = False
+                if batch_row:
+                    merged_bnote = merge_text(str(batch_row["note"] or ""), incoming_note)
+                    if merged_bnote != str(batch_row["note"] or ""):
+                        conn.execute(
+                            "UPDATE batch_entries SET note = ? WHERE batch_id = ? AND entry_id = ?",
+                            (merged_bnote, batch_row["batch_id"], note_entry_id),
+                        )
+                        note_applied = True
+                else:
+                    field_row = conn.execute(
+                        "SELECT current FROM entry_fields WHERE entry_id = ? AND field = 'notes'",
+                        (note_entry_id,),
+                    ).fetchone()
+                    current_notes = str(field_row["current"] or "") if field_row else ""
+                    if incoming_note not in current_notes:
+                        tagged = incoming_note if incoming_note.startswith(BATCH_NOTE_PREFIX.strip()) else f"{BATCH_NOTE_PREFIX}{incoming_note}"
+                        next_notes = merge_text(current_notes, tagged)
+                        if field_row is None:
+                            conn.execute(
+                                """INSERT INTO entry_fields(entry_id, field, origin, current, modified, value_source)
+                                   VALUES(?, 'notes', '', ?, 0, '')""",
+                                (note_entry_id, next_notes),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE entry_fields SET current = ? WHERE entry_id = ? AND field = 'notes'",
+                                (next_notes, note_entry_id),
+                            )
+                        if not is_new:
+                            conn.execute(
+                                """INSERT INTO field_history(entry_id, field, old_value, new_value, profile_id, changed_at)
+                                   VALUES(?, 'notes', ?, ?, '', ?)""",
+                                (note_entry_id, current_notes, next_notes, now),
+                            )
+                        note_applied = True
+                if note_applied and not is_new:
+                    conn.execute("UPDATE entries SET updated_at = ? WHERE id = ?", (now, note_entry_id))
+                    if note_entry_id not in updated_ids:
+                        updated_ids.append(note_entry_id)
+                    skipped = [item for item in skipped if item.get("_entry_id") != note_entry_id]
+                    existing_merged = next((item for item in merged if item["entry_id"] == note_entry_id), None)
+                    if existing_merged:
+                        if "催办批注" not in existing_merged["changes"]:
+                            existing_merged["changes"].append("催办批注")
+                    else:
+                        merged.append({
+                            "entry_id": note_entry_id,
+                            "invoice_no": "",
+                            "seller": "",
+                            "changes": ["催办批注"],
+                        })
+
+            for item in skipped:
+                item.pop("_entry_id", None)
+
+            affected_ids = list(dict.fromkeys(imported_ids + updated_ids))
 
             if affected_ids and created_profile_ids:
                 has_default = conn.execute(
@@ -595,7 +697,38 @@ def import_bindle(
                            ON CONFLICT(key) DO UPDATE SET value = excluded.value"""
                     )
             for affected_id in affected_ids:
-                entries_repo.recompute_status(affected_id,commit=False)
+                entries_repo.recompute_status(affected_id, commit=False)
+                if entries_repo.has_imported_payment_recognition(affected_id):
+                    entries_repo.refresh_payment_check(
+                        affected_id, commit=False, remind_pending=False, imported_only=True
+                    )
+                else:
+                    has_local_pay_rec = conn.execute(
+                        """SELECT 1 FROM attachments
+                            WHERE entry_id = ? AND type = 'payment_screenshot'
+                              AND COALESCE(recognition_status, '') <> ''
+                              AND recognition_version NOT LIKE '%:imported'
+                            LIMIT 1""",
+                        (affected_id,),
+                    ).fetchone() is not None
+                    if not has_local_pay_rec:
+                        entries_repo.clear_payment_check(affected_id, commit=False)
+            # 记录交接基线快照，供后续三方合并识别替换、删除与双端冲突。
+            if imported_exchange_records:
+                post_snapshots = storage._import_preview_snapshots(
+                    entries_repo, {entry_id for entry_id, _ in imported_exchange_records}
+                )
+                for rec_entry_id, incoming_entry in imported_exchange_records:
+                    inc_snap = build_entry_snapshot(incoming_entry)
+                    record_exchange_base(conn, rec_entry_id, inc_snap, "import", now)
+                    post_local = post_snapshots.get(rec_entry_id)
+                    if post_local is not None:
+                        local_snap = build_entry_snapshot(
+                            post_local,
+                            batch_note=str(post_local.get("_batch_note") or ""),
+                            extension_values=post_local.get("_extension_values"),
+                        )
+                        record_exchange_base(conn, rec_entry_id, local_snap, "import", now)
             conn.commit()
     except BaseException as exc:  # Roll back writes and extracted files on cancellation.
         conn.rollback()
@@ -618,6 +751,13 @@ def import_bindle(
                 f"{exc}；失败后的附件目录清理未完成：" + "；".join(cleanup_errors)
             ) from exc
         raise
+
+    # 事务已提交成功，安全清理被替换或移除的旧附件文件。
+    for old_path in removed_files:
+        try:
+            old_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     message_parts = [f"新增 {len(imported_ids)} 条" if imported_ids else "没有新增条目"]
     if updated_ids:

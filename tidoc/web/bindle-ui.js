@@ -16,7 +16,59 @@ const BindlePreview = {
     return [...new Set([...declared.keys(), ...referenced.keys()])]
       .filter((sourceId) => referenced.has(sourceId)).map((sourceId) => referenced.get(sourceId));
   },
-  isExisting: (entry) => entry.import_action === 'merge' || entry.import_action === 'unchanged',
+  isExisting: (entry) => entry.import_action === 'merge' || entry.import_action === 'conflict' || entry.import_action === 'unchanged',
+  actionLabel(entry) {
+    if (entry.import_action === 'conflict') return '已有·待确认';
+    if (entry.import_action === 'merge') return entry.merge_preview?.has_replacements ? '已有·可更新' : '已有·待补充';
+    if (entry.import_action === 'unchanged') return '已有·无变化';
+    return '新增';
+  },
+  defaultDecisions(entry) {
+    const out = {};
+    for (const item of entry?.merge_preview?.items || []) {
+      out[item.key] = item.default_choice;
+    }
+    return out;
+  },
+  incomingChoiceFor(item) {
+    const values = new Set((item.choices || []).map((choice) => choice.value));
+    if (item.kind === 'attachment_group') {
+      // 双方都改过同一类多文件材料时，优先智能合并（去掉对方删的旧图并保留本机新增），不误删汇总人新增的材料。
+      if (values.has('three_way')) return 'three_way';
+      if (values.has('replace')) return 'replace';
+      if (values.has('merge')) return 'merge';
+    }
+    if (item.kind === 'notes' && values.has('merge') && item.local_value && item.incoming_value) {
+      return 'merge';
+    }
+    if (values.has('use_incoming')) return 'use_incoming';
+    if (values.has('merge')) return 'merge';
+    return item.default_choice;
+  },
+  summarizeDecisions(entry, decisions) {
+    const items = entry?.merge_preview?.items || [];
+    let addCount = 0;
+    let replaceCount = 0;
+    let updateCount = 0;
+    let keepCount = 0;
+    let remainingConflicts = 0;
+    for (const item of items) {
+      const choice = decisions?.[item.key] || item.default_choice;
+      if (choice === 'keep_local') {
+        keepCount += 1;
+        if (item.status === 'conflict') remainingConflicts += 1;
+        continue;
+      }
+      if (item.kind === 'attachment_group' && (choice === 'replace' || choice === 'three_way')) {
+        replaceCount += 1;
+      } else if (choice === 'use_incoming' && (item.local_value || item.kind === 'items')) {
+        updateCount += 1;
+      } else {
+        addCount += 1;
+      }
+    }
+    return { addCount, replaceCount, updateCount, keepCount, remainingConflicts };
+  },
   batchNames: (entry) => (entry.existing_batches || [])
     .map((batch) => `${batch.name}${batch.archived ? '（已归档）' : ''}`).join('、') || '未进批次',
   target(entry, value, name, mode, batchId, batchName, moveExisting) {
@@ -67,26 +119,84 @@ async function openBindleImportPreview(path, insp, options = {}) {
   const perEntryBatchOptions = targetBatches.map((batch) =>
     `<option value="batch:${esc(batch.id)}">${esc(bindleBatchOptionLabel(batch))}</option>`
   ).join('');
+  const mergeDecisionsByEntry = new Map();
+  entries.forEach((entry, entryIndex) => {
+    if (entry.merge_preview?.items?.length) {
+      mergeDecisionsByEntry.set(entryIndex, BindlePreview.defaultDecisions(entry));
+    }
+  });
+  const renderFileList = (files) => {
+    if (!files?.length) return '<span class="bindle-diff-empty">无</span>';
+    return `<ul class="bindle-diff-files">${files.map((file) => `<li><span class="bindle-diff-fname" data-tooltip-overflow="${esc(file.name || '')}">${esc(file.name || '材料')}</span>${file.meta ? `<small>${esc(file.meta)}</small>` : ''}</li>`).join('')}</ul>`;
+  };
+  const renderMergePanel = (entry, entryIndex) => {
+    const plan = entry.merge_preview;
+    if (!plan?.items?.length) return '';
+    const decisions = mergeDecisionsByEntry.get(entryIndex) || {};
+    const modeHint = plan.mode === 'three_way'
+      ? '已关联上次交接基线，可自动识别对方更换的材料与修改'
+      : '未找到共同交接基线，存在差异的项目默认保留本机，可逐项选择替换或合并';
+    const archivedBanner = plan.archived
+      ? `<div class="bindle-merge-archived">该条目位于已归档批次（${esc((plan.archived_batches || []).join('、'))}），已默认保留本机内容，修改前请确认。</div>`
+      : '';
+    const rowsHtml = plan.items.map((item) => {
+      const selectedChoice = decisions[item.key] || item.default_choice;
+      const badgeCls = item.status === 'conflict' ? 'is-conflict' : item.status === 'auto_update' ? 'is-update' : 'is-add';
+      const badgeLabel = item.status === 'conflict' ? '待确认' : item.status === 'auto_update' ? '自动更新' : '补充';
+      const contentHtml = item.kind === 'attachment_group'
+        ? `<div class="bindle-diff-cols">
+             <div class="bindle-diff-side"><em>本机现有</em>${renderFileList(item.local_files)}</div>
+             <div class="bindle-diff-side"><em>包内提供</em>${renderFileList(item.incoming_files)}</div>
+           </div>`
+        : `<div class="bindle-diff-cols">
+             <div class="bindle-diff-side"><em>本机${item.local_hint ? ` · ${esc(item.local_hint)}` : ''}</em><div class="bindle-diff-val">${esc(item.local_value || '空')}</div></div>
+             <div class="bindle-diff-side"><em>包内${item.incoming_hint ? ` · ${esc(item.incoming_hint)}` : ''}</em><div class="bindle-diff-val">${esc(item.incoming_value || '空')}</div></div>
+           </div>`;
+      const choicesHtml = (item.choices || []).map((choice) => `
+        <label class="bindle-merge-choice">
+          <input type="radio" name="bm_${entryIndex}_${esc(item.key)}" value="${esc(choice.value)}" data-merge-entry="${entryIndex}" data-merge-key="${esc(item.key)}" ${selectedChoice === choice.value ? 'checked' : ''}/>
+          <span>${esc(choice.label)}</span>
+        </label>`).join('');
+      return `<div class="bindle-merge-item ${badgeCls}" data-merge-item-key="${esc(item.key)}">
+        <div class="bindle-merge-item-head">
+          <strong>${esc(item.label)}</strong>
+          <span class="bindle-merge-pill ${badgeCls}">${badgeLabel}</span>
+          <small>${esc(item.change_summary || '')}</small>
+        </div>
+        ${contentHtml}
+        <div class="bindle-merge-choices" role="radiogroup" aria-label="${esc(item.label)}处理方式">${choicesHtml}</div>
+      </div>`;
+    }).join('');
+    return `<div class="bindle-entry-merge hidden" id="bindleEntryMerge${entryIndex}" data-bind-entry-merge>
+      <div class="bindle-merge-head"><span>${esc(modeHint)}</span></div>
+      ${archivedBanner}
+      <div class="bindle-merge-items">${rowsHtml}</div>
+    </div>`;
+  };
   const entryRows = entries.map((entry, entryIndex) => {
     const profile = packageProfiles.find((item) => item.sourceId === (entry.profile_id || '__fallback__'));
     const isExisting = BindlePreview.isExisting(entry);
-    const action = entry.import_action === 'merge' ? '已有·待补充' : isExisting ? '已有·无变化' : '新增';
-    const actionDetail = entry.import_action === 'merge'
+    const action = BindlePreview.actionLabel(entry);
+    const actionDetail = (entry.import_action === 'merge' || entry.import_action === 'conflict')
       ? (entry.merge_preview?.labels || []).join('、')
       : entry.import_action === 'unchanged'
         ? ''
         : `材料 ${(entry.attachments || []).length} 份`;
     const owner = isExisting && entry.existing_profile?.id ? entry.existing_profile : profile;
     const ownerText = `${owner?.name || entry.profile_name || '未填写'} · ${owner?.reviewer || entry.reviewer || '未填写'}`;
-    return `<div class="bindle-entry-row" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}" data-bind-entry-index="${entryIndex}" data-bind-action="${esc(entry.import_action || 'new')}">
+    const hasMergeItems = !!(isExisting && entry.merge_preview?.items?.length);
+    const conflictCount = Number(entry.merge_preview?.conflict_count || 0);
+    const compareLabel = conflictCount ? `对比（${conflictCount}）` : '对比';
+    return `<div class="bindle-entry-row${entry.import_action === 'conflict' ? ' has-bindle-conflict' : ''}" data-bind-entry-profile="${esc(entry.profile_id || '__fallback__')}" data-bind-entry-index="${entryIndex}" data-bind-action="${esc(entry.import_action || 'new')}">
       <input type="checkbox" data-bind-entry-enabled aria-label="导入发票 ${esc(entry.invoice_no || entryIndex + 1)}" checked/>
       <div class="bindle-entry-invoice"><span class="bindle-entry-seller" data-tooltip-overflow="${esc(entry.seller || '')}">${esc(entry.seller || '未识别销售方')}</span><small class="mono" data-tooltip-overflow="${esc(entry.invoice_no || '')}">${esc(entry.invoice_no || '无发票号')}</small></div>
       <span class="bindle-entry-amount">${fmtMoney(entry.total)}</span>
       <span class="bindle-entry-owner" title="${isExisting ? '保留本机报账人和审核人' : '新条目的报账人和审核人'}" data-tooltip-overflow="${esc(ownerText)}">${esc(ownerText)}</span>
       <div class="bindle-entry-result">
-        <div class="bindle-entry-line"><span class="bindle-entry-action ${esc(entry.import_action || 'new')}">${esc(action)}</span><small data-tooltip-overflow="${esc(actionDetail)}">${esc(actionDetail)}</small></div>
-        <div class="bindle-entry-line"><small class="bindle-entry-location"></small><span class="bindle-row-tools">${isExisting ? '<button type="button" class="link-btn" data-bind-entry-view title="查看本机已有条目">查看</button>' : ''}<button type="button" class="link-btn" data-bind-entry-adjust aria-label="单独设置该条目的批次" aria-expanded="false" aria-controls="bindleEntryOverride${entryIndex}">设置</button></span></div>
+        <div class="bindle-entry-line"><span class="bindle-entry-action ${esc(entry.import_action || 'new')}">${esc(action)}</span><small data-bind-action-detail data-tooltip-overflow="${esc(actionDetail)}">${esc(actionDetail)}</small></div>
+        <div class="bindle-entry-line"><small class="bindle-entry-location"></small><span class="bindle-row-tools">${hasMergeItems ? `<button type="button" class="link-btn${conflictCount ? ' is-conflict-btn' : ''}" data-bind-entry-compare aria-expanded="false" aria-controls="bindleEntryMerge${entryIndex}">${compareLabel}</button>` : ''}${isExisting ? '<button type="button" class="link-btn" data-bind-entry-view title="查看本机已有条目">查看</button>' : ''}<button type="button" class="link-btn" data-bind-entry-adjust aria-label="单独设置该条目的批次" aria-expanded="false" aria-controls="bindleEntryOverride${entryIndex}">设置</button></span></div>
       </div>
+      ${renderMergePanel(entry, entryIndex)}
       <div class="bindle-entry-override hidden" id="bindleEntryOverride${entryIndex}" data-bind-entry-override>
         <span>本条导入到</span>
         <select data-bind-entry-batch aria-label="设置该条目的目标批次">
@@ -163,11 +273,26 @@ async function openBindleImportPreview(path, insp, options = {}) {
       </div>
     </section>
     <section class="bindle-import-section bindle-entry-section">
+      ${(() => {
+        const conflictEntries = entries.filter((e) => e.import_action === 'conflict').length;
+        return conflictEntries
+          ? `<div class="bindle-conflict-banner">
+              <span><b>${conflictEntries}</b> 条存在与本机不同的材料或信息，可点每行「对比」逐项选择替换或保留。</span>
+              <div class="bindle-conflict-actions">
+                <button type="button" class="btn small ghost" id="bindleConflictsUseIncoming">待确认项全用包内</button>
+                <button type="button" class="btn small ghost" id="bindleConflictsKeepLocal">待确认项全留本机</button>
+              </div>
+            </div>`
+          : '';
+      })()}
       <div class="bindle-section-head">
         <div class="bindle-filters" role="group" aria-label="按本机情况筛选">${[
           ['all', '全部', entries.length],
           ['new', '新增', entries.filter((e) => !BindlePreview.isExisting(e)).length],
-          ['merge', '已有·待补充', entries.filter((e) => e.import_action === 'merge').length],
+          ...(entries.some((e) => e.import_action === 'conflict')
+            ? [['conflict', '已有·待确认', entries.filter((e) => e.import_action === 'conflict').length]]
+            : []),
+          ['merge', '已有·可更新', entries.filter((e) => e.import_action === 'merge').length],
           ['unchanged', '已有·无变化', entries.filter((e) => e.import_action === 'unchanged').length],
         ].map(([key, label, count]) => `<button type="button" data-bind-filter="${key}" aria-pressed="${key === 'all'}">${label} <b>${count}</b></button>`).join('')}</div>
         <input type="search" id="bindleSearch" aria-label="搜索包内条目" placeholder="搜索发票、销售方、报账人或批次"/>
@@ -395,6 +520,20 @@ async function openBindleImportPreview(path, insp, options = {}) {
     row.querySelector('[data-bind-entry-enabled]').onchange = syncBindleSelection;
     const view = row.querySelector('[data-bind-entry-view]');
     if (view) view.onclick = () => openEntryDetail(entryFor(row).existing_entry_id).catch((error) => toast(error.message, 'err'));
+    const compareButton = row.querySelector('[data-bind-entry-compare]');
+    const mergePanel = row.querySelector('[data-bind-entry-merge]');
+    if (compareButton && mergePanel) {
+      compareButton.onclick = () => {
+        const opening = mergePanel.classList.contains('hidden');
+        const wasFocusedInside = mergePanel.contains(document.activeElement);
+        mergePanel.classList.toggle('hidden', !opening);
+        row.classList.toggle('editing-bindle-merge', opening);
+        const conflicts = Number(entryFor(row).merge_preview?.conflict_count || 0);
+        compareButton.textContent = opening ? '收起对比' : (conflicts ? `对比（${conflicts}）` : '对比');
+        compareButton.setAttribute('aria-expanded', String(opening));
+        if (!opening && wasFocusedInside) compareButton.focus();
+      };
+    }
     const adjustButton = row.querySelector('[data-bind-entry-adjust]');
     const editor = row.querySelector('[data-bind-entry-override]');
     const select = row.querySelector('[data-bind-entry-batch]');
@@ -428,6 +567,49 @@ async function openBindleImportPreview(path, insp, options = {}) {
       if (reviewing) renderReview();
     };
   });
+
+  body.addEventListener('change', (event) => {
+    const input = event.target;
+    if (input?.matches?.('[data-merge-entry][data-merge-key]')) {
+      const idx = Number(input.dataset.mergeEntry);
+      const map = mergeDecisionsByEntry.get(idx) || {};
+      map[input.dataset.mergeKey] = input.value;
+      mergeDecisionsByEntry.set(idx, map);
+      if (reviewing) renderReview();
+    }
+  });
+  const applyBulkConflictPreset = (mode) => {
+    let changedCount = 0;
+    let skippedArchived = 0;
+    entries.forEach((entry, idx) => {
+      const plan = entry.merge_preview;
+      if (!plan?.items?.length) return;
+      const map = mergeDecisionsByEntry.get(idx) || BindlePreview.defaultDecisions(entry);
+      for (const item of plan.items) {
+        if (item.status !== 'conflict') continue;
+        if (mode === 'incoming' && plan.archived) {
+          skippedArchived += 1;
+          continue;
+        }
+        const nextVal = mode === 'incoming' ? BindlePreview.incomingChoiceFor(item) : 'keep_local';
+        map[item.key] = nextVal;
+        changedCount += 1;
+        const radio = body.querySelector(`[data-merge-entry="${idx}"][data-merge-key="${CSS.escape(item.key)}"][value="${CSS.escape(nextVal)}"]`);
+        if (radio) radio.checked = true;
+      }
+      mergeDecisionsByEntry.set(idx, map);
+    });
+    if (reviewing) renderReview();
+    if (mode === 'incoming' && !changedCount && skippedArchived) {
+      toast('全部待确认项均位于已归档批次，已默认保留本机；如需修改请展开「对比」逐项确认', 'ok');
+    } else if (mode === 'incoming' && skippedArchived) {
+      toast(`已将 ${changedCount} 项非归档待确认项设为优先采用包内；${skippedArchived} 项位于已归档批次仍保留本机`, 'ok');
+    } else {
+      toast(mode === 'incoming' ? '待确认项已全部设为优先采用包内' : '待确认项已全部设为保留本机', 'ok');
+    }
+  };
+  body.querySelector('#bindleConflictsUseIncoming')?.addEventListener('click', () => applyBulkConflictPreset('incoming'));
+  body.querySelector('#bindleConflictsKeepLocal')?.addEventListener('click', () => applyBulkConflictPreset('local'));
 
   // 校验输入并整理导入参数；有问题时提示并返回 null。
   const collectImport = () => {
@@ -488,6 +670,13 @@ async function openBindleImportPreview(path, insp, options = {}) {
       }
     });
     if (invalidEntryBatch) { toast('请填写单条设置的新批次名称', 'err'); return null; }
+    const entryMergeDecisions = {};
+    rows.forEach((row) => {
+      const idx = Number(row.dataset.bindEntryIndex);
+      if (mergeDecisionsByEntry.has(idx)) {
+        entryMergeDecisions[String(idx)] = { ...mergeDecisionsByEntry.get(idx) };
+      }
+    });
     const options = {
       profile_overrides: profileOverrides,
       tags: tag ? [tag] : [],
@@ -497,6 +686,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
       selected_profile_ids: [...selected],
       selected_entry_indexes: [...selectedIndexes],
       entry_batch_overrides: entryBatchOverrides,
+      entry_merge_decisions: entryMergeDecisions,
       scheme_id: sourceScheme || $('[data-import-scheme]',body)?.value || State.scheme?.id,
       profile_mappings: Object.fromEntries($$('[data-bind-profile-mapping]',body).filter(input=>input.value).map(input=>[input.dataset.bindProfileMapping,input.value])),
       role_mappings: Object.fromEntries(rows.map(row=>[row.dataset.bindEntryIndex,Object.fromEntries($$('[data-bind-role-source]',row).filter(input=>input.value).map(input=>[input.dataset.bindRoleSource,input.value]))])),
@@ -507,21 +697,45 @@ async function openBindleImportPreview(path, insp, options = {}) {
   const reviewBox = body.querySelector('#bindleReview');
   const renderReview = () => {
     const rows = selectedEntryRows();
-    const counts = { new: 0, merge: 0, unchanged: 0 };
+    const counts = { new: 0, merge: 0, conflict: 0, unchanged: 0 };
     const destinations = new Map();
-    let keep = 0, intoArchived = 0;
+    let keep = 0, intoArchived = 0, addTotal = 0, replaceTotal = 0, updateTotal = 0, remainingConflicts = 0, archivedModified = 0;
     rows.forEach((row) => {
-      counts[row.dataset.bindAction] += 1;
+      const actionKey = row.dataset.bindAction;
+      counts[actionKey] = (counts[actionKey] || 0) + 1;
+      const entry = entryFor(row);
+      const idx = Number(row.dataset.bindEntryIndex);
+      if (mergeDecisionsByEntry.has(idx)) {
+        const stats = BindlePreview.summarizeDecisions(entry, mergeDecisionsByEntry.get(idx));
+        addTotal += stats.addCount;
+        replaceTotal += stats.replaceCount;
+        updateTotal += stats.updateCount;
+        remainingConflicts += stats.remainingConflicts;
+        if (entry.merge_preview?.archived && (stats.addCount || stats.replaceCount || stats.updateCount)) {
+          archivedModified += 1;
+        }
+      }
       const target = targetFor(row);
       if (target.mode === 'keep' || target.unchanged) keep += 1;
       else destinations.set(target.label, (destinations.get(target.label) || 0) + 1);
       if (target.archived) intoArchived += 1;
     });
-    const actions = [['new', '新增'], ['merge', '已有待补充'], ['unchanged', '已有无变化']]
-      .filter(([key]) => counts[key]).map(([key, label]) => `${label} ${counts[key]} 条`).join('，');
+    const actions = [
+      ['new', '新增'],
+      ['merge', '已有可更新'],
+      ['conflict', '已有待确认'],
+      ['unchanged', '已有无变化'],
+    ].filter(([key]) => counts[key]).map(([key, label]) => `${label} ${counts[key]} 条`).join('，');
+    const detailBits = [
+      addTotal ? `补充 ${addTotal} 处` : '',
+      replaceTotal ? `替换材料 ${replaceTotal} 处` : '',
+      updateTotal ? `更新字段 ${updateTotal} 处` : '',
+      remainingConflicts ? `保留本机冲突项 ${remainingConflicts} 处` : '',
+    ].filter(Boolean).join('、');
     const locations = [keep ? `保留原批次 ${keep} 条` : '', ...[...destinations].map(([label, count]) => `${label === '未进批次' ? '未进批次' : `进入「${label}」`} ${count} 条`)].filter(Boolean);
-    reviewBox.innerHTML = `<div class="bindle-review-head"><b>导入前请核对</b><span>${esc(actions)}。</span></div>
+    reviewBox.innerHTML = `<div class="bindle-review-head"><b>导入前请核对</b><span>${esc(actions)}${detailBits ? `（含${esc(detailBits)}）` : ''}。</span></div>
       <p class="bindle-review-note">${esc(locations.join('；'))}。</p>
+      ${archivedModified ? `<p class="bindle-review-warn">有 ${archivedModified} 条已归档条目将被修改，请确认无误后再导入。</p>` : ''}
       ${intoArchived ? `<p class="bindle-review-warn">${intoArchived} 条在已归档批次中，导入后到「已归档」查看。</p>` : ''}`;
   };
   const startReview = () => {
@@ -599,6 +813,12 @@ const BindleBatch = {
     if (Object.values(insp.profile_mapping_preview || {}).some((p) => p?.status === 'ambiguous')) {
       reasons.push('存在同名报账人，需确认对应身份');
     }
+    if ((insp.entries || []).some((e) => e.import_action === 'conflict' || e.merge_preview?.has_conflicts)) {
+      reasons.push('存在与本机不同的材料或信息，需确认替换或保留');
+    }
+    if ((insp.entries || []).some((e) => e.merge_preview?.archived && e.merge_preview?.has_changes)) {
+      reasons.push('涉及已归档批次条目，需单包预览确认');
+    }
     if ((insp.entries || []).some((e) => e.role_mapping_preview?.requires_explicit_mapping?.length)) {
       reasons.push('含需手动对应的自定义材料');
     }
@@ -623,11 +843,12 @@ const BindleBatch = {
   },
   summarize(insp) {
     const entries = insp?.entries || [];
-    let newCount = 0, mergeCount = 0, unchangedCount = 0, attachmentCount = 0, totalAmount = 0, hasAmount = false;
+    let newCount = 0, mergeCount = 0, conflictCount = 0, unchangedCount = 0, attachmentCount = 0, totalAmount = 0, hasAmount = false;
     const profiles = new Set();
     const declared = new Map((insp?.profiles || []).map((p) => [p.id || '__fallback__', p]));
     for (const entry of entries) {
-      if (entry.import_action === 'merge') mergeCount += 1;
+      if (entry.import_action === 'conflict') conflictCount += 1;
+      else if (entry.import_action === 'merge') mergeCount += 1;
       else if (entry.import_action === 'unchanged') unchangedCount += 1;
       else newCount += 1;
       attachmentCount += (entry.attachments || []).length;
@@ -646,12 +867,13 @@ const BindleBatch = {
       entryCount: entries.length,
       newCount,
       mergeCount,
+      conflictCount,
       unchangedCount,
       attachmentCount,
       totalAmount,
       hasAmount,
       profiles: [...profiles],
-      allUnchanged: entries.length > 0 && newCount === 0 && mergeCount === 0 && unchangedCount === entries.length,
+      allUnchanged: entries.length > 0 && newCount === 0 && mergeCount === 0 && conflictCount === 0 && unchangedCount === entries.length,
     };
   },
   folderHint(path) {

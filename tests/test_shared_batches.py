@@ -304,10 +304,20 @@ def test_auto_sync_upload_pull_no_repush_and_other_batch_preservation(env):
     updated_at_before = a_entry["updated_at"]
     hub.clear_requests()
     time.sleep(0.06)
-    a_info2, a_tick2 = _wait_batch_settled(admin_api, admin_batch)
-    assert a_tick2["generation"] == gen_stable
-    assert admin_api.entries.get(a_eid)["updated_at"] == updated_at_before
-    assert hub.snapshot_requests() == [("GET", f"/tidoc-hub/api/v1/spaces/{space_id}/sync-state")]
+    admin_mgr = admin_api._hub_sync_manager()
+    admin_prev_interval = admin_mgr._interval_seconds
+    admin_mgr._interval_seconds = 5.0
+    try:
+        a_info2, a_tick2 = _wait_batch_settled(admin_api, admin_batch)
+        assert a_tick2["generation"] == gen_stable
+        assert admin_api.entries.get(a_eid)["updated_at"] == updated_at_before
+        assert hub.snapshot_requests() == [("GET", f"/tidoc-hub/api/v1/spaces/{space_id}/sync-state")]
+    finally:
+        admin_mgr._interval_seconds = admin_prev_interval
+        with admin_mgr._lock:
+            rt = admin_mgr._runtime.get(admin_batch)
+            if rt is not None:
+                rt["next_due_at"] = time.monotonic() + admin_prev_interval
 
     # Member modifies field + adds new attachment -> manual sync uploads ONLY changed entry (new blob only)
     phys_png = _write_file(tmp, "m_phys.png", b"\x89PNG\r\n\x1a\nphysical-item")

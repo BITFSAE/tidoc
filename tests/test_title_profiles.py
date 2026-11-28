@@ -62,16 +62,20 @@ def test_secondary_launch_files_are_queued_without_duplicates():
 
 
 def test_launch_bindle_path_picked_from_argv(monkeypatch, tmp_path):
-    from tidoc.app import _launch_bindle_path
+    from tidoc.app import _launch_bindle_path, _launch_bindle_paths
 
     bindle = tmp_path / "材料包.tidoc"
+    second = tmp_path / "第二份.tidoc"
     bindle.write_bytes(b"x")
+    second.write_bytes(b"y")
 
-    monkeypatch.setattr(sys, "argv", ["tidoc.exe", str(bindle), "--debug"])
+    monkeypatch.setattr(sys, "argv", ["tidoc.exe", str(bindle), "--debug", str(second), str(bindle)])
     assert _launch_bindle_path() == str(bindle)
+    assert _launch_bindle_paths() == [str(bindle), str(second)]
 
     monkeypatch.setattr(sys, "argv", ["tidoc.exe", "--debug", str(tmp_path / "缺失.tidoc")])
     assert _launch_bindle_path() == ""
+    assert _launch_bindle_paths() == []
 
 
 def test_web_api_surface_has_title_profile_methods():

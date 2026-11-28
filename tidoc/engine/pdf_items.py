@@ -129,6 +129,47 @@ def _extract_spans(page) -> list[tuple[float, float, str]]:
     return spans
 
 
+def read_positioned_text(path: Path) -> str:
+    """Rebuild rows for templates whose text stream detaches currency and columns.
+
+    Reuse the flushed text matrices used for item columns. Keep indentation and
+    page boundaries, and decline fragmented spans rather than guessing baselines.
+    """
+    pages = []
+    for page in PdfReader(str(path)).pages:
+        spans = _page_spans(page)
+        if not any(_compact(value) == '项目名称' for _x, _y, value in spans):
+            return ''
+        if any('\n' in value for _x, _y, value in spans):
+            return ''
+        # Sideways download counters can be emitted as separate upright glyphs.
+        # Remove only the anchored counter, not arbitrary right-column text.
+        for index in range(len(spans) - 3):
+            counter = spans[index:index + 4]
+            if (''.join(value for _x, _y, value in counter) == '下载次数'
+                    and max(x for x, _y, _value in counter) - min(x for x, _y, _value in counter) < 1):
+                end = index + 4
+                while (end < len(spans) and abs(spans[end][0] - counter[0][0]) < 1
+                       and re.fullmatch(r'[:：\d]+', spans[end][2])):
+                    end += 1
+                spans = spans[:index] + spans[end:]
+                break
+        rows = []
+        for x, y, value in sorted(spans, key=lambda span: -span[1]):
+            if not rows or abs(rows[-1][0] - y) > 2:
+                rows.append((y, []))
+            rows[-1][1].append((x, value))
+        lines = []
+        for _y, row in rows:
+            line = ''
+            for x, value in sorted(row):
+                column = max(0, round(x / 4.5))
+                line += ' ' * max(1 if line else 0, column - len(line)) + value
+            lines.append(line)
+        pages.append('\n'.join(lines))
+    return '\n\f\n'.join(pages)
+
+
 def read_positioned_items(path: Path) -> list[ParsedItem]:
     """Return a candidate only when every positioned item row can be parsed.
 

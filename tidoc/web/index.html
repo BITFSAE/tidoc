@@ -22,7 +22,7 @@
       document.documentElement.dataset.engine = /\b(Edg|Chrome)\//.test(navigator.userAgent) ? 'blink' : 'webkit';
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=0.1.43-beta.3" />
+  <link rel="stylesheet" href="styles.css?v=0.1.43" />
 </head>
 <body>
   <div id="app" class="app">
@@ -98,29 +98,35 @@
             <kbd id="searchKbd" title="按 / 搜索，按 ? 查看常用快捷键">/</kbd>
           </div>
 
-          <div class="quick-chips" id="quickChips" aria-label="筛选">
-            <label class="chip-select title-filter-chip">
+          <div class="quick-chips" id="quickChips" aria-label="筛选与分组">
+            <div class="chip-select chip-split title-filter-chip">
+              <button type="button" class="chip-group-toggle" data-group-by="title" aria-label="按抬头分组" aria-pressed="false" data-tooltip="点击按抬头分组；右侧下拉框用于筛选">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2M10 6h4M10 10h4M10 14h4M10 18h4"/></svg>
               <span class="chip-label">抬头</span>
-              <select id="filterTitle">
+              </button>
+              <select id="filterTitle" aria-label="按抬头筛选">
                 <option value="">全部</option>
               </select>
               <span class="title-notice-dot" title="存在未配置的抬头" aria-hidden="true"></span>
-            </label>
-            <label class="chip-select">
+            </div>
+            <div class="chip-select chip-split">
+              <button type="button" class="chip-group-toggle" data-group-by="profile" aria-label="按报账人分组" aria-pressed="false" data-tooltip="点击按报账人分组；右侧下拉框用于筛选">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>
               <span class="chip-label">报账人</span>
-              <select id="filterProfile">
+              </button>
+              <select id="filterProfile" aria-label="按报账人筛选">
                 <option value="">全部</option>
               </select>
-            </label>
-            <label class="chip-select">
+            </div>
+            <div class="chip-select chip-split">
+              <button type="button" class="chip-group-toggle" data-group-by="tag" aria-label="按标签分组" aria-pressed="false" data-tooltip="点击按标签分组；右侧下拉框用于筛选">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r="1" fill="currentColor"/></svg>
               <span class="chip-label">标签</span>
-              <select id="filterTag">
+              </button>
+              <select id="filterTag" aria-label="按标签筛选">
                 <option value="">全部</option>
               </select>
-            </label>
+            </div>
           </div>
           <button type="button" class="chip-toggle" id="advancedToggle" aria-expanded="false">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></svg>
@@ -141,26 +147,17 @@
             </button>
           </div>
 
-          <label class="chip-select group-chip" title="分组浏览">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="7" x="3" y="3" rx="1.5"/><rect width="18" height="7" x="3" y="14" rx="1.5"/></svg>
-            <select id="groupSelect" aria-label="分组浏览">
-              <option value="none">不分组</option>
-              <option value="profile">按报账人</option>
-              <option value="title">按抬头</option>
-            </select>
-          </label>
         </div>
 
         <div class="toolbar-view-row">
           <div class="batch-folders" id="batchFolders"></div>
           <div class="view-presets" id="viewPresets" role="group" aria-label="状态">
             <button class="preset-btn active" data-view="all">全部</button>
-            <button class="preset-btn" data-view="incomplete" title="缺少方案要求的材料，或实付还没确认的条目">待补材料</button>
+            <button class="preset-btn" data-view="incomplete" title="缺少方案要求的材料、实付还没确认或有严重问题的条目">待补充</button>
             <button class="preset-btn" data-view="warning" title="发票或付款截图的识别结果需要核对的条目">识别提醒</button>
             <button class="preset-btn hidden" data-view="ocr" title="已用阿里云 OCR 识别过的条目" data-ocr-ui>已识别</button>
             <button class="preset-btn hidden" data-view="ocr_pending" title="阿里云 OCR 结果与当前值有差异、待确认的条目" data-ocr-ui>OCR 待确认</button>
             <button class="preset-btn" data-view="modified" title="手动改过发票信息、物品明细、实际物资名称或实付金额，且与原值不同的条目">已修改</button>
-            <button class="preset-btn" data-view="complete" title="材料齐全、实付已确认的条目">齐备</button>
           </div>
         </div>
 
@@ -302,14 +299,14 @@
   <div id="modalRoot"></div>
   <div id="toastRoot" class="toast-root" aria-live="polite"></div>
 
-  <script src="api.js?v=0.1.43-beta.3"></script>
-  <script src="ui-primitives.js?v=0.1.43-beta.3"></script>
-  <script src="select.js?v=0.1.43-beta.3"></script>
-  <script src="schema-form.js?v=0.1.43-beta.3"></script>
-  <script src="adapter-ui.js?v=0.1.43-beta.3"></script>
-  <script src="qr-ticket.js?v=0.1.43-beta.3"></script>
-  <script src="bindle-ui.js?v=0.1.43-beta.3"></script>
-  <script src="payment-ai-ui.js?v=0.1.43-beta.3"></script>
-  <script src="app.js?v=0.1.43-beta.3"></script>
+  <script src="api.js?v=0.1.43"></script>
+  <script src="ui-primitives.js?v=0.1.43"></script>
+  <script src="select.js?v=0.1.43"></script>
+  <script src="schema-form.js?v=0.1.43"></script>
+  <script src="adapter-ui.js?v=0.1.43"></script>
+  <script src="qr-ticket.js?v=0.1.43"></script>
+  <script src="bindle-ui.js?v=0.1.43"></script>
+  <script src="payment-ai-ui.js?v=0.1.43"></script>
+  <script src="app.js?v=0.1.43"></script>
 </body>
 </html>

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -31,7 +32,7 @@ VALUE_SOURCE_MANUAL = "manual"
 # These versions describe recognition rules, not the Tidoc release. Keep them
 # unchanged for ordinary app releases and bump only the affected value when its
 # local recognition logic or result contract changes.
-LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-10-28-2"
+LOCAL_INVOICE_RECOGNITION_VERSION = "invoice-local-2026-11-28-3"
 PAYMENT_AI_RECOGNITION_VERSION = "payment-ai-2026-10-24"
 # 关键信息，软件内默认只读；确需修正走特殊留痕流程（设计文档 8.5、第 6 节）
 LOCKED_FIELDS = ("invoice_no", "total", "buyer_name", "buyer_tax_id", "title", "seller", "seller_tax_id", "invoice_date")
@@ -918,6 +919,12 @@ class EntryRepo:
         """Apply a corrected local parser result unless the user edited this field."""
         if field not in {"buyer_tax_id", "seller_tax_id"}:
             raise ValueError("不支持的税号字段。")
+        return self.update_recognized_party_field(entry_id, field, value)
+
+    def update_recognized_party_field(self, entry_id: str, field: str, value: str) -> bool:
+        """Refresh locally recognized party data while preserving manual corrections."""
+        if field not in {"buyer_name", "seller", "buyer_tax_id", "seller_tax_id"}:
+            raise ValueError("不支持的购销方字段。")
         if field in self.human_modified_locked_fields(entry_id):
             return False
         row = self.db.conn.execute(
@@ -939,6 +946,63 @@ class EntryRepo:
             new_value,
             "",
         )
+        self._touch(entry_id)
+        self.db.conn.commit()
+        return True
+
+    def fill_recognized_total(self, entry_id: str, value: Decimal) -> bool:
+        """Fill an unread total without replacing a saved or manually cleared value."""
+        if "total" in self.human_modified_locked_fields(entry_id):
+            return False
+        row = self.db.conn.execute("SELECT total FROM entries WHERE id = ?", (entry_id,)).fetchone()
+        if row is None:
+            raise ValueError("条目不存在。")
+        if str(row["total"] or "").strip():
+            return False
+        new_value = str(money(value))
+        self.db.conn.execute("UPDATE entries SET total = ? WHERE id = ?", (new_value, entry_id))
+        self._log_history(entry_id, f"{LOCAL_RECOGNITION_HISTORY_LABEL}total", row["total"] or "", new_value, "")
+        self._touch(entry_id)
+        self.db.conn.commit()
+        return True
+
+    def repair_recognized_title(self, entry_id: str, buyer_name: str) -> bool:
+        """Repair product rows or detached punctuation copied into an old title."""
+        entry = self.db.conn.execute(
+            "SELECT title, title_profile_id, buyer_name, buyer_tax_id, scheme_revision_id "
+            "FROM entries WHERE id = ?", (entry_id,),
+        ).fetchone()
+        if entry is None:
+            raise ValueError("条目不存在。")
+        title = entry["title"] or ""
+        invalid_title = (title.startswith("*") and "*" in title[1:]) or bool(
+            title and re.fullmatch(r"[\W_]+", title)
+        ) or title == "下载次数"
+        # A configured or manually chosen title is a grouping decision. Only
+        # repair invalid values traceable to the old buyer recognition.
+        if (not buyer_name or entry["title_profile_id"] or not invalid_title or title == buyer_name
+                or {"title", "buyer_name"} & self.human_modified_locked_fields(entry_id)):
+            return False
+        if title != entry["buyer_name"]:
+            recognized = self.db.conn.execute(
+                "SELECT 1 FROM field_history WHERE entry_id = ? "
+                "AND field IN (?, ?) AND old_value = ? LIMIT 1",
+                (entry_id, f"{LOCAL_RECOGNITION_HISTORY_LABEL}buyer_name",
+                 f"{OCR_HISTORY_LABEL}buyer_name", title),
+            ).fetchone()
+            if not recognized:
+                return False
+        definition = self._definition(entry["scheme_revision_id"]) or {}
+        candidates = [t for t in definition.get("scheme", {}).get("titles", [])
+                      if t["name"] == buyer_name
+                      and (not t.get("tax_id") or not entry["buyer_tax_id"]
+                           or t["tax_id"] == entry["buyer_tax_id"])]
+        title_id = candidates[0]["id"] if len(candidates) == 1 else ""
+        self.db.conn.execute(
+            "UPDATE entries SET title = ?, title_profile_id = ? WHERE id = ?",
+            (buyer_name, title_id, entry_id),
+        )
+        self._log_history(entry_id, f"{LOCAL_RECOGNITION_HISTORY_LABEL}title", title, buyer_name, "")
         self._touch(entry_id)
         self.db.conn.commit()
         return True
@@ -1438,9 +1502,12 @@ class EntryRepo:
                     f"{PAYMENT_CHECK_PREFIX} {label}识别失败（{reason or '原因未知'}），可稍后重新识别或手动核对。"
                 )
             elif item["status"] == "unrecognized" or (item["status"] == "review" and not item["amount"]):
+                description = (
+                    (f"{label}：" if len(items) > 1 else "") + f"{reason}。"
+                    if reason else f"{label}未识别到金额，请换成付款账单截图或手动核对。"
+                )
                 payment_messages.append(
-                    f"{PAYMENT_CHECK_PREFIX} {label}未识别到金额："
-                    + (f"{reason}。" if reason else "请换成付款账单截图或手动核对。")
+                    f"{PAYMENT_CHECK_PREFIX} {description}"
                 )
             elif item["status"] == "review":
                 payment_messages.append(

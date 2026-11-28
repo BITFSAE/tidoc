@@ -389,7 +389,7 @@ def test_non_payment_screenshot_and_paid_mismatch_are_named_in_reminders(api, mo
     monkeypatch.setattr(ai, 'request_completion', lambda *args: complete(raw(kind='order', completed=False)))
     job = wait(api, api.start_payment_ai(entry_ids=[eid])['data'])
     message = api.entries.get(eid)['check_message']
-    assert '付款截图未识别到金额：订单页，请用付款账单截图' in message
+    assert message == '[付款截图识别] 订单页，请上传微信、支付宝或银行的付款账单截图。'
     assert job['entries'][0]['applied'] == '' and job['entries'][0]['notes']
 
     other = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('50.00')))
@@ -409,6 +409,40 @@ def test_non_payment_screenshot_and_paid_mismatch_are_named_in_reminders(api, mo
     assert entry['fields']['paid_amount']['current'] == '43.20' and '不一致' not in entry['check_message']
     view = api.payment_ai_result(other)['data']
     assert view['settled'] and view['items'][0]['name'] == 'paid.png'
+
+
+@pytest.mark.parametrize('reviewed', [False, True])
+def test_saved_order_page_message_updates_locally_without_recognition(api, monkeypatch, tmp_path, reviewed):
+    from tidoc.api_payment_ai import PAYMENT_CHECK_STATE_KEY
+    enable_payment_ai(api)
+    person = api.create_profile('测试人员', '测试审核人')['data']
+    eid = api.entries.create(person['id'], parsed=ParsedInvoice(total=Decimal('43.20')))
+    att = api.attachments.add(eid, image(tmp_path), 'payment_screenshot')
+    version = api._payment_ai_version()
+    api.attachments.set_recognition(att['id'], version, 'unrecognized', '', ai.LEGACY_ORDER_PAGE_REASON)
+    old_text = ai.LEGACY_ORDER_PAGE_REASON + '。'
+    api.entries.set_check(eid, 'warning', '[付款截图识别] ' + old_text)
+    if reviewed:
+        api.entries.review_check_lines(eid, [old_text])
+    api._set_preference_value(PAYMENT_CHECK_STATE_KEY, 'payment-check-4|1|1')
+    def unexpected_request(*args):
+        raise AssertionError('文案更新不应调用识别服务')
+    monkeypatch.setattr(ai, 'request_completion', unexpected_request)
+    # 按真实启动入口重新打开旧数据，验证升级后无需手动触发刷新。
+    api = type(api)(api.data_root.root)
+    entry = api.entries.get(eid)
+    assert entry['check_message'] == '[付款截图识别] ' + ai.ORDER_PAGE_REASON + '。'
+    assert entry['check_lines'][0]['reviewed'] is reviewed
+    assert api.payment_ai_result(eid)['data']['items'][0]['message'] == ai.ORDER_PAGE_REASON
+    saved = api.attachments.get(att['id'])
+    assert saved['recognition_message'] == ai.ORDER_PAGE_REASON
+    assert saved['recognition_version'] == version
+    assert saved['recognition_status'] == 'unrecognized'
+    # 旧服务商缓存里保存的 reason 也不会再盖回旧文案。
+    cached = payment_result('', kind='order', completed=False)
+    cached['result']['reason'] = ai.LEGACY_ORDER_PAGE_REASON
+    api._save_payment_ai_result(eid, saved, cached)
+    assert api.attachments.get(att['id'])['recognition_message'] == ai.ORDER_PAGE_REASON
 
 
 def test_switch_only_controls_automatic_recognition(api, monkeypatch, tmp_path):
@@ -441,7 +475,7 @@ def test_secret_mask_skips_the_common_prefix():
     (dict(source='uncertain'), '看不出付款来源'),
     (dict(currency='other'), '不是人民币付款'),
     (dict(completed=False), '付款未完成或看不出是否完成'),
-    (dict(kind='order', completed=False), '订单页，请用付款账单截图'),
+    (dict(kind='order', completed=False), '订单页，请上传微信、支付宝或银行的付款账单截图'),
     (dict(kind='income'), '收入记录，不是付款'),
     (dict(kind='other', paid=None), '不是付款凭证'),
 ])

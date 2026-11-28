@@ -22,7 +22,7 @@ def _same_money(a, b) -> bool:
 
 
 # 付款截图提醒的生成规则；规则或本机识别设置变了，就给所有带付款截图的条目重算一次提醒。
-PAYMENT_CHECK_RULES = "payment-check-3"
+PAYMENT_CHECK_RULES = "payment-check-5"
 PAYMENT_CHECK_STATE_KEY = "tidoc.paymentAi.checkState"
 
 
@@ -62,6 +62,22 @@ class PaymentAiApi:
         return self._payment_ai_config()['enabled'] and self._payment_ai_available()
 
     def _refresh_payment_ai_check(self, entry_id):
+        # 旧说明已经随截图落库，更新规则时在本机换成当前文案。
+        changed = self.db.conn.execute(
+            "UPDATE attachments SET recognition_message = REPLACE(recognition_message, ?, ?) "
+            "WHERE entry_id = ? AND type = 'payment_screenshot' "
+            "AND INSTR(recognition_message, ?) > 0",
+            (vision.LEGACY_ORDER_PAGE_REASON, vision.ORDER_PAGE_REASON, entry_id, vision.LEGACY_ORDER_PAGE_REASON),
+        ).rowcount
+        if changed:
+            from .engine.check_lines import reviewed_texts
+            row = self.db.conn.execute("SELECT check_reviewed FROM entries WHERE id = ?", (entry_id,)).fetchone()
+            if row:
+                reviewed = [vision.current_message(text) for text in reviewed_texts(row["check_reviewed"])]
+                self.db.conn.execute(
+                    "UPDATE entries SET check_reviewed = ? WHERE id = ?",
+                    (json.dumps(reviewed, ensure_ascii=False), entry_id),
+                )
         # Without a key, screenshots are filled in by hand: no reminders at all. With automatic
         # recognition off, keep the results already recognized but do not ask to re-run the rest.
         if self._payment_ai_available():
@@ -211,7 +227,7 @@ class PaymentAiApi:
         if value.get('error'):
             status = 'error'
         # 说明按当前规则从结果重新生成，缓存里的旧说明不再沿用。
-        message = vision.result_message(result) if result else value.get('message', '')
+        message = vision.result_message(result) if result else vision.current_message(value.get('message', ''))
         self.attachments.set_recognition(att['id'], version or self._payment_ai_version(), status, amount,
                                          value.get('error') or message)
         self.entries.refresh_payment_check(entry_id)

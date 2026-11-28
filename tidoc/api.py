@@ -385,9 +385,10 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
 
     @_guard
     def reparse_entries(self, entry_ids):
-        """用条目已有的原始发票附件批量重新识别明细并刷新识别提醒。"""
+        """用原始发票附件刷新明细、已核实的购销方信息和识别提醒。"""
         from .db import TYPE_INVOICE_PDF, TYPE_INVOICE_XML
         from .engine import check_invoice, parse_invoice_files
+        from .engine.models import FIELD_AGREE, FIELD_VERIFIED
         from .engine.money import d
 
         results = []
@@ -429,21 +430,33 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                     raise ValueError("附件中的发票号码与当前条目不一致")
 
                 # 条目中已锁定或人工修正的发票总额仍是校验权威值；重新识别
-                # 不静默覆盖实付、备注或人工修正过的关键字段。购买方税号可由
-                # 新版本地解析规则纠正，并由仓储层留痕。
+                # 不静默覆盖实付、备注或人工修正过的关键字段。购销方名称经
+                # 两种读取方式一致或独立校验后可更新，税号沿用本地纠正并留痕。
                 self.entries.set_invoice_evidence(entry_id, parsed)
+                manual_fields = self.entries.human_modified_locked_fields(entry_id)
+                total_check = parsed.field_checks.get("total")
+                if (parsed.total_present and total_check
+                        and total_check.state in {FIELD_AGREE, FIELD_VERIFIED}
+                        and self.entries.fill_recognized_total(entry_id, parsed.total)):
+                    entry["total"] = str(parsed.total)
+                for field in ("seller", "buyer_name"):
+                    candidate = getattr(parsed, field)
+                    evidence = parsed.field_checks.get(field)
+                    if field in manual_fields:
+                        setattr(parsed, field, entry.get(field) or "")
+                    elif candidate and evidence and evidence.state in {FIELD_AGREE, FIELD_VERIFIED}:
+                        self.entries.update_recognized_party_field(entry_id, field, candidate)
                 parsed.total_present = bool(str(entry.get("total") or "").strip())
-                if "seller_tax_id" in self.entries.human_modified_locked_fields(entry_id):
-                    parsed.seller_tax_id = entry.get("seller_tax_id") or ""
-                else:
-                    self.entries.update_recognized_buyer_tax_id(entry_id, parsed.seller_tax_id, field="seller_tax_id")
                 parsed.total = d(entry.get("total"))
-                if "buyer_tax_id" in self.entries.human_modified_locked_fields(entry_id):
-                    parsed.buyer_tax_id = entry.get("buyer_tax_id") or ""
-                else:
-                    self.entries.update_recognized_buyer_tax_id(
-                        entry_id, parsed.buyer_tax_id
-                    )
+                for field in ("seller_tax_id", "buyer_tax_id"):
+                    if field in manual_fields:
+                        setattr(parsed, field, entry.get(field) or "")
+                    else:
+                        self.entries.update_recognized_party_field(entry_id, field, getattr(parsed, field))
+                buyer_check = parsed.field_checks.get("buyer_name")
+                if (buyer_check and buyer_check.state in {FIELD_AGREE, FIELD_VERIFIED}
+                        and self.entries.repair_recognized_title(entry_id, parsed.buyer_name)):
+                    entry["title"] = parsed.buyer_name
                 check = check_invoice(parsed, expected_title=entry.get("title", ""),context=self._policy_context(entry_id=entry_id))
                 self.entries.replace_recognized_items(
                     entry_id,
@@ -569,6 +582,12 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         dest_dir.mkdir(parents=True, exist_ok=True)
         return dest_dir / name
 
+    def _discard_staged_drop(self, paths):
+        for path in paths:
+            dest = Path(path)
+            dest.unlink(missing_ok=True)
+            _remove_empty_dropped_parent(self.data_root.dropped_dir, dest.parent)
+
     @_guard
     def take_dropped_paths(self, files):
         """拖入文件的真实位置已由原生层报给后端时，直接从磁盘复制到中转区（流式，不占内存）。
@@ -598,9 +617,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                 out.append(str(dest))
                 shutil.copyfile(source, dest)
         except BaseException:
-            for path in out:
-                Path(path).unlink(missing_ok=True)
-                _remove_empty_dropped_parent(self.data_root.dropped_dir, Path(path).parent)
+            self._discard_staged_drop(out)
             raise
         return {"paths": out}
 
@@ -610,26 +627,30 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         self.data_root.dropped_dir.mkdir(parents=True, exist_ok=True)
         out = []
         total_bytes = 0
-        for item in (files or []):
-            name = _safe_filename(item.get("name") or "dropped-file")
-            data_url = item.get("data_url") or ""
-            if "," in data_url:
-                data_url = data_url.split(",", 1)[1]
-            if not data_url:
-                raise ValueError(f"文件内容为空：{name}")
-            estimated_bytes = len(data_url.rstrip("=")) * 3 // 4
-            if estimated_bytes > MAX_DROPPED_FILE_BYTES:
-                raise ValueError(f"文件过大：{name}（单个文件不能超过 100 MB）")
-            if total_bytes + estimated_bytes > MAX_DROPPED_TOTAL_BYTES:
-                raise ValueError("拖入文件总大小不能超过 500 MB")
-            try:
-                raw = base64.b64decode(data_url, validate=True)
-            except (binascii.Error, ValueError) as exc:
-                raise ValueError(f"文件内容无效：{name}") from exc
-            total_bytes += len(raw)
-            dest = self._staged_drop_path(name)
-            dest.write_bytes(raw)
-            out.append(str(dest))
+        try:
+            for item in (files or []):
+                name = _safe_filename(item.get("name") or "dropped-file")
+                data_url = item.get("data_url") or ""
+                if "," in data_url:
+                    data_url = data_url.split(",", 1)[1]
+                if not data_url:
+                    raise ValueError(f"文件内容为空：{name}")
+                estimated_bytes = len(data_url.rstrip("=")) * 3 // 4
+                if estimated_bytes > MAX_DROPPED_FILE_BYTES:
+                    raise ValueError(f"文件过大：{name}（单个文件不能超过 100 MB）")
+                if total_bytes + estimated_bytes > MAX_DROPPED_TOTAL_BYTES:
+                    raise ValueError("拖入文件总大小不能超过 500 MB")
+                try:
+                    raw = base64.b64decode(data_url, validate=True)
+                except (binascii.Error, ValueError) as exc:
+                    raise ValueError(f"文件内容无效：{name}") from exc
+                total_bytes += len(raw)
+                dest = self._staged_drop_path(name)
+                out.append(str(dest))
+                dest.write_bytes(raw)
+        except BaseException:
+            self._discard_staged_drop(out)
+            raise
         return {"paths": out}
 
     @_guard

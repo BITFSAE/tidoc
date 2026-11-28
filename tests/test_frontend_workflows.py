@@ -2,6 +2,213 @@
 from tests.test_selection_performance import run_selection
 
 
+def test_ocr_suggestion_counts_only_invoices_without_cloud_results():
+    run_selection(r"""
+const bar = document.querySelector('#ocrSuggestBar');
+State.quickView = 'warning';
+ocrReady = () => true;
+State.entries = [
+  {id: 'new', attachment_types: {invoice_pdf: 1}, ocr_recognized: false},
+  {id: 'done', attachment_types: {invoice_pdf: 1}, ocr_recognized: true},
+  {id: 'review', attachment_types: {invoice_pdf: 1}, ocr_recognized: true, ocr_pending: true},
+  {id: 'xml', attachment_types: {invoice_pdf: 1, invoice_xml: 1}},
+  {id: 'no-pdf', attachment_types: {payment_screenshot: 1}},
+];
+updateOcrSuggestBar();
+assert.equal(bar.classList.contains('hidden'), false);
+assert.ok(bar.innerHTML.includes('1 张发票尚未用阿里云识别'));
+let selected;
+renderEntries = () => {};
+openOcrDialog = ids => { selected = ids; };
+bar.querySelector('#ocrSuggestRun').onclick();
+assert.deepEqual(selected, ['new']);
+assert.deepEqual([...State.selected], ['new']);
+State.entries[0].ocr_recognized = true;
+updateOcrSuggestBar();
+assert.equal(bar.classList.contains('hidden'), true);
+assert.equal(bar.innerHTML, '');
+State.entries[0].ocr_recognized = false;
+State.quickView = 'all';
+updateOcrSuggestBar();
+assert.equal(bar.classList.contains('hidden'), true);
+State.quickView = 'warning';
+ocrReady = () => false;
+updateOcrSuggestBar();
+assert.equal(bar.classList.contains('hidden'), true);
+""")
+
+
+def test_chip_grouping_and_person_summary_toggle_independently():
+    run_selection(r"""
+(async () => {
+  const buttons = ['title', 'profile', 'tag'].map(mode => {
+    const button = makeNode(); button.dataset.groupBy = mode; return button;
+  });
+  document.querySelectorAll = selector => selector === '[data-group-by]' ? buttons : [];
+  const title = document.querySelector('#filterTitle'), profile = document.querySelector('#filterProfile');
+  title.value = '某抬头'; profile.value = 'p1'; State.tagFilter = '办公';
+  State.selected.add('keep');
+  let renders = 0;
+  renderEntries = () => {renders++;};
+  toggleEntryGrouping('title');
+  assert.equal(State.groupBy, 'title');
+  assert.equal(buttons[0].getAttribute('aria-pressed'), 'true');
+  toggleEntryGrouping('title');
+  assert.equal(State.groupBy, 'none');
+  assert.equal(buttons[0].getAttribute('aria-pressed'), 'false');
+  toggleEntryGrouping('profile');
+  toggleEntryGrouping('tag');
+  assert.equal(State.groupBy, 'tag');
+  assert.equal(buttons[1].getAttribute('aria-pressed'), 'false');
+  assert.equal(buttons[2].getAttribute('aria-pressed'), 'true');
+  assert.equal(title.value, '某抬头');
+  assert.equal(profile.value, 'p1');
+  assert.ok(State.selected.has('keep'));
+  assert.equal(renders, 4);
+
+  // Clicking a person in batch stats toggles #filterProfile and clears selection.
+  syncFilterControlStates = () => {};
+  const calls = [];
+  refreshEntries = async () => calls.push(profile.value);
+  await toggleStatsProfile('p2');
+  assert.equal(profile.value, 'p2');
+  assert.equal(State.selected.size, 0);
+  await toggleStatsProfile('p2');
+  assert.equal(profile.value, '');
+  assert.deepEqual(calls, ['p2', '']);
+})().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
+def test_tag_groups_use_the_full_combination_without_duplicate_entries():
+    run_selection(r"""
+State.groupBy = 'tag';
+const entries = [
+  {id:'a', tags:['办公','采购']}, {id:'b', tags:['采购','办公']},
+  {id:'c', tags:['办公']}, {id:'d', tags:[]}, {id:'e', tags:['办公、采购']},
+];
+const groups = new Map();
+entries.forEach(entry => {
+  const key = entryGroupKey(entry);
+  if (!groups.has(key)) groups.set(key, []);
+  groups.get(key).push(entry.id);
+});
+assert.equal(groups.size, 4);
+assert.deepEqual(groups.get(entryGroupKey(entries[0])), ['a','b']);
+assert.deepEqual(groups.get('[]'), ['d']);
+assert.notEqual(entryGroupKey(entries[0]), entryGroupKey(entries[4]));
+assert.equal([...groups.values()].flat().length, entries.length);
+""")
+
+
+def test_group_collapse_keeps_selection_and_survives_rerender():
+    run_selection(r"""
+document.createElement = () => {
+  const node = makeNode(), parts = new Map();
+  node.children = [];
+  node.appendChild = child => node.children.push(child);
+  node.append = (...children) => node.children.push(...children);
+  node.querySelector = selector => {
+    if (!parts.has(selector)) parts.set(selector, makeNode());
+    return parts.get(selector);
+  };
+  return node;
+};
+entryCard = entry => {
+  const card = makeNode(entry.id);
+  card.classList.toggle('selected', State.selected.has(entry.id));
+  entryCardPositions.set(entry.id, entryCardOrder.length);
+  entryCardOrder.push(card);
+  entryCardNodes.set(entry.id, card);
+  return card;
+};
+entryCardOrder.length = 0; entryCardPositions.clear(); entrySelectionGroups.clear();
+State.groupBy = 'title';
+State.batchFilter = 'one';
+State.entries = [{id:'a1',title:'甲',total:'1'}, {id:'b',title:'乙',total:'2'}, {id:'a2',title:'甲',total:'3'}];
+State.selected = new Set(['a1']);
+const parent = document.createElement();
+renderGroupedEntries(parent);
+assert.equal(parent.children.length, 2);
+const group = entrySelectionGroups.get('a1');
+assert.deepEqual(group.content.children.map(card => card.dataset.entryId), ['a1','a2']);
+group.toggle.onclick();
+assert.equal(group.content.hidden, true);
+assert.equal(group.toggle.getAttribute('aria-expanded'), 'false');
+assert.deepEqual([...State.selected], ['a1']);
+assert.deepEqual(entryCards().map(card => card.dataset.entryId), ['b']);
+group.button.onclick();
+assert.deepEqual([...State.selected].sort(), ['a1', 'a2']);
+assert.equal(group.button.getAttribute('aria-checked'), 'true');
+entryCardOrder.length = 0; entryCardPositions.clear(); entrySelectionGroups.clear();
+renderGroupedEntries(document.createElement());
+const refreshed = entrySelectionGroups.get('a1');
+assert.equal(refreshed.content.hidden, true);
+refreshed.toggle.onclick();
+assert.equal(refreshed.content.hidden, false);
+assert.deepEqual(entryCards().map(card => card.dataset.entryId), ['a1','a2','b']);
+""")
+
+
+def test_batch_navigation_limits_title_options_and_ignores_stale_responses():
+    run_selection(r"""
+(async () => {
+  const title = document.querySelector('#filterTitle'), calls = [];
+  title.closest = () => makeNode();
+  const options = () => [...title.innerHTML.matchAll(/<option value="([^"]*)"/g)].map(match => match[1]);
+  configuredTitleNames = () => ['抬头甲', '抬头乙', '未用配置'];
+  for (const id of ['filterCheck', 'filterProfile', 'filterKeyword', 'filterAmountMin',
+    'filterAmountMax', 'filterDateFrom', 'filterDateTo']) document.querySelector('#' + id).value = '';
+  const a = {id: 'a', stats: {by_title: {'抬头甲': 2}}};
+  const b = {id: 'b', stats: {by_title: {'抬头乙': 3}}};
+  const mixed = {id: 'mixed', stats: {by_title: {'抬头甲': 1, '抬头乙': 1}}};
+  const blank = {id: 'blank', stats: {by_title: {'未标注抬头': 1}}};
+  State.batches = [a, b, mixed, blank];
+  State.quickView = 'all';
+  globalThis.Api = {
+    listTitles: async () => ['抬头甲', '抬头乙', '其他批次抬头'],
+    getBatch: async id => State.batches.find(batch => batch.id === id),
+    listEntries: async filters => {calls.push({...filters}); return [];},
+    invoiceRecognitionNotice: async () => ({}),
+    listBatches: async () => ({batches: State.batches}),
+  };
+  renderEntries = renderBatchFolders = renderInvoiceRecognitionNotice =
+    syncFilterControlStates = repaintEntryList = () => {};
+
+  title.value = State.activeTitle = '旧抬头';
+  await focusBatch('a');
+  assert.deepEqual(options(), ['', '抬头甲']);
+  assert.equal(title.value, '');
+  title.value = State.activeTitle = '抬头甲';
+  await refreshEntries();
+  assert.equal(calls.at(-1).title, '抬头甲');
+  await focusBatch('b');
+  assert.deepEqual(options(), ['', '抬头乙']);
+  assert.equal(title.value, '');
+  assert.equal(calls.at(-1).title, undefined);
+  await focusBatch('mixed');
+  assert.deepEqual(options(), ['', '抬头甲', '抬头乙']);
+  await focusBatch('blank');
+  assert.deepEqual(options(), ['']);
+  await focusBatch('a');
+  await focusBatch('a'); // 再点一次退出批次，回到全部抬头。
+  assert.deepEqual(options(), ['', '抬头甲', '抬头乙', '未用配置', '其他批次抬头']);
+
+  // Stale getBatch response from an earlier navigation must not overwrite newer options.
+  let resolveSlow;
+  Api.getBatch = id => id === 'a' ? new Promise(resolve => {resolveSlow = resolve;}) : Promise.resolve(b);
+  calls.length = 0;
+  const first = focusBatch('a');
+  await Promise.resolve();
+  await focusBatch('b');
+  resolveSlow({...a, stats: {by_title: {'旧批次抬头': 1}}});
+  await first;
+  assert.deepEqual(options(), ['', '抬头乙']);
+  assert.deepEqual(calls.map(filters => filters.batch_id), ['b']);
+})().catch(e => {console.error(e); process.exitCode = 1;});
+""")
+
+
 def test_reparse_failures_show_reasons_and_retry_only_failed_entries():
     run_selection(r"""
 (async () => {
@@ -69,7 +276,7 @@ def test_list_refresh_updates_batch_counts_without_using_filtered_entry_count():
     run_selection(r"""
 (async () => {
   State.batchFilter = 'batch';
-  State.quickView = 'complete';
+  State.quickView = 'incomplete';
   State.batches = [{id: 'batch', stats: {count: 11, incomplete: 1}}];
   const batch = {id: 'batch', stats: {count: 11, incomplete: 0}, entry_notes: {}};
   let matches = Array.from({length: 11}, (_, i) => ({id: 'e' + i}));
@@ -80,7 +287,7 @@ def test_list_refresh_updates_batch_counts_without_using_filtered_entry_count():
     invoiceRecognitionNotice: async () => ({}),
   };
   refreshTitleOptions = async () => {};
-  currentFilters = () => ({batch_id: State.batchFilter || undefined, status: 'complete'});
+  currentFilters = () => ({batch_id: State.batchFilter || undefined, status: 'partial'});
   renderEntries = syncFilterControlStates = () => {};
   const displayed = [];
   renderBatchFolders = () => displayed.push(State.batches[0].stats.incomplete);

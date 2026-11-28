@@ -620,6 +620,64 @@ def test_oil_words_in_explicit_seller_name_still_report_a_real_conflict(parse_te
     assert 'seller_conflict' in codes(check_invoice(invoice, context=CONTEXT))
 
 
+@pytest.mark.parametrize("buyer", ["个人", "示例购方"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_split_vertical_party_labels_recover_joined_names(parse_texts, buyer, reverse):
+    joined = buyer + SELLER_NAME if reverse else SELLER_NAME + buyer
+    plain = (
+        "销\n售\n方\n信\n息\n购\n买\n方\n信\n息\n"
+        "名 称:\n统一社会信用代码/纳税人识别号:\n"
+        "项目名称 规格型号 单位 数量 单价 金额 税率 税额\n"
+        "名 称:\n统一社会信用代码/纳税人识别号:\n"
+        f"{joined}\n{SELLER_ID}\n"
+        "*生产生活服务*示例物流服务 无 次 1 5.66 5.66 0.346%\n"
+        "¥5.66 ¥0.34\n陆圆整 ¥6.00\n"
+    )
+    layout = (
+        "购                                            销\n"
+        f"买 名  称:{buyer}                             售 名 称: {SELLER_NAME}\n"
+        "方                                            方\n"
+        "信 统一社会信用代码/纳税人识别号:                信 统一社会信用代码/纳税人识别号:"
+        f"{SELLER_ID}\n息                               息\n"
+        "*生产生活服务*示例物流服务      无 次 1 5.66 5.66 6% 0.34\n"
+        "合 计 ¥5.66 ¥0.34\n价税合计(大写) 陆圆整 (小写) ¥6.00\n"
+    )
+    invoice = parse_texts(plain, layout)
+
+    assert invoice.seller == SELLER_NAME
+    assert invoice.buyer_name == buyer
+    assert invoice.seller_tax_id == SELLER_ID
+    assert invoice.buyer_tax_id == ""
+    for field in ("seller", "buyer_name"):
+        assert invoice.field_checks[field].state == FIELD_VERIFIED
+        assert invoice.field_checks[field].basis == "role_anchor"
+    assert not {"seller_conflict", "buyer_name_conflict"} & codes(check_invoice(invoice, context=CONTEXT))
+    assert invoice.items[0].actual_name == "示例物流服务"
+    assert invoice.items[0].total == invoice.total == Decimal("6.00")
+
+
+def test_pending_party_name_stops_before_invoice_items():
+    invoice = _parse_invoice_text(
+        "名称:\n名称:\n示例设备有限公司个人\n"
+        f"{SELLER_ID}\n*生产生活服务*示例物流服务 次 1 5.66 5.66 6% 0.34\n"
+        "陆圆整 ¥6.00\n"
+    )
+    assert invoice.buyer_name == ""
+    assert invoice.seller == "示例设备有限公司个人"
+
+
+def test_split_vertical_party_labels_keep_real_name_conflicts(parse_texts):
+    layout = layout_text().replace(
+        f"购  名称：{BUYER_NAME}                    销  名称：{SELLER_NAME}",
+        f"购                                            销\n"
+        f"买 名 称：{BUYER_NAME}                        售 名 称：{SELLER_NAME}",
+    )
+    invoice = parse_texts(plain_text(seller=OTHER_SELLER), layout)
+    assert invoice.seller == SELLER_NAME
+    assert invoice.field_checks["seller"].state == FIELD_CONFLICT
+    assert "seller_conflict" in codes(check_invoice(invoice, context=CONTEXT))
+
+
 def test_buyer_name_conflict_is_settled_by_a_configured_title(parse_texts):
     wrong = "示例学院"
     invoice = parse_texts(plain_text(buyer=wrong), layout_text())

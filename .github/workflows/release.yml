@@ -212,7 +212,6 @@ jobs:
           --exclude-module PIL._imagingtk
           --exclude-module PIL.ImageQt
           --icon "icon/macos/icon.icns"
-          --argv-emulation
           --osx-bundle-identifier "com.bitfsae.tidoc"
           --add-data "tidoc/web:tidoc/web"
           --add-data "schemas/team-adapter:schemas/team-adapter"

@@ -8,6 +8,8 @@ import base64
 import json
 from decimal import Decimal
 
+import pytest
+
 from tidoc.db import (
     STATUS_COMPLETE,
     TYPE_INVOICE_XML,
@@ -224,6 +226,92 @@ def test_batch_reparse_preserves_manually_corrected_buyer_tax_id(api, tmp_path, 
     api.reparse_entries([entry_id])
 
     assert api.entries.get(entry_id)["buyer_tax_id"] == "manual-value"
+
+
+def _seed_party_reparse_entry(api, tmp_path, *, buyer_name="*服务*示例商品", title=""):
+    profile = api.profiles.create("测试报账人", "测试审核人")
+    entry_id = api.entries.create(
+        profile["id"], title=title,
+        parsed=ParsedInvoice(
+            invoice_no="26110000000000000001", seller="示例设备有限公司个人",
+            buyer_name=buyer_name, total=Decimal("6.00"), source="pdf",
+        ),
+    )
+    pdf = tmp_path / "invoice.pdf"
+    pdf.write_bytes(b"placeholder")
+    api.attachments.add(entry_id, pdf, "invoice_pdf")
+    return profile, entry_id
+
+
+def _mock_party_reparse(monkeypatch, state="verified"):
+    from tidoc.engine.models import FieldCheck
+
+    parsed = ParsedInvoice(
+        invoice_no="26110000000000000001", seller="示例设备有限公司", buyer_name="个人",
+        total=Decimal("6.00"), source="pdf",
+        field_checks={field: FieldCheck(state, value, basis="role_anchor") for field, value in (
+            ("seller", "示例设备有限公司"), ("buyer_name", "个人"),
+        )},
+    )
+    monkeypatch.setattr("tidoc.engine.parse_invoice_files", lambda *_args, **_kwargs: parsed)
+    return parsed
+
+
+@pytest.mark.parametrize("state,manual", [("verified", False), ("agree", False), ("conflict", False), ("verified", True)])
+def test_batch_reparse_refreshes_verified_party_names(api, tmp_path, monkeypatch, state, manual):
+    profile, entry_id = _seed_party_reparse_entry(api, tmp_path)
+    api.entries.update_field(entry_id, "notes", "保留备注", profile["id"])
+    api.entries.update_field(entry_id, "paid_amount", "5.00", profile["id"])
+    if manual:
+        for field in ("seller", "buyer_name"):
+            api.entries.correct_locked_field(entry_id, field, "手动核对名称", profile["id"])
+    before = api.entries.get(entry_id)
+    parsed = _mock_party_reparse(monkeypatch, state)
+
+    response = api.reparse_entries([entry_id])
+
+    assert response["ok"] and response["data"]["results"][0]["ok"], response
+    updated = api.entries.get(entry_id)
+    should_update = not manual and state != "conflict"
+    for field in ("seller", "buyer_name"):
+        assert updated[field] == (getattr(parsed, field) if should_update else before[field])
+        assert any(row["field"] == f"[本地重新识别]{field}" for row in updated["history"]) == should_update
+    assert updated["title"] == ("个人" if should_update else before["title"])
+    assert updated["total"] == before["total"]
+    assert updated["fields"]["notes"] == before["fields"]["notes"]
+    assert updated["fields"]["paid_amount"] == before["fields"]["paid_amount"]
+    assert api.entries.invoice_recognition_current(entry_id)
+
+
+@pytest.mark.parametrize("mode", ["old", "buyer_corrected", "manual_title", "untraceable_title"])
+def test_batch_reparse_repairs_product_row_used_as_title(api, tmp_path, monkeypatch, mode):
+    product = "*服务*示例物流服务 次 1 5.66 5.66 6% 0.34"
+    profile, entry_id = _seed_party_reparse_entry(
+        api, tmp_path, buyer_name=product,
+        title="*服务*单独选择的分区" if mode == "untraceable_title" else "",
+    )
+    if mode == "buyer_corrected":
+        api.entries.update_recognized_party_field(entry_id, "buyer_name", "个人")
+    elif mode == "manual_title":
+        api.entries.correct_locked_field(entry_id, "title", "*服务*用户指定分区", profile["id"])
+    before = api.entries.get(entry_id)
+    _mock_party_reparse(monkeypatch)
+
+    response = api.reparse_entries([entry_id])
+
+    assert response["ok"] and response["data"]["results"][0]["ok"], response
+    updated = api.entries.get(entry_id)
+    repaired = mode in {"old", "buyer_corrected"}
+    assert updated["buyer_name"] == "个人"
+    assert updated["title"] == ("个人" if repaired else before["title"])
+    assert (updated["check_status"] == "blocked") is not repaired
+    title_history = [row for row in updated["history"] if row["field"] == "[本地重新识别]title"]
+    assert bool(title_history) == repaired
+    if repaired:
+        assert (title_history[0]["old_value"], title_history[0]["new_value"]) == (product, "个人")
+        api.reparse_entries([entry_id])
+        assert len([row for row in api.entries.get(entry_id)["history"]
+                    if row["field"] == "[本地重新识别]title"]) == 1
 
 
 def test_correcting_buyer_tax_id_refreshes_recognition_warning(api):
@@ -636,7 +724,7 @@ def test_unrecognized_payment_enters_recognition_warning(api, tmp_path, monkeypa
     attachment = api.add_attachment(entry["id"], str(payment), "payment_screenshot")["data"]
     refreshed = api.get_entry(entry["id"])["data"]
     assert refreshed["check_status"] == "warning"
-    assert "付款截图未识别到金额" in refreshed["check_message"]
+    assert refreshed["check_message"] == "[付款截图识别] 付款信息待核对。"
 
     api.delete_attachment(attachment["id"])
     cleared = api.get_entry(entry["id"])["data"]
@@ -723,7 +811,11 @@ def test_dropped_tidoc_is_classified_as_bindle_package(api, tmp_path):
 
 
 def test_dropped_file_rejects_invalid_base64(api):
-    res = api.save_dropped_files([{"name": "bad.pdf", "data_url": "data:application/pdf;base64,not-base64"}])
+    res = api.save_dropped_files([
+        {"name": "first.tidoc", "data_url": "YQ=="},
+        {"name": "bad.tidoc", "data_url": "data:application/octet-stream;base64,not-base64"},
+    ])
+    assert not list(api.data_root.dropped_dir.iterdir())
     assert res["ok"] is False
     assert "文件内容无效" in res["error"]
 

@@ -17,7 +17,7 @@ const State = {
   focusedEntryId: null,
   density: 'comfortable',
   themeMode: document.documentElement.dataset.themeMode || 'system',
-  groupBy: 'none',       // 'none' | 'profile' | 'title' —— 列表分组浏览
+  groupBy: 'none',       // 'none' | 'profile' | 'title' | 'tag' —— 列表分组浏览
   sortDir: 'desc',       // 'asc' | 'desc' —— 换排序字段时回到该字段的常用方向
   tagFilter: '',         // 工具栏筛选：按标签
   notesFilter: '',       // 高级筛选：'' | 'yes' | 'no'（有 / 无记账备注）
@@ -52,6 +52,7 @@ const entryCardNodes = new Map();
 const entryCardOrder = [];
 const entryCardPositions = new Map();
 const entrySelectionGroups = new Map();
+const collapsedEntryGroups = new Set();
 let focusedEntryCard = null;
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -451,8 +452,28 @@ async function handleSecondaryLaunch() {
       launch = await Api.takeLaunchFile();
     }
     if (!PendingLaunchFiles.length) return;
+    const activeBatch = window.ActiveBindleBatch;
+    if (activeBatch && $('#modalRoot').lastChild === activeBatch.mask) {
+      if (activeBatch.isBusy()) {
+        toast(`已收到 ${PendingLaunchFiles.length} 个绑定包，请等待当前导入结束后再处理`, 'ok');
+        return;
+      }
+      activeBatch.addPaths(PendingLaunchFiles.splice(0));
+      return;
+    }
     if ($('#modalRoot').lastChild) {
-      toast('已收到绑定包，关闭当前弹窗后将打开导入预览', 'ok');
+      toast(PendingLaunchFiles.length > 1
+        ? `已收到 ${PendingLaunchFiles.length} 个绑定包，关闭当前弹窗后将打开批量导入`
+        : '已收到绑定包，关闭当前弹窗后将打开导入预览', 'ok');
+      return;
+    }
+    if (PendingLaunchFiles.length > 1) {
+      if (!State.currentProfileId) {
+        PendingLaunchFiles.splice(0);
+        toast('请先创建报账人，再导入绑定包', 'err');
+        return;
+      }
+      openBindleBatch(PendingLaunchFiles.splice(0));
       return;
     }
     const path = PendingLaunchFiles.shift();
@@ -993,24 +1014,32 @@ async function refreshTagOptions() {
     State.allTags.map((t) => `<option value="${esc(t)}"${t === cur ? ' selected' : ''}>${esc(t)}</option>`).join('');
 }
 
-async function refreshTitleOptions() {
+function applyTitleOptions(batch = null) {
   const sel = $('#filterTitle');
   if (!sel) return;
+  const configured = configuredTitleNames();
   const current = State.activeTitle || sel.value || '';
+  const titles = actualBatchId()
+    ? State.titleOptions.filter((title) => (batch?.stats?.by_title?.[title] || 0) > 0)
+    : State.titleOptions;
+  sel.innerHTML = '<option value="">全部</option>' + titles.map((title) =>
+    `<option value="${esc(title)}">${esc(TITLE_SHORT[title] || title)}</option>`
+  ).join('');
+  State.activeTitle = titles.includes(current) ? current : '';
+  sel.value = State.activeTitle;
+  sel.closest('.title-filter-chip')?.classList.toggle('has-custom-title',
+    titles.some((title) => !configured.includes(title)));
+}
+
+async function refreshTitleOptions(batchRequest = null, isCurrent = () => true) {
   try {
-    const usedTitles = await Api.listTitles();
+    const [usedTitles, batch] = await Promise.all([Api.listTitles(), batchRequest]);
+    if (!isCurrent()) return;
     const configured = configuredTitleNames();
     const customTitles = usedTitles.filter((title) => !configured.includes(title));
-    const titles = [...configured, ...customTitles];
-    State.titleOptions = titles;
-    sel.innerHTML = '<option value="">全部</option>' + titles.map((title) =>
-      `<option value="${esc(title)}">${esc(TITLE_SHORT[title] || title)}</option>`
-    ).join('');
-    const available = !current || titles.includes(current);
-    sel.value = available ? current : '';
-    if (!available) State.activeTitle = '';
-    const chip = sel.closest('.title-filter-chip');
-    chip?.classList.toggle('has-custom-title', customTitles.length > 0);
+    // 全库抬头仍供新建条目等入口使用，只有筛选下拉按当前批次收窄。
+    State.titleOptions = [...configured, ...customTitles];
+    applyTitleOptions(batch);
   } catch (e) {
     // 抬头选项刷新失败不阻断条目列表，保留当前静态选项。
   }
@@ -1191,7 +1220,6 @@ function currentFilters() {
   // 先按状态在库里筛，待核对和已核对的分开在 applyCheckCategory 里做。
   if (State.quickView === 'warning') f.check_status = 'warning';
   else if (State.quickView === 'modified') f.modified_only = true;
-  else if (State.quickView === 'complete') f.status = 'complete';
   else if (State.quickView === 'ocr') f.ocr_recognized = true;
   else if (State.quickView === 'ocr_pending') f.ocr_pending = true;
 
@@ -1228,14 +1256,15 @@ async function refreshEntries() {
     if (sequence === entryRefreshSequence) list.classList.add('is-refreshing');
   }, 150);
   try {
-    await refreshTitleOptions();
-    if (sequence !== entryRefreshSequence) return;
-    // 抬头选项可能重置筛选里的抬头，之后再按最终筛选并行读取批次和条目。
     const batchId = actualBatchId();
+    const batchRequest = batchId ? Api.getBatch(batchId) : null;
+    await refreshTitleOptions(batchRequest, () => sequence === entryRefreshSequence);
+    if (sequence !== entryRefreshSequence) return;
+    // 先按整批抬头更新选项，避免上一个批次的抬头把新批次筛空。
     const filters = currentFilters();
     listKey = JSON.stringify([filters, State.quickView, State.groupBy]);
     [currentBatch, entries, recognitionNotice, batchListing] = await Promise.all([
-      batchId ? Api.getBatch(batchId) : null,
+      batchRequest,
       Api.listEntries(filters),
       Api.invoiceRecognitionNotice(),
       Api.listBatches(true).catch((error) => {
@@ -1259,7 +1288,7 @@ async function refreshEntries() {
   }
   if (sequence !== entryRefreshSequence) return;
   State.currentBatch = currentBatch;
-  // 批次汇总取完整成员的统计，不随搜索或「齐备」筛选缩小，也不沿用补材料前的数字。
+  // 批次汇总取完整成员的统计，不随搜索或「待补充」筛选缩小，也不沿用补材料前的数字。
   if (batchListing) applyBatchListing(batchListing);
   State.entries = entries;
   State.invoiceRecognitionNotice = recognitionNotice;
@@ -1369,8 +1398,9 @@ function renderEntries() {
   empty.hidden = !emptyAll;
   if (emptyAll) renderEmptyState();
   updateSelectionBar();
-  if (!State.entries.some((entry) => entry.id === State.focusedEntryId)) {
-    State.focusedEntryId = State.entries[0]?.id || null;
+  const visibleCards = entryCards();
+  if (!visibleCards.some((card) => card.dataset.entryId === State.focusedEntryId)) {
+    State.focusedEntryId = visibleCards[0]?.dataset.entryId || null;
   }
   syncEntryCardFocus(entryCardNodes.get(State.focusedEntryId));
   if (restoreFocusId) focusEntryCard(restoreFocusId, false);
@@ -1436,11 +1466,25 @@ function updateListSummary() {
   if (batch?.stats?.by_person?.length) {
     batch.stats.by_person.forEach((person) => {
       if (parts.length) parts.push(`<span class="sep">·</span>`);
-      parts.push(`<span><b>${esc(person.name)}</b> ${person.count} 条 · ${fmtMoney(person.total)}${person.incomplete ? ` · <i style="color:var(--warn);font-style:normal">缺 ${person.incomplete}</i>` : ''}</span>`);
+      const active = $('#filterProfile').value === person.profile_id;
+      const duplicate = batch.stats.by_person.some((other) => other !== person && other.name === person.name);
+      const label = duplicate && person.reviewer ? `${person.name} · ${person.reviewer}` : person.name;
+      parts.push(`<button type="button" class="stats-person" data-stats-profile="${esc(person.profile_id)}" aria-pressed="${active}" title="${active ? '取消报账人筛选' : `只看${esc(label)}的条目`}"><b>${esc(label)}</b> ${person.count} 条 · ${fmtMoney(person.total)}${person.incomplete ? ` · <i class="stats-person-missing">缺 ${person.incomplete}</i>` : ''}</button>`);
     });
   }
   $('#stats').innerHTML = parts.join('');
+  $('#stats').querySelectorAll('[data-stats-profile]').forEach((button) => {
+    button.onclick = () => toggleStatsProfile(button.dataset.statsProfile);
+  });
   syncHorizontalScrollers();
+}
+
+function toggleStatsProfile(profileId) {
+  const select = $('#filterProfile');
+  select.value = select.value === profileId ? '' : profileId;
+  State.selected.clear();
+  syncFilterControlStates();
+  return refreshEntries();
 }
 
 // 附件归属的方案材料角色；内置类型的角色标识与附件类型一致。
@@ -1536,7 +1580,7 @@ async function refreshEntryCard(entryId, currentDetail = null) {
 
 async function syncEntryAfterChange(entryId, { searchable = false, notes = false, affectsStatus = false, relist = false } = {}, detail = null) {
   const keywordActive = !!$('#filterKeyword')?.value;
-  const derivedViewActive = ['incomplete', 'warning', 'complete'].includes(State.quickView);
+  const derivedViewActive = ['incomplete', 'warning'].includes(State.quickView);
   if (relist || (searchable && keywordActive) || (notes && State.notesFilter) ||
       (affectsStatus && ($('#filterCheck')?.value || derivedViewActive || State.paymentCountFilter))) {
     await refreshEntries();
@@ -1812,11 +1856,13 @@ function itemCardLabel(entry) {
 }
 
 function entryCards() {
-  return entryCardOrder;
+  return State.groupBy === 'none' ? entryCardOrder : entryCardOrder.filter(
+    (card) => !entrySelectionGroups.get(card.dataset.entryId)?.collapsed
+  );
 }
 
 function syncEntryCardFocus(card) {
-  if (!card || card === focusedEntryCard) return;
+  if (!card || entrySelectionGroups.get(card.dataset.entryId)?.collapsed || card === focusedEntryCard) return;
   if (focusedEntryCard) focusedEntryCard.tabIndex = -1;
   focusedEntryCard = card;
   State.focusedEntryId = card.dataset.entryId;
@@ -1825,7 +1871,7 @@ function syncEntryCardFocus(card) {
 
 function focusEntryCard(entryId, scroll = true) {
   const card = entryCardNodes.get(entryId);
-  if (!card) return;
+  if (!card || entrySelectionGroups.get(entryId)?.collapsed) return;
   syncEntryCardFocus(card);
   card.focus({ preventScroll: true });
   if (scroll) card.scrollIntoView({ block: 'nearest' });
@@ -1843,13 +1889,14 @@ function moveEntryFocus(currentId, targetIndex, extendSelection) {
   focusEntryCard(targetId);
 }
 
-// Tab / Shift+Tab 在列表里一张一张往下（往上）走，分组标题上的「选中这组」按钮也算一站；
+// Tab / Shift+Tab 跳过折叠卡片，分组标题的选择和展开按钮也各算一站；
 // 走到头就交给浏览器，焦点离开列表。
 function stepEntryTab(ev) {
   if (ev.key !== 'Tab' || ev.defaultPrevented || ev.ctrlKey || ev.metaKey || ev.altKey) return;
-  const from = ev.target.closest?.('.entry-card, .group-sel');
+  const from = ev.target.closest?.('.entry-card, .group-sel, .group-toggle');
   if (!from) return;
-  const stops = [...$('#entryList').querySelectorAll('.entry-card, .group-sel')];
+  const stops = [...$('#entryList').querySelectorAll('.entry-card, .group-sel, .group-toggle')]
+    .filter((node) => !entrySelectionGroups.get(node.dataset.entryId)?.collapsed);
   const next = stops[stops.indexOf(from) + (ev.shiftKey ? -1 : 1)];
   if (!next) return;
   ev.preventDefault();
@@ -1860,7 +1907,7 @@ function stepEntryTab(ev) {
 function handleEntryCardKeydown(ev, entry) {
   if (ev.target !== ev.currentTarget) return;
   const cards = entryCards();
-  const index = entryCardPositions.get(entry.id);
+  const index = State.groupBy === 'none' ? entryCardPositions.get(entry.id) : cards.indexOf(ev.currentTarget);
   const key = ev.key;
   let targetIndex = null;
   if (key === 'ArrowDown' || key === 'ArrowRight') targetIndex = index + 1;
@@ -2019,8 +2066,28 @@ function entryModifiedTooltip(entry) {
   return changes.length ? `已修改：${changes.join('\n')}` : '当前保留人工修改结果，详情中可查看修改记录';
 }
 
-// 按报账人 / 抬头分组渲染，每组头显示条数、合计、齐备率，可整组选中
+function toggleEntryGroup(group) {
+  group.collapsed = !group.collapsed;
+  if (group.collapsed) collapsedEntryGroups.add(group.collapseKey);
+  else collapsedEntryGroups.delete(group.collapseKey);
+  group.content.hidden = group.collapsed;
+  group.toggle.setAttribute('aria-expanded', String(!group.collapsed));
+  if (group.collapsed && group.items.some((entry) => entry.id === State.lastSelectedId)) {
+    State.lastSelectedId = null;
+  }
+  if (group.collapsed && group.items.some((entry) => entry.id === State.focusedEntryId)) {
+    if (focusedEntryCard) focusedEntryCard.tabIndex = -1;
+    focusedEntryCard = null;
+    State.focusedEntryId = null;
+  }
+  if (!focusedEntryCard) syncEntryCardFocus(entryCards()[0]);
+}
+
+// 每组独占整行的小标题，卡片放在各自的网格里，折叠不改变选择。
 function entryGroupKey(entry) {
+  if (State.groupBy === 'tag') {
+    return JSON.stringify([...new Set(entry.tags || [])].sort((a, b) => a.localeCompare(b, 'zh-CN')));
+  }
   return State.groupBy === 'profile'
     ? (State.profileById[entry.profile_id]?.name || '未知报账人')
     : (entry.title || '未标注抬头');
@@ -2040,26 +2107,39 @@ function renderGroupedEntries(list) {
     groups.get(k).push(e);
   });
 
-  [...groups.entries()].forEach(([name, items]) => {
+  [...groups.entries()].forEach(([key, items]) => {
+    const tags = State.groupBy === 'tag' ? JSON.parse(key) : null;
+    const name = tags ? tags.join('、') || '未打标签' : key;
     const selectedCount = items.filter((e) => State.selected.has(e.id)).length;
     const tcls = State.groupBy === 'title' ? (TITLE_CLASS[name] || '') : '';
 
+    const section = el('section', 'entry-group');
+    const content = el('div', 'entry-group-cards');
+    content.id = `entryGroup${groups.size}-${entrySelectionGroups.size}`;
+    const collapseKey = JSON.stringify([activeBatchId(), State.groupBy, key]);
+    const collapsed = collapsedEntryGroups.has(collapseKey);
+    content.hidden = collapsed;
     const head = el('div', 'group-head' + (tcls ? ' ' + tcls : ''));
     head.innerHTML = `
-      <button class="group-sel" title="选中/取消这组">${selectedCount === items.length ? '✓' : ''}</button>
-      <span class="group-name">${esc(name)}</span>
-      <span class="group-meta">${entryGroupMeta(items)}</span>`;
+      <button type="button" class="group-sel" role="checkbox" aria-checked="${selectedCount === items.length ? 'true' : selectedCount ? 'mixed' : 'false'}" aria-label="选择${esc(name)}这组" title="选中/取消这组">${selectedCount === items.length ? '✓' : selectedCount ? '−' : ''}</button>
+      <button type="button" class="group-toggle" aria-expanded="${!collapsed}" aria-controls="${content.id}">
+        <span class="group-name" title="${esc(name)}">${esc(name)}</span>
+        <span class="group-meta">${entryGroupMeta(items)}</span>
+      </button>`;
     // items 与单卡刷新共用：分组不变时只替换卡片并更新这一组的合计。
-    const group = { key: name, items, meta: head.querySelector('.group-meta'),
-      button: head.querySelector('.group-sel'), size: items.length, selectedCount };
+    const group = { key, items, meta: head.querySelector('.group-meta'),
+      button: head.querySelector('.group-sel'), toggle: head.querySelector('.group-toggle'),
+      content, collapseKey, collapsed, size: items.length, selectedCount };
     items.forEach((e) => entrySelectionGroups.set(e.id, group));
     group.button.onclick = () => {
       if (group.selectedCount === group.size) items.forEach((e) => State.selected.delete(e.id));
       else items.forEach((e) => State.selected.add(e.id));
       syncVisibleSelectionState(items.map((e) => e.id));
     };
-    list.appendChild(head);
-    items.forEach((e) => list.appendChild(entryCard(e)));
+    group.toggle.onclick = () => toggleEntryGroup(group);
+    section.append(head, content);
+    list.appendChild(section);
+    items.forEach((e) => content.appendChild(entryCard(e)));
   });
 }
 
@@ -2115,6 +2195,28 @@ function renderEmptyState() {
   }
 }
 
+function syncGroupingControls() {
+  const labels = { title: '抬头', profile: '报账人', tag: '标签' };
+  $$('[data-group-by]').forEach((button) => {
+    const active = State.groupBy === button.dataset.groupBy;
+    const action = `${active ? '取消' : ''}按${labels[button.dataset.groupBy]}分组`;
+    button.setAttribute('aria-pressed', String(active));
+    button.setAttribute('aria-label', action);
+    button.dataset.tooltip = `点击${action}；右侧下拉框用于筛选`;
+  });
+}
+
+function setEntryGrouping(mode) {
+  if (!['none', 'title', 'profile', 'tag'].includes(mode)) return;
+  State.groupBy = mode;
+  syncGroupingControls();
+  renderEntries();
+}
+
+function toggleEntryGrouping(mode) {
+  setEntryGrouping(State.groupBy === mode ? 'none' : mode);
+}
+
 function syncFilterControlStates() {
   $('#filterKeyword')?.closest('.search')
     ?.classList.toggle('is-filtered', !!$('#filterKeyword')?.value);
@@ -2123,7 +2225,7 @@ function syncFilterControlStates() {
     const control = $('#' + id);
     control?.closest('.chip-select')?.classList.toggle('is-filtered', !!control.value);
   });
-  $('#groupSelect')?.closest('.chip-select')?.classList.toggle('is-filtered', State.groupBy !== 'none');
+  syncGroupingControls();
   const dateRange = [$('#filterDateFrom')?.value || '', $('#filterDateTo')?.value || ''].join();
   $$('[data-date-range]').forEach((btn) => {
     btn.classList.toggle('active', dateRange === dateRangeOf(btn.dataset.dateRange).join());
@@ -2198,6 +2300,7 @@ function selectEntryFromCard(id, range) {
       const [from, to] = start < end ? [start, end] : [end, start];
       for (let index = from; index <= to; index++) {
         const entryId = entryCardOrder[index].dataset.entryId;
+        if (entrySelectionGroups.get(entryId)?.collapsed) continue;
         if (State.selected.has(entryId)) continue;
         State.selected.add(entryId);
         changedIds.push(entryId);
@@ -2231,8 +2334,9 @@ function syncVisibleSelectionState(changedIds = null) {
     }
   }
   for (const group of changedGroups) {
-    const label = group.selectedCount === group.size ? '✓' : '';
+    const label = group.selectedCount === group.size ? '✓' : group.selectedCount ? '−' : '';
     if (group.button.textContent !== label) group.button.textContent = label;
+    group.button.setAttribute('aria-checked', group.selectedCount === group.size ? 'true' : group.selectedCount ? 'mixed' : 'false');
   }
   updateSelectionBar();
 }
@@ -2300,7 +2404,7 @@ function renderBatchFolders() {
     const st = batch.stats || {};
     const meta = batch.archived
       ? ''
-      : `${st.count || 0} 条${st.incomplete ? ` · <span class="miss">缺 ${st.incomplete}</span>` : ' · 齐'}`;
+      : `${st.count || 0} 条${st.incomplete ? ` · <span class="miss">缺 ${st.incomplete}</span>` : ''}`;
     const hint = batch.archived ? '恢复到在办' : '通过菜单归档批次';
     return `<span class="batch-folder${batch.archived ? ' archived' : ''}${State.batchFilter === batch.id ? ' active' : ''}" data-folder="${esc(batch.id)}">
       <button type="button" class="folder-open"><span data-tooltip-overflow="${esc(batch.name)}">${esc(batch.name)}</span>${meta ? `<small>${meta}</small>` : ''}</button>
@@ -2482,9 +2586,11 @@ function focusBatch(batchId) {
     State.batchFilter = requested;
   }
   State.currentBatch = null;
+  applyTitleOptions(State.batches.find((batch) => batch.id === actualBatchId()));
+  syncFilterControlStates();
   State.selected.clear();
   renderBatchFolders();
-  refreshEntries();
+  return refreshEntries();
 }
 
 function hasArchivedBatches() {
@@ -3677,12 +3783,12 @@ function openEntryMenu(x, y, e, options) {
   showContextMenu(menu, x, y, options);
 }
 
-// 卡片提醒标记的菜单：点一条提醒就标为已核对，已核对的点一下撤销，不用打开详情。
+// 卡片提醒弹层沿用详情的提醒行，只在明确点击核对或撤销按钮时更新。
 function openCheckMenu(x, y, e) {
-  const lines = sortedCheckLines(e);
+  const lines = e.check_lines || [];
   if (!lines.length) { openEntryDetail(e.id); return; }
-  const pending = lines.filter((line) => !line.reviewed);
   const run = async (texts, reviewed) => {
+    closeEntryMenu({ restoreFocus: true });
     try {
       const detail = await Api.reviewCheckLines(e.id, texts, reviewed, State.currentProfileId);
       await syncEntryAfterChange(e.id, { affectsStatus: true }, detail);
@@ -3690,22 +3796,15 @@ function openCheckMenu(x, y, e) {
     } catch (err) { toast(err.message, 'err'); }
   };
   const menu = el('div', 'entry-context-menu check-menu');
-  menu.appendChild(el('div', 'check-menu-head', pending.length ? '点一条提醒标为已核对' : '提醒都已核对，点一条可撤销'));
-  lines.forEach((line) => {
-    const b = el('button', 'check-menu-line' + (line.reviewed ? ' reviewed' : ''), `
-      <span class="check-line-cat">${esc(CHECK_CATEGORY_LABEL[line.category] || '其他')}</span>
-      <span class="check-menu-text">${esc(line.text)}</span>
-      <span class="check-menu-act">${line.reviewed ? '撤销' : '核对'}</span>`);
-    b.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await run([line.text], !line.reviewed); };
-    menu.appendChild(b);
+  menu.innerHTML = checkLinesHtml(e);
+  menu.querySelectorAll('[data-check-review]').forEach((button) => {
+    button.onclick = () => {
+      const line = lines[Number(button.dataset.checkReview)];
+      if (line) run([line.text], button.dataset.reviewed === '1');
+    };
   });
-  const item = (label, fn) => {
-    const b = el('button', 'check-menu-more', esc(label));
-    b.onclick = async () => { closeEntryMenu({ restoreFocus: true }); await fn(); };
-    menu.appendChild(b);
-  };
-  if (pending.length > 1) item(`全部标为已核对（${pending.length} 条）`, () => run(pending.map((line) => line.text), true));
-  item('打开详情', () => openEntryDetail(e.id));
+  const all = menu.querySelector('[data-check-review-all]');
+  if (all) all.onclick = () => run(lines.filter((line) => !line.reviewed).map((line) => line.text), true);
   showContextMenu(menu, x, y);
 }
 
@@ -3864,7 +3963,9 @@ function bindEvents() {
   $('#sortSelect').onchange = () => { State.sortDir = SORT_DEFAULT_DIR[$('#sortSelect').value] || 'desc'; syncSortDirButton(); relist(); };
   syncSortDirButton();
   $('#sortDirBtn').onclick = () => { State.sortDir = State.sortDir === 'asc' ? 'desc' : 'asc'; syncSortDirButton(); relist(); };
-  $('#groupSelect').onchange = () => { State.groupBy = $('#groupSelect').value || 'none'; syncFilterControlStates(); renderEntries(); };
+  $$('[data-group-by]').forEach((button) => {
+    button.onclick = () => toggleEntryGrouping(button.dataset.groupBy);
+  });
   $$('[data-date-range]').forEach((btn) => {
     btn.onclick = () => {
       const [from, to] = dateRangeOf(btn.dataset.dateRange);
@@ -5214,7 +5315,7 @@ async function maybeShowFirstUseGuide() {
 function usageGuideStepsMarkup() {
   return `<div><b>1 · 导入发票</b><span>拖入或粘贴发票 PDF/XML；多张用“导入发票”。</span></div>
     <div><b>2 · 补齐材料</b><span>在卡片或详情补齐方案要求的材料；右键可打开已有文件。</span></div>
-    <div><b>3 · 核对条目</b><span>从“待补材料”或“识别提醒”进入详情，确认实付、明细和备注。</span></div>
+    <div><b>3 · 核对条目</b><span>从“待补充”或“识别提醒”进入详情，确认实付、明细和备注。</span></div>
     <div><b>4 · 组织批次</b><span>选中条目后移动到批次；点击批次右侧“⋯”可编辑批次、填写批次备注、归档，已归档批次可从“已归档”查看并恢复。</span></div>
     <div><b>5 · 导出打印</b><span>选中条目后导出绑定包、汇总或打印材料。</span></div>
     <div><b>6 · 后续查找</b><span>用抬头、报账人、状态、日期、金额或关键词筛选。</span></div>`;
@@ -6437,10 +6538,24 @@ async function openInboundBindle(infos, cleanupPaths, progress = null) {
   }
   const packages = (infos || []).filter(isBindlePackageInfo);
   if (!packages.length) return false;
-  if (packages.length !== 1 || infos.length !== 1) {
-    throw new Error('绑定包需要单独导入：一次请只拖入或粘贴一个 .tidoc 文件。');
+  if (packages.length !== infos.length) {
+    throw new Error('请将绑定包与发票、材料分开导入。多个 .tidoc 文件可以一起导入。');
   }
   if (!State.currentProfileId) throw new Error('请先创建报账人，再导入绑定包。');
+  const activeBatch = window.ActiveBindleBatch;
+  if (activeBatch && $('#modalRoot')?.lastChild === activeBatch.mask) {
+    if (activeBatch.isBusy()) {
+      throw new Error('正在导入绑定包，请等待当前操作结束后再添加。');
+    }
+    activeBatch.addPaths(packages.map(info => info.path), cleanupPaths || []);
+    return true;
+  }
+  if (packages.length > 1) {
+    openBindleBatch(packages.map(info => info.path), {
+      cleanupPaths: cleanupPaths || [],
+    });
+    return true;
+  }
   progress?.update('正在检查绑定包完整性…');
   const info = packages[0];
   const insp = await Api.inspectBindle(info.path, State.scheme?.id);
@@ -6689,6 +6804,12 @@ function setupGlobalDrop() {
         reportQrOutcome(qr);
         return;
       }
+      const activeBatch = window.ActiveBindleBatch;
+      if (activeBatch && $('#modalRoot')?.lastChild === activeBatch.mask) {
+        await cleanupDroppedPaths(paths);
+        toast('批量导入窗口仅支持添加 .tidoc 绑定包', 'err');
+        return;
+      }
       const invoiceInfos = infos.filter(isInvoiceImportInfo);
       const materialInfos = infos.filter(isLooseMaterialInfo);
       if (invoiceInfos.length) {
@@ -6730,18 +6851,17 @@ function setupGlobalDrop() {
 function filesFromClipboard(ev) {
   const dt = ev.clipboardData;
   if (!dt) return [];
-  const out = [];
-  const seen = new Set();
-  for (const file of [...(dt.files || [])]) {
-    const key = `${file.name}:${file.size}:${file.type}`;
-    if (!seen.has(key)) { seen.add(key); out.push(file); }
-  }
+  const out = [...(dt.files || [])];
+  const keyOf = file => JSON.stringify([file.name, file.size, file.type]);
+  const listed = new Map();
+  for (const file of out) listed.set(keyOf(file), (listed.get(keyOf(file)) || 0) + 1);
   for (const item of [...(dt.items || [])]) {
     if (item.kind !== 'file') continue;
     const file = item.getAsFile();
     if (!file) continue;
-    const key = `${file.name}:${file.size}:${file.type}`;
-    if (!seen.has(key)) { seen.add(key); out.push(file); }
+    const key = keyOf(file);
+    if (listed.get(key)) listed.set(key, listed.get(key) - 1);
+    else out.push(file);
   }
   return out;
 }
@@ -6769,6 +6889,12 @@ function setupClipboardUpload() {
       if (await openInboundBindle(infos, paths, progress)) {
         cleanupDeferred = true;
         reportQrOutcome(qr);
+        return;
+      }
+      const activeBatch = window.ActiveBindleBatch;
+      if (activeBatch && $('#modalRoot')?.lastChild === activeBatch.mask) {
+        await cleanupDroppedPaths(paths);
+        toast('批量导入窗口仅支持添加 .tidoc 绑定包', 'err');
         return;
       }
       if (activeEntryId) {
@@ -7141,10 +7267,11 @@ function showExportResult(outputs) {
 async function doImport() {
   if (!State.currentProfileId) { toast('请先创建报账人', 'err'); return; }
   try {
-    const res = await Api.pickFiles(false, ['绑定包 (*.tidoc)']);
+    const res = await Api.pickFiles(true, ['绑定包 (*.tidoc)']);
     const paths = res.paths || [];
     if (!paths.length) return;
-    await importBindleFlow(paths[0]);
+    if (paths.length === 1) await importBindleFlow(paths[0]);
+    else openBindleBatch(paths);
   } catch (e) { toast(e.message, 'err'); }
 }
 
@@ -7159,7 +7286,7 @@ function updateOcrSuggestBar() {
   if (!bar) return;
   const applicable = State.quickView === 'warning'
     ? State.entries.filter((entry) =>
-        entry.attachment_types?.invoice_pdf && !entry.attachment_types?.invoice_xml)
+        entry.attachment_types?.invoice_pdf && !entry.attachment_types?.invoice_xml && !entry.ocr_recognized)
     : [];
   if (!applicable.length || !ocrReady()) {
     bar.classList.add('hidden');
@@ -7168,7 +7295,7 @@ function updateOcrSuggestBar() {
   }
   bar.classList.remove('hidden');
   bar.innerHTML = `
-    <span class="ocr-suggest-text">当前视图有 ${applicable.length} 张发票可用阿里云识别</span>
+    <span class="ocr-suggest-text">当前视图有 ${applicable.length} 张发票尚未用阿里云识别</span>
     <button class="btn small" id="ocrSuggestRun">识别全部</button>`;
   bar.querySelector('#ocrSuggestRun').onclick = () => {
     const ids = applicable.map((entry) => entry.id);

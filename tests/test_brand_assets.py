@@ -30,7 +30,9 @@ def test_release_builds_use_platform_icons_and_register_tidoc_file_icons():
 
     assert '--icon "icon/windows/icon.ico"' in workflow
     assert '--icon "icon/macos/icon.icns"' in workflow
-    assert "--argv-emulation" in workflow
+    # Cocoa handles both initial and later Finder events; the bootloader must
+    # not consume the initial document event before our delegate receives it.
+    assert "--argv-emulation" not in workflow
     assert 'CFBundleTypeIconFile string tidoc-file.icns' in workflow
     assert 'UTTypeIdentifier string com.bitfsae.tidoc.bindle' in workflow
     assert 'public.filename-extension:0 string tidoc' in workflow

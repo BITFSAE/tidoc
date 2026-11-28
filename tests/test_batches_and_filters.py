@@ -119,6 +119,23 @@ def test_batch_stats_by_person(repos, sample_xmls):
     assert names == {"张三", "王五"}
 
 
+def test_batch_person_stats_keep_same_name_profiles_separate(repos):
+    from tidoc.engine.models import ParsedInvoice
+
+    first = repos["profiles"].create("示例报账人", "审核甲")
+    second = repos["profiles"].create("示例报账人", "审核乙")
+    ids = [repos["entries"].create(person["id"], parsed=ParsedInvoice(
+        invoice_no=f"STATS-{index}", total=Decimal(amount)))
+        for index, (person, amount) in enumerate([(first, "12.00"), (second, "25.00")])]
+    batch = repos["batches"].create("同名报账人", entry_ids=ids)
+    people = {person["profile_id"]: person for person in batch["stats"]["by_person"]}
+    assert people[first["id"]]["total"] == "12.00"
+    assert people[first["id"]]["reviewer"] == "审核甲"
+    assert people[second["id"]]["total"] == "25.00"
+    assert people[second["id"]]["reviewer"] == "审核乙"
+    assert all(person["count"] == 1 for person in people.values())
+
+
 def test_batch_archive_excluded_from_list(repos, sample_xmls):
     repos["batches"].create("活跃批")
     b2 = repos["batches"].create("已交批")

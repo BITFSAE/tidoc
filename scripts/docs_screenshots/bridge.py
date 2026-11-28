@@ -91,6 +91,35 @@ SHIM = """<script>(function () {
   }
 
   var scenes = {
+    "check-menu": function () {
+      until(function () { return pickCard("锂电池组"); }, function (card) {
+        var entry = State.entries.find(function (item) { return item.id === card.dataset.entryId; });
+        openCheckMenu(24, 24, entry);
+        until(function () { return document.querySelector(".check-menu .check-line"); }, function () {
+          var menu = document.querySelector(".check-menu").cloneNode(true);
+          closeEntryMenu();
+          menu.style.cssText = "position:relative;left:auto;top:auto;opacity:1;transform:none";
+          isolate(menu, 8, null, "#202020");
+          settle();
+        });
+      });
+    },
+    "grouped-entries": function () {
+      until(function () { return cards().length && State.batches.length; }, function () {
+        var batch = State.batches.find(function (item) { return item.name === "9 月第一批"; });
+        setEntryGrouping("profile");
+        focusBatch(batch.id).then(function () { settle(); });
+      });
+    },
+    "bindle-batch": function () {
+      until(function () { return cards()[0]; }, function () {
+        openBindleBatch(%(bindle_batch_paths)s);
+        until(function () {
+          var rows = document.querySelectorAll(".bindle-batch-row");
+          return rows.length >= 3 && !document.querySelector(".bindle-batch-scanning");
+        }, settle);
+      });
+    },
     bindle: function () {
       until(function () { return cards()[0]; }, function () {
         importBindleFlow(%(bindle_path)s);
@@ -336,7 +365,7 @@ def _update_status(core_version: str, print_version: str, ocr_version: str) -> d
     }
 
 
-def make_server(api, sprite_titles, sprite_heights, sprite_width, *, bindle_path="", import_paths=()) -> ThreadingHTTPServer:
+def make_server(api, sprite_titles, sprite_heights, sprite_width, *, bindle_path="", bindle_batch_paths=(), import_paths=()) -> ThreadingHTTPServer:
     from tidoc import __version__
     from tidoc_ocr import __version__ as ocr_version
     from tidoc_print import __version__ as print_version
@@ -350,6 +379,7 @@ def make_server(api, sprite_titles, sprite_heights, sprite_width, *, bindle_path
         "heights": json.dumps(sprite_heights),
         "width": sprite_width,
         "bindle_path": json.dumps(str(bindle_path)),
+        "bindle_batch_paths": json.dumps([str(path) for path in bindle_batch_paths], ensure_ascii=False),
         "import_paths": json.dumps([str(path) for path in import_paths], ensure_ascii=False),
         "import_label": json.dumps(f"{len(import_paths)} 个文件", ensure_ascii=False),
     }

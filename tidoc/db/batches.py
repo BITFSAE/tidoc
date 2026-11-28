@@ -395,7 +395,7 @@ class BatchRepo:
         """
         rows = self.db.conn.execute(
             """SELECT e.id, e.profile_id, e.title, e.total, e.status,
-                      p.name AS profile_name
+                      p.name AS profile_name, p.reviewer AS profile_reviewer
                FROM batch_entries be
                JOIN entries e ON e.id = be.entry_id
                LEFT JOIN profiles p ON p.id = e.profile_id
@@ -415,7 +415,10 @@ class BatchRepo:
                 amt = Decimal("0")
             total += amt
             pname = r["profile_name"] or "未知报账人"
-            slot = by_person.setdefault(pname, {"count": 0, "total": Decimal("0"), "incomplete": 0})
+            slot = by_person.setdefault(r["profile_id"], {
+                "name": pname, "reviewer": r["profile_reviewer"] or "",
+                "count": 0, "total": Decimal("0"), "incomplete": 0,
+            })
             slot["count"] += 1
             slot["total"] += amt
             if r["status"] != "complete":
@@ -428,7 +431,8 @@ class BatchRepo:
             "total": str(total),
             "incomplete": incomplete,
             "by_person": [
-                {"name": k, "count": v["count"], "total": str(v["total"]), "incomplete": v["incomplete"]}
+                {"profile_id": k, "name": v["name"], "reviewer": v["reviewer"],
+                 "count": v["count"], "total": str(v["total"]), "incomplete": v["incomplete"]}
                 for k, v in sorted(by_person.items(), key=lambda kv: -kv[1]["count"])
             ],
             "by_title": by_title,

@@ -57,7 +57,7 @@ markdownStyles: false
 <a class="ledger-link" href="/guide/organize.html">
 <span class="ledger-num">03</span>
 <h2 class="ledger-title">核对、筛选与批次</h2>
-<p class="ledger-text">通过「待补材料」「识别提醒」收尾，按报账人、标签和报账批次归类整理。</p>
+<p class="ledger-text">通过「待补充」「识别提醒」收尾，按报账人、标签和报账批次归类整理。</p>
 <span class="ledger-more">筛选与批次 <span class="vpi-arrow-right"></span></span>
 </a>
 </li>

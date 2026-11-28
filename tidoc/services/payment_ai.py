@@ -435,13 +435,20 @@ def make_payload(cfg, image):
 
 
 ALLOWED_SOURCES = ("wechat", "alipay", "bank")
+LEGACY_ORDER_PAGE_REASON = "订单页，请用付款账单截图"
+ORDER_PAGE_REASON = "订单页，请上传微信、支付宝或银行的付款账单截图"
+
+
+def current_message(message):
+    """仅更新已知的旧提示文案，不改变识别结论或自定义说明。"""
+    return str(message or "").replace(LEGACY_ORDER_PAGE_REASON, ORDER_PAGE_REASON)
 
 
 def review_reason(result):
     """说清楚为什么要人工核对；从已保存的结果推出，旧缓存也能得到同样的说明。"""
     kind = result["document_type"]
     if kind == "order_page":
-        return "订单页，请用付款账单截图"
+        return ORDER_PAGE_REASON
     if kind == "refund" and not result.get("amount"):
         return "退款记录，核对原付款"
     if result["direction"] == "income":
@@ -462,7 +469,7 @@ def review_reason(result):
 def result_message(result):
     messages = []
     if result["needs_review"]:
-        messages.append(result["reason"] or review_reason(result))
+        messages.append(current_message(result["reason"] or review_reason(result)))
     if result["theme"] in {"dark", "mixed"} and result["document_type"] in {"payment_receipt", "refund"}:
         messages.append("建议用浅色截图，打印更省墨")
     return "；".join(messages)

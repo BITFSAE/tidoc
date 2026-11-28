@@ -740,7 +740,10 @@ def _infer_legacy_applied_changes(
         try:
             from ..engine.parser import parse_pdf
 
-            parsed = parse_pdf(Path(attachments_dir) / pdf["stored_path"],context=entries_repo.recognition_context(entry_id))
+            parsed = parse_pdf(
+                Path(attachments_dir) / pdf["stored_path"],
+                context=entries_repo.recognition_context(entry["id"]),
+            )
             before = [
                 {
                     "name": item.name,

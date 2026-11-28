@@ -212,18 +212,23 @@ def _normalize_party_name(value: str) -> str:
 def _extract_layout_parties(text: str) -> tuple[str, str, str, str] | None:
     """Read the side-by-side buyer/seller block from layout-preserving text.
 
-    The three supplied invoices expose the left buyer and right seller in one
-    text row.  The ordinary text stream loses those roles and reverses or even
-    picks up the vertical tax-stamp text, while the layout stream still carries
-    the ``购 ... 名称`` / ``销 ... 名称`` anchors.
+    Ordinary text may join the two names or lose their roles. Layout text keeps
+    the left buyer and right seller cells beside the vertical role headings,
+    including headings whose 购/销 and 买/售 characters occupy separate rows.
     """
     lines = [line for line in (text or "").splitlines() if line.strip()]
     buyer = seller = ""
-    for line in lines:
-        if "名称" not in line or "购" not in line or "销" not in line:
+    for index, line in enumerate(lines):
+        if not re.search(r"名\s*称", line):
             continue
+        # Vertical headings can put 购/销 on the preceding row and 买/售
+        # beside the name cells. Require the paired heading before using them.
+        split_heading = index > 0 and re.fullmatch(r"\s*购\s+销\s*", lines[index - 1])
+        buyer_role, seller_role = ("买", "售") if split_heading else ("购", "销")
+        if index > 0 and re.fullmatch(r"\s*购买方信息\s+销售方信息\s*", lines[index - 1]):
+            buyer_role = seller_role = ""
         direct = re.search(
-            r"购\s+名称[:：]\s*(.*?)\s+销\s+名称[:：]\s*(.*?)\s*$",
+            rf"{buyer_role}\s+名\s*称[:：]\s*(.*?)\s+{seller_role}\s+名\s*称[:：]\s*(.*?)\s*$",
             line,
         )
         if direct:
@@ -234,7 +239,7 @@ def _extract_layout_parties(text: str) -> tuple[str, str, str, str] | None:
         # Some PDFs emit the seller name before the right-column ``销 名称``
         # label.  A large layout gap separates it from the buyer name.
         split = re.search(
-            r"购\s+名称[:：]\s*(.*?)\s{3,}(.*?)销\s+名称",
+            rf"{buyer_role}\s+名\s*称[:：]\s*(.*?)\s{{3,}}(.*?){seller_role}\s+名\s*称",
             line,
         )
         if split:
@@ -328,6 +333,8 @@ def _normalize_label(line: str) -> str:
 def _looks_like_invoice_meta(line: str) -> bool:
     norm = _normalize_label(line)
     if not norm:
+        return True
+    if norm == "下载次数" or re.fullmatch(r"[\d\W_]+", norm):
         return True
     # Some invoice generators place all field labels first and the actual values
     # later in the text stream.  While waiting for the two party names, do not
@@ -436,6 +443,9 @@ def _extract_parties(lines: list[str], context=None) -> tuple[str, str, str, str
     parties: list[tuple[str, str]] = []  # (name, tax_id)
     pending = 0          # 仍在等待抬头配对的「名称:」数量
     for line in lines:
+        # Detached name labels must not consume a product or later totals.
+        if re.search(r"\*[^*]+\*", line):
+            break
         m = re.match(r"名\s*称\s*[:：]\s*(.*)", line)
         if m:
             tail_text = m.group(1).strip()
@@ -1187,8 +1197,25 @@ def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
     text = _pdf_text(path)
     invoice = _parse_invoice_text(text, source="pdf", context=context)
     layout_text = layout_invoice = layout_parties = None
+    positioned_layout = False
     try:
         layout_text = _pdf_layout_text(path)
+        # Some generators emit amounts before their labels/currency even in
+        # layout mode. Only replace that damaged view when positions recover a
+        # labelled total independently confirmed by words AND the subtotal row.
+        if re.search(r"\d\.\d{2}\s*[（(]小写[）)]\s*[¥￥]\s*$", layout_text, re.M):
+            from .pdf_items import read_positioned_text
+
+            rebuilt = read_positioned_text(path)
+            fields = read_total_fields(rebuilt)
+            if (fields.total is not None and fields.words is not None
+                    and words_match_total(fields.words, fields.total)
+                    and fields.subtotal is not None and fields.tax_total is not None
+                    and fields.subtotal + fields.tax_total == fields.total
+                    and _extract_invoice_no(rebuilt) == invoice.invoice_no
+                    and invoice.invoice_no):
+                layout_text = rebuilt
+                positioned_layout = True
         layout_invoice = _parse_invoice_text(layout_text, source="pdf-layout", context=context)
         layout_parties = _extract_layout_parties(layout_text)
     except (OSError, ValueError, PyPdfError, DependencyError, NotImplementedError, KeyError, RuntimeError):
@@ -1197,6 +1224,8 @@ def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
     # 两种读取方式逐字段比较：一致就采用，不一致或缺失记入 invoice.field_checks，
     # 由 check_invoice 变成识别提醒，而不是静默用版面结果覆盖。
     _reconcile_fields(invoice, text, layout_invoice, layout_text, layout_parties, context)
+    if positioned_layout and layout_invoice is not None:
+        invoice.tax_rates = layout_invoice.tax_rates
     if layout_text is not None:
         try:
             # splitlines() consumes form feeds and loses PDF page boundaries.
@@ -1210,6 +1239,9 @@ def parse_pdf(path: str | Path, context=None) -> ParsedInvoice:
         from .pdf_items import align_positioned_items, name_has_column_spill, read_positioned_items
 
         positioned = read_positioned_items(path)
+        if (not invoice.items and positioned and invoice.total_present
+                and money(sum((item.total for item in positioned), Decimal('0'))) == invoice.total):
+            invoice.items = positioned
         aligned = align_positioned_items(invoice.items, positioned)
         if (
             aligned
@@ -1374,10 +1406,26 @@ def _reconcile_fields(invoice, text, layout, layout_text, layout_parties, contex
             )
 
         names_swapped = swapped("seller", "buyer_name", compact_text)
+        text_names = [
+            _party_name_key(text_parties[name]) for name in ("seller", "buyer_name")
+            if _party_name_key(text_parties[name])
+        ]
+        # Recover two names emitted as one text fragment only when the role
+        # cells independently reproduce that entire fragment, in either order.
+        layout_names = [_party_name_key(layout_values[name]) for name in ("seller", "buyer_name")]
+        names_joined = all(layout_names) and len(text_names) == 1 and text_names[0] in {
+            "".join(layout_names), "".join(reversed(layout_names)),
+        }
+        # Detached values may follow the entire item table in the plain stream.
+        # Role cells locate them; exact standalone source lines corroborate them.
+        source_names = {compact_text(line) for line in text.splitlines()}
+        names_detached = not text_names and all(layout_names) and all(
+            name in source_names for name in layout_names
+        )
         ids_swapped = swapped("seller_tax_id", "buyer_tax_id", _normalize_tax_text)
         for name, tax_name in (("seller", "seller_tax_id"), ("buyer_name", "buyer_tax_id")):
             # 名称：普通文本可能读成竖排的税务监制章文字，这样的候选当作没读到。
-            if names_swapped:
+            if names_swapped or names_joined or names_detached:
                 # 版面文本的「购 / 销」标签是独立的角色依据。
                 value = layout_values[name]
                 checks[name] = FieldCheck(

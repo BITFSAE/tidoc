@@ -219,6 +219,58 @@ def seed_bindle_preview(api, work_dir: Path) -> Path:
     return package
 
 
+def seed_bindle_batch(api, work_dir: Path) -> list[Path]:
+    """构造 3 个虚构绑定包用于批量导入截图：纯新增、含已有待补充、完整性异常（需单包预览）。"""
+    import zipfile
+    from tidoc.db import TYPE_INSPECTION
+    from tidoc.services.bindle import export_bindle
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    backend = Backend(api)
+    entries = {entry["invoice_no"]: entry for entry in api.entries.list()}
+    existing_ids = [entries[f"26999000000000000{n}"]["id"] for n in (101, 102)]
+    profiles = {profile["id"]: profile for profile in api.profiles.list()}
+    profile_ids = {profile["name"]: profile["id"] for profile in profiles.values()}
+
+    def make_temp_entries(specs):
+        created = []
+        for n, name, amount, person, seller in specs:
+            xml_path = work_dir / f"batch-{n}.xml"
+            _invoice_xml(xml_path, f"26999000000000000{n}", "2026-09-21", seller, UNIVERSITY, name, amount)
+            created.append(backend.create_entry(profile_ids[person], title=UNIVERSITY, xml_path=str(xml_path))["id"])
+        return created
+
+    # 包 1：电控组九月材料（2 条新增，可直接导入）
+    ids1 = make_temp_entries([
+        (401, "杜邦线套装", "128.00", "张三", "示例电子元器件商行"),
+        (402, "接线端子", "215.50", "李四", "示例工业电气有限公司"),
+    ])
+    pkg1 = export_bindle(api.entries, api.attachments, ids1, work_dir / "电控组九月材料.tidoc", profiles)
+    for eid in ids1:
+        backend.delete_entry(eid)
+
+    # 包 2：加工费补充材料（1 条已有待补充 + 1 条已有无变化，可直接导入）
+    extra = work_dir / "批量补交查验单.pdf"
+    _blank_pdf(extra, 610)
+    attachment = api.attachments.add(existing_ids[0], str(extra), TYPE_INSPECTION)
+    pkg2 = export_bindle(api.entries, api.attachments, existing_ids, work_dir / "加工费补充材料.tidoc", profiles)
+    api.attachments.delete(attachment["id"])
+    api.entries.recompute_status(existing_ids[0])
+
+    # 包 3：采购组报账（1 条新增，但签名清单被改动，触发「需核对」）
+    ids3 = make_temp_entries([
+        (403, "铝型材角码", "360.00", "张三", "示例机械加工有限公司"),
+    ])
+    pkg3 = export_bindle(api.entries, api.attachments, ids3, work_dir / "采购组报账.tidoc", profiles)
+    for eid in ids3:
+        backend.delete_entry(eid)
+    # 写入一个额外文件触发完整性校验提醒，展示批量导入里「需核对」与高亮「单包预览」的状态。
+    with zipfile.ZipFile(pkg3, "a") as zf:
+        zf.writestr("extra.txt", "tampered")
+
+    return [pkg1, pkg2, pkg3]
+
+
 def seed_import_preview(work_dir: Path) -> list[Path]:
     """生成导入预览用的虚构文件：4 组 XML+PDF、1 个只有 PDF 的发票、1 张付款截图和 1 份查验单。
 

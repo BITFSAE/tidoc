@@ -12,6 +12,7 @@ import sys
 import threading
 import warnings
 from pathlib import Path
+from queue import Empty, SimpleQueue
 
 import webview
 
@@ -220,15 +221,26 @@ def _initial_window_background(api: Api) -> str:
     return _LIGHT_WINDOW_BACKGROUND
 
 
-def _launch_bindle_path() -> str:
-    """双击 .tidoc 绑定包启动时，取第一个存在的 .tidoc 参数。"""
+def _launch_bindle_paths() -> list[str]:
+    """双击或命令行传入 .tidoc 绑定包启动时，按顺序收集全部存在的 .tidoc 路径。"""
+    paths: list[str] = []
+    seen: set[str] = set()
     for arg in sys.argv[1:]:
         if arg.startswith("-"):
             continue
         path = Path(arg)
         if path.suffix.lower() == ".tidoc" and path.is_file():
-            return str(path)
-    return ""
+            value = str(path)
+            if value not in seen:
+                seen.add(value)
+                paths.append(value)
+    return paths
+
+
+def _launch_bindle_path() -> str:
+    """双击 .tidoc 绑定包启动时，取第一个存在的 .tidoc 参数。"""
+    paths = _launch_bindle_paths()
+    return paths[0] if paths else ""
 
 
 def _update_health_path_from_argv(argv: list[str] | None = None) -> Path | None:
@@ -241,14 +253,22 @@ def _update_health_path_from_argv(argv: list[str] | None = None) -> Path | None:
     return path.resolve() if path.is_absolute() else None
 
 
-def _serve_instance_requests(instance, api, window, stop_event) -> None:
-    """Forward secondary launches to the first window until it closes."""
+def _serve_instance_requests(instance, api, window, stop_event, document_requests=None) -> None:
+    """Forward secondary launches and native file-open events to the window."""
     while not stop_event.is_set():
-        for request in instance.pop_requests():
-            launch_file = str(request.get("launch_file") or "")
-            path = Path(launch_file) if launch_file else None
-            if path and path.suffix.lower() == ".tidoc" and path.is_file():
-                api.queue_launch_file(str(path))
+        requests = instance.pop_requests()
+        if document_requests is not None:
+            while True:
+                try:
+                    requests.append({"launch_file": document_requests.get_nowait()})
+                except Empty:
+                    break
+        if requests:
+            for request in requests:
+                launch_file = str(request.get("launch_file") or "")
+                path = Path(launch_file) if launch_file else None
+                if path and path.suffix.lower() == ".tidoc" and path.is_file():
+                    api.queue_launch_file(str(path))
             activate_main_window(window)
             try:
                 window.evaluate_js(
@@ -274,11 +294,12 @@ def main() -> None:
                 traceback.print_exc()
             sys.exit(1)
         return
-    launch_file = _launch_bindle_path()
+    launch_files = _launch_bindle_paths()
     instance = SingleInstance()
     if not instance.acquire():
         try:
-            instance.send_activation(launch_file)
+            for launch_file in (launch_files or [""]):
+                instance.send_activation(launch_file)
         except OSError:
             pass
         return
@@ -290,11 +311,17 @@ def main() -> None:
 
         api = Api(
             resolve_data_root(),
-            launch_file=launch_file,
+            launch_file=launch_files[0] if launch_files else "",
             update_health_path=_update_health_path_from_argv(),
         )
+        for extra_file in launch_files[1:]:
+            api.queue_launch_file(extra_file)
         index = web_dir() / "index.html"
         _configure_webview_settings()
+        from .services.macos_documents import install_document_handler
+
+        document_requests = SimpleQueue()
+        install_document_handler(document_requests.put)
         window = webview.create_window(
             "tidoc",
             url=web_app_url(index),
@@ -309,7 +336,7 @@ def main() -> None:
         window.events.closed += stop_event.set
         threading.Thread(
             target=_serve_instance_requests,
-            args=(instance, api, window, stop_event),
+            args=(instance, api, window, stop_event, document_requests),
             daemon=True,
             name="tidoc-instance-listener",
         ).start()

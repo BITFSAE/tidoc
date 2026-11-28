@@ -13,6 +13,7 @@ tidoc/web 前端接到真实的 Api 上，再用无界面的 Chrome 或 Edge 按
 - hero-cards.png / hero-cards-dark.png         首页右上角三张卡片，1132×836（2x 无损），四角透明
 - detail.png                                  条目详情（含查验单的次数与时间）
 - warning-detail.png                          带识别提醒的条目详情，只留关键信息一栏
+- check-menu.png                              卡片上的识别提醒弹层
 - print-dialog.png                            打印导出窗口，默认选项
 - print-options.png                           打印导出窗口，展开扩展选项
 - payment-ai-settings.png                     付款截图 AI 识别设置，单独摆在一块面板上
@@ -26,6 +27,7 @@ tidoc/web 前端接到真实的 Api 上，再用无界面的 Chrome 或 Edge 按
 - batch-edit.png                              编辑批次窗口，含示例批次备注
 - batch-toolbar.png                           选中 3 条后的批量操作条
 - status-views.png                            工具条、批次、状态视图和统计条
+- grouped-entries.png                         按报账人分组的通栏标题与批次统计
 - import-preview.png                          批量导入预览，含 XML+PDF、只有 PDF、付款截图和查验单
 
 另生成 docs/public/og-image.png（1200×630，见 og.py），内容取自本次的深色主界面图。
@@ -108,9 +110,11 @@ SHOTS = [
     Shot("hero-cards-dark", "dark", kind="sprite", scale=HOME_SCALE, lossless=True),
     Shot("detail", scene="detail", kind="dialog", expect_width=880, size=(1200, 1700)),
     Shot("warning-detail", scene="warning-detail", kind="dialog", size=(1200, 1700)),
+    Shot("check-menu", scene="check-menu", kind="isolate", lossless=True),
     Shot("print-dialog", scene="print", kind="dialog", expect_width=880),
     Shot("print-options", scene="print-options", kind="dialog", expect_width=880),
     Shot("payment-ai-settings", scene="payment-ai", kind="dialog"),
+    Shot("bindle-batch", scene="bindle-batch", kind="dialog", expect_width=880),
     Shot("bindle-preview", scene="bindle", kind="dialog", expect_width=880),
     Shot("settings", scene="settings", kind="dialog", expect_width=880, size=(1200, 1950)),
     Shot("scheme-settings", scene="scheme", kind="dialog", expect_width=880, size=(1200, 1400)),
@@ -121,6 +125,7 @@ SHOTS = [
     Shot("batch-edit", scene="batch-edit", kind="dialog", expect_width=680, size=(1200, 780)),
     Shot("batch-toolbar", scene="batch-toolbar", kind="isolate"),
     Shot("status-views", scene="status-views", kind="isolate", full_width=True),
+    Shot("grouped-entries", scene="grouped-entries", lossless=True),
     Shot("import-preview", scene="import-preview", kind="dialog", expect_width=880, size=(1200, 1600)),
 ]
 
@@ -235,9 +240,10 @@ def main(argv: list[str] | None = None) -> None:
         print("写入虚构数据…")
         data.seed(api, temp / "files")
         bindle_path = data.seed_bindle_preview(api, temp / "files") if any(shot.scene == "bindle" for shot in shots) else ""
+        bindle_batch_paths = data.seed_bindle_batch(api, temp / "batch-bindles") if any(shot.scene == "bindle-batch" for shot in shots) else []
         import_paths = data.seed_import_preview(temp / "import") if any(shot.scene == "import-preview" for shot in shots) else []
         server = make_server(api, SPRITE_TITLES, SPRITE_HEIGHTS, SPRITE_WIDTH,
-                             bindle_path=bindle_path, import_paths=import_paths)
+                             bindle_path=bindle_path, bindle_batch_paths=bindle_batch_paths, import_paths=import_paths)
         url = f"http://127.0.0.1:{server.server_address[1]}/"
         # 首次使用：另一个空数据目录，前端会自己打开「选择报账方案」。
         first_run_url = ""

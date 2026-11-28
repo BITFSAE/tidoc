@@ -1114,6 +1114,61 @@ def test_api_run_ocr_pending_drives_entry_flag(api, monkeypatch, ocr_component_r
     assert api.get_entry(entry_id)["data"]["ocr_pending"] is False
 
 
+@pytest.mark.parametrize("pdf_items", ["different", "same", "unreadable"])
+def test_api_saved_ocr_result_recovers_legacy_items(api, monkeypatch, tmp_path, pdf_items):
+    from pypdf import PdfWriter
+    from tidoc.engine import parser
+    from tidoc.engine.models import ParsedInvoice
+
+    normalized = _normalized()
+    parsed = ParsedInvoice.from_dict({**normalized, "source": "pdf"})
+    profile_id = api.profiles.create("张三", "李四")["id"]
+    entry_id = api.entries.create(profile_id, parsed=parsed)
+    pdf_path = tmp_path / "invoice.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.write(pdf_path)
+    attachment = api.attachments.add(entry_id, pdf_path, "invoice_pdf")
+    # Older results lack saved changes; viewing them reconstructs the PDF comparison.
+    api.ocr.record(
+        entry_id, file_sha256=attachment["sha256"],
+        normalized=json.dumps(normalized, ensure_ascii=False), closure_pass=True,
+    )
+    original_context = api.entries.recognition_context
+    context_entries = []
+
+    def recognition_context(eid):
+        context_entries.append(eid)
+        return original_context(eid)
+
+    def parse_pdf(path, *, context):
+        assert path == api.data_root.attachments_dir / attachment["stored_path"]
+        assert context == original_context(entry_id)
+        if pdf_items == "unreadable":
+            raise OSError("PDF is unavailable")
+        local = ParsedInvoice.from_dict({**normalized, "source": "pdf"})
+        if pdf_items == "different":
+            local.items[0].name = local.items[0].actual_name = "本地识别的明细"
+        return local
+
+    monkeypatch.setattr(api.entries, "recognition_context", recognition_context)
+    monkeypatch.setattr(parser, "parse_pdf", parse_pdf)
+    changes_before = api.entries.db.conn.total_changes
+    response = api.get_ocr_result(entry_id)
+
+    assert response["ok"], response
+    assert context_entries == [entry_id]
+    assert response["data"]["latest"]["id"] == api.ocr.latest(entry_id)["id"]
+    changes = response["data"]["applied_changes"]
+    if pdf_items == "different":
+        assert changes["inferred_from_legacy"] is True
+        assert changes["items"]["before"][0]["actual_name"] == "本地识别的明细"
+        assert changes["items"]["after"][0]["actual_name"] == "软件开发服务"
+    else:
+        assert changes == {}
+    assert api.entries.db.conn.total_changes == changes_before
+
+
 # ---------------------------------------------------------------- schema / 更新安装
 def test_latest_schema_keeps_ocr_results_table(repos):
     from tidoc.db.schema import SCHEMA_VERSION

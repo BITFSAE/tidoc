@@ -29,6 +29,7 @@ function makeNode(id = '') {
     setAttribute(name, value) { attrs.set(name, value); },
     getAttribute(name) { return attrs.get(name) ?? null; },
     querySelector() { return this.label ??= makeNode(); },
+    querySelectorAll() { return []; },
   };
   return node;
 }
@@ -105,7 +106,8 @@ assert.equal(group.selectedCount, 3);
 assert.equal(group.button.textContent, '✓');
 selectEntryFromCard('entry-1', false);
 assert.equal(group.selectedCount, 2);
-assert.equal(group.button.textContent, '');
+assert.equal(group.button.textContent, '−');
+assert.equal(group.button.getAttribute('aria-checked'), 'mixed');
 State.lastSelectedId = 'filtered-out';
 selectEntryFromCard('entry-1', true);
 assert.equal(group.selectedCount, 3);

@@ -12,7 +12,9 @@ import json
 import mimetypes
 import re
 import shutil
+import _socket
 import socket
+import sys
 import tempfile
 import threading
 from collections import defaultdict
@@ -134,6 +136,15 @@ class HubClient:
                     sock.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
+                if sys.platform == "win32":
+                    # Winsock shutdown(SD_BOTH) does not wake a blocked recv() while
+                    # the peer stays open, and sock.close() defers closesocket() while
+                    # HTTPResponse.fp holds _io_refs. Close the underlying C socket directly
+                    # so the blocked read aborts immediately without touching SSLSocket state.
+                    try:
+                        _socket.socket.close(sock)
+                    except OSError:
+                        pass
         if self._hub_connection_lock.acquire(blocking=False):
             try:
                 connection.close()
@@ -150,10 +161,15 @@ class HubClient:
                     raise OSError("共享区连接已关闭")
                 try:
                     connection.timeout = timeout
+                    if connection.sock is None:
+                        connection.connect()
+                    self._active_sock = connection.sock
+                    if self._closed.is_set():
+                        connection.close()
+                        raise OSError("共享区连接已关闭")
                     if connection.sock is not None:
                         connection.sock.settimeout(timeout)
                     connection.request(method, route, body=data, headers=headers)
-                    self._active_sock = connection.sock
                     if self._closed.is_set():
                         raise OSError("共享区连接已关闭")
                     with connection.getresponse() as response:

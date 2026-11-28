@@ -273,11 +273,19 @@ def test_auto_sync_upload_pull_no_repush_and_other_batch_preservation(env):
     hub.clear_requests()
     assert member_api.hub_sync_tick()["ok"]
     assert hub.snapshot_requests() == []
-    assert member_api.hub_set_batch_auto_sync(member_batch, True)["ok"]
-    _wait_batch_settled(member_api, member_batch)
-    reqs = hub.snapshot_requests()
-    assert reqs == [("GET", f"/tidoc-hub/api/v1/spaces/{space_id}/sync-state")]
-    assert member_api.hub_set_batch_auto_sync(member_batch, False)["ok"]
+    # Use a wider interval during this single-tick probe so slow CI runners do not re-enqueue
+    # a second periodic /sync-state before _wait_batch_settled observes the settled state.
+    member_mgr = member_api._hub_sync_manager()
+    prev_interval = member_mgr._interval_seconds
+    member_mgr._interval_seconds = 5.0
+    try:
+        assert member_api.hub_set_batch_auto_sync(member_batch, True)["ok"]
+        _wait_batch_settled(member_api, member_batch)
+        reqs = hub.snapshot_requests()
+        assert reqs == [("GET", f"/tidoc-hub/api/v1/spaces/{space_id}/sync-state")]
+        assert member_api.hub_set_batch_auto_sync(member_batch, False)["ok"]
+    finally:
+        member_mgr._interval_seconds = prev_interval
 
     # Admin auto-sync pulls new entry into admin_batch and bumps generation
     gen_before = admin_api.hub_sync_tick()["data"]["generation"]

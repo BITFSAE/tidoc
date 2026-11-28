@@ -372,7 +372,8 @@ def test_schema_v14_has_exchange_bases_table(tmp_path):
     db = Database(tmp_path / "schema_check.sqlite")
     try:
         ver = db.conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()["value"]
-        assert int(ver) == SCHEMA_VERSION == 14
+        assert int(ver) == SCHEMA_VERSION
+        assert int(ver) >= 14
         tbl = db.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='entry_exchange_bases'"
         ).fetchone()

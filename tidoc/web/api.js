@@ -232,5 +232,25 @@ const Api = (() => {
     // 二维码取票：识别图片里的税务平台取票二维码并联网取回发票文件；preview_only 只识别、不联网。
     cancelInvoiceQr: (requestId) => call('cancel_invoice_qr', requestId),
     fetchInvoiceByQr: (imagePath, options) => call('fetch_invoice_by_qr', imagePath, options || null),
+
+    // 团队协同共享区（全部由用户显式触发，无后台自动联网）
+    hubSettings: () => call('hub_settings'),
+    hubJoin: (serverUrl, inviteCode, name, reviewer) => call('hub_join', serverUrl, inviteCode, name || '', reviewer || ''),
+    hubConnectToken: (serverUrl, token) => call('hub_connect_token', serverUrl, token),
+    hubRefreshMe: () => call('hub_refresh_me'),
+    hubDisconnect: () => call('hub_disconnect'),
+    hubListSpaces: (includeArchived) => call('hub_list_spaces', !!includeArchived),
+    hubCreateSpace: (name, description) => call('hub_create_space', name, description || ''),
+    hubUpdateSpace: (spaceId, fields) => call('hub_update_space', spaceId, fields || {}),
+    hubListInvites: () => call('hub_list_invites'),
+    hubCreateInvite: (role, maxUses, expiresDays, note) => call('hub_create_invite', role || 'member', maxUses || 20, expiresDays || 30, note || ''),
+    hubRevokeInvite: (code) => call('hub_revoke_invite', code),
+    hubListUsers: () => call('hub_list_users'),
+    hubUpdateUser: (userId, fields) => call('hub_update_user', userId, fields || {}),
+    hubPushEntries: (spaceId, entryIds, spaceName) => call('hub_push_entries', spaceId, entryIds || [], spaceName || ''),
+    hubPreviewPull: (spaceId, schemeId) => call('hub_preview_pull', spaceId, schemeId || null),
+    hubApplyPull: (spaceId, profileId, options) => call('hub_apply_pull', spaceId, profileId || '', options || null),
+    hubReviewEntry: (entryId, reviewState, reviewNote, pushLocal) => call('hub_review_entry', entryId, reviewState, reviewNote || '', pushLocal !== false),
+    hubWithdrawEntry: (entryId) => call('hub_withdraw_entry', entryId),
   };
 })();

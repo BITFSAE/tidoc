@@ -245,7 +245,42 @@ class EntryRepo:
         if entry.get("scheme_revision_id"):
             self._decorate_policy(entry)
         entry["modified_fields"] = self._modified_fields_map([entry_id])[entry_id]
+        entry["hub"] = self._hub_links_map([entry_id]).get(entry_id)
         return entry
+
+    def _hub_links_map(self, entry_ids: list[str]) -> dict[str, dict]:
+        if not entry_ids:
+            return {}
+        has_table = self.db.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hub_entry_links'"
+        ).fetchone()
+        if not has_table:
+            return {}
+        out: dict[str, dict] = {}
+        for offset in range(0, len(entry_ids), QUERY_BATCH_SIZE):
+            batch_ids = entry_ids[offset:offset + QUERY_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch_ids)
+            for row in self.db.conn.execute(
+                f"""SELECT entry_id, server_url, space_id, space_name, remote_entry_id,
+                           remote_revision, owner_user_id, owner_name, review_state,
+                           review_note, last_synced_at
+                      FROM hub_entry_links
+                     WHERE entry_id IN ({placeholders})""",
+                batch_ids,
+            ).fetchall():
+                out[row["entry_id"]] = {
+                    "server_url": row["server_url"] or "",
+                    "space_id": row["space_id"] or "",
+                    "space_name": row["space_name"] or "",
+                    "remote_entry_id": row["remote_entry_id"] or "",
+                    "remote_revision": int(row["remote_revision"] or 0),
+                    "owner_user_id": row["owner_user_id"] or "",
+                    "owner_name": row["owner_name"] or "",
+                    "review_state": row["review_state"] or "",
+                    "review_note": row["review_note"] or "",
+                    "last_synced_at": row["last_synced_at"] or "",
+                }
+        return out
 
     def _definition(self, revision_id):
         if not revision_id:
@@ -559,7 +594,17 @@ class EntryRepo:
         # Evidence belongs to detail/rechecking, not every card in a large list.
         columns = [row[1] for row in self.db.conn.execute("PRAGMA table_info(entries)")
                    if row[1] != "recognition_data"]
-        sql = "SELECT " + ",".join(f'e."{name}"' for name in columns) + " FROM entries e"
+        hub_cols = (
+            ", h.server_url AS _hub_server_url, h.space_id AS _hub_space_id"
+            ", h.space_name AS _hub_space_name, h.remote_entry_id AS _hub_remote_entry_id"
+            ", h.remote_revision AS _hub_remote_revision, h.owner_user_id AS _hub_owner_user_id"
+            ", h.owner_name AS _hub_owner_name, h.review_state AS _hub_review_state"
+            ", h.review_note AS _hub_review_note, h.last_synced_at AS _hub_last_synced_at"
+        )
+        sql = (
+            "SELECT " + ",".join(f'e."{name}"' for name in columns) + hub_cols
+            + " FROM entries e LEFT JOIN hub_entry_links h ON h.entry_id = e.id"
+        )
         if where:
             sql += " WHERE " + " AND ".join(where)
         # 排序：sort_dir 缺省时用各字段的常用方向；空值总排在最后，同值按最近更新排，列表顺序稳定。
@@ -568,7 +613,37 @@ class EntryRepo:
         sql += (f" ORDER BY ({column} IS NULL OR TRIM({column}) = '') ASC, {column} {direction},"
                 " e.updated_at DESC, e.id")
         rows = self.db.conn.execute(sql, params).fetchall()
-        decorated = {r["id"]: _decorate_check(_row_to_dict(r)) for r in rows}
+        decorated = {}
+        hub_links_by_entry: dict[str, dict | None] = {}
+        for r in rows:
+            drow = _row_to_dict(r)
+            hub_remote = drow.pop("_hub_remote_entry_id", None)
+            hub_server = drow.pop("_hub_server_url", None)
+            hub_space = drow.pop("_hub_space_id", None)
+            hub_space_name = drow.pop("_hub_space_name", None)
+            hub_rev = drow.pop("_hub_remote_revision", None)
+            hub_owner_id = drow.pop("_hub_owner_user_id", None)
+            hub_owner_name = drow.pop("_hub_owner_name", None)
+            hub_state = drow.pop("_hub_review_state", None)
+            hub_note = drow.pop("_hub_review_note", None)
+            hub_synced = drow.pop("_hub_last_synced_at", None)
+            hub_links_by_entry[drow["id"]] = (
+                {
+                    "server_url": hub_server or "",
+                    "space_id": hub_space or "",
+                    "space_name": hub_space_name or "",
+                    "remote_entry_id": hub_remote or "",
+                    "remote_revision": int(hub_rev or 0),
+                    "owner_user_id": hub_owner_id or "",
+                    "owner_name": hub_owner_name or "",
+                    "review_state": hub_state or "",
+                    "review_note": hub_note or "",
+                    "last_synced_at": hub_synced or "",
+                }
+                if hub_remote
+                else None
+            )
+            decorated[drow["id"]] = _decorate_check(drow)
 
         result = []
         entry_ids = [r["id"] for r in rows]
@@ -680,6 +755,7 @@ class EntryRepo:
                 entry["title_profile"] = matches[0] if matches else None
             # 卡片按材料角色显示"已添加"状态，自定义角色没有独立的附件类型，需要角色计数。
             entry["role_counts"] = dict(entry.pop("_role_counts", None) or {})
+            entry["hub"] = hub_links_by_entry.get(entry["id"])
             entry.pop("_claimant",None)
             result.append(entry)
         return result

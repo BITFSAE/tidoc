@@ -54,6 +54,10 @@
           </span>
         </div>
         <div class="topbar-actions">
+          <button id="hubBtn" class="btn ghost icon-text hidden" title="打开团队协同共享区（拉取或上传报账条目）">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/><path d="M12 12v5m0-5-2 2m2-2 2 2"/></svg>
+            <span>共享区</span>
+          </button>
           <button id="actionImport" class="btn ghost icon-text" title="导入别人导出的 .tidoc 绑定包">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
             <span>导入包</span>
@@ -266,6 +270,9 @@
             <button class="btn small ghost" id="batchExportBtn">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg><span>导出</span>
             </button>
+            <button class="btn small ghost hidden" id="batchHubPushBtn" title="将所选条目上传到团队协同共享区">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/><path d="M12 12v5m0-5-2 2m2-2 2 2"/></svg><span>传共享区</span>
+            </button>
             <button class="btn small ghost" id="batchPrintBtn">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6"/><rect x="6" y="14" width="12" height="8" rx="1"/></svg><span>打印</span>
             </button>
@@ -306,6 +313,7 @@
   <script src="adapter-ui.js?v=0.1.43"></script>
   <script src="qr-ticket.js?v=0.1.43"></script>
   <script src="bindle-ui.js?v=0.1.43"></script>
+  <script src="hub-ui.js?v=0.1.43"></script>
   <script src="payment-ai-ui.js?v=0.1.43"></script>
   <script src="app.js?v=0.1.43"></script>
 </body>

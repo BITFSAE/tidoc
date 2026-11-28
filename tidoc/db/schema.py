@@ -29,7 +29,8 @@ import sqlite3
 # v11：报账批次改为单一归属，历史重复归属保留最后一次装入的批次。
 # v13：保存销售方税号和本地解析证据，关键值重算时保留票面核对提醒。
 # v14：新增条目交接基线表 entry_exchange_bases，支持绑定包与未来协同的三方合并。
-SCHEMA_VERSION = 14
+# v15：新增共享区条目关联表 hub_entry_links，记录条目与共享区的映射、远端版本与审核状态。
+SCHEMA_VERSION = 15
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -222,6 +223,24 @@ CREATE TABLE IF NOT EXISTS entry_exchange_bases (
 );
 
 CREATE INDEX IF NOT EXISTS idx_exchange_bases_entry ON entry_exchange_bases(entry_id);
+
+-- 共享区条目关联：记录本机条目与团队共享区的映射、远端版本与审核状态（仅显式连接共享区时写入）。
+CREATE TABLE IF NOT EXISTS hub_entry_links (
+    entry_id        TEXT PRIMARY KEY,
+    server_url      TEXT NOT NULL DEFAULT '',
+    space_id        TEXT NOT NULL DEFAULT '',
+    space_name      TEXT NOT NULL DEFAULT '',
+    remote_entry_id TEXT NOT NULL DEFAULT '',
+    remote_revision INTEGER NOT NULL DEFAULT 0,
+    owner_user_id   TEXT NOT NULL DEFAULT '',
+    owner_name      TEXT NOT NULL DEFAULT '',
+    review_state    TEXT NOT NULL DEFAULT '',
+    review_note     TEXT NOT NULL DEFAULT '',
+    last_synced_at  TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_hub_entry_links_remote ON hub_entry_links(space_id, remote_entry_id);
 """
 
 

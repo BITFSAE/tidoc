@@ -228,16 +228,19 @@ async function openBindleImportPreview(path, insp, options = {}) {
     || baseName(path).replace(/\.tidoc$/i, '').trim();
   const initialMoveExisting = !!(preset?.moveExisting && defaultBatchMode !== 'none');
   const initialTag = String(preset?.tag || '').trim();
+  const sourceLabel = options.sourceLabel || baseName(path);
+  const sourceBanner = options.sourceBanner || '';
   body.innerHTML = `
     <div class="bindle-import-bar">
-      <strong data-tooltip-overflow="${esc(baseName(path))}">${esc(baseName(path))}</strong>
+      <strong data-tooltip-overflow="${esc(sourceLabel)}">${esc(sourceLabel)}</strong>
       <div class="bindle-import-meta">
         <span><b>${entries.length}</b> 条目</span>
         <span><b>${packageProfiles.length}</b> 报账人</span>
         <span><b>${attachmentCount}</b> 份材料</span>
       </div>
     </div>
-    ${insp.verified ? '' : `<div class="bindle-integrity-warning">
+    ${sourceBanner}
+    ${insp.verified !== false ? '' : `<div class="bindle-integrity-warning">
       <b>完整性校验未通过</b><span>${esc((insp.tampered || []).join('、'))}</span>
       <label><input type="checkbox" id="bindleAllowTampered"/> 我确认继续，导入后标记为严重问题</label>
     </div>`}
@@ -323,7 +326,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
       if (importing) return;
       importing = true;
       try {
-        const updated = await Api.inspectBindle(path, event.target.value);
+        const updated = options.reopenWithScheme
+          ? await options.reopenWithScheme(event.target.value)
+          : await Api.inspectBindle(path, event.target.value);
         await openBindleImportPreview(path, updated, {...options, replace: m.mask});
         reopening = true;
         m.close();
@@ -437,8 +442,9 @@ async function openBindleImportPreview(path, insp, options = {}) {
       ? `全部 ${packageProfiles.length} 位` : `已选 ${selectedProfiles} / ${packageProfiles.length} 位`;
     all.disabled = !entries.length;
     if (importButton) {
+      const verb = options.confirmLabel || '导入';
       importButton.textContent = !selectedRows.length ? '请选择条目'
-        : reviewing ? `确认导入 ${selectedRows.length} 条` : `导入 ${selectedRows.length} 条`;
+        : reviewing ? `确认${verb} ${selectedRows.length} 条` : `${verb} ${selectedRows.length} 条`;
       importButton.disabled = !selectedRows.length;
     }
     if (reviewing) renderReview();
@@ -751,7 +757,7 @@ async function openBindleImportPreview(path, insp, options = {}) {
 
   let m;
   m = modal({
-    title: '导入绑定包',
+    title: options.title || '导入绑定包',
     replace: options.replace,
     guard: () => !importing,
     wide: true,
@@ -759,17 +765,19 @@ async function openBindleImportPreview(path, insp, options = {}) {
     onClose: () => { if(!reopening&&options.onClose)options.onClose(); },
     footer: [
       mkBtn('取消', 'ghost', () => { if (!importing) m.close(); }),
-      (importButton = mkBtn('导入', 'primary', async () => {
+      (importButton = mkBtn(options.confirmLabel || '导入', 'primary', async () => {
         if (importing) return;
         const collected = collectImport();
         if (!collected) return;
         if (!reviewing) { startReview(); return; }
-        const { tampered, options } = collected;
+        const { tampered, options: importOptions } = collected;
         importing = true;
-        const progress = taskProgress('正在导入条目和材料…');
-        window.TidocUI?.setBusy(importButton, true, '正在导入…');
+        const progress = taskProgress(options.progressText || '正在导入条目和材料…');
+        window.TidocUI?.setBusy(importButton, true, options.busyText || '正在导入…');
         try {
-          const r = await Api.importBindle(path, State.currentProfileId, !!tampered, options);
+          const r = options.applyImport
+            ? await options.applyImport(!!tampered, importOptions)
+            : await Api.importBindle(path, State.currentProfileId, !!tampered, importOptions);
           onImported?.(r);
           progress.update('正在刷新条目列表…');
           m.close();

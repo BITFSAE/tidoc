@@ -63,9 +63,10 @@ from .api_verification import InvoiceVerificationApi
 from .api_updates import UpdateApi
 from .api_qr import QrTicketApi
 from .api_payment_ai import PaymentAiApi, payment_result_current
+from .api_hub import HubApi
 
 
-class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiApi):
+class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiApi, HubApi):
     def __init__(
         self,
         data_root: str | Path | None = None,
@@ -99,6 +100,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
         self._update_check_lock = threading.Lock()
         self._update_check_jobs = {}
         self._bindle_inspection_cache: dict | None = None
+        self._hub_pull_cache: dict | None = None
         self._launch_files = [launch_file] if launch_file else []
         from .services.native_drop import NativeDropRegistry
         self._native_drops = NativeDropRegistry()

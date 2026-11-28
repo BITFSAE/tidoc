@@ -422,6 +422,7 @@ async function init() {
   let startupUpdate = null;
   try { startupUpdate = await Api.startupUpdateState(); } catch (e) {}
   refreshOcrStatus();
+  HubUI.refreshState();
   await AdapterUI.setup();
   await AdapterUI.initializeViewPreference();
   await loadWorkflowPreferences();
@@ -1437,7 +1438,7 @@ function updateSelectionBar() {
   const clearBtn = $('#clearSelBtn');
   const hideClear = !hasSelection || allSelected;
   if (clearBtn.classList.contains('hidden') !== hideClear) clearBtn.classList.toggle('hidden', hideClear);
-  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReviewBtn', 'batchReparseBtn', 'batchOcrBtn', 'batchVerificationBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
+  ['clearSelBtn', 'addToBatchBtn', 'tagBtn', 'changeProfileBtn', 'batchReviewBtn', 'batchReparseBtn', 'batchOcrBtn', 'batchVerificationBtn', 'batchSummaryBtn', 'batchExportBtn', 'batchHubPushBtn', 'batchPrintBtn', 'batchDeleteBtn'].forEach((id) => {
     const btn = $('#' + id);
     if (btn && btn.disabled === hasSelection) btn.disabled = !hasSelection;
   });
@@ -1683,6 +1684,7 @@ function entryCard(e) {
       <span class="entry-title-wrap">${titleDot}<span class="entry-item-title" data-tooltip-overflow="${esc(itemTitle)}">${esc(itemTitle)}</span></span>
       ${ownerBadge}
       ${batchBadges}
+      ${HubUI.badgeHtml(e)}
       ${checkBadge}
       ${modified}
       ${ocrBadge}
@@ -1706,6 +1708,8 @@ function entryCard(e) {
   if (batchNote) {
     main.insertAdjacentHTML('beforeend', `<div class="batch-entry-note" data-tooltip-overflow="${esc(batchNote)}">${iconNote(12)}${esc(batchNote)}</div>`);
   }
+  const hubCardNote = HubUI.cardNoteHtml(e);
+  if (hubCardNote) main.insertAdjacentHTML('beforeend', hubCardNote);
 
   const right = el('div', 'entry-right');
   const hasRoles = !!e.material_roles?.length;
@@ -3778,6 +3782,16 @@ function openEntryMenu(x, y, e, options) {
     }
     await addSelectionToBatch([e.id]);
   }, { icon: actualBatchId() ? 'folderOutput' : 'folder' });
+  if (HubUI.isConnected()) {
+    sep();
+    item('上传到共享区', () => HubUI.openPushDialog([e.id], { preferredSpaceId: HubUI.matchesCurrentHub(e.hub) ? (e.hub?.space_id || '') : '' }), { icon: 'cloud' });
+    if (HubUI.matchesCurrentHub(e.hub) && HubUI.isAdmin()) {
+      item('共享区审核状态', () => HubUI.openReviewDialog(e), { icon: 'checkCircle' });
+    }
+    if (HubUI.matchesCurrentHub(e.hub) && e.hub.review_state !== 'withdrawn' && (e.hub.review_state !== 'locked' || HubUI.isAdmin())) {
+      item('从共享区撤回', () => HubUI.withdrawEntryFlow(e), { icon: 'rotateCcw' });
+    }
+  }
   sep();
   item('删除条目', () => quickDelete(e), { danger: true, icon: 'trash' });
   showContextMenu(menu, x, y, options);
@@ -4018,6 +4032,7 @@ function bindEvents() {
     }
   };
   $('#emptyNew').onclick = () => openNewEntry();
+  $('#hubBtn').onclick = () => HubUI.openWorkspace();
   $('#actionImport').onclick = doImport;
 
   $('#clearSelBtn').onclick = clearEntrySelection;
@@ -4032,6 +4047,7 @@ function bindEvents() {
   $('#batchVerificationBtn').onclick = () => openBatchVerification([...State.selected]);
   $('#batchSummaryBtn').onclick = () => exportSummary([...State.selected]);
   $('#batchExportBtn').onclick = () => doExport([...State.selected]);
+  $('#batchHubPushBtn').onclick = () => HubUI.openPushDialog([...State.selected]);
   $('#batchPrintBtn').onclick = () => openPrintDialog([...State.selected]);
   $('#batchDeleteBtn').onclick = batchDelete;
 
@@ -4509,6 +4525,13 @@ async function buildSettings(options = {}) {
           </div>
           <button class="btn small" id="setExportJobs">查看</button>
         </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <b>协同共享区</b>
+            <span id="setHubSummary">${esc(HubUI.summaryText())}</span>
+          </div>
+          <button class="btn small" id="setHubManage">${HubUI.isConnected() ? '管理' : '配置'}</button>
+        </div>
       </div>
       <!-- 报账人 -->
       <div class="settings-block">
@@ -4931,6 +4954,7 @@ async function buildSettings(options = {}) {
   const payeesButton = body.querySelector('#setPayees');
   if (payeesButton) payeesButton.onclick = () => AdapterUI.payees();
   body.querySelector('#setExportJobs').onclick = () => AdapterUI.jobs();
+  body.querySelector('#setHubManage').onclick = () => HubUI.openSettings();
   body.querySelector('#setProfilesManage').onclick = () => openProfileManager(false);
   body.querySelector('#setComponentsUpdate').onclick = () => openUpdateDialog();
   PaymentAiUI.bind(body, paymentAi);
@@ -5050,6 +5074,13 @@ async function buildSettings(options = {}) {
       title.innerHTML = '<option value="">全部</option>' + (State.titleOptions.length ? State.titleOptions : configuredTitleNames())
         .map((name) => `<option value="${esc(name)}">${esc(TITLE_SHORT[name] || name)}</option>`).join('');
       selectDefaultTitle(title, value);
+    }
+    if (closed.dataset.modalKey === 'hub-settings') {
+      await HubUI.refreshState();
+      const elHub = body.querySelector('#setHubSummary');
+      const elHubBtn = body.querySelector('#setHubManage');
+      if (elHub) elHub.textContent = HubUI.summaryText();
+      if (elHubBtn) elHubBtn.textContent = HubUI.isConnected() ? '管理' : '配置';
     }
     if (closed.dataset.modalKey === 'profiles') {
       const profile = State.profiles.find((item) => item.is_default);
@@ -6021,6 +6052,7 @@ async function openEntryDetail(entryId, currentDetail = null) {
   const compLine = completenessLine(e);
 
   body.innerHTML = `
+    ${HubUI.detailBannerHtml(e)}
     <div class="detail-top-grid">
       <div class="detail-section">
         <h3>关键信息 <span data-detail-check-badge>${detailCheckBadge(e)}</span><span class="h3-line"></span></h3>
@@ -6107,6 +6139,9 @@ async function openEntryDetail(entryId, currentDetail = null) {
   setupMaterialDrop(body.querySelector('#materialDrop'), entryId, async () => {
     toast('材料已添加', 'ok');
     await reopenEntryDetail(mm, entryId, { affectsStatus: true });
+  });
+  HubUI.bindDetailBanner(body, e, async () => {
+    await reopenEntryDetail(mm, entryId, { relist: true });
   });
 
   // ---- editable fields (paid_amount, actual_item_name, notes)

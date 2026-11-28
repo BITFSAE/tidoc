@@ -446,3 +446,14 @@ def test_invalid_calendar_version_and_runtime_rule_change(monkeypatch):
     assert invoice_recognition_version_key('invoice-local-2026-02-30-1') is None
     monkeypatch.setattr(entries, 'LOCAL_INVOICE_RECOGNITION_VERSION', NEWER_VERSION)
     assert compare_invoice_recognition_versions(LOCAL_INVOICE_RECOGNITION_VERSION) == -1
+
+
+def test_reparse_checks_the_manual_items_that_it_preserves(api, tmp_path):
+    entry_id, _ = _make_entry(api, tmp_path, '81', version=OLDER_VERSION)
+    item = api.entries.get(entry_id)['items'][0]
+    api.entries.update_item(item['id'], {'total': '99.00'})
+    result = api.rerecognize_materials([entry_id], ['invoice'])['data']['invoice']
+    assert not result['failed']
+    saved = api.entries.get(entry_id)
+    assert saved['items'][0]['total'] == '99.00'
+    assert '相差 -87.00' in saved['check_message']

@@ -466,8 +466,10 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                             and self.entries.repair_recognized_title(
                                 entry_id, parsed.buyer_name, commit=False)):
                         entry["title"] = parsed.buyer_name
-                    check = check_invoice(parsed, expected_title=entry.get("title", ""),context=self._policy_context(entry_id=entry_id))
                     from .db.manual_changes import current_manual_fields
+                    protect_manual_items = "items" in current_manual_fields(entry, ["items"])
+                    check_parsed = self.entries.parsed_for_check(entry_id) if protect_manual_items else parsed
+                    check = check_invoice(check_parsed, expected_title=entry.get("title", ""),context=self._policy_context(entry_id=entry_id))
                     self.entries.replace_recognized_items(
                         entry_id,
                         parsed.items,
@@ -475,7 +477,7 @@ class Api(SchemeApi, InvoiceVerificationApi, UpdateApi, QrTicketApi, PaymentAiAp
                         check.status,
                         check.message,
                         commit=False,
-                        protect_manual_items="items" in current_manual_fields(entry, ["items"]),
+                        protect_manual_items=protect_manual_items,
                     )
                     self.entries.mark_invoice_recognized(entry_id, commit=False)
                 refreshed = self.entries.get(entry_id) or {}
